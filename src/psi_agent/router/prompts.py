@@ -30,7 +30,7 @@ def build_planning_messages(
     *,
     messages: list[dict[str, Any]],
     upstream: list[tuple[str, str]] | tuple[tuple[str, str], ...],
-    context_limit: int | None = None,
+    max_context_length: int | None = None,
 ) -> list[dict[str, Any]]:
     """Ask the planning model to choose an appropriate number of socket-selected subtasks."""
 
@@ -46,7 +46,11 @@ def build_planning_messages(
                 "Return JSON only in this exact shape: "
                 '{"tasks":[{"task_type":"...","subtask":"...","socket":"..."}]}. '
                 "Use one or more tasks as appropriate. Each socket must exactly match one configured socket."
-                + (f" Context limit for this request: {context_limit} tokens." if context_limit is not None else "")
+                + (
+                    f" Maximum context length for this request: {max_context_length} tokens."
+                    if max_context_length is not None
+                    else ""
+                )
             ),
         }
     )
@@ -58,7 +62,7 @@ def build_repair_messages(
     original_messages: list[dict[str, Any]],
     invalid_plan: str,
     upstream: list[tuple[str, str]] | tuple[tuple[str, str], ...],
-    context_limit: int | None = None,
+    max_context_length: int | None = None,
 ) -> list[dict[str, Any]]:
     """Ask once for a strictly formatted replacement plan."""
 
@@ -72,7 +76,11 @@ def build_repair_messages(
                 "Repair it. Return JSON only in this exact shape: "
                 '{"tasks":[{"task_type":"...","subtask":"...","socket":"..."}]}. '
                 "Use one or more tasks as appropriate. Each socket must exactly match one configured socket."
-                + (f" Context limit for this request: {context_limit} tokens." if context_limit is not None else "")
+                + (
+                    f" Maximum context length for this request: {max_context_length} tokens."
+                    if max_context_length is not None
+                    else ""
+                )
             ),
         }
     )

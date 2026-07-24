@@ -19,7 +19,7 @@ async def _run_router_service(
     upstreams: tuple[tuple[str, str], ...],
     default_socket: str,
     router_timeout: float | None,
-    router_context_chars: int,
+    max_context_length: int,
 ) -> None:
     """Start the Router implementation supplied by the router feature branch.
 
@@ -34,7 +34,7 @@ async def _run_router_service(
         upstream=list(upstreams),
         default_socket=default_socket,
         router_timeout=router_timeout,
-        router_context_chars=router_context_chars,
+        max_context_length=max_context_length,
     )
     await router.run()
 
@@ -54,7 +54,7 @@ class RouterInfo:
     upstreams: tuple[RouterUpstreamInfo, ...]
     default_ai_id: str
     router_timeout: float | None
-    router_context_chars: int
+    max_context_length: int
 
 
 @dataclass
@@ -80,7 +80,7 @@ class RouterManager:
         default_ai_id: str,
         *,
         router_timeout: float | None = None,
-        router_context_chars: int = 12_000,
+        max_context_length: int = 12_000,
         id: str = "",
     ) -> RouterInfo:
         router_id = id or _new_uuid()
@@ -94,8 +94,8 @@ class RouterManager:
             raise ValueError("upstreams contain duplicate ai_id values")
         if default_ai_id not in candidate_ids:
             raise ValueError("default_ai_id must identify one of the upstreams")
-        if router_context_chars <= 0:
-            raise ValueError("router_context_chars must be positive")
+        if max_context_length <= 0:
+            raise ValueError("max_context_length must be positive")
         if router_timeout is not None and (not math.isfinite(router_timeout) or router_timeout <= 0):
             raise ValueError("router_timeout must be a finite positive number")
         for ai_id in (router_ai_id, *candidate_ids):
@@ -117,7 +117,7 @@ class RouterManager:
                             upstreams=tuple((self._aim.get_socket(item.ai_id), item.description) for item in targets),
                             default_socket=self._aim.get_socket(default_ai_id),
                             router_timeout=router_timeout,
-                            router_context_chars=router_context_chars,
+                            max_context_length=max_context_length,
                         )
                 except Exception as exc:
                     logger.error(f"Router {router_id!r} crashed: {exc!r}")
@@ -134,7 +134,7 @@ class RouterManager:
                 targets,
                 default_ai_id,
                 router_timeout,
-                router_context_chars,
+                max_context_length,
             )
             self._entries[router_id] = _RouterEntry(scope, info)
         try:

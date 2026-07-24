@@ -56,11 +56,12 @@ async def test_run_router_service_builds_merged_router(monkeypatch: pytest.Monke
         upstreams=(("simple.sock", "simple tasks"),),
         default_socket="simple.sock",
         router_timeout=None,
-        router_context_chars=12_000,
+        max_context_length=12_000,
     )
     assert captured[0]["session_socket"] == "router.sock"
     assert captured[0]["router_socket"] == "route-ai.sock"
-    assert captured[0]["upstream"] == ['{"socket": "simple.sock", "description": "simple tasks"}']
+    assert captured[0]["upstream"] == [("simple.sock", "simple tasks")]
+    assert captured[0]["max_context_length"] == 12_000
 
 
 @pytest.mark.anyio

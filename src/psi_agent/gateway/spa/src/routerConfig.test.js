@@ -14,7 +14,7 @@ function form() {
     ],
     default_ai_id: 'simple',
     router_timeout: '30',
-    router_context_chars: '12000',
+    max_context_length: '12000',
   }
 }
 
@@ -36,7 +36,7 @@ describe('router configuration', () => {
       ],
       default_ai_id: 'simple',
       router_timeout: 30,
-      router_context_chars: 12000,
+      max_context_length: 12000,
     })
   })
 })

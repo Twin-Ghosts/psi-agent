@@ -41,7 +41,7 @@ class Router:
     run_ttl: float = 1_800.0
     """Maximum seconds to retain a run while waiting for tool results."""
 
-    router_context_chars: int = 12_000
+    max_context_length: int = 12_000
     """Maximum context characters supplied to the routing model."""
 
     verbose: bool = False
@@ -61,7 +61,7 @@ class Router:
             branch_timeout=self.branch_timeout,
             aggregate_timeout=self.aggregate_timeout,
             run_ttl=self.run_ttl,
-            router_context_chars=self.router_context_chars,
+            max_context_length=self.max_context_length,
         )
         for name, timeout in (
             ("router_timeout", config.router_timeout),

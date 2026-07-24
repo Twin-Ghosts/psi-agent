@@ -112,7 +112,7 @@ class Gateway:
                         ],
                         default_ai_id=cfg.get("default_ai_id", ""),
                         router_timeout=cfg.get("router_timeout"),
-                        router_context_chars=cfg.get("router_context_chars", 12_000),
+                        max_context_length=cfg.get("max_context_length", 12_000),
                         id=cfg.get("id", ""),
                     )
                     logger.info(f"Restored Router {cfg.get('id', '?')!r}")
@@ -179,7 +179,7 @@ class Gateway:
                             ],
                             "default_ai_id": info.default_ai_id,
                             "router_timeout": info.router_timeout,
-                            "router_context_chars": info.router_context_chars,
+                            "max_context_length": info.max_context_length,
                         }
                         for info in await rm.list_all()
                     ],

@@ -75,7 +75,7 @@ class Planner:
     timeout: float | None
 
     async def plan(
-        self, *, messages: list[dict[str, Any]], context_limit: int | None = None
+        self, *, messages: list[dict[str, Any]], max_context_length: int | None = None
     ) -> tuple[PlannedTask, ...]:
         """Return a valid plan, allowing one request solely to repair its structure."""
 
@@ -83,7 +83,7 @@ class Planner:
             socket=self.router_socket,
             body={
                 "messages": build_planning_messages(
-                    messages=messages, upstream=self.upstream, context_limit=context_limit
+                    messages=messages, upstream=self.upstream, max_context_length=max_context_length
                 ),
                 "stream": True,
             },
@@ -98,7 +98,7 @@ class Planner:
                 body={
                     "messages": build_repair_messages(
                         original_messages=messages, invalid_plan=result.content[:2_000], upstream=self.upstream
-                        , context_limit=context_limit
+                        , max_context_length=max_context_length
                     ),
                     "stream": True,
                 },

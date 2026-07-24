@@ -4,7 +4,7 @@ import { ref } from 'vue'
 function emptyForm() {
   return {
     name: '', router_ai_id: '', upstreams: [], default_ai_id: '',
-    router_timeout: null, router_context_chars: 12000,
+    router_timeout: null, max_context_length: 12000,
   }
 }
 

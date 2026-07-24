@@ -32,7 +32,7 @@ class _CompletionClient(Protocol):
 
 class _TaskPlanner(Protocol):
     async def plan(
-        self, *, messages: list[dict[str, Any]], context_limit: int | None = None
+        self, *, messages: list[dict[str, Any]], max_context_length: int | None = None
     ) -> tuple[PlannedTask, ...]: ...
 
 
@@ -64,8 +64,8 @@ class Orchestrator:
         """Plan a round, execute selected subtasks, then aggregate through router_socket."""
         messages = self._messages(body)
         tools = self._tools(body)
-        context_limit = self._context_limit(body) or self.config.router_context_chars
-        plan = await self.planner.plan(messages=messages, context_limit=context_limit)
+        max_context_length = self._max_context_length(body) or self.config.max_context_length
+        plan = await self.planner.plan(messages=messages, max_context_length=max_context_length)
         logger.info(f"Router plan selected {len(plan)} task(s): {[(task.subtask, task.socket) for task in plan]}")
         results: list[UpstreamResult | None] = [None] * len(plan)
         errors: list[Exception] = []
@@ -300,14 +300,14 @@ class Orchestrator:
         return messages
 
     @staticmethod
-    def _context_limit(body: dict[str, Any]) -> int | None:
-        for key in ("context_limit", "context_length", "max_context_tokens"):
+    def _max_context_length(body: dict[str, Any]) -> int | None:
+        for key in ("max_context_length",):
             value = body.get(key)
             if isinstance(value, int) and not isinstance(value, bool) and value > 0:
                 return value
         routing = body.get("routing")
         if isinstance(routing, dict):
-            value = routing.get("context_limit")
+            value = routing.get("max_context_length")
             if isinstance(value, int) and not isinstance(value, bool) and value > 0:
                 return value
         return None
