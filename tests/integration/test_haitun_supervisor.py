@@ -10,6 +10,9 @@ from typing import Any
 import anyio
 import pytest
 
+_ALICE_HASH = "a" * 64
+_BOB_HASH = "b" * 64
+
 
 def _load_protocol() -> ModuleType:
     path = Path(__file__).parents[2] / "examples" / "haitun-workspace" / "systems" / "supervisor_protocol.py"
@@ -43,25 +46,25 @@ async def test_store_isolates_two_users_while_sharing_domain_map(tmp_path: Path)
     store_module = _load_store()
     store = store_module.SupervisorStore(anyio.Path(tmp_path))
     await store.save_map("ml", {"domain_id": "ml"})
-    alice = await store.load_heatmap("alice-hash", "ml")
-    bob = await store.load_heatmap("bob-hash", "ml")
+    alice = await store.load_heatmap(_ALICE_HASH, "ml")
+    bob = await store.load_heatmap(_BOB_HASH, "ml")
     alice["question_count"] = 3
     bob["question_count"] = 7
-    await store.save_heatmap("alice-hash", "ml", alice)
-    await store.save_heatmap("bob-hash", "ml", bob)
+    await store.save_heatmap(_ALICE_HASH, "ml", alice)
+    await store.save_heatmap(_BOB_HASH, "ml", bob)
 
     assert (await store.load_map("ml"))["domain_id"] == "ml"
     assert store.map_path("ml") == store.map_path("ML")
-    assert store.heatmap_path("alice-hash", "ml") != store.heatmap_path("bob-hash", "ml")
-    assert (await store.load_heatmap("alice-hash", "ml"))["question_count"] == 3
-    assert (await store.load_heatmap("bob-hash", "ml"))["question_count"] == 7
+    assert store.heatmap_path(_ALICE_HASH, "ml") != store.heatmap_path(_BOB_HASH, "ml")
+    assert (await store.load_heatmap(_ALICE_HASH, "ml"))["question_count"] == 3
+    assert (await store.load_heatmap(_BOB_HASH, "ml"))["question_count"] == 7
 
 
 @pytest.mark.anyio
 async def test_store_heatmap_default_update_and_latest_advice_roundtrip(tmp_path: Path) -> None:
     store_module = _load_store()
     store = store_module.SupervisorStore(anyio.Path(tmp_path))
-    heatmap = await store.load_heatmap("alice", "ml")
+    heatmap = await store.load_heatmap(_ALICE_HASH, "ml")
 
     updated = store_module.update_heatmap(
         heatmap,
@@ -70,9 +73,9 @@ async def test_store_heatmap_default_update_and_latest_advice_roundtrip(tmp_path
         intent="compare",
         surface=True,
     )
-    await store.save_heatmap("alice", "ml", updated)
+    await store.save_heatmap(_ALICE_HASH, "ml", updated)
     advice = {"classification": {"domain": "ml"}}
-    await store.save_latest_advice("alice", advice)
+    await store.save_latest_advice(_ALICE_HASH, advice)
 
     assert updated["question_count"] == 1
     assert updated["nodes"]["basics"]["count"] == 2
@@ -81,7 +84,7 @@ async def test_store_heatmap_default_update_and_latest_advice_roundtrip(tmp_path
     assert updated["cognitive_history"][-1] == "understand"
     assert updated["intent_history"][-1] == "compare"
     assert len(updated["last_seen"]) > 0
-    assert await store.load_latest_advice("alice") == advice
+    assert await store.load_latest_advice(_ALICE_HASH) == advice
 
 
 @pytest.mark.anyio
@@ -89,7 +92,7 @@ async def test_store_malformed_files_return_safe_values(tmp_path: Path) -> None:
     store_module = _load_store()
     store = store_module.SupervisorStore(anyio.Path(tmp_path))
     maps = anyio.Path(tmp_path) / "wiki" / "supervisor" / "maps"
-    users = anyio.Path(tmp_path) / "wiki" / "supervisor" / "users" / "alice"
+    users = anyio.Path(tmp_path) / "wiki" / "supervisor" / "users" / _ALICE_HASH
     await maps.mkdir(parents=True)
     await users.mkdir(parents=True)
     await (maps / "ml.yaml").write_text("- not\n- a mapping\n", encoding="utf-8")
@@ -99,9 +102,9 @@ async def test_store_malformed_files_return_safe_values(tmp_path: Path) -> None:
     await (domains / "ml.yaml").write_text("[unterminated", encoding="utf-8")
 
     assert await store.load_map("ml") is None
-    assert await store.load_latest_advice("alice") is None
-    heatmap = await store.load_heatmap("alice", "ml")
-    assert heatmap["user"] == "alice"
+    assert await store.load_latest_advice(_ALICE_HASH) is None
+    heatmap = await store.load_heatmap(_ALICE_HASH, "ml")
+    assert heatmap["user"] == _ALICE_HASH
     assert heatmap["domain"] == "ml"
     assert heatmap["question_count"] == 0
     assert heatmap["visited_nodes"] == []
@@ -119,28 +122,52 @@ def test_store_sanitizes_domains_and_rejects_empty_results(tmp_path: Path) -> No
             store.map_path(domain)
 
 
+def test_store_rejects_invalid_user_hashes_at_all_boundaries(tmp_path: Path) -> None:
+    store_module = _load_store()
+    store = store_module.SupervisorStore(anyio.Path(tmp_path))
+    invalid_hashes = (
+        "",
+        "a" * 63,
+        "a" * 65,
+        "A" * 64,
+        "g" * 64,
+        "../" + "a" * 61,
+        "a/b" + "c" * 61,
+        "C:\\" + "a" * 61,
+    )
+
+    for user_hash in invalid_hashes:
+        with pytest.raises(ValueError, match="user_hash"):
+            store.heatmap_path(user_hash, "ml")
+        with pytest.raises(ValueError, match="user_hash"):
+            store.latest_advice_path(user_hash)
+
+
 @pytest.mark.anyio
 async def test_store_same_key_locks_serialize_but_different_keys_do_not(tmp_path: Path) -> None:
     store_module = _load_store()
     store = store_module.SupervisorStore(anyio.Path(tmp_path))
+    with pytest.raises(ValueError, match="user_hash"):
+        async with store.user_lock("../invalid"):
+            pass
     same_entered = anyio.Event()
     release_same = anyio.Event()
     second_entered = anyio.Event()
     other_entered = anyio.Event()
 
     async def hold_same() -> None:
-        async with store.user_lock("alice"):
+        async with store.user_lock(_ALICE_HASH):
             same_entered.set()
             await release_same.wait()
 
     async def wait_same() -> None:
         await same_entered.wait()
-        async with store.user_lock("alice"):
+        async with store.user_lock(_ALICE_HASH):
             second_entered.set()
 
     async def enter_other() -> None:
         await same_entered.wait()
-        async with store.user_lock("bob"):
+        async with store.user_lock(_BOB_HASH):
             other_entered.set()
 
     async with anyio.create_task_group() as task_group:

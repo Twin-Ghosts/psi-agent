@@ -15,6 +15,7 @@ from anyio import to_thread
 from loguru import logger
 
 _DOMAIN_UNSAFE = re.compile(r"[^a-z0-9]+")
+_USER_HASH = re.compile(r"[0-9a-f]{64}")
 _HISTORY_LIMIT = 20
 _LOCK_GUARD = anyio.Lock()
 _USER_LOCKS: dict[str, anyio.Lock] = {}
@@ -38,11 +39,18 @@ class SupervisorStore:
     def map_path(self, domain_id: str) -> anyio.Path:
         return self.root / "maps" / f"{self.safe_domain(domain_id)}.yaml"
 
+    @staticmethod
+    def validate_user_hash(user_hash: str) -> str:
+        if _USER_HASH.fullmatch(user_hash) is None:
+            raise ValueError("user_hash must be exactly 64 lowercase hexadecimal characters")
+        return user_hash
+
     def heatmap_path(self, user_hash: str, domain_id: str) -> anyio.Path:
-        return self.root / "users" / user_hash / "domains" / f"{self.safe_domain(domain_id)}.yaml"
+        safe_user_hash = self.validate_user_hash(user_hash)
+        return self.root / "users" / safe_user_hash / "domains" / f"{self.safe_domain(domain_id)}.yaml"
 
     def latest_advice_path(self, user_hash: str) -> anyio.Path:
-        return self.root / "users" / user_hash / "latest-advice.json"
+        return self.root / "users" / self.validate_user_hash(user_hash) / "latest-advice.json"
 
     async def load_map(self, domain_id: str) -> dict[str, Any] | None:
         return await self._load_yaml(self.map_path(domain_id))
@@ -86,14 +94,15 @@ class SupervisorStore:
 
     @asynccontextmanager
     async def user_lock(self, user_hash: str) -> AsyncIterator[None]:
-        lock = await self._get_lock(_USER_LOCKS, f"{self.workspace}:{user_hash}")
-        logger.debug(f"Acquiring supervisor user lock: {user_hash}")
+        safe_user_hash = self.validate_user_hash(user_hash)
+        lock = await self._get_lock(_USER_LOCKS, f"{self.workspace}:{safe_user_hash}")
+        logger.debug(f"Acquiring supervisor user lock: {safe_user_hash}")
         async with lock:
-            logger.debug(f"Acquired supervisor user lock: {user_hash}")
+            logger.debug(f"Acquired supervisor user lock: {safe_user_hash}")
             try:
                 yield
             finally:
-                logger.debug(f"Releasing supervisor user lock: {user_hash}")
+                logger.debug(f"Releasing supervisor user lock: {safe_user_hash}")
 
     @asynccontextmanager
     async def domain_lock(self, domain_id: str) -> AsyncIterator[None]:
