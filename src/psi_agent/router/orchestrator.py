@@ -88,10 +88,17 @@ class Orchestrator:
                 logger.warning(f"Upstream {socket!r} failed: {exc}")
                 errors.append(exc)
 
+        grouped_indices: dict[str, list[int]] = {}
+        for index, task in enumerate(plan):
+            grouped_indices.setdefault(task.socket, []).append(index)
+
+        async def invoke_socket_group(socket: str, indices: list[int]) -> None:
+            for index in indices:
+                await invoke(index, socket)
+
         async with anyio.create_task_group() as tg:
-            for index, task in enumerate(plan):
-                socket = task.socket
-                tg.start_soon(invoke, index, socket)
+            for socket, indices in grouped_indices.items():
+                tg.start_soon(invoke_socket_group, socket, indices)
 
         successful = [result for result in results if result is not None]
         logger.info(f"Router upstream round completed: {len(successful)}/{len(results)} succeeded")
