@@ -100,7 +100,7 @@ async def test_planner_repairs_one_invalid_result_at_router_socket() -> None:
     assert [task.socket for task in tasks] == ["a", "a", "a"]
     assert [socket for socket, _, _ in client.calls] == ["router", "router"]
     assert [timeout for _, _, timeout in client.calls] == [12.0, 12.0]
-    assert "Plan this request" in client.calls[0][1]["messages"][-1]["content"]
+    assert "request type" in client.calls[0][1]["messages"][-1]["content"]
     assert "Repair it" in client.calls[1][1]["messages"][-1]["content"]
 
 

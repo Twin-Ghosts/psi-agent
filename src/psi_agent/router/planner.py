@@ -46,19 +46,22 @@ def parse_plan(content: str, *, allowed_sockets: set[str]) -> tuple[PlannedTask,
     for index, raw_task in enumerate(raw_tasks, start=1):
         if not isinstance(raw_task, dict):
             raise PlanValidationError(f"Planner task {index} must be an object")
-        if set(raw_task) != {"subtask", "socket"}:
-            raise PlanValidationError(f"Planner task {index} must contain only subtask and socket keys")
+        if set(raw_task) - {"task_type", "subtask", "socket"} or not {"subtask", "socket"} <= set(raw_task):
+            raise PlanValidationError(f"Planner task {index} must contain subtask and socket keys")
         subtask = raw_task.get("subtask")
         socket = raw_task.get("socket")
+        task_type = raw_task.get("task_type", "general")
         if not isinstance(subtask, str) or not subtask.strip():
             raise PlanValidationError(f"Planner task {index} subtask must be a non-empty string")
         if not isinstance(socket, str):
             raise PlanValidationError(f"Planner task {index} socket must be a string")
+        if not isinstance(task_type, str) or not task_type.strip():
+            raise PlanValidationError(f"Planner task {index} task_type must be a non-empty string")
         subtask = subtask.strip()
         socket = socket.strip()
         if socket not in allowed_sockets:
             raise PlanValidationError(f"Planner task {index} selected an unconfigured socket")
-        tasks.append(PlannedTask(subtask=subtask, socket=socket))
+        tasks.append(PlannedTask(subtask=subtask, socket=socket, task_type=task_type.strip()))
     return tuple(tasks)
 
 
@@ -71,12 +74,19 @@ class Planner:
     upstream: tuple[tuple[str, str], ...] | list[tuple[str, str]]
     timeout: float | None
 
-    async def plan(self, *, messages: list[dict[str, Any]]) -> tuple[PlannedTask, ...]:
+    async def plan(
+        self, *, messages: list[dict[str, Any]], context_limit: int | None = None
+    ) -> tuple[PlannedTask, ...]:
         """Return a valid plan, allowing one request solely to repair its structure."""
 
         result = await self.client.complete(
             socket=self.router_socket,
-            body={"messages": build_planning_messages(messages=messages, upstream=self.upstream), "stream": True},
+            body={
+                "messages": build_planning_messages(
+                    messages=messages, upstream=self.upstream, context_limit=context_limit
+                ),
+                "stream": True,
+            },
             timeout=self.timeout,
         )
         allowed_sockets = {socket for socket, _ in self.upstream}
@@ -88,6 +98,7 @@ class Planner:
                 body={
                     "messages": build_repair_messages(
                         original_messages=messages, invalid_plan=result.content[:2_000], upstream=self.upstream
+                        , context_limit=context_limit
                     ),
                     "stream": True,
                 },

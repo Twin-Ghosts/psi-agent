@@ -85,6 +85,7 @@ class PlannedTask:
 
     subtask: str
     socket: str
+    task_type: str = "general"
 
 
 @dataclass

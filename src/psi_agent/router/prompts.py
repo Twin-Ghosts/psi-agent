@@ -27,7 +27,10 @@ def _socket_catalog(upstream: list[tuple[str, str]] | tuple[tuple[str, str], ...
 
 
 def build_planning_messages(
-    *, messages: list[dict[str, Any]], upstream: list[tuple[str, str]] | tuple[tuple[str, str], ...]
+    *,
+    messages: list[dict[str, Any]],
+    upstream: list[tuple[str, str]] | tuple[tuple[str, str], ...],
+    context_limit: int | None = None,
 ) -> list[dict[str, Any]]:
     """Ask the planning model to choose an appropriate number of socket-selected subtasks."""
 
@@ -36,12 +39,14 @@ def build_planning_messages(
         {
             "role": "user",
             "content": (
-                "Plan this request by decomposing it into the smallest useful set of complementary subtasks. "
+                "Classify the request type (for example: chat, coding, research, data-analysis, tool-operation, "
+                "or writing), then decompose it into the smallest useful set of complementary subtasks. "
                 "Configured backend sockets and capabilities are:\n"
                 f"{_socket_catalog(upstream)}\n\n"
                 "Return JSON only in this exact shape: "
-                '{"tasks":[{"subtask":"...","socket":"..."}]}. '
+                '{"tasks":[{"task_type":"...","subtask":"...","socket":"..."}]}. '
                 "Use one or more tasks as appropriate. Each socket must exactly match one configured socket."
+                + (f" Context limit for this request: {context_limit} tokens." if context_limit is not None else "")
             ),
         }
     )
@@ -53,6 +58,7 @@ def build_repair_messages(
     original_messages: list[dict[str, Any]],
     invalid_plan: str,
     upstream: list[tuple[str, str]] | tuple[tuple[str, str], ...],
+    context_limit: int | None = None,
 ) -> list[dict[str, Any]]:
     """Ask once for a strictly formatted replacement plan."""
 
@@ -64,8 +70,9 @@ def build_repair_messages(
                 "Your prior routing plan was invalid:\n"
                 f"{invalid_plan}\n\nConfigured backend sockets and capabilities are:\n{_socket_catalog(upstream)}\n\n"
                 "Repair it. Return JSON only in this exact shape: "
-                '{"tasks":[{"subtask":"...","socket":"..."}]}. '
+                '{"tasks":[{"task_type":"...","subtask":"...","socket":"..."}]}. '
                 "Use one or more tasks as appropriate. Each socket must exactly match one configured socket."
+                + (f" Context limit for this request: {context_limit} tokens." if context_limit is not None else "")
             ),
         }
     )

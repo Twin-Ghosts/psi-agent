@@ -31,7 +31,9 @@ class _CompletionClient(Protocol):
 
 
 class _TaskPlanner(Protocol):
-    async def plan(self, *, messages: list[dict[str, Any]]) -> tuple[PlannedTask, ...]: ...
+    async def plan(
+        self, *, messages: list[dict[str, Any]], context_limit: int | None = None
+    ) -> tuple[PlannedTask, ...]: ...
 
 
 class Orchestrator:
@@ -62,7 +64,8 @@ class Orchestrator:
         """Plan a round, execute selected subtasks, then aggregate through router_socket."""
         messages = self._messages(body)
         tools = self._tools(body)
-        plan = await self.planner.plan(messages=messages)
+        context_limit = self._context_limit(body)
+        plan = await self.planner.plan(messages=messages, context_limit=context_limit)
         logger.info(f"Router plan selected {len(plan)} task(s): {[(task.subtask, task.socket) for task in plan]}")
         results: list[UpstreamResult | None] = [None] * len(plan)
         errors: list[Exception] = []
@@ -71,7 +74,9 @@ class Orchestrator:
             try:
                 logger.info(f"Router dispatching round to upstream[{index}] socket={socket!r}")
                 branch_messages = build_branch_messages(
-                    original_messages=messages, subtask=plan[index].subtask, prior_answers=[]
+                    original_messages=messages,
+                    subtask=f"[{plan[index].task_type}] {plan[index].subtask}",
+                    prior_answers=[],
                 )
                 request_body = self._completion_body(request_body=body, messages=branch_messages, tools=tools)
                 results[index] = await self.client.complete(
@@ -293,6 +298,19 @@ class Orchestrator:
         if not isinstance(messages, list) or any(not isinstance(message, dict) for message in messages):
             raise OrchestrationError("Request messages must be a list of objects")
         return messages
+
+    @staticmethod
+    def _context_limit(body: dict[str, Any]) -> int | None:
+        for key in ("context_limit", "context_length", "max_context_tokens"):
+            value = body.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                return value
+        routing = body.get("routing")
+        if isinstance(routing, dict):
+            value = routing.get("context_limit")
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                return value
+        return None
 
     @staticmethod
     def _tools(body: dict[str, Any]) -> list[dict[str, Any]]:
