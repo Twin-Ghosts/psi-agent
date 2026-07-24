@@ -180,7 +180,20 @@ class SessionAgent:
                 await self._schedule_registry.refresh()
 
                 if not turn_response_kind.startswith("schedule."):
+                    content = hook_message.get("content")
+                    user_id = hook_message.get("user_id")
+                    profile_id = hook_message.get("profile_id")
+                    session_id = hook_message.get("session_id")
+                    logger.debug(
+                        "Before-turn input: "
+                        f"content_present={isinstance(content, str) and bool(content.strip())}, "
+                        f"has_user_id={isinstance(user_id, str) and bool(user_id.strip())}, "
+                        f"has_profile_id={isinstance(profile_id, str) and bool(profile_id.strip())}, "
+                        f"has_session_id={isinstance(session_id, str) and bool(session_id.strip())}, "
+                        f"kind={hook_message.get('kind', 'missing')!r}"
+                    )
                     supervisor_advice = await self._system_prompt.run_before_turn(hook_message)
+                    logger.debug(f"Before-turn advice present: {bool(supervisor_advice)}")
                     if supervisor_advice:
                         hook_message["supervisor_advice"] = supervisor_advice
 
