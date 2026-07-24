@@ -36,7 +36,10 @@ class FakeClient:
 class FakePlanner:
     tasks: tuple[PlannedTask, ...] = tuple(PlannedTask(socket=socket, subtask=socket) for socket in ("a", "b", "c"))
 
-    async def plan(self, *, messages: list[dict[str, Any]]) -> tuple[PlannedTask, ...]:
+    async def plan(
+        self, *, messages: list[dict[str, Any]], context_limit: int | None = None
+    ) -> tuple[PlannedTask, ...]:
+        del context_limit
         return self.tasks
 
 
