@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import anyio
 import pytest
@@ -147,7 +148,7 @@ async def test_before_turn_hook_loads_and_returns_result(tmp_path: Path) -> None
 
 @pytest.mark.anyio
 async def test_before_turn_hook_timeout_returns_empty_dict() -> None:
-    async def slow(_user_message: dict) -> dict:
+    async def slow(_user_message: dict[str, Any]) -> dict[str, Any]:
         await anyio.sleep(1)
         return {"unexpected": True}
 
@@ -157,7 +158,7 @@ async def test_before_turn_hook_timeout_returns_empty_dict() -> None:
 
 @pytest.mark.anyio
 async def test_before_turn_hook_invalid_result_returns_empty_dict() -> None:
-    async def invalid(_user_message: dict) -> str:
+    async def invalid(_user_message: dict[str, Any]) -> str:
         return "bad"
 
     sp = SystemPrompt(before_turn=invalid)
@@ -166,7 +167,7 @@ async def test_before_turn_hook_invalid_result_returns_empty_dict() -> None:
 
 @pytest.mark.anyio
 async def test_before_turn_hook_exception_returns_empty_dict() -> None:
-    async def fail(_user_message: dict) -> dict:
+    async def fail(_user_message: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("broken hook")
 
     sp = SystemPrompt(before_turn=fail)
@@ -175,9 +176,11 @@ async def test_before_turn_hook_exception_returns_empty_dict() -> None:
 
 @pytest.mark.anyio
 async def test_before_turn_hook_propagates_cancellation() -> None:
-    completed: list[dict] = []
+    entered = anyio.Event()
+    completed: list[dict[str, Any]] = []
 
-    async def wait_forever(_user_message: dict) -> dict:
+    async def wait_forever(_user_message: dict[str, Any]) -> dict[str, Any]:
+        entered.set()
         await anyio.sleep_forever()
 
     async def run_hook(sp: SystemPrompt) -> None:
@@ -186,7 +189,7 @@ async def test_before_turn_hook_propagates_cancellation() -> None:
     sp = SystemPrompt(before_turn=wait_forever)
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(run_hook, sp)
-        await anyio.lowlevel.checkpoint()
+        await entered.wait()
         task_group.cancel_scope.cancel()
 
     assert completed == []
