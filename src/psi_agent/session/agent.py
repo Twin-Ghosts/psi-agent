@@ -179,6 +179,11 @@ class SessionAgent:
                 await self._tool_registry.refresh()
                 await self._schedule_registry.refresh()
 
+                if not turn_response_kind.startswith("schedule."):
+                    supervisor_advice = await self._system_prompt.run_before_turn(hook_message)
+                    if supervisor_advice:
+                        hook_message["supervisor_advice"] = supervisor_advice
+
                 # system prompt (lazy + optional rebuild)
                 await self._system_prompt.ensure(self._conversation, hook_message)
 

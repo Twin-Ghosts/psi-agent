@@ -167,6 +167,97 @@ async def test_agent_passes_current_message_and_fallback_session_id_to_system_ho
 
 
 @pytest.mark.anyio
+async def test_agent_injects_ephemeral_before_turn_advice_into_system_builder(tmp_path: Path) -> None:
+    events: list[str] = []
+    builder_messages: list[dict] = []
+    ai_requests: list[dict] = []
+
+    async def before_turn(user_message: dict) -> dict:
+        events.append("before")
+        assert user_message == {"role": "user", "content": "question", "session_id": "session-42"}
+        return {"summary": "Prefer a concise answer"}
+
+    async def builder(user_message: dict) -> str:
+        events.append("builder")
+        builder_messages.append(user_message)
+        return f"Guidance: {user_message['supervisor_advice']['summary']}"
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        ai_requests.append(await request.json())
+        resp = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        await resp.write(_sse_chunk(content="answer", finish="stop").encode())
+        await resp.write(b"data: [DONE]\n\n")
+        return resp
+
+    mock_server = MockAIServer(tmp_path)
+    ai_socket = await mock_server.start(handler)
+    await anyio.Path(tmp_path / "histories").mkdir()
+    conversation = Conversation(path=tmp_path / "histories" / "session-42.jsonl")
+    try:
+        agent = SessionAgent(
+            ai_client=AiClient(ai_socket),
+            conversation=conversation,
+            system_prompt=SystemPrompt(builder=builder, before_turn=before_turn),
+        )
+        user = {"role": "user", "content": "question"}
+        _ = [chunk async for chunk in agent.run(user)]
+
+        assert events == ["before", "builder"]
+        assert builder_messages == [
+            {
+                **user,
+                "session_id": "session-42",
+                "supervisor_advice": {"summary": "Prefer a concise answer"},
+            }
+        ]
+        assert ai_requests[0]["messages"][0] == {
+            "role": "system",
+            "content": "Guidance: Prefer a concise answer",
+        }
+        assert all("supervisor_advice" not in message for message in conversation.messages)
+        assert all("supervisor_advice" not in message for message in ai_requests[0]["messages"])
+        assert "supervisor_advice" not in ai_requests[0]
+    finally:
+        await mock_server.cleanup()
+
+
+@pytest.mark.anyio
+async def test_agent_skips_before_turn_hook_for_silent_schedule(tmp_path: Path) -> None:
+    before_turn_calls: list[dict] = []
+
+    async def before_turn(user_message: dict) -> dict:
+        before_turn_calls.append(user_message)
+        return {"summary": "unused"}
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        resp = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        await resp.write(_sse_chunk(content="done", finish="stop").encode())
+        await resp.write(b"data: [DONE]\n\n")
+        return resp
+
+    mock_server = MockAIServer(tmp_path)
+    ai_socket = await mock_server.start(handler)
+    try:
+        agent = SessionAgent(
+            ai_client=AiClient(ai_socket),
+            system_prompt=SystemPrompt(before_turn=before_turn),
+        )
+        _ = [
+            chunk
+            async for chunk in agent.run(
+                {"role": "user", "content": "scheduled", "kind": "schedule.silent"},
+                response_kind="schedule.silent",
+            )
+        ]
+
+        assert before_turn_calls == []
+    finally:
+        await mock_server.cleanup()
+
+
+@pytest.mark.anyio
 async def test_agent_reserves_explicit_identity_metadata_for_system_hooks(tmp_path: Path) -> None:
     checker_messages: list[dict] = []
     after_turn_calls: list[tuple[dict, dict]] = []
