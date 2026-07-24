@@ -629,6 +629,7 @@ async def test_supervisor_skips_nonlearning_and_recursive_sessions(tmp_path: Pat
     )
     assert await manager.supervise({"content": "thanks", "session_id": "main"}) is None
     assert await manager.supervise({"content": "what is ML?", "session_id": "supervisor-deadbeef"}) is None
+    assert await manager.supervise({"content": "what is ML?", "session_id": "main", "kind": "schedule.silent"}) is None
 
 
 @pytest.mark.anyio

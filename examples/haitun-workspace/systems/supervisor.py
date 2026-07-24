@@ -209,7 +209,10 @@ class SupervisorManager:
     async def supervise(self, user_message: dict[str, Any]) -> dict[str, Any] | None:
         question = user_message.get("content")
         session_id = user_message.get("session_id")
+        kind = user_message.get("kind")
         if not isinstance(question, str) or not is_learning_question(question):
+            return None
+        if isinstance(kind, str) and kind.startswith("schedule"):
             return None
         if isinstance(session_id, str) and session_id.startswith("supervisor-"):
             return None

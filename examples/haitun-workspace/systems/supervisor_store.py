@@ -137,7 +137,7 @@ class SupervisorStore:
     @staticmethod
     async def _atomic_write(target: anyio.Path, content: str) -> None:
         await target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+        temporary = target.with_name(f".tmp-{uuid4().hex[:12]}")
         try:
             await temporary.write_text(content, encoding="utf-8")
             await to_thread.run_sync(os.replace, str(temporary), str(target))
