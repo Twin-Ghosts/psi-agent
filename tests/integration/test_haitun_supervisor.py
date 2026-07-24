@@ -58,12 +58,23 @@ def test_protocol_validation_repairs_and_bounds_values() -> None:
     protocol = _load_protocol()
 
     assert protocol.validate_advice(_valid_advice())["breakout"]["type"] == "broaden"
-    assert protocol.validate_advice({"breakout": {"score": 4}})["breakout"]["score"] == 1.0
-    directions = protocol.validate_advice({"breakout": {"directions": [1, "two", "", "four", "five"]}})["breakout"][
+    clamped = protocol.validate_advice({"breakout": {"score": 4}, "diagnostics": {"source": "live"}})
+    assert clamped["breakout"]["score"] == 1.0
+    assert clamped["diagnostics"]["source"] == "repaired"
+    directions = protocol.validate_advice({"breakout": {"directions": ["one", "two", "three", "four"]}})["breakout"][
         "directions"
     ]
-    assert directions == ["two", "four", "five"]
+    assert directions == ["one", "two", "three"]
+    assert len(directions) == 3
     assert protocol.validate_advice("not a dict")["diagnostics"]["source"] == "unavailable"
+
+
+def test_protocol_malformed_section_marks_live_payload_repaired() -> None:
+    protocol = _load_protocol()
+    raw = _valid_advice()
+    raw["user_state"] = "malformed"
+
+    assert protocol.validate_advice(raw)["diagnostics"]["source"] == "repaired"
 
 
 def test_protocol_extracts_plain_fenced_and_embedded_json() -> None:

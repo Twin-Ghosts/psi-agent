@@ -136,6 +136,10 @@ def validate_advice(raw: object) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return empty_advice()
 
+    normalized_raw: dict[str, Any] = {key: value for key, value in raw.items() if isinstance(key, str)}
+    discarded_non_string_key = len(normalized_raw) != len(raw)
+    raw = normalized_raw
+
     diagnostics = _section(raw, "diagnostics")
     requested_source = diagnostics.get("source")
     source = requested_source if requested_source in ADVICE_SOURCES else "repaired"
@@ -242,7 +246,13 @@ def validate_advice(raw: object) -> dict[str, Any]:
         if isinstance(map_updates.get("branch_additions"), list)
         else [],
     }
-    if repaired and source == "live":
+    normalized_sections_changed = discarded_non_string_key or any(
+        raw.get(key) != advice[key] for key in advice if key != "diagnostics"
+    )
+    diagnostics_changed = (
+        not isinstance(raw.get("diagnostics"), dict) or diagnostics.get("evidence") != advice["diagnostics"]["evidence"]
+    )
+    if (repaired or normalized_sections_changed or diagnostics_changed) and source == "live":
         source = "repaired"
     advice["diagnostics"] = {
         "source": source,
