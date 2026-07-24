@@ -129,6 +129,69 @@ async def test_after_turn_hook_failure_is_recoverable() -> None:
     await sp.run_after_turn({"role": "user"}, {"role": "assistant"})
 
 
+@pytest.mark.anyio
+async def test_before_turn_hook_loads_and_returns_result(tmp_path: Path) -> None:
+    systems = tmp_path / "systems"
+    await anyio.Path(systems).mkdir()
+    await anyio.Path(systems / "system.py").write_text(
+        "async def system_before_turn(user_message):\n"
+        "    return {'breakout': {'needed': True}, 'seen': user_message['content']}\n",
+        encoding="utf-8",
+    )
+
+    sp = await SystemPrompt.from_workspace(tmp_path, "test")
+
+    result = await sp.run_before_turn({"content": "learn"})
+    assert result["seen"] == "learn"
+
+
+@pytest.mark.anyio
+async def test_before_turn_hook_timeout_returns_empty_dict() -> None:
+    async def slow(_user_message: dict) -> dict:
+        await anyio.sleep(1)
+        return {"unexpected": True}
+
+    sp = SystemPrompt(before_turn=slow, before_turn_timeout_seconds=0.01)
+    assert await sp.run_before_turn({"content": "learn"}) == {}
+
+
+@pytest.mark.anyio
+async def test_before_turn_hook_invalid_result_returns_empty_dict() -> None:
+    async def invalid(_user_message: dict) -> str:
+        return "bad"
+
+    sp = SystemPrompt(before_turn=invalid)
+    assert await sp.run_before_turn({"content": "learn"}) == {}
+
+
+@pytest.mark.anyio
+async def test_before_turn_hook_exception_returns_empty_dict() -> None:
+    async def fail(_user_message: dict) -> dict:
+        raise RuntimeError("broken hook")
+
+    sp = SystemPrompt(before_turn=fail)
+    assert await sp.run_before_turn({"content": "learn"}) == {}
+
+
+@pytest.mark.anyio
+async def test_before_turn_hook_propagates_cancellation() -> None:
+    completed: list[dict] = []
+
+    async def wait_forever(_user_message: dict) -> dict:
+        await anyio.sleep_forever()
+
+    async def run_hook(sp: SystemPrompt) -> None:
+        completed.append(await sp.run_before_turn({"content": "learn"}))
+
+    sp = SystemPrompt(before_turn=wait_forever)
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(run_hook, sp)
+        await anyio.lowlevel.checkpoint()
+        task_group.cancel_scope.cancel()
+
+    assert completed == []
+
+
 def test_workspace_empty_string_uses_cwd(tmp_path: Path) -> None:
     session = Session(workspace="", channel_socket=str(tmp_path / "c.sock"), ai_socket=str(tmp_path / "a.sock"))
     assert session.workspace == ""
