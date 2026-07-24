@@ -544,6 +544,7 @@ def _plan_reuse_parent_session(
     *,
     sid: str,
     workspace: Path,
+    child_workspace: Path,
     repo_root: Path,
     psi: str,
     parent: dict[str, str],
@@ -556,7 +557,7 @@ def _plan_reuse_parent_session(
         shell = "powershell"
         session_argv = _build_session_argv(
             psi,
-            workspace=workspace,
+            workspace=child_workspace,
             channel_socket=channel_socket,
             ai_socket=ai_socket,
             session_id=sid,
@@ -567,7 +568,7 @@ def _plan_reuse_parent_session(
         shell = "bash"
         session_argv = _build_session_argv(
             psi,
-            workspace=workspace,
+            workspace=child_workspace,
             channel_socket=channel_socket,
             ai_socket=ai_socket,
             session_id=sid,
@@ -598,9 +599,11 @@ async def plan_subagent(
     *,
     session_id: str = "",
     workspace_raw: str = "",
+    child_workspace_raw: str = "",
     gateway_ai_id: str = "",
 ) -> dict[str, Any]:
     workspace = resolve_workspace(workspace_raw)
+    child_workspace = resolve_workspace(child_workspace_raw) if child_workspace_raw.strip() else workspace
     repo_root = resolve_project_root(workspace)
     sid = session_id.strip() or f"sub-{uuid.uuid4().hex[:8]}"
     psi = psi_executable(repo_root)
@@ -618,6 +621,7 @@ async def plan_subagent(
                 return _plan_reuse_parent_session(
                     sid=sid,
                     workspace=workspace,
+                    child_workspace=child_workspace,
                     repo_root=repo_root,
                     psi=psi,
                     parent=parent,
@@ -632,6 +636,7 @@ async def plan_subagent(
             return _plan_reuse_parent_session(
                 sid=sid,
                 workspace=workspace,
+                child_workspace=child_workspace,
                 repo_root=repo_root,
                 psi=psi,
                 parent=process_parent,
@@ -667,7 +672,7 @@ async def plan_subagent(
         ai_argv = _build_ai_argv(psi, ai_socket=ai_socket, **creds)
         session_argv = _build_session_argv(
             psi,
-            workspace=workspace,
+            workspace=child_workspace,
             channel_socket=channel_socket,
             ai_socket=ai_socket,
             session_id=sid,
@@ -680,7 +685,7 @@ async def plan_subagent(
         ai_argv = _build_ai_argv(psi, ai_socket=ai_socket, **creds)
         session_argv = _build_session_argv(
             psi,
-            workspace=workspace,
+            workspace=child_workspace,
             channel_socket=channel_socket,
             ai_socket=ai_socket,
             session_id=sid,

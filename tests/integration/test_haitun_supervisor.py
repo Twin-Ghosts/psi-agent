@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -34,6 +35,20 @@ def _load_supervisor_system() -> ModuleType:
     module.__file__ = str(path)
     exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), module.__dict__)
     return module
+
+
+def _load_supervisor_manager() -> ModuleType:
+    systems = Path(__file__).parents[2] / "examples" / "haitun-workspace" / "systems"
+    path = systems / "supervisor.py"
+    sys.path.insert(0, str(systems))
+    try:
+        module = ModuleType("haitun_supervisor_manager")
+        module.__file__ = str(path)
+        sys.modules[module.__name__] = module
+        exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), module.__dict__)
+        return module
+    finally:
+        sys.path.remove(str(systems))
 
 
 @pytest.mark.anyio
@@ -515,3 +530,138 @@ def test_protocol_rendering_is_concise_and_safe() -> None:
     non_learning = _valid_advice()
     non_learning["classification"]["is_learning"] = False
     assert protocol.render_advice_prompt(protocol.validate_advice(non_learning)) == ""
+
+
+def test_supervisor_identity_and_learning_signals_are_stable() -> None:
+    supervisor = _load_supervisor_manager()
+    assert supervisor.hash_identity("alice") == supervisor.hash_identity("alice")
+    assert len(supervisor.hash_identity("alice")) == 64
+    assert supervisor.hash_identity("alice") != supervisor.hash_identity("bob")
+    assert supervisor.is_learning_question("") is False
+    assert supervisor.is_learning_question("什么是过拟合\N{FULLWIDTH QUESTION MARK}") is True
+    assert supervisor.is_learning_question("How does gradient descent work?") is True
+    assert supervisor.is_learning_question("谢谢") is False
+    assert supervisor.resolve_identity({"user_id": "u", "profile_id": "p", "session_id": "s"}) == "u"
+    assert supervisor.resolve_identity({"profile_id": "p", "session_id": "s"}) == "p"
+    assert supervisor.resolve_identity({"session_id": "s"}) == "s"
+
+
+@pytest.mark.anyio
+async def test_supervisor_reuses_handle_and_payload_is_whitelisted(tmp_path: Path) -> None:
+    supervisor = _load_supervisor_manager()
+    calls: dict[str, list[Any]] = {"plan": [], "start": [], "wait": [], "chat": []}
+
+    async def plan_fn(**kwargs: Any) -> dict[str, Any]:
+        calls["plan"].append(kwargs)
+        return {
+            "ok": True,
+            "session_id": kwargs["session_id"],
+            "reuse_parent_ai": True,
+            "ai_socket": "ai",
+            "channel_socket": "channel",
+            "session_command": "session",
+            "session_process_id": "session-process",
+            "shell": "bash",
+        }
+
+    async def start_fn(**kwargs: Any) -> dict[str, Any]:
+        calls["start"].append(kwargs)
+        return {"ok": True}
+
+    async def wait_fn(addr: str, **kwargs: Any) -> dict[str, Any]:
+        calls["wait"].append((addr, kwargs))
+        return {"ok": True}
+
+    advice = _valid_advice()
+    advice["map_updates"] = {"proposed_map": None, "visited_nodes": [], "branch_additions": []}
+
+    async def chat_fn(**kwargs: Any) -> dict[str, Any]:
+        calls["chat"].append(kwargs)
+        payload = json.loads(kwargs["message"])
+        assert set(payload) == {
+            "event",
+            "user_id_hash",
+            "profile_id",
+            "session_id_hash",
+            "turn_index",
+            "user_question",
+            "stage_profile",
+            "existing_map",
+            "heatmap",
+            "previous_supervision",
+        }
+        serialized = kwargs["message"]
+        for forbidden in ("assistant", "reasoning", "tool_calls", "tool results", "messages"):
+            assert forbidden not in serialized
+        return {"ok": True, "text": json.dumps(advice, ensure_ascii=False)}
+
+    manager = supervisor.SupervisorManager(
+        anyio.Path(tmp_path), plan_fn=plan_fn, start_fn=start_fn, wait_fn=wait_fn, chat_fn=chat_fn
+    )
+    message = {
+        "content": "How does overfitting work?",
+        "user_id": "alice",
+        "profile_id": "profile",
+        "session_id": "main",
+        "turn_index": 2,
+        "stage_profile": {"depth": 2, "goal": 0.5, "familiarity": 9},
+        "messages": [{"role": "assistant", "reasoning": "secret", "tool_calls": ["secret"]}],
+    }
+    first = await manager.supervise(message)
+    second = await manager.supervise(message)
+    assert first["diagnostics"]["source"] in {"live", "repaired"}
+    assert second["classification"]["domain"] == "machine-learning"
+    assert len(calls["plan"]) == 1
+    assert len(calls["start"]) == 1
+    assert calls["plan"][0]["child_workspace_raw"].endswith("haitun-supervisor-workspace")
+    assert len(calls["chat"]) == 2
+
+
+@pytest.mark.anyio
+async def test_supervisor_skips_nonlearning_and_recursive_sessions(tmp_path: Path) -> None:
+    supervisor = _load_supervisor_manager()
+
+    async def forbidden(**kwargs: Any) -> dict[str, Any]:
+        raise AssertionError(kwargs)
+
+    manager = supervisor.SupervisorManager(
+        anyio.Path(tmp_path), plan_fn=forbidden, start_fn=forbidden, wait_fn=forbidden, chat_fn=forbidden
+    )
+    assert await manager.supervise({"content": "thanks", "session_id": "main"}) is None
+    assert await manager.supervise({"content": "what is ML?", "session_id": "supervisor-deadbeef"}) is None
+
+
+@pytest.mark.anyio
+async def test_supervisor_retries_dead_child_once_then_returns_unavailable(tmp_path: Path) -> None:
+    supervisor = _load_supervisor_manager()
+    counts = {"plan": 0, "chat": 0}
+
+    async def plan_fn(**kwargs: Any) -> dict[str, Any]:
+        counts["plan"] += 1
+        return {
+            "ok": True,
+            "session_id": kwargs["session_id"],
+            "reuse_parent_ai": True,
+            "ai_socket": "ai",
+            "channel_socket": f"channel-{counts['plan']}",
+            "session_command": "session",
+            "session_process_id": "session-process",
+            "shell": "bash",
+        }
+
+    async def start_fn(**kwargs: Any) -> dict[str, Any]:
+        return {"ok": True}
+
+    async def wait_fn(addr: str, **kwargs: Any) -> dict[str, Any]:
+        return {"ok": True}
+
+    async def chat_fn(**kwargs: Any) -> dict[str, Any]:
+        counts["chat"] += 1
+        return {"ok": False, "text": ""}
+
+    manager = supervisor.SupervisorManager(
+        anyio.Path(tmp_path), plan_fn=plan_fn, start_fn=start_fn, wait_fn=wait_fn, chat_fn=chat_fn
+    )
+    advice = await manager.supervise({"content": "Explain gradient descent", "user_id": "alice", "session_id": "main"})
+    assert advice["diagnostics"]["source"] == "unavailable"
+    assert counts == {"plan": 2, "chat": 2}
