@@ -28,6 +28,60 @@ def _load_store() -> ModuleType:
     return module
 
 
+def _load_supervisor_system() -> ModuleType:
+    path = Path(__file__).parents[2] / "examples" / "haitun-supervisor-workspace" / "systems" / "system.py"
+    module = ModuleType("haitun_supervisor_system")
+    module.__file__ = str(path)
+    exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), module.__dict__)
+    return module
+
+
+@pytest.mark.anyio
+async def test_supervisor_workspace_prompt_is_stable_and_strictly_isolated() -> None:
+    system = _load_supervisor_system()
+
+    first = await system.system_prompt_builder({"content": "ignored"})
+    second = await system.system_prompt_builder()
+
+    assert first == second
+    assert "独立旁路监督 Agent" in first
+    assert "永远不面向用户" in first
+    assert "不回答用户问题" in first
+    for forbidden_input in ("主 Agent 答案", "reasoning", "drafts", "tool_calls", "tool results"):
+        assert forbidden_input in first
+    assert "SupervisorAdvice" in first
+    assert "只输出一个 JSON 对象" in first
+    assert "Markdown" in first
+    assert await system.system_prompt_rebuild_checker({"content": "anything"}) is False
+
+
+@pytest.mark.anyio
+async def test_supervisor_workspace_prompt_encodes_breakout_and_map_policy() -> None:
+    prompt = await _load_supervisor_system().system_prompt_builder()
+
+    for breakout_type in ("broaden", "deepen", "reframe", "cross_domain", "operationalize"):
+        assert breakout_type in prompt
+    for concept in ("最高优先级", "latent_need", "认知层级", "意图进展", "前两轮", "明确目标", "用户明确要求简短"):
+        assert concept in prompt
+    assert "proposed_map" in prompt
+    assert "visited_nodes" in prompt
+    assert "branch_additions" in prompt
+    assert "缺少地图" in prompt
+    assert "不得重新生成完整地图" in prompt
+    assert "隔离 JSON payload" in prompt
+
+
+def test_supervisor_workspace_has_no_main_agent_hooks_or_persona() -> None:
+    system = _load_supervisor_system()
+    assert system.__file__ is not None
+    source = Path(system.__file__).read_text(encoding="utf-8")
+
+    assert not hasattr(system, "system_before_turn")
+    assert not hasattr(system, "system_after_turn")
+    assert "profile_update" not in source
+    assert "海屯先生" not in source
+
+
 @pytest.mark.anyio
 async def test_store_roundtrips_shared_map_and_preserves_generated_at(tmp_path: Path) -> None:
     store_module = _load_store()
