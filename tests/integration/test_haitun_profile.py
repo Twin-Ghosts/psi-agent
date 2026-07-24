@@ -197,14 +197,11 @@ def test_policy_uses_current_turn_and_single_injection(monkeypatch: pytest.Monke
 
     third = module._build_profile_policy({"turns": 2, "dimensions": {"familiarity": 0.7}})
     fifth = module._build_profile_policy({"turns": 4, "dimensions": {"familiarity": 0.7}})
-    sixth = module._build_profile_policy({"turns": 5, "dimensions": {"familiarity": 0.7}})
-    gated = module._build_profile_policy({"turns": 5, "dimensions": {"familiarity": 0.5}})
 
     assert "本轮必须提问" in third
-    assert "破圈条件未满足" in third
-    assert "本轮必须提出跨领域" in fifth
-    assert "本轮必须提出跨领域" in sixth
-    assert "破圈条件未满足" in gated
+    assert "旁路监督" in third
+    assert "本轮必须提出跨领域" not in fifth
+    assert "第五轮" not in fifth
 
 
 @pytest.mark.anyio

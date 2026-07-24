@@ -51,6 +51,215 @@ def _load_supervisor_manager() -> ModuleType:
         sys.path.remove(str(systems))
 
 
+def _load_main_system(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    workspace = Path(__file__).parents[2] / "examples" / "haitun-workspace"
+    monkeypatch.syspath_prepend(str(workspace / "systems"))
+    monkeypatch.syspath_prepend(str(workspace / "tools"))
+    path = workspace / "systems" / "system.py"
+    module = ModuleType("haitun_main_system")
+    module.__file__ = str(path)
+    exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), module.__dict__)
+    return module
+
+
+def _learning_advice() -> dict[str, Any]:
+    advice = _load_protocol().empty_advice(source="live")
+    advice["classification"] = {
+        "is_learning": True,
+        "domain": "ml",
+        "topic": "overfitting",
+        "confidence": 0.9,
+    }
+    advice["response_strategy"]["answer_depth"] = "concise"
+    return advice
+
+
+@pytest.mark.anyio
+async def test_main_before_turn_returns_supervisor_advice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    system = _load_main_system(monkeypatch)
+    advice = _learning_advice()
+
+    class Manager:
+        async def supervise(self, message: dict[str, Any]) -> dict[str, Any]:
+            assert message["content"] == "什么是过拟合?"
+            return advice
+
+    monkeypatch.setattr(system, "_get_supervisor_manager", lambda _workspace: Manager())
+    result = await system.system_before_turn(
+        {"content": "什么是过拟合?", "user_id": "alice"}, workspace_raw=str(tmp_path)
+    )
+    assert result == advice
+
+
+@pytest.mark.anyio
+async def test_main_before_turn_composes_with_session_hook_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    system = _load_main_system(monkeypatch)
+    advice = _learning_advice()
+
+    class Manager:
+        async def supervise(self, _message: dict[str, Any]) -> dict[str, Any]:
+            return advice
+
+    async def base_prompt(_self) -> str:
+        return "stable<!-- HAITUN_CACHE_BOUNDARY -->dynamic"
+
+    monkeypatch.setattr(system, "_get_supervisor_manager", lambda _workspace: Manager())
+    monkeypatch.setattr(system.System, "build_system_prompt", base_prompt)
+    message: dict[str, Any] = {"content": "什么是过拟合?", "user_id": "alice"}
+    result = await system.system_before_turn(message, workspace_raw=str(tmp_path))
+    message["supervisor_advice"] = result
+    prompt = await system.system_prompt_builder(message, workspace_raw=str(tmp_path))
+    assert prompt.count("## 旁路监督建议") == 1
+
+
+@pytest.mark.anyio
+async def test_main_prompt_injects_one_valid_advice_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    system = _load_main_system(monkeypatch)
+
+    async def base_prompt(_self) -> str:
+        return "stable<!-- HAITUN_CACHE_BOUNDARY -->dynamic"
+
+    monkeypatch.setattr(system.System, "build_system_prompt", base_prompt)
+    prompt = await system.system_prompt_builder(
+        {
+            "content": "什么是过拟合?",
+            "user_id": "alice",
+            "supervisor_advice": _learning_advice(),
+        },
+        workspace_raw=str(tmp_path),
+    )
+    assert prompt.count("## 旁路监督建议") == 1
+    assert prompt.count("## 当前知识点学习画像") == 1
+    assert prompt.count("## 强制监督规则") == 1
+    assert prompt.index("## 当前知识点学习画像") < prompt.index("## 旁路监督建议")
+    assert prompt.index("## 旁路监督建议") < prompt.index("## 强制监督规则")
+
+
+@pytest.mark.anyio
+async def test_main_prompt_omits_missing_or_invalid_advice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    system = _load_main_system(monkeypatch)
+
+    async def base_prompt(_self) -> str:
+        return "stable<!-- HAITUN_CACHE_BOUNDARY -->dynamic"
+
+    monkeypatch.setattr(system.System, "build_system_prompt", base_prompt)
+    missing = await system.system_prompt_builder(
+        {"content": "hello", "user_id": "alice"}, workspace_raw=str(tmp_path)
+    )
+    invalid = await system.system_prompt_builder(
+        {"content": "hello", "user_id": "alice", "supervisor_advice": "UNSAFE RAW TEXT"},
+        workspace_raw=str(tmp_path),
+    )
+    assert "## 旁路监督建议" not in missing
+    assert "## 旁路监督建议" not in invalid
+    assert "UNSAFE RAW TEXT" not in invalid
+
+
+@pytest.mark.anyio
+async def test_main_prompt_preserves_explicit_no_expand_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    system = _load_main_system(monkeypatch)
+    advice = _learning_advice()
+    advice["breakout"] = {
+        "needed": True,
+        "type": "broaden",
+        "score": 0.9,
+        "reason": "connect adjacent topics",
+        "directions": ["optimization"],
+        "evidence": [],
+    }
+
+    async def base_prompt(_self) -> str:
+        return "stable<!-- HAITUN_CACHE_BOUNDARY -->dynamic"
+
+    monkeypatch.setattr(system.System, "build_system_prompt", base_prompt)
+    prompt = await system.system_prompt_builder(
+        {
+            "content": "只回答定义, 不要展开",
+            "user_id": "alice",
+            "supervisor_advice": advice,
+        },
+        workspace_raw=str(tmp_path),
+    )
+    assert "若用户要求不展开, 则抑制破圈, 不得强制扩展" in prompt
+    assert "不要强迫用户转换话题" in prompt
+
+
+@pytest.mark.anyio
+async def test_main_before_turn_skips_ineligible_messages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    system = _load_main_system(monkeypatch)
+
+    def unexpected(_workspace: anyio.Path) -> object:
+        raise AssertionError("manager must not be created")
+
+    monkeypatch.setattr(system, "_get_supervisor_manager", unexpected)
+    messages = [
+        {},
+        {"content": "谢谢", "user_id": "alice"},
+        {"content": "什么是 ML?", "session_id": "supervisor-deadbeef"},
+        {"content": "什么是 ML?", "kind": "schedule.silent", "user_id": "alice"},
+        {"content": "什么是 ML?"},
+    ]
+    for message in messages:
+        assert await system.system_before_turn(message, workspace_raw=str(tmp_path)) == {}
+
+
+@pytest.mark.anyio
+async def test_main_before_turn_degrades_on_error_but_propagates_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    system = _load_main_system(monkeypatch)
+
+    class FailingManager:
+        async def supervise(self, _message: dict[str, Any]) -> None:
+            raise RuntimeError("offline")
+
+    monkeypatch.setattr(system, "_get_supervisor_manager", lambda _workspace: FailingManager())
+    message = {"content": "什么是 ML?", "user_id": "alice"}
+    assert await system.system_before_turn(message, workspace_raw=str(tmp_path)) == {}
+
+    cancelled = anyio.get_cancelled_exc_class()
+
+    class CancelledManager:
+        async def supervise(self, _message: dict[str, Any]) -> None:
+            raise cancelled()
+
+    monkeypatch.setattr(system, "_get_supervisor_manager", lambda _workspace: CancelledManager())
+    with pytest.raises(cancelled):
+        await system.system_before_turn(message, workspace_raw=str(tmp_path))
+
+
+def test_main_supervisor_manager_cache_is_per_resolved_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    system = _load_main_system(monkeypatch)
+    created: list[str] = []
+
+    class Manager:
+        def __init__(self, workspace: anyio.Path) -> None:
+            created.append(str(workspace))
+
+    supervisor = ModuleType("supervisor")
+    supervisor.__dict__["SupervisorManager"] = Manager
+    monkeypatch.setitem(sys.modules, "supervisor", supervisor)
+    first = system._get_supervisor_manager(anyio.Path(tmp_path / "one"))
+    assert system._get_supervisor_manager(anyio.Path(tmp_path / "one")) is first
+    second = system._get_supervisor_manager(anyio.Path(tmp_path / "two"))
+    assert second is not first
+    assert len(created) == 2
+
+
 @pytest.mark.anyio
 async def test_supervisor_workspace_prompt_is_stable_and_strictly_isolated() -> None:
     system = _load_supervisor_system()

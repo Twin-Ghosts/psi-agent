@@ -98,6 +98,8 @@ _CONTEXT_FILE_MAX_CHARS = 40_000
 
 _SKILLS_SNAPSHOT_FILE = ".skills_prompt_snapshot.json"
 
+_SUPERVISOR_MANAGERS: dict[str, Any] = {}
+
 # Global skills directory, shared across workspaces (AGENTS.md ecosystem
 # convention). Each skill lives at ~/.agent/skills/<name>/SKILL.md, mirroring
 # the per-workspace skills/ layout. Workspace skills override global ones on
@@ -1227,21 +1229,64 @@ Never write API keys into this workspace, generated `.flow.ts` files, or committ
 
 def _build_profile_policy(topic_profile: dict[str, Any]) -> str:
     current_turn = int(topic_profile.get("turns", 0)) + 1
-    dimensions = topic_profile.get("dimensions", {})
-    familiarity = float(dimensions.get("familiarity", 0.5)) if isinstance(dimensions, dict) else 0.5
     socratic = "3. **苏格拉底提问**: 本轮必须提问!" if current_turn % 3 == 0 else "3. 本轮不强制提问。"
-    breakout = (
-        "4. **破圈引导**: 本轮必须提出跨领域或更高阶的思考题!"
-        if current_turn >= 5 and familiarity > 0.5
-        else "4. 破圈条件未满足。"
-    )
     return (
         "## 强制监督规则 (你必须100%遵守, 否则视为无效回答)\n\n"
         "1. **确定性标记**: 事实性陈述使用 `[已确认]`、`[推断]` 或 `[需验证]`。\n"
         "2. **反例注入**: 每个核心概念给出一个反例或边界场景。\n"
-        f"{socratic}\n{breakout}\n"
+        f"{socratic}\n4. **破圈引导**: 是否破圈由旁路监督按当前问题决定, 不绑定固定轮次。\n"
         "5. **画像匹配**: 按教学指令控制深度、术语和决策信息。\n"
     )
+
+
+def _resolve_workspace(workspace_raw: str) -> anyio.Path:
+    workspace = workspace_raw or os.environ.get("HAITUN_DEMO_WORKSPACE", "")
+    if not workspace:
+        workspace = str(anyio.Path(__file__).parent.parent)
+    return anyio.Path(os.path.realpath(os.path.abspath(workspace)))
+
+
+def _get_supervisor_manager(workspace: anyio.Path) -> Any:
+    key = os.path.realpath(os.path.abspath(str(workspace)))
+    manager = _SUPERVISOR_MANAGERS.get(key)
+    if manager is None:
+        supervisor = importlib.import_module("supervisor")
+        manager = supervisor.SupervisorManager(anyio.Path(key))
+        _SUPERVISOR_MANAGERS[key] = manager
+    return manager
+
+
+async def system_before_turn(
+    user_message: dict[str, Any] | None,
+    *,
+    workspace_raw: str = "",
+) -> dict[str, Any]:
+    if not isinstance(user_message, dict):
+        return {}
+    content = user_message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return {}
+    session_id = user_message.get("session_id")
+    kind = user_message.get("kind")
+    if isinstance(session_id, str) and session_id.startswith("supervisor-"):
+        return {}
+    if isinstance(kind, str) and kind.startswith("schedule"):
+        return {}
+    if not any(
+        isinstance(user_message.get(name), str) and bool(user_message[name].strip())
+        for name in ("user_id", "profile_id", "session_id")
+    ):
+        return {}
+
+    supervisor = importlib.import_module("supervisor")
+    if not supervisor.is_learning_question(content):
+        return {}
+    try:
+        advice = await _get_supervisor_manager(_resolve_workspace(workspace_raw)).supervise(user_message)
+    except Exception as exc:
+        logger.warning("Background supervisor unavailable: %r", exc, exc_info=True)
+        return {}
+    return advice if isinstance(advice, dict) else {}
 
 
 async def system_prompt_builder(
@@ -1250,9 +1295,7 @@ async def system_prompt_builder(
     workspace_raw: str = "",
 ) -> str:
     up = importlib.import_module("_user_profile")
-    workspace_dir = anyio.Path(
-        workspace_raw or os.environ.get("HAITUN_DEMO_WORKSPACE", "") or anyio.Path(__file__).parent.parent
-    )
+    workspace_dir = _resolve_workspace(workspace_raw)
     ws = workspace_dir
 
     identity: dict[str, str] = {}
@@ -1276,7 +1319,19 @@ async def system_prompt_builder(
             topic_profile = profile.topics.get(current_topic_key)
 
     profile_text = ""
+    advice_text = ""
     supervisor_rules = ""
+
+    if user_message:
+        raw_advice = user_message.get("supervisor_advice")
+        if isinstance(raw_advice, dict):
+            protocol = importlib.import_module("supervisor_protocol")
+            advice_text = protocol.render_advice_prompt(protocol.validate_advice(raw_advice))
+            if advice_text:
+                advice_text += (
+                    "\n- 用户当前消息中的直接范围和深度要求优先; 若用户要求不展开, "
+                    "则抑制破圈, 不得强制扩展。"
+                )
 
     if topic_profile:
         eff = profile.effective_dimensions(topic_profile)
@@ -1301,9 +1356,19 @@ async def system_prompt_builder(
     boundary = "<!-- HAITUN_CACHE_BOUNDARY -->"
     if boundary in base_prompt:
         idx = base_prompt.find(boundary) + len(boundary)
-        return base_prompt[:idx] + "\n" + profile_text + "\n" + supervisor_rules + "\n" + base_prompt[idx:]
+        return (
+            base_prompt[:idx]
+            + "\n"
+            + profile_text
+            + "\n"
+            + advice_text
+            + "\n"
+            + supervisor_rules
+            + "\n"
+            + base_prompt[idx:]
+        )
     else:
-        return base_prompt + "\n" + profile_text + "\n" + supervisor_rules
+        return base_prompt + "\n" + profile_text + "\n" + advice_text + "\n" + supervisor_rules
 
 
 async def system_prompt_rebuild_checker(_user_message: dict[str, Any] | None = None) -> bool:
@@ -1318,9 +1383,7 @@ async def system_after_turn(
     workspace_raw: str = "",
 ) -> None:
     up = importlib.import_module("_user_profile")
-    workspace_dir = anyio.Path(
-        workspace_raw or os.environ.get("HAITUN_DEMO_WORKSPACE", "") or anyio.Path(__file__).parent.parent
-    )
+    workspace_dir = _resolve_workspace(workspace_raw)
     identity = {
         name: value
         for name in ("profile_id", "user_id", "session_id")
