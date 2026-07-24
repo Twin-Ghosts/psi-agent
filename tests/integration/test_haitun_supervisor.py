@@ -71,6 +71,40 @@ async def test_supervisor_workspace_prompt_encodes_breakout_and_map_policy() -> 
     assert "隔离 JSON payload" in prompt
 
 
+@pytest.mark.anyio
+async def test_supervisor_workspace_prompt_requires_sustained_profile_shift() -> None:
+    prompt = await _load_supervisor_system().system_prompt_builder()
+
+    assert "连续两回合" in prompt
+    assert "明确的认知层级或意图转变" in prompt
+    assert "profile_shift.detected` 设为 `true" in prompt
+    assert "否则保持观察" in prompt
+    assert "前两轮默认只观察" in prompt
+    assert "明确目标" in prompt
+
+
+@pytest.mark.anyio
+async def test_supervisor_workspace_prompt_has_complete_anti_overbreakout_policy() -> None:
+    prompt = await _load_supervisor_system().system_prompt_builder()
+
+    for policy in (
+        "只回答当前问题",
+        "不要扩展",
+        "紧急失败",
+        "直接回答之前",
+        "最多一个框架",
+        "1-3 个方向",
+        "说明建议原因",
+        "由用户选择",
+        "避免重复已被忽略的建议",
+        "明确拒绝",
+        "暂时抑制",
+        "连续未被接受",
+        "降低优先级",
+    ):
+        assert policy in prompt
+
+
 def test_supervisor_workspace_has_no_main_agent_hooks_or_persona() -> None:
     system = _load_supervisor_system()
     assert system.__file__ is not None
