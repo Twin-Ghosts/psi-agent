@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import math
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -32,10 +31,7 @@ async def _run_router_service(
     router = router_class(
         session_socket=session_socket,
         router_socket=router_socket,
-        upstream=[
-            json.dumps({"socket": socket, "description": description}, ensure_ascii=False)
-            for socket, description in upstreams
-        ],
+        upstream=list(upstreams),
         default_socket=default_socket,
         router_timeout=router_timeout,
         router_context_chars=router_context_chars,

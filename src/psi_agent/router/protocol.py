@@ -40,6 +40,7 @@ class RouterConfig:
     branch_timeout: float | None = None
     aggregate_timeout: float | None = None
     run_ttl: float = 1_800.0
+    router_context_chars: int = 12_000
 
     def __post_init__(self) -> None:
         for name in ("session_socket", "router_socket", "default_socket"):
@@ -77,6 +78,12 @@ class RouterConfig:
                 raise ValueError(f"{name} must be a positive number or None")
         if not isinstance(self.run_ttl, (int, float)) or isinstance(self.run_ttl, bool) or self.run_ttl <= 0:
             raise ValueError("run_ttl must be a positive number")
+        if (
+            not isinstance(self.router_context_chars, int)
+            or isinstance(self.router_context_chars, bool)
+            or self.router_context_chars <= 0
+        ):
+            raise ValueError("router_context_chars must be a positive integer")
 
 
 @dataclass(frozen=True)

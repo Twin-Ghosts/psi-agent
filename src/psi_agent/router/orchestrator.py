@@ -64,7 +64,7 @@ class Orchestrator:
         """Plan a round, execute selected subtasks, then aggregate through router_socket."""
         messages = self._messages(body)
         tools = self._tools(body)
-        context_limit = self._context_limit(body)
+        context_limit = self._context_limit(body) or self.config.router_context_chars
         plan = await self.planner.plan(messages=messages, context_limit=context_limit)
         logger.info(f"Router plan selected {len(plan)} task(s): {[(task.subtask, task.socket) for task in plan]}")
         results: list[UpstreamResult | None] = [None] * len(plan)
