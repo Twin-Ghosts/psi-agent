@@ -75,9 +75,7 @@ def _learning_advice() -> dict[str, Any]:
 
 
 @pytest.mark.anyio
-async def test_main_before_turn_returns_supervisor_advice(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_main_before_turn_returns_supervisor_advice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     system = _load_main_system(monkeypatch)
     advice = _learning_advice()
 
@@ -117,9 +115,7 @@ async def test_main_before_turn_composes_with_session_hook_message(
 
 
 @pytest.mark.anyio
-async def test_main_prompt_injects_one_valid_advice_section(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_main_prompt_injects_one_valid_advice_section(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     system = _load_main_system(monkeypatch)
 
     async def base_prompt(_self) -> str:
@@ -142,18 +138,14 @@ async def test_main_prompt_injects_one_valid_advice_section(
 
 
 @pytest.mark.anyio
-async def test_main_prompt_omits_missing_or_invalid_advice(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_main_prompt_omits_missing_or_invalid_advice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     system = _load_main_system(monkeypatch)
 
     async def base_prompt(_self) -> str:
         return "stable<!-- HAITUN_CACHE_BOUNDARY -->dynamic"
 
     monkeypatch.setattr(system.System, "build_system_prompt", base_prompt)
-    missing = await system.system_prompt_builder(
-        {"content": "hello", "user_id": "alice"}, workspace_raw=str(tmp_path)
-    )
+    missing = await system.system_prompt_builder({"content": "hello", "user_id": "alice"}, workspace_raw=str(tmp_path))
     invalid = await system.system_prompt_builder(
         {"content": "hello", "user_id": "alice", "supervisor_advice": "UNSAFE RAW TEXT"},
         workspace_raw=str(tmp_path),
@@ -195,9 +187,7 @@ async def test_main_prompt_preserves_explicit_no_expand_request(
 
 
 @pytest.mark.anyio
-async def test_main_before_turn_skips_ineligible_messages(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_main_before_turn_skips_ineligible_messages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     system = _load_main_system(monkeypatch)
 
     def unexpected(_workspace: anyio.Path) -> object:
@@ -749,6 +739,12 @@ def test_supervisor_identity_and_learning_signals_are_stable() -> None:
     assert supervisor.is_learning_question("") is False
     assert supervisor.is_learning_question("什么是过拟合\N{FULLWIDTH QUESTION MARK}") is True
     assert supervisor.is_learning_question("How does gradient descent work?") is True
+    assert (
+        supervisor.is_learning_question(
+            "我想快速了解机器学习整个领域\N{FULLWIDTH COMMA}目前只知道过拟合是什么。请先给我一个框架。"
+        )
+        is True
+    )
     assert supervisor.is_learning_question("谢谢") is False
     assert supervisor.resolve_identity({"user_id": "u", "profile_id": "p", "session_id": "s"}) == "u"
     assert supervisor.resolve_identity({"profile_id": "p", "session_id": "s"}) == "p"

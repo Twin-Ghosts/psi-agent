@@ -54,6 +54,14 @@ def is_learning_question(text: str) -> bool:
         "区别",
         "原理",
         "教程",
+        "了解",
+        "框架",
+        "领域",
+        "概念",
+        "深入",
+        "推导",
+        "机制",
+        "比较",
         "what ",
         "why ",
         "how ",
@@ -62,6 +70,11 @@ def is_learning_question(text: str) -> bool:
         "understand",
         "difference",
         "tutorial",
+        "framework",
+        "concept",
+        "derive",
+        "mechanism",
+        "compare",
     )
     return "?" in value or "\N{FULLWIDTH QUESTION MARK}" in value or any(signal in value for signal in signals)
 
