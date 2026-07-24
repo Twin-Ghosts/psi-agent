@@ -168,3 +168,17 @@ the current framework — do not "clean them up" as dead code:
 ```bash
 uv run python examples/haitun-workspace/systems/system.py   # prints the assembled prompt
 ```
+
+## Background supervisor scenario evaluation
+
+Generate the auditable CEO CI/CD and legal Agent-governance demonstrations with:
+
+```bash
+uv run --no-cache python examples/haitun-workspace/demo_supervisor_scenarios.py --output artifacts/supervisor-scenarios
+```
+
+The command writes a complete Markdown report and per-scenario raw JSON under
+`artifacts/supervisor-scenarios/`. The deterministic output is explicitly marked
+`DETERMINISTIC MOCK`; it validates the expected evidence flow but is not proof of
+live provider behavior. Preserve live upstream errors separately with repeated
+`--real-error` arguments.
