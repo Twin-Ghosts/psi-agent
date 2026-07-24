@@ -1262,30 +1262,53 @@ async def system_before_turn(
     workspace_raw: str = "",
 ) -> dict[str, Any]:
     if not isinstance(user_message, dict):
+        logger.debug("Background supervisor skipped: reason=invalid_message")
         return {}
     content = user_message.get("content")
     if not isinstance(content, str) or not content.strip():
+        logger.debug("Background supervisor skipped: reason=empty_content")
         return {}
     session_id = user_message.get("session_id")
     kind = user_message.get("kind")
     if isinstance(session_id, str) and session_id.startswith("supervisor-"):
+        logger.debug("Background supervisor skipped: reason=recursive_session")
         return {}
     if isinstance(kind, str) and kind.startswith("schedule"):
+        logger.debug("Background supervisor skipped: reason=schedule_kind")
         return {}
     if not any(
         isinstance(user_message.get(name), str) and bool(user_message[name].strip())
         for name in ("user_id", "profile_id", "session_id")
     ):
+        logger.debug("Background supervisor skipped: reason=missing_identity")
         return {}
 
     supervisor = importlib.import_module("supervisor")
     if not supervisor.is_learning_question(content):
+        logger.debug("Background supervisor skipped: reason=non_learning")
         return {}
+    logger.debug("Background supervisor eligible")
     try:
         advice = await _get_supervisor_manager(_resolve_workspace(workspace_raw)).supervise(user_message)
     except Exception as exc:
         logger.warning("Background supervisor unavailable: %r", exc, exc_info=True)
         return {}
+    source = "unknown"
+    if isinstance(advice, dict):
+        diagnostics = advice.get("diagnostics")
+        if isinstance(diagnostics, dict) and diagnostics.get("source") in {
+            "live",
+            "repaired",
+            "stale",
+            "unavailable",
+        }:
+            source = diagnostics["source"]
+    logger.debug(
+        "Background supervisor completed: advice_present=%s source=%s type=%s",
+        isinstance(advice, dict) and bool(advice),
+        source,
+        type(advice).__name__,
+    )
     return advice if isinstance(advice, dict) else {}
 
 
