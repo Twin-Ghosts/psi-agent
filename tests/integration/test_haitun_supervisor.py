@@ -710,3 +710,54 @@ async def test_supervisor_cleans_owned_ai_when_session_start_fails(tmp_path: Pat
     )
     assert await manager.ensure_supervisor("a" * 64) is None
     assert stopped == ["owned-ai"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("reuse_parent_ai", "cancel_addr", "expected_stops"),
+    [
+        (False, "ai", ["owned-ai"]),
+        (False, "channel", ["owned-session", "owned-ai"]),
+        (True, "channel", ["owned-session"]),
+    ],
+)
+async def test_supervisor_cancellation_cleans_only_owned_processes(
+    tmp_path: Path, reuse_parent_ai: bool, cancel_addr: str, expected_stops: list[str]
+) -> None:
+    supervisor = _load_supervisor_manager()
+    stopped: list[str] = []
+
+    async def plan_fn(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "reuse_parent_ai": reuse_parent_ai,
+            "ai_socket": "ai",
+            "channel_socket": "channel",
+            "ai_command": "ai",
+            "session_command": "session",
+            "ai_process_id": "owned-ai",
+            "session_process_id": "owned-session",
+            "shell": "bash",
+        }
+
+    async def start_fn(**kwargs: Any) -> dict[str, Any]:
+        return {"ok": True}
+
+    async def stop_fn(**kwargs: Any) -> dict[str, Any]:
+        stopped.append(kwargs["process_id"])
+        return {"ok": True}
+
+    async def wait_fn(addr: str, **kwargs: Any) -> dict[str, Any]:
+        if addr == cancel_addr:
+            raise anyio.get_cancelled_exc_class()
+        return {"ok": True}
+
+    async def chat_fn(**kwargs: Any) -> dict[str, Any]:
+        raise AssertionError(kwargs)
+
+    manager = supervisor.SupervisorManager(
+        anyio.Path(tmp_path), plan_fn=plan_fn, start_fn=start_fn, stop_fn=stop_fn, wait_fn=wait_fn, chat_fn=chat_fn
+    )
+    with pytest.raises(anyio.get_cancelled_exc_class()):
+        await manager.ensure_supervisor("a" * 64)
+    assert stopped == expected_stops

@@ -160,49 +160,54 @@ class SupervisorManager:
             if plan.get("ok") is not True:
                 return None
             shell = str(plan.get("shell", "auto"))
-            ai_started = False
-            if plan.get("reuse_parent_ai") is not True:
-                started = await start_fn(
-                    command=str(plan.get("ai_command", "")),
-                    workspace_raw=str(self.workspace),
-                    process_id=str(plan.get("ai_process_id", "")),
-                    shell=shell,
+            owned_process_ids: list[str] = []
+            try:
+                if plan.get("reuse_parent_ai") is not True:
+                    ai_process_id = str(plan.get("ai_process_id", ""))
+                    with anyio.CancelScope(shield=True):
+                        started = await start_fn(
+                            command=str(plan.get("ai_command", "")),
+                            workspace_raw=str(self.workspace),
+                            process_id=ai_process_id,
+                            shell=shell,
+                        )
+                        if started.get("ok") is True:
+                            owned_process_ids.append(ai_process_id)
+                    if started.get("ok") is not True:
+                        return None
+                    if not (await wait_fn(str(plan.get("ai_socket", "")))).get("ok"):
+                        return None
+                session_process_id = str(plan.get("session_process_id", ""))
+                with anyio.CancelScope(shield=True):
+                    started = await start_fn(
+                        command=str(plan.get("session_command", "")),
+                        workspace_raw=str(self.workspace),
+                        process_id=session_process_id,
+                        shell=shell,
+                    )
+                    if started.get("ok") is True:
+                        owned_process_ids.append(session_process_id)
+                if started.get("ok") is not True:
+                    return None
+                channel_socket = str(plan.get("channel_socket", ""))
+                if not (await wait_fn(channel_socket)).get("ok"):
+                    return None
+                handle = SupervisorHandle(
+                    user_id_hash=user_hash,
+                    session_id=session_id,
+                    ai_socket=str(plan.get("ai_socket", "")),
+                    channel_socket=channel_socket,
+                    reuse_parent_ai=plan.get("reuse_parent_ai") is True,
+                    ai_process_id=str(plan.get("ai_process_id", "")),
+                    session_process_id=session_process_id,
                 )
-                ai_started = started.get("ok") is True
-                if not ai_started:
-                    return None
-                if not (await wait_fn(str(plan.get("ai_socket", "")))).get("ok"):
-                    await self._cleanup_processes([str(plan.get("ai_process_id", ""))])
-                    return None
-            started = await start_fn(
-                command=str(plan.get("session_command", "")),
-                workspace_raw=str(self.workspace),
-                process_id=str(plan.get("session_process_id", "")),
-                shell=shell,
-            )
-            channel_socket = str(plan.get("channel_socket", ""))
-            session_started = started.get("ok") is True
-            if not session_started:
-                if ai_started:
-                    await self._cleanup_processes([str(plan.get("ai_process_id", ""))])
-                return None
-            if not (await wait_fn(channel_socket)).get("ok"):
-                cleanup = [str(plan.get("session_process_id", ""))]
-                if ai_started:
-                    cleanup.append(str(plan.get("ai_process_id", "")))
-                await self._cleanup_processes(cleanup)
-                return None
-            handle = SupervisorHandle(
-                user_id_hash=user_hash,
-                session_id=session_id,
-                ai_socket=str(plan.get("ai_socket", "")),
-                channel_socket=channel_socket,
-                reuse_parent_ai=plan.get("reuse_parent_ai") is True,
-                ai_process_id=str(plan.get("ai_process_id", "")),
-                session_process_id=str(plan.get("session_process_id", "")),
-            )
-            self._handles[user_hash] = handle
-            return handle
+                self._handles[user_hash] = handle
+                owned_process_ids.clear()
+                return handle
+            finally:
+                if owned_process_ids:
+                    with anyio.CancelScope(shield=True):
+                        await self._cleanup_processes(list(reversed(owned_process_ids)))
 
     @staticmethod
     def _profile(raw: object) -> dict[str, float]:
