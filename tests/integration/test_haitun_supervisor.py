@@ -636,6 +636,7 @@ async def test_supervisor_skips_nonlearning_and_recursive_sessions(tmp_path: Pat
 async def test_supervisor_retries_dead_child_once_then_returns_unavailable(tmp_path: Path) -> None:
     supervisor = _load_supervisor_manager()
     counts = {"plan": 0, "chat": 0}
+    stopped: list[str] = []
 
     async def plan_fn(**kwargs: Any) -> dict[str, Any]:
         counts["plan"] += 1
@@ -660,9 +661,52 @@ async def test_supervisor_retries_dead_child_once_then_returns_unavailable(tmp_p
         counts["chat"] += 1
         return {"ok": False, "text": ""}
 
+    async def stop_fn(**kwargs: Any) -> dict[str, Any]:
+        stopped.append(kwargs["process_id"])
+        return {"ok": True}
+
     manager = supervisor.SupervisorManager(
-        anyio.Path(tmp_path), plan_fn=plan_fn, start_fn=start_fn, wait_fn=wait_fn, chat_fn=chat_fn
+        anyio.Path(tmp_path), plan_fn=plan_fn, start_fn=start_fn, stop_fn=stop_fn, wait_fn=wait_fn, chat_fn=chat_fn
     )
     advice = await manager.supervise({"content": "Explain gradient descent", "user_id": "alice", "session_id": "main"})
     assert advice["diagnostics"]["source"] == "unavailable"
     assert counts == {"plan": 2, "chat": 2}
+    assert stopped == ["session-process"]
+
+
+@pytest.mark.anyio
+async def test_supervisor_cleans_owned_ai_when_session_start_fails(tmp_path: Path) -> None:
+    supervisor = _load_supervisor_manager()
+    stopped: list[str] = []
+
+    async def plan_fn(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "reuse_parent_ai": False,
+            "ai_socket": "ai",
+            "channel_socket": "channel",
+            "ai_command": "ai",
+            "session_command": "session",
+            "ai_process_id": "owned-ai",
+            "session_process_id": "owned-session",
+            "shell": "bash",
+        }
+
+    async def start_fn(**kwargs: Any) -> dict[str, Any]:
+        return {"ok": kwargs["process_id"] == "owned-ai"}
+
+    async def stop_fn(**kwargs: Any) -> dict[str, Any]:
+        stopped.append(kwargs["process_id"])
+        return {"ok": True}
+
+    async def wait_fn(addr: str, **kwargs: Any) -> dict[str, Any]:
+        return {"ok": True}
+
+    async def chat_fn(**kwargs: Any) -> dict[str, Any]:
+        raise AssertionError(kwargs)
+
+    manager = supervisor.SupervisorManager(
+        anyio.Path(tmp_path), plan_fn=plan_fn, start_fn=start_fn, stop_fn=stop_fn, wait_fn=wait_fn, chat_fn=chat_fn
+    )
+    assert await manager.ensure_supervisor("a" * 64) is None
+    assert stopped == ["owned-ai"]

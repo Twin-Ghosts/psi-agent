@@ -18,6 +18,7 @@ from supervisor_store import SupervisorStore, update_heatmap
 
 PlanFn = Callable[..., Awaitable[dict[str, Any]]]
 StartFn = Callable[..., Awaitable[dict[str, Any]]]
+StopFn = Callable[..., Awaitable[dict[str, Any]]]
 WaitFn = Callable[..., Awaitable[dict[str, Any]]]
 ChatFn = Callable[..., Awaitable[dict[str, Any]]]
 _TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
@@ -90,6 +91,7 @@ class SupervisorManager:
         *,
         plan_fn: PlanFn | None = None,
         start_fn: StartFn | None = None,
+        stop_fn: StopFn | None = None,
         wait_fn: WaitFn | None = None,
         chat_fn: ChatFn | None = None,
     ) -> None:
@@ -97,31 +99,44 @@ class SupervisorManager:
         self.store = SupervisorStore(workspace)
         self._plan_fn = plan_fn
         self._start_fn = start_fn
+        self._stop_fn = stop_fn
         self._wait_fn = wait_fn
         self._chat_fn = chat_fn
         self._handles: dict[str, SupervisorHandle] = {}
         self._handle_locks: dict[str, anyio.Lock] = {}
         self._locks_guard = anyio.Lock()
 
-    async def _dependencies(self) -> tuple[PlanFn, StartFn, WaitFn, ChatFn]:
-        if None in (self._plan_fn, self._start_fn, self._wait_fn, self._chat_fn):
+    async def _dependencies(self) -> tuple[PlanFn, StartFn, StopFn, WaitFn, ChatFn]:
+        if None in (self._plan_fn, self._start_fn, self._stop_fn, self._wait_fn, self._chat_fn):
             if str(_TOOLS_DIR) not in sys.path:
                 sys.path.insert(0, str(_TOOLS_DIR))
             helpers = _load_tool_module("_subagent_helpers.py", "_supervisor_subagent_helpers")
             registry = _load_tool_module("_background_process_registry.py", "_supervisor_background_registry")
             self._plan_fn = self._plan_fn or helpers["plan_subagent"]
             self._start_fn = self._start_fn or registry["start_process"]
+            self._stop_fn = self._stop_fn or registry["stop_process"]
             self._wait_fn = self._wait_fn or helpers["wait_socket"]
             self._chat_fn = self._chat_fn or helpers["chat_subagent"]
-        assert self._plan_fn and self._start_fn and self._wait_fn and self._chat_fn
-        return self._plan_fn, self._start_fn, self._wait_fn, self._chat_fn
+        assert self._plan_fn and self._start_fn and self._stop_fn and self._wait_fn and self._chat_fn
+        return self._plan_fn, self._start_fn, self._stop_fn, self._wait_fn, self._chat_fn
+
+    async def _cleanup_processes(self, process_ids: list[str]) -> None:
+        _, _, stop_fn, _, _ = await self._dependencies()
+        with anyio.CancelScope(shield=True):
+            for process_id in process_ids:
+                if not process_id:
+                    continue
+                try:
+                    await stop_fn(process_id=process_id, workspace_raw=str(self.workspace))
+                except Exception as exc:
+                    logger.warning(f"Supervisor child cleanup failed: {type(exc).__name__}")
 
     async def _handle_lock(self, user_hash: str) -> anyio.Lock:
         async with self._locks_guard:
             return self._handle_locks.setdefault(user_hash, anyio.Lock())
 
     async def ensure_supervisor(self, user_hash: str, *, restart: bool = False) -> SupervisorHandle | None:
-        plan_fn, start_fn, wait_fn, _ = await self._dependencies()
+        plan_fn, start_fn, _, wait_fn, _ = await self._dependencies()
         lock = await self._handle_lock(user_hash)
         async with lock:
             cached = self._handles.get(user_hash)
@@ -129,6 +144,11 @@ class SupervisorManager:
                 probe = await wait_fn(cached.channel_socket, timeout_seconds=0.5)
                 if probe.get("ok") is True:
                     return cached
+            if cached is not None:
+                cleanup = [cached.session_process_id]
+                if not cached.reuse_parent_ai and cached.ai_process_id:
+                    cleanup.append(cached.ai_process_id)
+                await self._cleanup_processes(cleanup)
             self._handles.pop(user_hash, None)
             session_id = f"supervisor-{user_hash[:16]}"
             child_workspace = anyio.Path(__file__).parent.parent.parent / "haitun-supervisor-workspace"
@@ -140,6 +160,7 @@ class SupervisorManager:
             if plan.get("ok") is not True:
                 return None
             shell = str(plan.get("shell", "auto"))
+            ai_started = False
             if plan.get("reuse_parent_ai") is not True:
                 started = await start_fn(
                     command=str(plan.get("ai_command", "")),
@@ -147,7 +168,11 @@ class SupervisorManager:
                     process_id=str(plan.get("ai_process_id", "")),
                     shell=shell,
                 )
-                if started.get("ok") is not True or not (await wait_fn(str(plan.get("ai_socket", "")))).get("ok"):
+                ai_started = started.get("ok") is True
+                if not ai_started:
+                    return None
+                if not (await wait_fn(str(plan.get("ai_socket", "")))).get("ok"):
+                    await self._cleanup_processes([str(plan.get("ai_process_id", ""))])
                     return None
             started = await start_fn(
                 command=str(plan.get("session_command", "")),
@@ -156,7 +181,16 @@ class SupervisorManager:
                 shell=shell,
             )
             channel_socket = str(plan.get("channel_socket", ""))
-            if started.get("ok") is not True or not (await wait_fn(channel_socket)).get("ok"):
+            session_started = started.get("ok") is True
+            if not session_started:
+                if ai_started:
+                    await self._cleanup_processes([str(plan.get("ai_process_id", ""))])
+                return None
+            if not (await wait_fn(channel_socket)).get("ok"):
+                cleanup = [str(plan.get("session_process_id", ""))]
+                if ai_started:
+                    cleanup.append(str(plan.get("ai_process_id", "")))
+                await self._cleanup_processes(cleanup)
                 return None
             handle = SupervisorHandle(
                 user_id_hash=user_hash,
@@ -248,7 +282,7 @@ class SupervisorManager:
                 "heatmap": self._heatmap_summary(heatmap),
                 "previous_supervision": validate_advice(previous) if previous is not None else None,
             }
-            _, _, _, chat_fn = await self._dependencies()
+            _, _, _, _, chat_fn = await self._dependencies()
             advice: dict[str, Any] | None = None
             for attempt in range(2):
                 try:
