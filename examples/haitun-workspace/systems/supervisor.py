@@ -170,7 +170,14 @@ class SupervisorManager:
                 workspace_raw=str(self.workspace),
                 child_workspace_raw=str(child_workspace),
             )
+            logger.info(
+                "Supervisor plan completed: "
+                f"ok={plan.get('ok') is True} "
+                f"reuse_parent_ai={plan.get('reuse_parent_ai') is True} "
+                f"binding_source={str(plan.get('binding_source', ''))!r}"
+            )
             if plan.get("ok") is not True:
+                logger.warning("Supervisor planning failed")
                 return None
             shell = str(plan.get("shell", "auto"))
             owned_process_ids: list[str] = []
@@ -186,10 +193,13 @@ class SupervisorManager:
                         )
                         if started.get("ok") is True:
                             owned_process_ids.append(ai_process_id)
+                    logger.info(f"Supervisor child AI start completed: ok={started.get('ok') is True}")
                     if started.get("ok") is not True:
+                        logger.warning("Supervisor child AI failed to start")
                         return None
-                    if not (await wait_fn(str(plan.get("ai_socket", "")))).get("ok"):
-                        return None
+                if not (await wait_fn(str(plan.get("ai_socket", "")))).get("ok"):
+                    logger.warning("Supervisor child AI readiness check failed")
+                    return None
                 session_process_id = str(plan.get("session_process_id", ""))
                 with anyio.CancelScope(shield=True):
                     started = await start_fn(
@@ -200,10 +210,13 @@ class SupervisorManager:
                     )
                     if started.get("ok") is True:
                         owned_process_ids.append(session_process_id)
+                logger.info(f"Supervisor child Session start completed: ok={started.get('ok') is True}")
                 if started.get("ok") is not True:
+                    logger.warning("Supervisor child Session failed to start")
                     return None
                 channel_socket = str(plan.get("channel_socket", ""))
                 if not (await wait_fn(channel_socket)).get("ok"):
+                    logger.warning("Supervisor child Session readiness check failed")
                     return None
                 handle = SupervisorHandle(
                     user_id_hash=user_hash,
@@ -216,6 +229,10 @@ class SupervisorManager:
                 )
                 self._handles[user_hash] = handle
                 owned_process_ids.clear()
+                logger.info(
+                    "Supervisor handle ready: "
+                    f"reuse_parent_ai={handle.reuse_parent_ai} binding_source={str(plan.get('binding_source', ''))!r}"
+                )
                 return handle
             finally:
                 if owned_process_ids:
@@ -285,6 +302,7 @@ class SupervisorManager:
             heatmap = await self.store.load_heatmap(user_hash, prior_domain)
             handle = await self.ensure_supervisor(user_hash)
             if handle is None:
+                logger.warning("Supervisor unavailable: no healthy child handle")
                 return empty_advice()
             payload = {
                 "event": "supervise_learning_turn",
