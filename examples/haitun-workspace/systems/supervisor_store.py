@@ -1,0 +1,188 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime
+from typing import Any
+from uuid import uuid4
+
+import anyio
+import yaml
+from anyio import to_thread
+from loguru import logger
+
+_DOMAIN_UNSAFE = re.compile(r"[^a-z0-9]+")
+_HISTORY_LIMIT = 20
+_LOCK_GUARD = anyio.Lock()
+_USER_LOCKS: dict[str, anyio.Lock] = {}
+_DOMAIN_LOCKS: dict[str, anyio.Lock] = {}
+
+
+class SupervisorStore:
+    """Persist shared supervisor maps and isolated per-user state."""
+
+    def __init__(self, workspace: anyio.Path) -> None:
+        self.workspace = workspace
+        self.root = workspace / "wiki" / "supervisor"
+
+    @staticmethod
+    def safe_domain(domain_id: str) -> str:
+        safe = _DOMAIN_UNSAFE.sub("-", domain_id.lower()).strip("-")
+        if not safe:
+            raise ValueError("domain must contain ASCII letters or digits")
+        return safe
+
+    def map_path(self, domain_id: str) -> anyio.Path:
+        return self.root / "maps" / f"{self.safe_domain(domain_id)}.yaml"
+
+    def heatmap_path(self, user_hash: str, domain_id: str) -> anyio.Path:
+        return self.root / "users" / user_hash / "domains" / f"{self.safe_domain(domain_id)}.yaml"
+
+    def latest_advice_path(self, user_hash: str) -> anyio.Path:
+        return self.root / "users" / user_hash / "latest-advice.json"
+
+    async def load_map(self, domain_id: str) -> dict[str, Any] | None:
+        return await self._load_yaml(self.map_path(domain_id))
+
+    async def save_map(self, domain_id: str, data: dict[str, Any]) -> None:
+        content = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
+        await self._atomic_write(self.map_path(domain_id), content)
+
+    async def load_heatmap(self, user_hash: str, domain_id: str) -> dict[str, Any]:
+        safe_domain = self.safe_domain(domain_id)
+        loaded = await self._load_yaml(self.heatmap_path(user_hash, safe_domain))
+        if loaded is not None:
+            return loaded
+        return {
+            "user": user_hash,
+            "domain": safe_domain,
+            "question_count": 0,
+            "visited_nodes": [],
+            "nodes": {},
+            "repeated_surface_questions": 0,
+            "cognitive_history": [],
+            "intent_history": [],
+            "last_seen": "",
+        }
+
+    async def save_heatmap(self, user_hash: str, domain_id: str, data: dict[str, Any]) -> None:
+        content = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
+        await self._atomic_write(self.heatmap_path(user_hash, domain_id), content)
+
+    async def load_latest_advice(self, user_hash: str) -> dict[str, Any] | None:
+        try:
+            content = await self.latest_advice_path(user_hash).read_text(encoding="utf-8")
+            loaded = json.loads(content)
+        except FileNotFoundError, json.JSONDecodeError, UnicodeError:
+            return None
+        return loaded if isinstance(loaded, dict) else None
+
+    async def save_latest_advice(self, user_hash: str, data: dict[str, Any]) -> None:
+        content = json.dumps(data, ensure_ascii=False, indent=2)
+        await self._atomic_write(self.latest_advice_path(user_hash), content)
+
+    @asynccontextmanager
+    async def user_lock(self, user_hash: str) -> AsyncIterator[None]:
+        lock = await self._get_lock(_USER_LOCKS, f"{self.workspace}:{user_hash}")
+        logger.debug(f"Acquiring supervisor user lock: {user_hash}")
+        async with lock:
+            logger.debug(f"Acquired supervisor user lock: {user_hash}")
+            try:
+                yield
+            finally:
+                logger.debug(f"Releasing supervisor user lock: {user_hash}")
+
+    @asynccontextmanager
+    async def domain_lock(self, domain_id: str) -> AsyncIterator[None]:
+        safe_domain = self.safe_domain(domain_id)
+        lock = await self._get_lock(_DOMAIN_LOCKS, f"{self.workspace}:{safe_domain}")
+        logger.debug(f"Acquiring supervisor domain lock: {safe_domain}")
+        async with lock:
+            logger.debug(f"Acquired supervisor domain lock: {safe_domain}")
+            try:
+                yield
+            finally:
+                logger.debug(f"Releasing supervisor domain lock: {safe_domain}")
+
+    @staticmethod
+    async def _get_lock(locks: dict[str, anyio.Lock], key: str) -> anyio.Lock:
+        async with _LOCK_GUARD:
+            lock = locks.get(key)
+            if lock is None:
+                lock = anyio.Lock()
+                locks[key] = lock
+            return lock
+
+    @staticmethod
+    async def _load_yaml(path: anyio.Path) -> dict[str, Any] | None:
+        try:
+            content = await path.read_text(encoding="utf-8")
+            loaded = yaml.safe_load(content)
+        except FileNotFoundError, UnicodeError, yaml.YAMLError:
+            return None
+        return loaded if isinstance(loaded, dict) else None
+
+    @staticmethod
+    async def _atomic_write(target: anyio.Path, content: str) -> None:
+        await target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+        try:
+            await temporary.write_text(content, encoding="utf-8")
+            await to_thread.run_sync(os.replace, str(temporary), str(target))
+        finally:
+            with anyio.CancelScope(shield=True):
+                with suppress(FileNotFoundError):
+                    await temporary.unlink()
+
+
+def update_heatmap(
+    heatmap: dict[str, Any],
+    *,
+    node_ids: list[str],
+    cognitive_level: str,
+    intent: str,
+    surface: bool,
+) -> dict[str, Any]:
+    """Return a bounded heatmap update for one user question."""
+    updated = dict(heatmap)
+    question_count = updated.get("question_count", 0)
+    updated["question_count"] = (question_count if isinstance(question_count, int) else 0) + 1
+
+    raw_nodes = updated.get("nodes")
+    nodes = dict(raw_nodes) if isinstance(raw_nodes, dict) else {}
+    visited: list[str] = []
+    for node_id in node_ids:
+        if not isinstance(node_id, str) or not node_id:
+            continue
+        raw_node = nodes.get(node_id)
+        node = dict(raw_node) if isinstance(raw_node, dict) else {}
+        count = node.get("count", 0)
+        count = (count if isinstance(count, int) else 0) + 1
+        node["count"] = count
+        node["heat"] = min(1.0, count / 5)
+        nodes[node_id] = node
+        visited.append(node_id)
+    updated["nodes"] = nodes
+
+    prior_visited = updated.get("visited_nodes")
+    combined = list(prior_visited) if isinstance(prior_visited, list) else []
+    updated["visited_nodes"] = (combined + visited)[-_HISTORY_LIMIT:]
+
+    surface_count = updated.get("repeated_surface_questions", 0)
+    if not isinstance(surface_count, int):
+        surface_count = 0
+    updated["repeated_surface_questions"] = surface_count + int(surface)
+    updated["cognitive_history"] = _append_history(updated.get("cognitive_history"), cognitive_level)
+    updated["intent_history"] = _append_history(updated.get("intent_history"), intent)
+    updated["last_seen"] = datetime.now(UTC).isoformat()
+    return updated
+
+
+def _append_history(history: Any, value: str) -> list[str]:
+    values = [item for item in history if isinstance(item, str)] if isinstance(history, list) else []
+    if value:
+        values.append(value)
+    return values[-_HISTORY_LIMIT:]

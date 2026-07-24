@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+
+import anyio
+import pytest
 
 
 def _load_protocol() -> ModuleType:
@@ -11,6 +16,162 @@ def _load_protocol() -> ModuleType:
     module = ModuleType("haitun_supervisor_protocol")
     exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), module.__dict__)
     return module
+
+
+def _load_store() -> ModuleType:
+    path = Path(__file__).parents[2] / "examples" / "haitun-workspace" / "systems" / "supervisor_store.py"
+    module = ModuleType("haitun_supervisor_store")
+    exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), module.__dict__)
+    return module
+
+
+@pytest.mark.anyio
+async def test_store_roundtrips_shared_map_and_preserves_generated_at(tmp_path: Path) -> None:
+    store_module = _load_store()
+    store = store_module.SupervisorStore(anyio.Path(tmp_path))
+    domain_map = {"domain_id": "machine-learning", "generated_at": "2026-07-24T00:00:00Z", "nodes": []}
+
+    await store.save_map("Machine Learning", domain_map)
+    loaded = await store.load_map("machine-learning")
+
+    assert loaded == domain_map
+    assert loaded["generated_at"] == "2026-07-24T00:00:00Z"
+
+
+@pytest.mark.anyio
+async def test_store_isolates_two_users_while_sharing_domain_map(tmp_path: Path) -> None:
+    store_module = _load_store()
+    store = store_module.SupervisorStore(anyio.Path(tmp_path))
+    await store.save_map("ml", {"domain_id": "ml"})
+    alice = await store.load_heatmap("alice-hash", "ml")
+    bob = await store.load_heatmap("bob-hash", "ml")
+    alice["question_count"] = 3
+    bob["question_count"] = 7
+    await store.save_heatmap("alice-hash", "ml", alice)
+    await store.save_heatmap("bob-hash", "ml", bob)
+
+    assert (await store.load_map("ml"))["domain_id"] == "ml"
+    assert store.map_path("ml") == store.map_path("ML")
+    assert store.heatmap_path("alice-hash", "ml") != store.heatmap_path("bob-hash", "ml")
+    assert (await store.load_heatmap("alice-hash", "ml"))["question_count"] == 3
+    assert (await store.load_heatmap("bob-hash", "ml"))["question_count"] == 7
+
+
+@pytest.mark.anyio
+async def test_store_heatmap_default_update_and_latest_advice_roundtrip(tmp_path: Path) -> None:
+    store_module = _load_store()
+    store = store_module.SupervisorStore(anyio.Path(tmp_path))
+    heatmap = await store.load_heatmap("alice", "ml")
+
+    updated = store_module.update_heatmap(
+        heatmap,
+        node_ids=["basics", "basics", "models"],
+        cognitive_level="understand",
+        intent="compare",
+        surface=True,
+    )
+    await store.save_heatmap("alice", "ml", updated)
+    advice = {"classification": {"domain": "ml"}}
+    await store.save_latest_advice("alice", advice)
+
+    assert updated["question_count"] == 1
+    assert updated["nodes"]["basics"]["count"] == 2
+    assert updated["nodes"]["models"]["count"] == 1
+    assert updated["repeated_surface_questions"] == 1
+    assert updated["cognitive_history"][-1] == "understand"
+    assert updated["intent_history"][-1] == "compare"
+    assert len(updated["last_seen"]) > 0
+    assert await store.load_latest_advice("alice") == advice
+
+
+@pytest.mark.anyio
+async def test_store_malformed_files_return_safe_values(tmp_path: Path) -> None:
+    store_module = _load_store()
+    store = store_module.SupervisorStore(anyio.Path(tmp_path))
+    maps = anyio.Path(tmp_path) / "wiki" / "supervisor" / "maps"
+    users = anyio.Path(tmp_path) / "wiki" / "supervisor" / "users" / "alice"
+    await maps.mkdir(parents=True)
+    await users.mkdir(parents=True)
+    await (maps / "ml.yaml").write_text("- not\n- a mapping\n", encoding="utf-8")
+    await (users / "latest-advice.json").write_text("[]", encoding="utf-8")
+    domains = users / "domains"
+    await domains.mkdir()
+    await (domains / "ml.yaml").write_text("[unterminated", encoding="utf-8")
+
+    assert await store.load_map("ml") is None
+    assert await store.load_latest_advice("alice") is None
+    heatmap = await store.load_heatmap("alice", "ml")
+    assert heatmap["user"] == "alice"
+    assert heatmap["domain"] == "ml"
+    assert heatmap["question_count"] == 0
+    assert heatmap["visited_nodes"] == []
+
+
+def test_store_sanitizes_domains_and_rejects_empty_results(tmp_path: Path) -> None:
+    store_module = _load_store()
+    store = store_module.SupervisorStore(anyio.Path(tmp_path))
+
+    for domain in ("Machine Learning", "../ML", "with space", "under_score"):
+        filename = store.map_path(domain).name
+        assert re.fullmatch(r"[a-z0-9-]+\.yaml", filename)
+    for domain in ("", "机器学习", "../"):
+        with pytest.raises(ValueError, match="domain"):
+            store.map_path(domain)
+
+
+@pytest.mark.anyio
+async def test_store_same_key_locks_serialize_but_different_keys_do_not(tmp_path: Path) -> None:
+    store_module = _load_store()
+    store = store_module.SupervisorStore(anyio.Path(tmp_path))
+    same_entered = anyio.Event()
+    release_same = anyio.Event()
+    second_entered = anyio.Event()
+    other_entered = anyio.Event()
+
+    async def hold_same() -> None:
+        async with store.user_lock("alice"):
+            same_entered.set()
+            await release_same.wait()
+
+    async def wait_same() -> None:
+        await same_entered.wait()
+        async with store.user_lock("alice"):
+            second_entered.set()
+
+    async def enter_other() -> None:
+        await same_entered.wait()
+        async with store.user_lock("bob"):
+            other_entered.set()
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(hold_same)
+        task_group.start_soon(wait_same)
+        task_group.start_soon(enter_other)
+        await same_entered.wait()
+        with anyio.fail_after(1):
+            await other_entered.wait()
+        assert not second_entered.is_set()
+        release_same.set()
+        with anyio.fail_after(1):
+            await second_entered.wait()
+
+
+@pytest.mark.anyio
+async def test_store_failed_atomic_replace_preserves_previous_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store_module = _load_store()
+    store = store_module.SupervisorStore(anyio.Path(tmp_path))
+    await store.save_map("ml", {"version": 1})
+
+    def fail_replace(source: str, destination: str) -> None:
+        raise OSError(f"cannot replace {source} with {destination}")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    with pytest.raises(OSError, match="cannot replace"):
+        await store.save_map("ml", {"version": 2})
+
+    assert await store.load_map("ml") == {"version": 1}
 
 
 def _valid_advice() -> dict[str, Any]:
