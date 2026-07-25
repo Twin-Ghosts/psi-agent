@@ -162,12 +162,13 @@ AI 的 tool_calls 通过 SSE 流式传输——多个 chunk 中的 `delta.tool_c
     _seconds_until_next(cron)   ← 本机本地墙钟下次触发（勿用 time.time() 作 croniter base）
     await anyio.sleep(wait)     ← 睡到触发
     async with agent._lock:       ← 等当前请求完成
-      user = {role:user, content:TASK.md, kind:schedule.silent}  ← user 始终 silent
-      response_kind = schedule.display | schedule.silent         ← 由 TASK.md visibility 决定
-      agent.run(user, response_kind=...)
-      ← 整轮写入 JSONL（user/assistant/tool 均带 kind）
-      ← 仅 visibility=display 时 stash pending，下次 Channel POST 开头 yield
-      ← visibility=silent（如 heartbeat）不注入下一轮 SSE
+      if fire == tool:
+        ToolRegistry.get(tool)(**tool_args)  ← 直调，不跑 LLM（飞书提醒等）
+      else:  # fire == prompt（缺省）
+        user = {role:user, content:TASK.md, kind:schedule.silent}  ← user 始终 silent
+        agent.run(user, response_kind=display|silent)              ← 由 TASK.md visibility 决定
+      ← 整轮写入 JSONL（带 kind）；display 才 stash pending；silent 不注入下一轮 SSE
+      ← run_once 成功后删 TASK.md 并结束 runner
 ```
 
 关键点：
