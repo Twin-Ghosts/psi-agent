@@ -220,6 +220,49 @@ async def test_find_chat_exact_filters(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_chat_builds_request_and_returns_chat_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"chat_id": "oc_new", "name": "项目群", "invalid_user_id_list": []})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.create_chat_impl("项目群", ["ou_a", "ou_b"], description="d")
+    req = cap.request
+    assert req.http_method.name == "POST"
+    assert req.uri.endswith("/im/v1/chats")
+    assert _qdict(req).get("user_id_type") == "open_id"
+    assert req.body["name"] == "项目群"
+    assert req.body["description"] == "d"
+    assert req.body["user_id_list"] == ["ou_a", "ou_b"]
+    assert "set_bot_manager" not in _qdict(req)  # no owner → bot stays owner
+    assert result["ok"] is True
+    assert result["chat_id"] == "oc_new"
+    assert result["invited_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_create_chat_owner_sets_bot_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"chat_id": "oc_o", "owner_id": "ou_owner"})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.create_chat_impl("群", ["ou_a"], owner_id="ou_owner")
+    assert cap.request.body["owner_id"] == "ou_owner"
+    assert _qdict(cap.request).get("set_bot_manager") == "true"
+    assert result["owner_id"] == "ou_owner"
+
+
+@pytest.mark.asyncio
+async def test_create_chat_requires_name() -> None:
+    result = await _impl.create_chat_impl("   ", ["ou_a"])
+    assert result["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_create_chat_rejects_over_50_members(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"chat_id": "oc_x"})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.create_chat_impl("群", [f"ou_{i}" for i in range(51)])
+    assert result["ok"] is False
+    assert cap.request is None  # never sent
+
+
+@pytest.mark.asyncio
 async def test_send_message_builds_create_and_returns_thread(monkeypatch: pytest.MonkeyPatch) -> None:
     cap = _CapturedInvoke({"message_id": "om_1", "thread_id": "omt_1", "chat_id": "oc_1"})
     monkeypatch.setattr(_impl, "_invoke", cap)
@@ -306,6 +349,7 @@ def test_im_tools_are_async_with_docstrings() -> None:
     msg_mod = importlib.import_module("feishu_message")
     fns = [
         chat_mod.feishu_chat_find,
+        chat_mod.feishu_chat_create,
         msg_mod.feishu_message_send,
         msg_mod.feishu_message_send_card,
         msg_mod.feishu_message_reply,
@@ -575,6 +619,19 @@ async def test_chat_list_members_tool_returns_json(monkeypatch: pytest.MonkeyPat
     out = await mod.feishu_chat_list_members(chat_id="oc_x")
     assert inspect.iscoroutinefunction(mod.feishu_chat_list_members)
     assert json.loads(out)["members"][0]["id"] == "ou_9"
+
+
+@pytest.mark.asyncio
+async def test_chat_create_tool_returns_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = importlib.import_module("feishu_chat")
+
+    async def _fake(*a: Any, **k: Any) -> dict[str, Any]:
+        return {"ok": True, "chat_id": "oc_new", "invited": ["ou_a"], "invited_count": 1}
+
+    monkeypatch.setattr(_impl, "create_chat_impl", _fake)
+    out = await mod.feishu_chat_create(name="项目群", user_ids=["ou_a"])
+    assert inspect.iscoroutinefunction(mod.feishu_chat_create)
+    assert json.loads(out)["chat_id"] == "oc_new"
 
 
 # ── Approval — list tasks, read instance, approve/reject ──────────────────────

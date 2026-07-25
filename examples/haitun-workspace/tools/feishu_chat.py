@@ -1,7 +1,9 @@
-"""Feishu/Lark chat (group) tools — find a group the bot belongs to by name.
+"""Feishu/Lark chat (group) tools — find a group the bot belongs to by name,
+resolve a member's open_id, and create a new group (拉人建群).
 
-Use this to resolve a human-given group name (e.g. "主群") into a ``chat_id``
-before sending messages. The bot must already be a member of the group.
+Use ``feishu_chat_find`` to resolve a human-given group name (e.g. "主群") into a
+``chat_id`` before sending messages (the bot must already be a member), or
+``feishu_chat_create`` to spin up a brand-new group and pull people into it.
 Pair with ``feishu_message`` (send / reply-in-thread / list messages).
 """
 
@@ -69,3 +71,34 @@ async def feishu_chat_list_members(chat_id: str, member_id_type: str = "open_id"
         member_id_type: Id form to return — open_id (default), union_id, or user_id.
     """
     return _f.dumps_result(await _f.list_chat_members_impl(chat_id, member_id_type))
+
+
+async def feishu_chat_create(
+    name: str,
+    user_ids: list[str] | None = None,
+    description: str = "",
+    owner_id: str = "",
+    user_id_type: str = "open_id",
+) -> str:
+    """Create a **new** Feishu/Lark group chat and pull the given people in (拉人建群).
+
+    Use this when there is no existing group to post to — the bot creates one, joins
+    it, and (unless you pass ``owner_id``) becomes its owner, so afterwards you can send
+    to the returned ``chat_id`` with ``feishu_message_send``. This is the missing piece
+    versus ``feishu_message_send``, which can only post to a group that already exists.
+
+    Members are given as user ids, not names: resolve names to open_ids first with
+    ``feishu_chat_find_member`` (from another group) or ``feishu_department_members``.
+    The response includes the new ``chat_id`` and ``invalid_user_ids`` (ids Feishu
+    could not add — e.g. outside the app's contact scope).
+
+    Args:
+        name: Group name (required).
+        user_ids: Members to invite — a list of ids matching ``user_id_type`` (max 50).
+            Empty creates a group with just the bot; invite more later.
+        description: Group description/topic (optional).
+        owner_id: Id (matching ``user_id_type``) of the person to make group owner.
+            Empty leaves the bot as owner (needed for the bot to keep posting).
+        user_id_type: Id form used by user_ids/owner_id — open_id (default), union_id, or user_id.
+    """
+    return _f.dumps_result(await _f.create_chat_impl(name, user_ids, description, owner_id, user_id_type))
