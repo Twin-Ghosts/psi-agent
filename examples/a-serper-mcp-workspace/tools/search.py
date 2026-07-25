@@ -55,7 +55,7 @@ def _sync_api_key() -> str:
     _load_env(Path(__file__).parent.parent / ".env")
     key = os.getenv("SERPER_API_KEY", "").strip()
     for mod_name in ("serper_mcp_server.core", "serper_mcp_server.server"):
-        importlib.import_module(mod_name).SERPER_API_KEY = key
+        vars(importlib.import_module(mod_name))["SERPER_API_KEY"] = key
     return key
 
 
