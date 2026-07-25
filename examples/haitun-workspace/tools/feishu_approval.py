@@ -174,3 +174,27 @@ async def feishu_approval_create(
             user_key,
         )
     )
+
+
+async def feishu_approval_subscribe(approval_code: str) -> str:
+    """Subscribe to an approval definition so its status changes get pushed (no polling).
+
+    Once subscribed, Feishu pushes an event to the bot whenever any instance of this
+    approval changes status (approved / rejected / canceled / etc.), and the bot
+    proactively DMs the applicant with the update. Call this **once per approval
+    definition** — it's idempotent per app, so re-subscribing is harmless. Use this
+    instead of repeatedly polling ``feishu_approval_get`` to watch for a decision.
+
+    Args:
+        approval_code: The approval definition code to subscribe to (from a task/instance).
+    """
+    return _f.dumps_result(await _f.subscribe_approval_impl(approval_code))
+
+
+async def feishu_approval_unsubscribe(approval_code: str) -> str:
+    """Cancel a subscription so this approval's status changes stop being pushed.
+
+    Args:
+        approval_code: The approval definition code to stop receiving events for.
+    """
+    return _f.dumps_result(await _f.unsubscribe_approval_impl(approval_code))

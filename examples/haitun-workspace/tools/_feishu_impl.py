@@ -1193,6 +1193,59 @@ async def create_approval_instance_impl(
     return {"ok": True, "instance_code": data.get("instance_code", "")}
 
 
+# ── Approval event subscription — enable push (no polling) ────────────────────
+#
+# Subscribing an approval definition makes Feishu push an ``approval_instance``
+# event over the app's event channel (the same WebSocket the bot already runs)
+# every time an instance of that definition changes status. The channel layer
+# turns those events into a proactive DM to the applicant — so status changes are
+# pushed, never polled. Subscribe is idempotent per app: one call per approval
+# definition is enough (repeat calls are a no-op on Feishu's side).
+
+
+def _build_approval_subscribe_request(approval_code: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.POST
+    req.uri = "/open-apis/approval/v4/approvals/:approval_code/subscribe"
+    req.paths["approval_code"] = approval_code
+    req.token_types = {AccessTokenType.TENANT}
+    return req
+
+
+def _build_approval_unsubscribe_request(approval_code: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.POST
+    req.uri = "/open-apis/approval/v4/approvals/:approval_code/unsubscribe"
+    req.paths["approval_code"] = approval_code
+    req.token_types = {AccessTokenType.TENANT}
+    return req
+
+
+async def subscribe_approval_impl(approval_code: str) -> dict[str, Any]:
+    """Subscribe to an approval definition's instance status-change events.
+
+    After this, Feishu pushes an ``approval_instance`` event whenever any instance
+    of ``approval_code`` changes status, and the bot DMs the applicant. Idempotent
+    per app — one call per definition is enough. Uses the bot's tenant token.
+    """
+    if not approval_code:
+        return _error("approval_code is required (the approval definition code).")
+    res = await _invoke(_build_approval_subscribe_request(approval_code))
+    if not res["ok"]:
+        return res
+    return {"ok": True, "approval_code": approval_code, "subscribed": True}
+
+
+async def unsubscribe_approval_impl(approval_code: str) -> dict[str, Any]:
+    """Cancel a previous subscription so status-change events stop being pushed."""
+    if not approval_code:
+        return _error("approval_code is required (the approval definition code).")
+    res = await _invoke(_build_approval_unsubscribe_request(approval_code))
+    if not res["ok"]:
+        return res
+    return {"ok": True, "approval_code": approval_code, "subscribed": False}
+
+
 # ── Wiki — resolve a wiki node token to its underlying document ───────────────
 #
 # A Feishu wiki URL (.../wiki/<node_token>) is a shell; the real content lives in

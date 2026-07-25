@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from functools import partial
 from types import SimpleNamespace
 from typing import Any, cast
@@ -18,8 +19,12 @@ from psi_agent.channel.feishu.client import (
     _add_reaction,
     _comment_context_header,
     _handle_and_stream,
+    _handle_approval_event,
     _handle_comment,
+    _parse_instance_detail,
+    _register_approval_processor,
     _remove_reaction,
+    _SeenEvents,
     run_feishu,
 )
 
@@ -664,3 +669,155 @@ async def test_gateway_route_provider_raises_on_failure_and_does_not_cache() -> 
     socket = await provider.ensure("ou_1")
     assert socket == "/tmp/ok.sock"
     assert len(http.post_calls) == 2
+
+
+# ── approval status-change push ───────────────────────────────────────────────
+
+
+def _instance_resp(status: str = "APPROVED", applicant: str = "ou_applicant", name: str = "请假") -> SimpleNamespace:
+    """Fake SDK arequest response carrying an approval instance detail body."""
+    body = {"code": 0, "msg": "success", "data": {"user_id": applicant, "approval_name": name, "status": status}}
+    content = json.dumps(body).encode("utf-8")
+    return SimpleNamespace(code=0, msg="success", raw=SimpleNamespace(content=content))
+
+
+def _approval_channel(instance_resp: SimpleNamespace | Exception | None = None) -> MagicMock:
+    channel = MagicMock()
+    if isinstance(instance_resp, Exception):
+        channel.client.arequest = AsyncMock(side_effect=instance_resp)
+    else:
+        channel.client.arequest = AsyncMock(return_value=instance_resp or _instance_resp())
+    channel.send = AsyncMock()
+    return channel
+
+
+def _approval_event(instance_code: str = "inst_1", approval_code: str = "appr_1", status: str = "APPROVED") -> Any:
+    return SimpleNamespace(event={"instance_code": instance_code, "approval_code": approval_code, "status": status})
+
+
+def test_parse_instance_detail_extracts_applicant():
+    detail = _parse_instance_detail(_instance_resp(status="REJECTED", applicant="ou_x", name="报销"))
+    assert detail == {"applicant_open_id": "ou_x", "approval_name": "报销", "status": "REJECTED"}
+
+
+def test_parse_instance_detail_bad_body_returns_empty():
+    assert _parse_instance_detail(SimpleNamespace(raw=SimpleNamespace(content=b"not json"))) == {}
+    assert _parse_instance_detail(SimpleNamespace(raw=None)) == {}
+
+
+def test_seen_events_dedup_and_bound():
+    seen = _SeenEvents(maxlen=2)
+    assert seen.add_if_new("a") is True
+    assert seen.add_if_new("a") is False  # duplicate
+    assert seen.add_if_new("b") is True
+    assert seen.add_if_new("c") is True  # evicts "a"
+    assert seen.add_if_new("a") is True  # "a" was evicted, seen as new again
+
+
+@pytest.mark.anyio
+async def test_handle_approval_event_pushes_dm_to_applicant(monkeypatch, tmp_path):
+    monkeypatch.setattr(client, "_collect_reply", AsyncMock(return_value="你的请假已通过"))
+    channel = _approval_channel()
+    core = ChannelCore(session_socket=str(tmp_path / "x.sock"))
+
+    await _handle_approval_event(channel, _resolver(core), None, _SeenEvents(), _approval_event())
+
+    channel.send.assert_awaited_once()
+    args = channel.send.call_args.args
+    assert args[0] == "ou_applicant"
+    assert args[1] == {"text": "你的请假已通过"}
+    assert args[2] == {"receive_id_type": "open_id"}
+
+
+@pytest.mark.anyio
+async def test_handle_approval_event_respects_whitelist(monkeypatch, tmp_path):
+    monkeypatch.setattr(client, "_collect_reply", AsyncMock(return_value="x"))
+    channel = _approval_channel(_instance_resp(applicant="ou_blocked"))
+    core = ChannelCore(session_socket=str(tmp_path / "x.sock"))
+
+    await _handle_approval_event(channel, _resolver(core), ["ou_allowed"], _SeenEvents(), _approval_event())
+
+    channel.send.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_handle_approval_event_dedups_redelivery(monkeypatch, tmp_path):
+    monkeypatch.setattr(client, "_collect_reply", AsyncMock(return_value="ok"))
+    channel = _approval_channel()
+    core = ChannelCore(session_socket=str(tmp_path / "x.sock"))
+    seen = _SeenEvents()
+
+    await _handle_approval_event(channel, _resolver(core), None, seen, _approval_event())
+    await _handle_approval_event(channel, _resolver(core), None, seen, _approval_event())
+
+    channel.send.assert_awaited_once()  # second delivery deduped
+
+
+@pytest.mark.anyio
+async def test_handle_approval_event_no_applicant_skips(monkeypatch, tmp_path):
+    monkeypatch.setattr(client, "_collect_reply", AsyncMock(return_value="x"))
+    channel = _approval_channel(_instance_resp(applicant=""))
+    core = ChannelCore(session_socket=str(tmp_path / "x.sock"))
+
+    await _handle_approval_event(channel, _resolver(core), None, _SeenEvents(), _approval_event())
+
+    channel.send.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_handle_approval_event_swallows_errors(monkeypatch, tmp_path):
+    monkeypatch.setattr(client, "_collect_reply", AsyncMock(side_effect=RuntimeError("agent boom")))
+    channel = _approval_channel()
+    core = ChannelCore(session_socket=str(tmp_path / "x.sock"))
+
+    # Must not raise even though the agent call fails.
+    await _handle_approval_event(channel, _resolver(core), None, _SeenEvents(), _approval_event())
+    channel.send.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_handle_approval_event_missing_instance_code_skips(tmp_path):
+    channel = _approval_channel()
+    core = ChannelCore(session_socket=str(tmp_path / "x.sock"))
+    event = SimpleNamespace(event={"approval_code": "appr_1", "status": "APPROVED"})
+
+    await _handle_approval_event(channel, _resolver(core), None, _SeenEvents(), event)
+
+    channel.client.arequest.assert_not_awaited()
+    channel.send.assert_not_awaited()
+
+
+def test_register_approval_processor_injects_both_schemas():
+    proc_map: dict = {}
+    channel = SimpleNamespace(dispatcher=SimpleNamespace(_processorMap=proc_map))
+
+    ok = _register_approval_processor(channel, lambda _e: None)
+
+    assert ok is True
+    assert "p1.approval_instance" in proc_map
+    assert "p2.approval_instance" in proc_map
+
+
+def test_register_approval_processor_degrades_without_processor_map():
+    channel = SimpleNamespace(dispatcher=SimpleNamespace())  # no _processorMap
+    assert _register_approval_processor(channel, lambda _e: None) is False
+
+
+@pytest.mark.anyio
+async def test_run_feishu_registers_approval_processor(monkeypatch):
+    channel = MagicMock()
+    channel.on = MagicMock()
+    channel.start_background = AsyncMock()
+    channel.stop_background = AsyncMock()
+    channel.bot_identity = SimpleNamespace(open_id="ou_bot", name="Haitun")
+    calls: list = []
+    monkeypatch.setattr(client, "FeishuChannel", lambda **kw: channel)
+    monkeypatch.setattr(client, "BlockingPortal", lambda: _FakePortal())
+    monkeypatch.setattr(client, "_register_approval_processor", lambda ch, cb: calls.append(ch) or True)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(partial(run_feishu, session_socket="/tmp/x.sock", app_id="a", app_secret="s"))
+        await anyio.sleep(0.1)
+        tg.cancel_scope.cancel()
+
+    assert calls == [channel]

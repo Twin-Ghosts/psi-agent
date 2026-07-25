@@ -126,6 +126,12 @@ message_id / sender_open_id）。需要群里之前的上下文时：
     **申请人身份靠 `applicant_open_id` 指定**——传 `<feishu_context>` 的 `sender_open_id`，单子即记在员工
     本人名下；用机器人 tenant token 提交即可，**这一步不需要员工单独授权 UAT**（区别于文档搜索/知识库）。
     提交是对外动作，按 [`admin-finance-governance`] 先把拼好的表单给员工确认再提交；缺字段就问，绝不编造。
+    **订阅审批状态变更（免轮询，主动推送）**：想在审批被通过/拒绝/撤销时第一时间通知申请人，
+    用 `feishu_approval_subscribe(approval_code)` 订阅该审批定义一次即可（每个定义订阅一次，重复调用无害）。
+    订阅后飞书会在实例状态变化时把事件推给机器人，Haitun 自动私聊 DM 申请人本人告知最新状态——
+    **不要再反复 `feishu_approval_get` 轮询**。收到审批事件（`<feishu_approval_event>`）时可先用
+    `feishu_approval_get(instance_code)` 补充关键信息，再用一句自然的话把状态告诉申请人。
+    停止推送用 `feishu_approval_unsubscribe(approval_code)`。
 12. **卡点找人（判定归属 + 给联系方式）**：员工私聊说"工作上卡在某个点了"，按 [`feishu-blocker-routing`]
     技能给他指路。先读一张**职责归属多维表格**（业务领域/职责 → 负责人 open_id）
     `feishu_bitable_list_records(app_token, table_id)` 把卡点匹配到负责人，再用

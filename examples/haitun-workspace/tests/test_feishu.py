@@ -3229,3 +3229,49 @@ def test_contact_tools_are_async_with_docstrings() -> None:
         fn = getattr(mod, name)
         assert inspect.iscoroutinefunction(fn), name
         assert (inspect.getdoc(fn) or "").strip(), f"{name} needs a docstring"
+
+
+@pytest.mark.asyncio
+async def test_subscribe_approval_builds_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.subscribe_approval_impl("appr_1")
+    assert result == {"ok": True, "approval_code": "appr_1", "subscribed": True}
+    req = cap.request
+    assert req.http_method.name == "POST"
+    assert req.uri == "/open-apis/approval/v4/approvals/:approval_code/subscribe"
+    assert req.paths["approval_code"] == "appr_1"
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_approval_builds_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.unsubscribe_approval_impl("appr_1")
+    assert result == {"ok": True, "approval_code": "appr_1", "subscribed": False}
+    assert cap.request.uri == "/open-apis/approval/v4/approvals/:approval_code/unsubscribe"
+
+
+@pytest.mark.asyncio
+async def test_subscribe_approval_requires_code() -> None:
+    result = await _impl.subscribe_approval_impl("")
+    assert result["ok"] is False
+    assert "approval_code" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_subscribe_approval_propagates_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fail(request: Any, user_key: str | None = None, prefer: str = "tenant") -> dict[str, Any]:
+        return {"ok": False, "code": 99991672, "msg": "no permission", "message": "err"}
+
+    monkeypatch.setattr(_impl, "_invoke", _fail)
+    result = await _impl.subscribe_approval_impl("appr_1")
+    assert result["ok"] is False
+
+
+def test_approval_subscribe_tools_are_async_with_docstrings() -> None:
+    mod = importlib.import_module("feishu_approval")
+    for name in ("feishu_approval_subscribe", "feishu_approval_unsubscribe"):
+        fn = getattr(mod, name)
+        assert inspect.iscoroutinefunction(fn), name
+        assert (inspect.getdoc(fn) or "").strip(), f"{name} needs a docstring"

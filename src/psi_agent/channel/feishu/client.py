@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack, aclosing
 from datetime import date
@@ -18,6 +20,8 @@ from lark_channel.api.im.v1.model.create_message_reaction_request_body import Cr
 from lark_channel.api.im.v1.model.delete_message_reaction_request import DeleteMessageReactionRequest
 from lark_channel.api.im.v1.model.emoji import Emoji
 from lark_channel.api.im.v1.model.get_message_resource_request import GetMessageResourceRequest
+from lark_channel.core.enum import AccessTokenType, HttpMethod
+from lark_channel.core.model import BaseRequest
 from loguru import logger
 
 from psi_agent.channel._core import ChannelCore
@@ -423,9 +427,215 @@ async def _handle_comment(
         logger.error(f"Unhandled error in _handle_comment: {e!r}")
 
 
+# ── Approval status-change push (event-driven, no polling) ────────────────────
+#
+# Feishu pushes an ``approval_instance`` event over the app's event channel (the
+# same WebSocket the bot runs) once a definition is subscribed via
+# ``feishu_approval_subscribe``. The event carries only instance_code /
+# approval_code / status — no target — so we fetch the instance detail to resolve
+# the applicant's open_id, then feed the change into that applicant's own session
+# and DM them the agent's reply. lark-channel-sdk 1.2.0 has no typed processor for
+# this event, so it's wired as a customized-event handler (same escape hatch the
+# SDK itself uses for drive doc comments).
+
+_APPROVAL_EVENT_TYPE = "approval_instance"
+
+# Human-facing labels for the Feishu instance status enum.
+_APPROVAL_STATUS_LABELS = {
+    "PENDING": "审批中",
+    "APPROVED": "已通过",
+    "REJECTED": "已拒绝",
+    "CANCELED": "已撤销",
+    "DELETED": "已删除",
+    "REVERTED": "已撤回",
+}
+
+
+class _SeenEvents:
+    """有界去重集 — 飞书会重推同一事件, 用 (instance_code, status) 键去重。
+
+    ``OrderedDict`` 当 FIFO: 超过 ``maxlen`` 淘汰最旧键, 内存有界。非线程安全,
+    只在 portal 的事件循环里单线程访问, 无需加锁。"""
+
+    def __init__(self, maxlen: int = 512) -> None:
+        self._maxlen = maxlen
+        self._seen: OrderedDict[str, None] = OrderedDict()
+
+    def add_if_new(self, key: str) -> bool:
+        """True 表示首见 (已记下); False 表示重复。"""
+        if key in self._seen:
+            return False
+        self._seen[key] = None
+        if len(self._seen) > self._maxlen:
+            self._seen.popitem(last=False)
+        return True
+
+
+def _build_instance_get_request(instance_code: str) -> BaseRequest:
+    """GET 审批实例详情 (tenant token) — channel 层不能 import workspace 工具,
+    故按 workspace ``_feishu_impl`` 同款手搓 BaseRequest。"""
+    req = BaseRequest()
+    req.http_method = HttpMethod.GET
+    req.uri = "/open-apis/approval/v4/instances/:instance_id"
+    req.paths["instance_id"] = instance_code
+    req.add_query("user_id_type", "open_id")
+    req.token_types = {AccessTokenType.TENANT}
+    return req
+
+
+def _parse_instance_detail(resp: Any) -> dict[str, Any]:
+    """从 SDK arequest 响应里取审批实例详情, 只保留推送要用的字段。"""
+    raw = getattr(resp, "raw", None)
+    content = getattr(raw, "content", None) if raw is not None else None
+    if not content:
+        return {}
+    try:
+        body = json.loads(bytes(content).decode("utf-8"))
+    except ValueError, UnicodeDecodeError:
+        return {}
+    if not isinstance(body, dict) or body.get("code") != 0:
+        return {}
+    data = body.get("data")
+    if not isinstance(data, dict):
+        return {}
+    return {
+        "applicant_open_id": data.get("user_id", "") or data.get("open_id", ""),
+        "approval_name": data.get("approval_name", ""),
+        "status": data.get("status", ""),
+    }
+
+
+async def _fetch_instance_detail(channel: Any, instance_code: str) -> dict[str, Any]:
+    try:
+        resp = await channel.client.arequest(_build_instance_get_request(instance_code))
+    except Exception as e:
+        logger.warning(f"approval instance {instance_code} detail fetch failed — {e!r}")
+        return {}
+    return _parse_instance_detail(resp)
+
+
+def _approval_event_header(instance_code: str, approval_code: str, status: str, approval_name: str) -> str:
+    """构造审批事件的元数据前缀, 注入到发给 agent 的主动输入最前面。
+
+    与 ``_context_header`` 同理只输出协议事实, 不含具体 workspace 工具名, 保持
+    channel 层与 workspace 解耦。agent 如何用 instance_code 读详情的引导放 TOOLS.md。"""
+    label = _APPROVAL_STATUS_LABELS.get(status, status)
+    lines = [
+        "<feishu_approval_event>",
+        f"instance_code: {instance_code}",
+        f"approval_code: {approval_code}",
+        f"approval_name: {approval_name}",
+        f"status: {status} ({label})",
+        "</feishu_approval_event>",
+    ]
+    return "\n".join(lines)
+
+
+_APPROVAL_INSTRUCTION = (
+    "上面是你订阅的一条审批状态变更事件 (由飞书主动推送, 非用户提问)。请用一句自然的话"
+    "把这条审批的最新状态告知申请人本人 (可先读实例详情补充关键信息), 直接输出要发给他的话, 不要多余寒暄。"
+)
+
+
+async def _handle_approval_event(
+    channel: Any,
+    resolve_core: Callable[[str | None], Awaitable[ChannelCore]],
+    allowed_ids: list[str] | None,
+    seen: _SeenEvents,
+    event: Any,
+) -> None:
+    """处理审批实例状态变更事件 — 反查申请人 → 喂其 session → DM 推送 agent 回复。
+
+    经 ``portal.start_task_soon`` 调度, 与 ``_handle_comment`` 一样异常绝不冒泡。
+    事件不带推送目标, 故先反查实例详情拿 applicant open_id; 命中白名单后按其
+    open_id 路由到本人 session, 私聊推送 (receive_id_type=open_id)。飞书会重推同一
+    事件, 用 (instance_code, status) 去重。"""
+    try:
+        payload = getattr(event, "event", None)
+        if not isinstance(payload, dict):
+            payload = getattr(event, "__dict__", {}).get("event") if hasattr(event, "__dict__") else None
+        if not isinstance(payload, dict):
+            logger.debug("approval event has no dict payload, skipping")
+            return
+
+        instance_code = payload.get("instance_code", "") or ""
+        approval_code = payload.get("approval_code", "") or ""
+        status = payload.get("status", "") or ""
+        if not instance_code:
+            logger.debug("approval event missing instance_code, skipping")
+            return
+
+        if not seen.add_if_new(f"{instance_code}:{status}"):
+            logger.debug(f"approval event {instance_code}:{status} already seen, skipping")
+            return
+
+        detail = await _fetch_instance_detail(channel, instance_code)
+        applicant = detail.get("applicant_open_id", "")
+        if not applicant:
+            logger.warning(f"approval {instance_code} — no applicant open_id resolved, cannot push")
+            return
+        if not _allowed(applicant, allowed_ids):
+            logger.debug(f"approval applicant {applicant} blocked by whitelist")
+            return
+
+        core = await resolve_core(applicant)
+        approval_name = detail.get("approval_name", "")
+        status = status or detail.get("status", "")
+        logger.debug(f"approval push instance={instance_code} status={status} applicant={applicant}")
+
+        chunks: list[InputChunk] = [
+            TextChunk(_approval_event_header(instance_code, approval_code, status, approval_name)),
+            TextChunk(_APPROVAL_INSTRUCTION),
+        ]
+        try:
+            reply_text = await _collect_reply(core, chunks)
+        except Exception as e:
+            logger.error(f"approval agent call failed — {e!r}")
+            return
+        if not reply_text:
+            logger.debug(f"approval {instance_code} produced empty reply, skipping push")
+            return
+
+        await channel.send(applicant, {"text": reply_text}, {"receive_id_type": "open_id"})
+        logger.debug(f"approval {instance_code} pushed to {applicant} ({len(reply_text)} chars)")
+    except Exception as e:
+        logger.error(f"Unhandled error in _handle_approval_event: {e!r}")
+
+
+def _register_approval_processor(channel: Any, on_event: Callable[[Any], None]) -> bool:
+    """把审批事件处理器注入已建好的 dispatcher (SDK 无 typed processor, 走 customized)。
+
+    必须在 ``start_background()`` 之后调用: ``start_background`` 会重建 dispatcher
+    (channel.py 会 ``self._dispatcher = self._build_dispatcher()``), 提前注册会被覆盖。
+    p1/p2 两种 schema 都注册 (与 SDK 对 drive 评论的处理一致)。任何 SDK 内部结构
+    缺失/改名都降级为告警, 绝不拖垮启动。返回是否至少注册成功一个 schema。"""
+    try:
+        from lark_channel.event.custom import CustomizedEventProcessor  # noqa: PLC0415
+    except Exception as e:
+        logger.warning(f"approval events unavailable — cannot import CustomizedEventProcessor: {e!r}")
+        return False
+    dispatcher = getattr(channel, "dispatcher", None)
+    proc_map = getattr(dispatcher, "_processorMap", None)
+    if not isinstance(proc_map, dict):
+        logger.warning("approval events unavailable — dispatcher has no _processorMap")
+        return False
+    registered = False
+    for schema in ("p1", "p2"):
+        key = f"{schema}.{_APPROVAL_EVENT_TYPE}"
+        if key in proc_map:  # don't clobber an SDK-provided processor
+            continue
+        try:
+            proc_map[key] = CustomizedEventProcessor(on_event)
+            registered = True
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(f"approval processor register failed for {key} — {e!r}")
+    if registered:
+        logger.debug("approval_instance event processor registered (p1/p2)")
+    return registered
+
+
 def _log_reject(event: Any) -> None:
     """记录被准入策略拒绝的消息 (如群里没 @机器人的普通发言)。
-
     注册为 channel 的 ``reject`` 回调; 自身异常绝不冒泡, 以免拖垮事件循环。
     ``policy_no_mention`` 是最常见原因 — 群聊 require_mention 生效但消息没 @机器人。
     """
@@ -518,6 +728,17 @@ async def run_feishu(
         async def _on_comment(event: Any) -> None:
             portal.start_task_soon(_handle_comment, channel, resolve_core, allowed_user_ids, event)
 
+        approval_seen = _SeenEvents()
+
+        def _on_approval(event: Any) -> None:
+            # Runs on the SDK dispatcher thread — hop onto the anyio loop via the portal.
+            try:
+                portal.start_task_soon(
+                    _handle_approval_event, channel, resolve_core, allowed_user_ids, approval_seen, event
+                )
+            except Exception as e:  # portal closing during shutdown — never crash the WS thread
+                logger.warning(f"approval event schedule failed — {e!r}")
+
         channel.on("message", _on_message)
         channel.on("reject", _log_reject)
         if respond_to_comments:
@@ -526,6 +747,9 @@ async def run_feishu(
         try:
             await channel.start_background()
             logger.info(f"Feishu bot started (session={session_socket} interval={interval})")
+            # Inject the approval processor AFTER start_background — it rebuilds the
+            # dispatcher, so an earlier registration would be discarded.
+            _register_approval_processor(channel, _on_approval)
             await _ensure_bot_identity(channel)
             await anyio.sleep_forever()
         finally:
