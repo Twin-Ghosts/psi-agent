@@ -307,6 +307,7 @@ def test_im_tools_are_async_with_docstrings() -> None:
     fns = [
         chat_mod.feishu_chat_find,
         msg_mod.feishu_message_send,
+        msg_mod.feishu_message_send_card,
         msg_mod.feishu_message_reply,
         msg_mod.feishu_message_list,
     ]
@@ -325,6 +326,75 @@ async def test_message_send_tool_returns_json(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(_impl, "send_message_impl", _fake)
     out = await mod.feishu_message_send(receive_id="oc_9", text="hi")
     assert json.loads(out)["thread_id"] == "omt_9"
+
+
+@pytest.mark.asyncio
+async def test_send_card_builds_interactive_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"message_id": "om_c", "thread_id": "omt_c", "chat_id": "oc_1"})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    card = {
+        "schema": "2.0",
+        "body": {"elements": [{"tag": "action", "actions": [{"tag": "button", "value": {"a": "ok"}}]}]},
+    }
+    result = await _impl.send_card_impl("oc_1", json.dumps(card), "chat_id")
+    req = cap.request
+    assert req.http_method.name == "POST"
+    assert req.uri == "/open-apis/im/v1/messages"
+    assert _qdict(req).get("receive_id_type") == "chat_id"
+    assert req.body["msg_type"] == "interactive"
+    # card content is posted verbatim as a JSON string
+    assert json.loads(req.body["content"]) == card
+    assert result["message_id"] == "om_c"
+    assert result["thread_id"] == "omt_c"
+
+
+@pytest.mark.asyncio
+async def test_send_card_infers_receive_id_type_from_open_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"message_id": "om_c"})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    # default receive_id_type=chat_id but an ou_ id must be corrected to open_id
+    await _impl.send_card_impl("ou_zhang", json.dumps({"config": {}, "elements": []}), "chat_id")
+    assert _qdict(cap.request).get("receive_id_type") == "open_id"
+
+
+@pytest.mark.asyncio
+async def test_send_card_rejects_invalid_json() -> None:
+    result = await _impl.send_card_impl("oc_1", "not json{", "chat_id")
+    assert result["ok"] is False
+    assert "valid JSON" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_send_card_rejects_non_object_json() -> None:
+    result = await _impl.send_card_impl("oc_1", "[1, 2, 3]", "chat_id")
+    assert result["ok"] is False
+    assert "JSON object" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_send_card_tool_returns_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = importlib.import_module("feishu_message")
+
+    async def _fake(*a: Any, **k: Any) -> dict[str, Any]:
+        return {"ok": True, "message_id": "om_c9", "thread_id": "omt_c9", "chat_id": "oc_9"}
+
+    monkeypatch.setattr(_impl, "send_card_impl", _fake)
+    out = await mod.feishu_message_send_card(receive_id="oc_9", card_json='{"schema": "2.0"}')
+    assert json.loads(out)["message_id"] == "om_c9"
+
+
+@pytest.mark.asyncio
+async def test_send_card_tool_passes_user_key_as_none_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = importlib.import_module("feishu_message")
+    captured: dict[str, Any] = {}
+
+    async def _fake(receive_id: str, card_json: str, receive_id_type: str, user_key: Any = None) -> dict[str, Any]:
+        captured["user_key"] = user_key
+        return {"ok": True, "message_id": "om_c"}
+
+    monkeypatch.setattr(_impl, "send_card_impl", _fake)
+    await mod.feishu_message_send_card(receive_id="oc_9", card_json='{"schema": "2.0"}')
+    assert captured["user_key"] is None
 
 
 @pytest.mark.asyncio

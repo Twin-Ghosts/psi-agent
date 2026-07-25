@@ -546,6 +546,44 @@ async def send_message_impl(receive_id: str, text: str, receive_id_type: str, on
     }
 
 
+async def send_card_impl(
+    receive_id: str, card_json: str, receive_id_type: str, user_key: str | None = None
+) -> dict[str, Any]:
+    """Send an interactive card (``msg_type=interactive``) — buttons/forms/selectors etc.
+
+    ``card_json`` is the full card object as a JSON string (Feishu 卡片 JSON, either the
+    card 2.0 ``{"schema":"2.0","body":{"elements":[...]}}`` form or the legacy
+    ``{"config":...,"elements":[...]}`` form). It is parsed, validated to be a JSON
+    object, and posted verbatim as the message ``content`` — so any element the Feishu
+    card spec supports (button / form / input / select_static / date_picker / …) works.
+
+    ``receive_id_type`` is auto-corrected from the id prefix, same as ``send_message_impl``.
+    Returns ``message_id`` + ``thread_id`` (thread_id is the topic root if in a thread).
+    """
+    try:
+        card = json.loads(card_json)
+    except ValueError as exc:
+        return _error(f"card_json is not valid JSON: {exc}")
+    if not isinstance(card, dict):
+        return _error(
+            "card_json must be a JSON object — the Feishu card, e.g. "
+            '{"schema":"2.0","body":{"elements":[...]}} or {"config":...,"elements":[...]}.'
+        )
+    receive_id_type = _infer_receive_id_type(receive_id, receive_id_type)
+    content = json.dumps(card, ensure_ascii=False)
+    req = _build_send_message_request(receive_id, receive_id_type, "interactive", content)
+    res = await _invoke(req, user_key=user_key)
+    if not res["ok"]:
+        return res
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    return {
+        "ok": True,
+        "message_id": data.get("message_id", ""),
+        "thread_id": data.get("thread_id", ""),
+        "chat_id": data.get("chat_id", ""),
+    }
+
+
 def _build_reply_message_request(message_id: str, text: str, reply_in_thread: bool) -> BaseRequest:
     req = BaseRequest()
     req.http_method = HttpMethod.POST

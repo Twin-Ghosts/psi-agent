@@ -77,6 +77,56 @@ async def feishu_message_send(
     return _f.dumps_result(await _f.send_message_impl(receive_id, text, receive_id_type, on_behalf_of))
 
 
+async def feishu_message_send_card(
+    receive_id: str, card_json: str, receive_id_type: str = "chat_id", user_key: str = ""
+) -> str:
+    """Send an **interactive card** message — buttons, forms, inputs, selectors, date pickers.
+
+    Far richer than ``feishu_message_send`` (plain text): a card can carry clickable
+    buttons, a form (input fields / dropdowns / date pickers) the recipient fills in and
+    submits, styled headers, multi-column layouts, images and dividers. Use it whenever
+    you want the recipient to *act* (approve/reject, pick an option, submit a value)
+    rather than just read.
+
+    You build the card yourself and pass it as a JSON string in ``card_json``. Both
+    Feishu card formats are accepted and sent verbatim:
+
+    - Card 2.0 (recommended)::
+
+        {"schema": "2.0",
+         "header": {"title": {"tag": "plain_text", "content": "请假审批"}, "template": "blue"},
+         "body": {"elements": [
+           {"tag": "markdown", "content": "**张三** 申请年假 2 天"},
+           {"tag": "action", "actions": [
+             {"tag": "button", "text": {"tag": "plain_text", "content": "同意"},
+              "type": "primary", "value": {"action": "approve", "id": "req_1"}},
+             {"tag": "button", "text": {"tag": "plain_text", "content": "驳回"},
+              "type": "danger", "value": {"action": "reject", "id": "req_1"}}]}]}}
+
+    - Legacy ``{"config": {...}, "header": {...}, "elements": [...]}`` is also accepted.
+
+    Selectors / date pickers go inside an ``action`` element (``select_static`` with
+    ``options``, ``date_picker``, ``picker_time``, …); grouped inputs that submit together
+    go inside a ``form`` element. Anything the Feishu 消息卡片 spec supports works — the
+    card is validated only to be a JSON object, then posted as-is.
+
+    Note: button/form **clicks fire a card action callback** to the app. Delivering that
+    callback back into the conversation is a channel-side concern and may not yet be wired;
+    the card renders and is interactive regardless. Prefer buttons whose ``value`` also
+    encodes the choice, and/or a URL button, so intent is captured even without the callback.
+
+    Args:
+        receive_id: Target id — a chat_id (oc_...), open_id (ou_...), user_id, union_id, or email.
+        card_json: The full Feishu card as a JSON object string (see examples above).
+        receive_id_type: Type of receive_id — chat_id, open_id, user_id, union_id, or email.
+            Auto-detected from the id prefix (oc_→chat_id, ou_→open_id, ...); only set it
+            explicitly for a bare user_id.
+        user_key: The sender's open_id (from ``<feishu_context>``) as a fallback identity;
+            harmless to pass, leave empty in single-user scenarios.
+    """
+    return _f.dumps_result(await _f.send_card_impl(receive_id, card_json, receive_id_type, user_key or None))
+
+
 async def feishu_message_reply(message_id: str, text: str, reply_in_thread: bool = True) -> str:
     """Reply to a message; with ``reply_in_thread=True`` this forms/continues a native thread (topic).
 
