@@ -72,15 +72,8 @@ def _parse_once_at(once_at: str) -> tuple[datetime | None, str | None]:
         try:
             parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         except ValueError:
-            return None, (
-                f"Invalid once_at {once_at!r}: use 'YYYY-MM-DD HH:MM' "
-                "(local time) or an ISO-8601 datetime."
-            )
-        dt = (
-            parsed.astimezone().replace(tzinfo=None)
-            if parsed.tzinfo is not None
-            else parsed
-        )
+            return None, (f"Invalid once_at {once_at!r}: use 'YYYY-MM-DD HH:MM' (local time) or an ISO-8601 datetime.")
+        dt = parsed.astimezone().replace(tzinfo=None) if parsed.tzinfo is not None else parsed
     if dt <= datetime.now():
         return None, f"once_at {once_at!r} is not in the future (local time)."
     return dt, None
@@ -329,9 +322,7 @@ async def schedule_manage(
             return f"[Error] {err}"
         # 刻意为之: once_at always fire=tool; reject prompt + prose/pseudocode creates.
         if run_once:
-            if cerr := _once_at_requires_tool_fire(
-                fire=fire_mode, tool=tool, tool_args=parsed_args
-            ):
+            if cerr := _once_at_requires_tool_fire(fire=fire_mode, tool=tool, tool_args=parsed_args):
                 return f"[Error] {cerr}"
         elif "feishu_message_send" in content and fire_mode != "tool":
             return (
@@ -363,10 +354,7 @@ async def schedule_manage(
         extra = f", fire={fire_mode!r}"
         if fire_mode == "tool":
             extra += f", tool={tool.strip()!r}"
-        return (
-            f"Schedule created: {schedule_name!r} "
-            f"({kind}, cron: {cron_raw!r}, visibility: {vis!r}{extra})"
-        )
+        return f"Schedule created: {schedule_name!r} ({kind}, cron: {cron_raw!r}, visibility: {vis!r}{extra})"
 
     if action == "patch":
         if err := _validate_schedule_name(schedule_name):

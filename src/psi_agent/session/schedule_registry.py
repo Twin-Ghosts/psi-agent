@@ -212,18 +212,14 @@ class ScheduleRegistry:
         If ``schedule.run_once`` is True, deletes ``TASK.md`` after one successful
         fire and exits (刻意为之: one-shot reminders must not re-fire next year).
         """
-        logger.info(
-            f"Schedule runner started: {schedule.name!r} ({schedule.cron!r}, run_once={schedule.run_once})"
-        )
+        logger.info(f"Schedule runner started: {schedule.name!r} ({schedule.cron!r}, run_once={schedule.run_once})")
 
         try:
             with cancel_scope:
                 while True:
                     try:
                         wait = ScheduleRegistry._seconds_until_next(schedule.cron)
-                        logger.debug(
-                            f"Schedule {schedule.name!r} sleeping {wait:.1f}s until next fire"
-                        )
+                        logger.debug(f"Schedule {schedule.name!r} sleeping {wait:.1f}s until next fire")
                         await anyio.sleep(wait)
 
                         logger.info(f"Schedule triggered: {schedule.name!r}")
@@ -233,13 +229,9 @@ class ScheduleRegistry:
 
                         async with agent._lock:
                             if schedule.fire == FIRE_TOOL:
-                                pending_chunks = await ScheduleRegistry._fire_tool(
-                                    schedule, agent, response_kind
-                                )
+                                pending_chunks = await ScheduleRegistry._fire_tool(schedule, agent, response_kind)
                             else:
-                                pending_chunks = await ScheduleRegistry._fire_prompt(
-                                    schedule, agent, response_kind
-                                )
+                                pending_chunks = await ScheduleRegistry._fire_prompt(schedule, agent, response_kind)
                             # silent → never push into the next Channel turn
                             if schedule.visibility == "display" and pending_chunks:
                                 agent.set_pending_schedule_chunks(pending_chunks)
@@ -278,9 +270,7 @@ class ScheduleRegistry:
         async with aclosing(agent.run(user_msg, response_kind=response_kind)) as chunks:
             async for chunk in chunks:
                 pending_chunks.append(chunk)
-                logger.debug(
-                    f"Schedule chunk: content={chunk.content!r}, reasoning={chunk.reasoning!r}"
-                )
+                logger.debug(f"Schedule chunk: content={chunk.content!r}, reasoning={chunk.reasoning!r}")
         return pending_chunks
 
     @staticmethod
@@ -328,11 +318,7 @@ class ScheduleRegistry:
                     result = f"Error executing tool {tool_name!r}: {e}"
                     logger.error(f"Schedule {schedule.name!r} tool error: {e!r}")
 
-            chunks.append(
-                AgentChunk(
-                    reasoning=f"[Tool Call: {tool_name}({json.dumps(args, ensure_ascii=False)})]"
-                )
-            )
+            chunks.append(AgentChunk(reasoning=f"[Tool Call: {tool_name}({json.dumps(args, ensure_ascii=False)})]"))
             chunks.append(AgentChunk(reasoning=f"[Tool Result: {result[:1000]}]"))
             if schedule.visibility == "display":
                 chunks.append(AgentChunk(content=result[:2000]))
@@ -456,9 +442,7 @@ class ScheduleRegistry:
                 raw_fire = header.get("fire", FIRE_PROMPT)
                 fire = str(raw_fire).strip().casefold() if isinstance(raw_fire, str) else FIRE_PROMPT
                 if fire not in {FIRE_PROMPT, FIRE_TOOL}:
-                    logger.warning(
-                        f"Invalid fire {raw_fire!r} in {task_file!r}, defaulting to {FIRE_PROMPT!r}"
-                    )
+                    logger.warning(f"Invalid fire {raw_fire!r} in {task_file!r}, defaulting to {FIRE_PROMPT!r}")
                     fire = FIRE_PROMPT
 
                 tool_name = ""
@@ -473,23 +457,18 @@ class ScheduleRegistry:
                         try:
                             parsed = json.loads(raw_args)
                         except json.JSONDecodeError as e:
-                            logger.error(
-                                f"Invalid tool_args JSON for schedule {name!r} in {task_file!r}: {e!r}"
-                            )
+                            logger.error(f"Invalid tool_args JSON for schedule {name!r} in {task_file!r}: {e!r}")
                             continue
                         if not isinstance(parsed, dict):
                             logger.error(
-                                f"tool_args for schedule {name!r} must be a JSON object, got "
-                                f"{type(parsed).__name__}"
+                                f"tool_args for schedule {name!r} must be a JSON object, got {type(parsed).__name__}"
                             )
                             continue
                         tool_args = parsed
                     else:
                         tool_args = {}
                     if not tool_name:
-                        logger.error(
-                            f"fire=tool schedule {name!r} in {task_file!r} missing 'tool'; skipping"
-                        )
+                        logger.error(f"fire=tool schedule {name!r} in {task_file!r} missing 'tool'; skipping")
                         continue
 
                 schedule = Schedule(
@@ -506,9 +485,7 @@ class ScheduleRegistry:
                 files[str_path] = ScheduleEntry(file_hash=file_hash, schedule=schedule, fresh=True)
                 logger.debug(
                     f"Loaded schedule: {name!r} (cron: {cron!r}, visibility: {visibility!r}, "
-                    f"run_once={run_once}, fire={fire!r}"
-                    + (f", tool={tool_name!r}" if fire == FIRE_TOOL else "")
-                    + ")"
+                    f"run_once={run_once}, fire={fire!r}" + (f", tool={tool_name!r}" if fire == FIRE_TOOL else "") + ")"
                 )
             except Exception as e:
                 logger.error(f"Failed to load schedule from {task_dir!r}: {e!r}")

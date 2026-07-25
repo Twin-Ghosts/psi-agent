@@ -90,10 +90,7 @@ async def test_create_one_shot_once_at(workspace: Path) -> None:
         description="Meeting reminder",
         fire="tool",
         tool="feishu_message_send",
-        tool_args=(
-            '{"receive_id":"oc_testdemo123","text":"Meeting in 5 minutes",'
-            '"receive_id_type":"chat_id"}'
-        ),
+        tool_args=('{"receive_id":"oc_testdemo123","text":"Meeting in 5 minutes","receive_id_type":"chat_id"}'),
         visibility="silent",
     )
     assert "one-shot" in msg
@@ -127,10 +124,7 @@ async def test_create_one_shot_rejects_prompt_with_feishu_in_content(workspace: 
         action="create",
         schedule_name="bad-legacy",
         once_at="2099-07-24 15:30",
-        content=(
-            'feishu_message_send(receive_id="oc_testdemo123", text="hi", '
-            'receive_id_type="chat_id")'
-        ),
+        content=('feishu_message_send(receive_id="oc_testdemo123", text="hi", receive_id_type="chat_id")'),
         visibility="display",
     )
     assert msg.startswith("[Error]")

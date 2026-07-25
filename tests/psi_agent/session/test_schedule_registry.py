@@ -435,9 +435,7 @@ async def test_load_fire_tool_header(tmp_path: Path) -> None:
 async def test_fire_tool_calls_registry_directly() -> None:
     called: dict[str, object] = {}
 
-    async def feishu_message_send(
-        receive_id: str, text: str, receive_id_type: str = "chat_id"
-    ) -> str:
+    async def feishu_message_send(receive_id: str, text: str, receive_id_type: str = "chat_id") -> str:
         called["receive_id"] = receive_id
         called["text"] = text
         called["receive_id_type"] = receive_id_type
