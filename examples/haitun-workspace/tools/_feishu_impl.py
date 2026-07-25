@@ -3181,6 +3181,222 @@ def _build_blocks_append_request(document_id: str, children: list[dict[str, Any]
     return req
 
 
+# ── Tables (block_type 31) + flowcharts/swimlanes rendered AS tables ────────────
+# Feishu docx has no API to *draw* a flowchart/mindnote/board: block_type 21
+# (diagram) and 44 (board) are empty canvases the open API can't populate with
+# nodes/edges, so a "生成流程图/泳道图" request can't produce a real editable diagram
+# via the API. The faithful, fully-supported alternative is a native Feishu table:
+# a flowchart becomes a single-column "步骤 → 步骤" ladder, a swimlane becomes a
+# grid whose columns are the lanes (角色/部门) and rows are the stages. Both render
+# as real, editable tables in the doc — not an image, not a broken embed.
+#
+# A table can't be created with the plain /children endpoint: the table block, its
+# cell blocks (block_type 32) and each cell's text block must all be sent together
+# to the /descendant endpoint, which takes a flat `descendants` list plus the
+# `children_id` of the blocks that attach at the insert point (here: the table).
+_TABLE_BLOCK_TYPE = 31
+_TABLE_CELL_BLOCK_TYPE = 32
+
+
+def _text_block(block_id: str, text: str, *, bold: bool = False) -> dict[str, Any]:
+    """A paragraph (block_type 2) carrying one text run, for use inside a table cell."""
+    run: dict[str, Any] = {"content": text}
+    if bold:
+        run["text_style"] = {"bold": True}
+    return {"block_id": block_id, "block_type": 2, "text": {"elements": [{"text_run": run}]}}
+
+
+def _table_descendants(
+    rows: list[list[str]],
+    *,
+    table_id: str = "tbl",
+    header_row: bool = True,
+    column_width: list[int] | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Build the (table_block_id, descendants) for a 2-D grid of cell strings.
+
+    ``rows`` is a list of rows, each a list of cell texts; every row is padded to
+    the widest row so the grid is rectangular (Feishu requires it). Returns the
+    table block_id to put in ``children_id`` and the flat descendants list (table,
+    then each cell, then each cell's text block) the /descendant endpoint wants.
+    """
+    row_size = len(rows)
+    column_size = max((len(r) for r in rows), default=0)
+    cell_ids: list[str] = []
+    descendants: list[dict[str, Any]] = []
+    cell_blocks: list[dict[str, Any]] = []
+    text_blocks: list[dict[str, Any]] = []
+    for r, row in enumerate(rows):
+        for c in range(column_size):
+            text = row[c] if c < len(row) else ""
+            cid = f"{table_id}_c{r}_{c}"
+            tid = f"{cid}_t"
+            cell_ids.append(cid)
+            cell_blocks.append({"block_id": cid, "block_type": _TABLE_CELL_BLOCK_TYPE, "children": [tid]})
+            text_blocks.append(_text_block(tid, text, bold=header_row and r == 0))
+    table_prop: dict[str, Any] = {"row_size": row_size, "column_size": column_size, "header_row": header_row}
+    if column_width:
+        table_prop["column_width"] = column_width
+    table_block = {
+        "block_id": table_id,
+        "block_type": _TABLE_BLOCK_TYPE,
+        "table": {"cells": cell_ids, "property": table_prop},
+    }
+    # Order: table first, then all cells, then all cell-text blocks. The API only
+    # requires every referenced block_id to be present somewhere in descendants.
+    descendants.append(table_block)
+    descendants.extend(cell_blocks)
+    descendants.extend(text_blocks)
+    return table_id, descendants
+
+
+def _build_descendant_request(
+    document_id: str, children_id: list[str], descendants: list[dict[str, Any]], index: int
+) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.POST
+    # Root block: the document_id doubles as the root block_id (append at doc root).
+    req.uri = "/open-apis/docx/v1/documents/:document_id/blocks/:block_id/descendant"
+    req.paths["document_id"] = document_id
+    req.paths["block_id"] = document_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    body: dict[str, Any] = {"children_id": children_id, "descendants": descendants}
+    if index >= 0:
+        body["index"] = index
+    req.body = body
+    return req
+
+
+def _parse_rows(rows_json: str) -> list[list[str]] | dict[str, Any]:
+    """Parse a JSON 2-D array of cell values into list[list[str]] (or an error dict).
+
+    Accepts a JSON array of arrays; each cell is str()-coerced (numbers/bools become
+    text). Rejects anything that isn't a non-empty list of lists.
+    """
+    try:
+        data = json.loads(rows_json)
+    except (json.JSONDecodeError, TypeError) as exc:
+        return _error(f'rows must be a JSON 2-D array, e.g. [["a","b"],["1","2"]]. Parse error: {exc}')
+    if not isinstance(data, list) or not data:
+        return _error("rows must be a non-empty JSON array of rows.")
+    parsed: list[list[str]] = []
+    for i, row in enumerate(data):
+        if not isinstance(row, list):
+            return _error(f"row {i} must be an array of cell values.")
+        parsed.append(["" if c is None else str(c) for c in row])
+    return parsed
+
+
+async def _append_table_descendants(
+    document_id: str, rows: list[list[str]], *, header_row: bool, column_width: list[int] | None, user_key: str
+) -> dict[str, Any]:
+    """Send one table (built from ``rows``) to the /descendant endpoint. Shared by
+    the table / flowchart / swimlane tools."""
+    if not document_id.strip():
+        return _error("document_id is required.")
+    if not rows:
+        return _error("no rows to write — the table would be empty.")
+    table_id, descendants = _table_descendants(rows, header_row=header_row, column_width=column_width)
+    req = _build_descendant_request(document_id.strip(), [table_id], descendants, index=-1)
+    res = await _invoke(req, user_key=user_key, prefer="user")
+    if not res["ok"]:
+        return res
+    return {
+        "ok": True,
+        "document_id": document_id.strip(),
+        "rows": len(rows),
+        "columns": max((len(r) for r in rows), default=0),
+    }
+
+
+async def append_doc_table_impl(
+    document_id: str, rows_json: str, header_row: bool = True, column_width_json: str = "", user_key: str = ""
+) -> dict[str, Any]:
+    """Append a native Feishu table (block_type 31) to a docx body.
+
+    ``rows_json`` is a JSON 2-D array; the first row is styled as a header when
+    ``header_row`` is true. ``column_width_json`` optionally sets per-column pixel
+    widths (JSON array of ints).
+    """
+    rows = _parse_rows(rows_json)
+    if isinstance(rows, dict):  # parse error
+        return rows
+    column_width: list[int] | None = None
+    if column_width_json.strip():
+        try:
+            cw = json.loads(column_width_json)
+            if isinstance(cw, list) and all(isinstance(x, int) for x in cw):
+                column_width = cw
+        except json.JSONDecodeError, TypeError:
+            column_width = None
+    return await _append_table_descendants(
+        document_id, rows, header_row=header_row, column_width=column_width, user_key=user_key
+    )
+
+
+async def append_doc_flowchart_impl(
+    document_id: str, steps_json: str, title: str = "", user_key: str = ""
+) -> dict[str, Any]:
+    """Append a flowchart rendered as a single-column Feishu table (each step a row,
+    joined by ↓ arrows). Feishu's API can't draw a real diagram, so this is the
+    faithful, editable alternative. ``steps_json`` is a JSON array of step labels."""
+    try:
+        steps = json.loads(steps_json)
+    except (json.JSONDecodeError, TypeError) as exc:
+        return _error(f"steps must be a JSON array of strings. Parse error: {exc}")
+    if not isinstance(steps, list) or not steps:
+        return _error('steps must be a non-empty JSON array, e.g. ["开始","审批","结束"].')
+    labels = ["" if s is None else str(s) for s in steps]
+    # Interleave arrow rows so the ladder reads top-to-bottom like a flowchart.
+    rows: list[list[str]] = [[title or "流程图"]]
+    for i, label in enumerate(labels):
+        rows.append([label])
+        if i < len(labels) - 1:
+            rows.append(["↓"])
+    return await _append_table_descendants(
+        document_id, rows, header_row=bool(title) or True, column_width=None, user_key=user_key
+    )
+
+
+async def append_doc_swimlane_impl(
+    document_id: str, lanes_json: str, stages_json: str = "", user_key: str = ""
+) -> dict[str, Any]:
+    """Append a swimlane diagram rendered as a Feishu table: columns = lanes
+    (角色/部门), rows = stages. Feishu's API can't draw a real swimlane diagram, so
+    this grid is the faithful, editable alternative.
+
+    ``lanes_json`` — either a JSON array of lane names (then ``stages_json`` gives
+    the per-stage cells) OR a JSON object mapping lane→[activities] (auto-gridded).
+    """
+    try:
+        lanes = json.loads(lanes_json)
+    except (json.JSONDecodeError, TypeError) as exc:
+        return _error(f"lanes must be JSON. Parse error: {exc}")
+    rows: list[list[str]]
+    if isinstance(lanes, dict):
+        # {lane: [activity, ...]} — columns are lanes, each column filled top-down.
+        if not lanes:
+            return _error("lanes object is empty.")
+        lane_names = [str(name) for name in lanes]
+        columns = [[str(a) for a in (lanes[name] or [])] for name in lane_names]
+        depth = max((len(col) for col in columns), default=0)
+        rows = [lane_names]
+        for r in range(depth):
+            rows.append([col[r] if r < len(col) else "" for col in columns])
+    elif isinstance(lanes, list) and lanes:
+        # lanes = header (column) names; stages_json = 2-D array of body rows.
+        lane_names = [str(x) for x in lanes]
+        rows = [lane_names]
+        if stages_json.strip():
+            body = _parse_rows(stages_json)
+            if isinstance(body, dict):  # parse error
+                return body
+            rows.extend(body)
+    else:
+        return _error("lanes must be a non-empty JSON array of lane names or an object {lane:[activities]}.")
+    return await _append_table_descendants(document_id, rows, header_row=True, column_width=None, user_key=user_key)
+
+
 async def append_doc_content_impl(document_id: str, content: str, user_key: str = "") -> dict[str, Any]:
     """Append text/heading blocks (from plain text or light Markdown) to a docx body.
 

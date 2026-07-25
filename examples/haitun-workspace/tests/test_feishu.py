@@ -2694,12 +2694,128 @@ async def test_append_doc_content_requires_document_id() -> None:
     assert result["ok"] is False
 
 
+# ── Tables + flowchart/swimlane (rendered as tables) ──────────────────────────
+
+
+def test_table_descendants_shape() -> None:
+    table_id, desc = _impl._table_descendants([["A", "B"], ["1", "2"]], header_row=True)
+    # 1 table + 4 cells + 4 text blocks = 9 descendants
+    assert len(desc) == 9
+    table = desc[0]
+    assert table["block_id"] == table_id
+    assert table["block_type"] == 31
+    assert table["table"]["property"]["row_size"] == 2
+    assert table["table"]["property"]["column_size"] == 2
+    assert table["table"]["property"]["header_row"] is True
+    # cells list references exactly the 4 cell block_ids, in order
+    assert table["table"]["cells"] == [d["block_id"] for d in desc[1:5]]
+    # each cell (block_type 32) points at its own text block
+    for cell in desc[1:5]:
+        assert cell["block_type"] == 32
+        assert len(cell["children"]) == 1
+    # header row text runs are bold
+    assert desc[5]["text"]["elements"][0]["text_run"]["text_style"]["bold"] is True
+
+
+def test_table_descendants_pads_ragged_rows() -> None:
+    _tid, desc = _impl._table_descendants([["a", "b", "c"], ["x"]], header_row=False)
+    table = desc[0]
+    assert table["table"]["property"]["column_size"] == 3
+    # 6 cells for a 2x3 grid; the short row's missing cells are empty strings
+    cells = [d for d in desc if d["block_type"] == 32]
+    assert len(cells) == 6
+
+
+@pytest.mark.asyncio
+async def test_append_doc_table_builds_descendant_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.append_doc_table_impl("doc1", '[["名","部门"],["张三","研发"]]', True, "[120,200]")
+    assert result["ok"] is True
+    assert result["rows"] == 2
+    assert result["columns"] == 2
+    req = cap.request
+    assert req.http_method.name == "POST"
+    assert req.uri == "/open-apis/docx/v1/documents/:document_id/blocks/:block_id/descendant"
+    assert req.paths["document_id"] == "doc1"
+    # the table block_id is the sole top-level child at the insert point
+    assert len(req.body["children_id"]) == 1
+    assert req.body["children_id"][0] == req.body["descendants"][0]["block_id"]
+    assert req.body["descendants"][0]["table"]["property"]["column_width"] == [120, 200]
+
+
+@pytest.mark.asyncio
+async def test_append_doc_table_rejects_bad_json() -> None:
+    result = await _impl.append_doc_table_impl("doc1", "not json")
+    assert result["ok"] is False
+    assert "2-D array" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_append_doc_table_rejects_non_list_rows() -> None:
+    result = await _impl.append_doc_table_impl("doc1", '{"a":1}')
+    assert result["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_append_doc_flowchart_interleaves_arrows(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.append_doc_flowchart_impl("doc1", '["开始","审批","结束"]', "请假流程")
+    assert result["ok"] is True
+    desc = cap.request.body["descendants"]
+    texts = [d["text"]["elements"][0]["text_run"]["content"] for d in desc if d["block_type"] == 2]
+    # title + 3 steps + 2 arrows between them
+    assert texts == ["请假流程", "开始", "↓", "审批", "↓", "结束"]
+
+
+@pytest.mark.asyncio
+async def test_append_doc_flowchart_rejects_empty() -> None:
+    result = await _impl.append_doc_flowchart_impl("doc1", "[]")
+    assert result["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_append_doc_swimlane_from_object(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.append_doc_swimlane_impl("doc1", '{"客户":["下单","付款"],"仓库":["发货"]}')
+    assert result["ok"] is True
+    # 2 lanes → 2 columns; header row + 2 stage rows (deepest lane has 2)
+    assert result["columns"] == 2
+    assert result["rows"] == 3
+    desc = cap.request.body["descendants"]
+    header_texts = [
+        desc[i]["text"]["elements"][0]["text_run"]["content"] for i, d in enumerate(desc) if d["block_type"] == 2
+    ][:2]
+    assert header_texts == ["客户", "仓库"]
+
+
+@pytest.mark.asyncio
+async def test_append_doc_swimlane_from_array_with_stages(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.append_doc_swimlane_impl("doc1", '["客户","客服","仓库"]', '[["下单","接单","发货"]]')
+    assert result["ok"] is True
+    assert result["columns"] == 3
+    assert result["rows"] == 2  # header + 1 body row
+
+
+@pytest.mark.asyncio
+async def test_append_doc_swimlane_rejects_bad_json() -> None:
+    result = await _impl.append_doc_swimlane_impl("doc1", "42")
+    assert result["ok"] is False
+
+
 def test_create_tools_are_async_with_docstrings() -> None:
     doc_mod = importlib.import_module("feishu_doc")
     wiki_mod = importlib.import_module("feishu_wiki")
     for fn in (
         doc_mod.feishu_doc_create,
         doc_mod.feishu_doc_append_content,
+        doc_mod.feishu_doc_append_table,
+        doc_mod.feishu_doc_append_flowchart,
+        doc_mod.feishu_doc_append_swimlane,
         wiki_mod.feishu_wiki_list_spaces,
         wiki_mod.feishu_wiki_create_doc,
     ):

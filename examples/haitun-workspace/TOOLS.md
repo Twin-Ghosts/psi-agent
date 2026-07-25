@@ -92,6 +92,18 @@ message_id / sender_open_id）。需要群里之前的上下文时：
   一次完成「建节点 + 写正文」，避免分两步（`feishu_wiki_create_doc` 再 `feishu_doc_append_content`）
   时留下**空文档**。若正文写入失败，它会连 `node_token`/`obj_token` 一并回报，可用相同 `user_key`
   调 `feishu_doc_append_content` 补写。
+- **在文档里放表格 / 流程图 / 泳道图**：`feishu_doc_append_content` 只能写标题和段落，
+  **写不出真正的表格**，更画不了图。要真正的表格/图，用下面三个专门工具（都吃 docx 的
+  `document_id`，也就是 `feishu_doc_create` 返回的 id，或 wiki 节点的 `obj_token`；带 `user_key`）：
+  - 表格：`feishu_doc_append_table(document_id, rows_json, header_row, column_width_json, user_key)`——
+    `rows_json` 是二维 JSON 数组，如 `[["姓名","部门"],["张三","研发"]]`，会生成飞书原生表格块。
+  - 流程图：`feishu_doc_append_flowchart(document_id, steps_json, title, user_key)`——
+    `steps_json` 是步骤数组 `["提交","审批","归档"]`。**飞书开放接口画不了真正的流程图块**
+    （block_type 21 是空画布，API 填不进节点），所以用「单列表格 + ↓ 箭头」如实呈现，可编辑。
+  - 泳道图：`feishu_doc_append_swimlane(document_id, lanes_json, stages_json, user_key)`——
+    `lanes_json` 可传对象 `{"客户":["下单","付款"],"仓库":["发货"]}`（列=泳道，自动排格），
+    或传泳道名数组 `["客户","客服","仓库"]` 再用 `stages_json` 给二维正文行。同样用表格如实呈现。
+  一句话：用户要「表格/流程图/泳道图」时别再往正文里塞纯文本，改用这三个工具。
 - **删除文档/文件**：`feishu_drive_delete_file(file_token, file_type, user_key)`——删除进
   **回收站可恢复**。file_type 是 docx/doc/sheet/bitable/mindnote/slides/file/folder/shortcut。
   删**知识库(wiki)里的文档**：飞书没有独立删 wiki 节点的接口——先 `feishu_wiki_get_node`
