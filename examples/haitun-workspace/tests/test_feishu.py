@@ -3223,9 +3223,134 @@ async def test_get_users_batch_rejects_over_50() -> None:
     assert "50" in result["message"]
 
 
+# ── Contact — global user search by name (user_access_token) ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_search_users_not_authorized(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_impl, "_get_uat_client", lambda: object())
+
+    async def _no_uat(user_key: str = "") -> Any:
+        return None
+
+    monkeypatch.setattr(_impl, "_get_valid_uat", _no_uat)
+    result = await _impl.search_users_impl("张三")
+    assert result["ok"] is False
+    assert result.get("need_auth") is True
+
+
+@pytest.mark.asyncio
+async def test_search_users_requires_query() -> None:
+    result = await _impl.search_users_impl("   ")
+    assert result["ok"] is False
+    assert "required" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_search_users_rejects_bad_page_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_impl, "_get_uat_client", lambda: object())
+
+    async def _uat(user_key: str = "") -> Any:
+        return _FakeUAT()
+
+    monkeypatch.setattr(_impl, "_get_valid_uat", _uat)
+    result = await _impl.search_users_impl("张三", page_size=500)
+    assert result["ok"] is False
+    assert "200" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_search_users_builds_request_and_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = {
+        "code": 0,
+        "data": {
+            "users": [
+                {
+                    "open_id": "ou_1",
+                    "user_id": "e1",
+                    "name": "张三",
+                    "avatar": {"avatar_240": "https://x/240.png", "avatar_72": "https://x/72.png"},
+                    "department_ids": ["od_a"],
+                }
+            ],
+            "has_more": True,
+            "page_token": "pt2",
+        },
+    }
+    client = _CapturingUatClient(body)
+    monkeypatch.setattr(_impl, "_get_uat_client", lambda: client)
+
+    async def _uat(user_key: str = "") -> Any:
+        return _FakeUAT()
+
+    monkeypatch.setattr(_impl, "_get_valid_uat", _uat)
+    result = await _impl.search_users_impl("张三", 10, "pt1", "ou_me")
+    req = client.request
+    assert req.http_method.name == "GET"
+    assert req.uri == "/open-apis/search/v1/user"
+    assert _impl.AccessTokenType.USER in req.token_types
+    q = _qdict(req)
+    assert q.get("query") == "张三"
+    assert q.get("page_size") == "10"
+    assert q.get("page_token") == "pt1"
+    assert client.option.user_access_token == "uat_tok"
+    assert result["users"][0] == {
+        "open_id": "ou_1",
+        "user_id": "e1",
+        "name": "张三",
+        "avatar": "https://x/240.png",
+        "department_ids": ["od_a"],
+    }
+    assert result["count"] == 1
+    assert result["has_more"] is True
+    assert result["page_token"] == "pt2"
+
+
+@pytest.mark.asyncio
+async def test_search_users_forwards_user_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """search_users_impl must resolve the UAT for the passed user_key."""
+    seen: dict[str, str] = {}
+
+    async def _uat(user_key: str = "") -> Any:
+        seen["user_key"] = user_key
+        return _FakeUAT()
+
+    monkeypatch.setattr(_impl, "_get_uat_client", lambda: _CapturingUatClient({"code": 0, "data": {"users": []}}))
+    monkeypatch.setattr(_impl, "_get_valid_uat", _uat)
+    await _impl.search_users_impl("张三", 20, "", "ou_zhang")
+    assert seen["user_key"] == "ou_zhang"
+
+
+@pytest.mark.asyncio
+async def test_search_users_api_error_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _CapturingUatClient({"code": 99991663, "msg": "permission denied", "data": {}})
+    monkeypatch.setattr(_impl, "_get_uat_client", lambda: client)
+
+    async def _uat(user_key: str = "") -> Any:
+        return _FakeUAT()
+
+    monkeypatch.setattr(_impl, "_get_valid_uat", _uat)
+    result = await _impl.search_users_impl("x")
+    assert result["ok"] is False
+    assert result["code"] == 99991663
+
+
+@pytest.mark.asyncio
+async def test_contact_search_tool_returns_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = importlib.import_module("feishu_contact")
+
+    async def _fake(*a: Any, **k: Any) -> dict[str, Any]:
+        return {"ok": True, "users": [{"open_id": "ou_1", "name": "张三"}], "count": 1}
+
+    monkeypatch.setattr(_impl, "search_users_impl", _fake)
+    out = await mod.feishu_contact_search(query="张三")
+    assert inspect.iscoroutinefunction(mod.feishu_contact_search)
+    assert json.loads(out)["users"][0]["open_id"] == "ou_1"
+
+
 def test_contact_tools_are_async_with_docstrings() -> None:
     mod = importlib.import_module("feishu_contact")
-    for name in ("feishu_department_members", "feishu_user_get"):
+    for name in ("feishu_department_members", "feishu_user_get", "feishu_contact_search"):
         fn = getattr(mod, name)
         assert inspect.iscoroutinefunction(fn), name
         assert (inspect.getdoc(fn) or "").strip(), f"{name} needs a docstring"

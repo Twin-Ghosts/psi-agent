@@ -130,7 +130,9 @@ message_id / sender_open_id）。需要群里之前的上下文时：
     技能给他指路。先读一张**职责归属多维表格**（业务领域/职责 → 负责人 open_id）
     `feishu_bitable_list_records(app_token, table_id)` 把卡点匹配到负责人，再用
     `feishu_user_get(user_ids=<负责人 open_id>)` 取其**联系方式**（`mobile`/`email`/`enterprise_email`/
-    `job_title`），回员工"①这归谁负责 ②去找谁 ③怎么联系"。台账里存的是姓名不是 open_id 时，先
+    `job_title`），回员工"①这归谁负责 ②去找谁 ③怎么联系"。台账里存的是姓名不是 open_id 时，
+    最省事是 `feishu_contact_search(query=<姓名>)` **全局按名搜人**（不必先知道他在哪个群/部门，
+    直接把姓名解析成 open_id）——这一步走用户身份，返回 `need_auth=True` 时才引导授权；退而求其次用
     `feishu_department_members(recursive=True)` 或 `feishu_chat_find_member` 按名反查 open_id。
     要一次拿到某群**全部**成员（不是按名找某个人）时，用 `feishu_chat_list_members(chat_id)` 列全员花名册。
     **联系方式只在私聊回给来问的本人，不群发**；`mobile`/`email` 读到空多是缺

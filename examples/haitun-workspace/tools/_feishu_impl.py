@@ -2812,6 +2812,89 @@ async def get_users_batch_impl(
     return {"ok": True, "user_id_type": user_id_type, "users": users, "count": len(users)}
 
 
+# ── Contact — global user search by name (search/v1/user) ─────────────────────
+#
+# The one way to resolve a person by name WITHOUT already knowing which group or
+# department they're in. feishu_chat_find_member only searches a known group's
+# roster; department_members needs a department id. This searches the whole org
+# by name keyword. Feishu only allows this via a user_access_token (the bot's
+# tenant token can't call it), so it follows the same auth flow as doc search:
+# the caller must have authorized once (feishu_auth_start / _complete).
+
+
+def _build_search_user_request(query: str, page_size: int, page_token: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.GET
+    req.uri = "/open-apis/search/v1/user"
+    req.add_query("query", query)
+    req.add_query("page_size", page_size)
+    if page_token:
+        req.add_query("page_token", page_token)
+    req.token_types = {AccessTokenType.USER}
+    return req
+
+
+async def search_users_impl(
+    query: str, page_size: int = 20, page_token: str = "", user_key: str = ""
+) -> dict[str, Any]:
+    """Search all users in the org by name keyword (needs a user_access_token).
+
+    Unlike find_member (group roster) or department_members (a department), this
+    matches any user across the whole organization by name — no chat_id/department
+    needed. Returns [{open_id, user_id, name, avatar, department_ids}].
+    """
+    query = (query or "").strip()
+    if not query:
+        return _error("query is required (a name or name keyword to search for).")
+    if page_size < 1 or page_size > 200:
+        return _error("page_size must be between 1 and 200.")
+
+    client = _get_uat_client()
+    if client is None:
+        return _error("Feishu app not configured. Set PSI_FEISHU_APP_ID / PSI_FEISHU_APP_SECRET.")
+    uat = await _get_valid_uat(user_key)
+    if uat is None or not uat.access_token:
+        return _error(_AUTH_PROMPT, need_auth=True)
+
+    req = _build_search_user_request(query, page_size, page_token)
+    from lark_channel.core.model import RequestOption  # noqa: PLC0415
+
+    option = RequestOption.builder().user_access_token(uat.access_token).build()
+    try:
+        resp = await client.arequest(req, option)
+    except Exception as exc:  # SDK/transport failure
+        return _error(f"Feishu user search failed: {type(exc).__name__}: {exc}")
+
+    body = _parse_resp_body(resp)
+    if body.get("code") not in (0, None):
+        return {
+            "ok": False,
+            "code": body.get("code"),
+            "msg": body.get("msg", ""),
+            "message": f"Feishu API error {body.get('code')}: {body.get('msg', '')}",
+        }
+    data = body.get("data", {}) if isinstance(body.get("data"), dict) else {}
+    users = [
+        {
+            "open_id": u.get("open_id", ""),
+            "user_id": u.get("user_id", ""),
+            "name": u.get("name", ""),
+            "avatar": (u.get("avatar") or {}).get("avatar_240", "") if isinstance(u.get("avatar"), dict) else "",
+            "department_ids": u.get("department_ids", []),
+        }
+        for u in (data.get("users", []) if isinstance(data.get("users"), list) else [])
+        if isinstance(u, dict)
+    ]
+    return {
+        "ok": True,
+        "query": query,
+        "users": users,
+        "count": len(users),
+        "has_more": bool(data.get("has_more")),
+        "page_token": data.get("page_token", ""),
+    }
+
+
 # ── Drive — download a file/attachment to disk ────────────────────────────────
 #
 # Two sources: a drive media file_token (goes through the medias endpoint), or a
