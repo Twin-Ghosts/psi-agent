@@ -177,3 +177,44 @@ async def feishu_thread_read(thread_id: str, page_size: int = 50) -> str:
         page_size: Messages per page while paging (default 50, max 50).
     """
     return _f.dumps_result(await _f.read_thread_impl(thread_id, page_size))
+
+
+async def feishu_image_get(
+    message_id: str,
+    file_key: str,
+    save_path: str,
+    resource_type: str = "image",
+    user_key: str = "",
+) -> str:
+    """Download an image (or file) attached to a chat message to a local path.
+
+    When someone sends a picture in Feishu, the image lives *inside* that message,
+    not in Drive — so it is fetched by the message it belongs to via
+    ``im/v1/messages/:message_id/resources/:file_key`` (not the drive-medias
+    endpoint that ``feishu_file_download`` uses).
+
+    Where to get ``file_key``:
+    - The image the user just sent is already auto-downloaded and attached to the
+      turn — you usually don't need this tool for it.
+    - For an image found in history, read the chat/thread with
+      ``feishu_message_list`` / ``feishu_thread_read``, then parse the message's
+      content JSON: an image message has ``{"image_key": "img_v3_..."}``; a
+      file/audio/video message has ``{"file_key": "file_v3_...", ...}``.
+
+    After downloading, describe or OCR the image with the ``describe_image`` /
+    ``read_pdf`` tools or the ``ocr-and-documents`` skill.
+
+    Args:
+        message_id: The message the image/file belongs to (om_...). Use the
+            ``message_id`` of the message that carried the image, from
+            ``<feishu_context>`` or a ``feishu_message_list`` item.
+        file_key: The ``image_key`` (image message) or ``file_key`` (file/media
+            message) from the message content JSON.
+        save_path: Local filesystem path to write the image to (parent dirs created).
+        resource_type: "image" for an image message (default), or "file" for a
+            file/audio/video/media attachment.
+        user_key: The sender's open_id (from ``<feishu_context>``). Pass it to fetch
+            as that user when the bot can't see the message; empty uses the bot's
+            tenant token (tenant is always tried first regardless).
+    """
+    return _f.dumps_result(await _f.get_message_image_impl(message_id, file_key, save_path, resource_type, user_key))

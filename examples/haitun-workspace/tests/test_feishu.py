@@ -2201,6 +2201,99 @@ async def test_download_media_empty_user_key_uses_tenant(monkeypatch: pytest.Mon
 
 
 @pytest.mark.asyncio
+async def test_get_message_image_via_tenant(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+
+    class _Client:
+        async def arequest(self, req: Any) -> Any:
+            captured["uri"] = req.uri
+            captured["message_id"] = req.paths.get("message_id")
+            captured["file_key"] = req.paths.get("file_key")
+            captured["queries"] = req.queries
+            return _FakeResp(None, "", b"\x89PNG\r\nimg")
+
+    monkeypatch.setattr(_impl, "_get_client", lambda: _Client())
+    dest = tmp_path / "sub" / "pic.png"
+    result = await _impl.get_message_image_impl("om_1", "img_v3_abc", str(dest))
+    assert result["ok"] is True
+    assert captured["uri"].endswith("/im/v1/messages/:message_id/resources/:file_key")
+    assert captured["message_id"] == "om_1"
+    assert captured["file_key"] == "img_v3_abc"
+    assert ("type", "image") in captured["queries"]
+    assert dest.read_bytes() == b"\x89PNG\r\nimg"
+    assert result["bytes"] == len(b"\x89PNG\r\nimg")
+
+
+@pytest.mark.asyncio
+async def test_get_message_image_file_type_query(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+
+    class _Client:
+        async def arequest(self, req: Any) -> Any:
+            captured["queries"] = req.queries
+            return _FakeResp(None, "", b"FILEBYTES")
+
+    monkeypatch.setattr(_impl, "_get_client", lambda: _Client())
+    dest = tmp_path / "a.mp4"
+    result = await _impl.get_message_image_impl("om_2", "file_v3_x", str(dest), "file")
+    assert result["ok"] is True
+    assert ("type", "file") in captured["queries"]
+    assert dest.read_bytes() == b"FILEBYTES"
+
+
+@pytest.mark.asyncio
+async def test_get_message_image_with_user_key_uses_uat(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+
+    class _UatClient:
+        async def arequest(self, req: Any, option: Any = None) -> Any:
+            captured["uri"] = req.uri
+            captured["option"] = option
+            return _FakeResp(None, "", b"UATIMG")
+
+    monkeypatch.setattr(_impl, "_get_client", lambda: None)
+    monkeypatch.setattr(_impl, "_get_uat_client", lambda: _UatClient())
+
+    async def _uat(user_key: str = "") -> Any:
+        return _FakeUAT()
+
+    monkeypatch.setattr(_impl, "_get_valid_uat", _uat)
+    dest = tmp_path / "u.png"
+    result = await _impl.get_message_image_impl("om_3", "img_v3_u", str(dest), "image", "ou_a")
+    assert result["ok"] is True
+    assert dest.read_bytes() == b"UATIMG"
+    assert captured["uri"].endswith("/im/v1/messages/:message_id/resources/:file_key")
+    assert captured["option"].user_access_token == "uat_tok"
+
+
+@pytest.mark.asyncio
+async def test_get_message_image_user_key_not_authorized(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(_impl, "_get_client", lambda: None)
+    monkeypatch.setattr(_impl, "_get_uat_client", lambda: object())
+
+    async def _no_uat(user_key: str = "") -> Any:
+        return None
+
+    monkeypatch.setattr(_impl, "_get_valid_uat", _no_uat)
+    result = await _impl.get_message_image_impl("om_4", "img_v3_z", str(tmp_path / "x.png"), "image", "ou_a")
+    assert result["ok"] is False
+    assert result.get("need_auth") is True
+
+
+@pytest.mark.asyncio
+async def test_get_message_image_requires_args() -> None:
+    result = await _impl.get_message_image_impl("", "img_v3", "x.png")
+    assert result["ok"] is False
+
+
+def test_image_get_tool_async_with_docstring() -> None:
+    mod = importlib.import_module("feishu_message")
+    fn = mod.feishu_image_get
+    assert inspect.iscoroutinefunction(fn)
+    assert (inspect.getdoc(fn) or "").strip()
+
+
+@pytest.mark.asyncio
 async def test_delete_file_builds_delete_request(monkeypatch: pytest.MonkeyPatch) -> None:
     cap = _CapturedInvoke({"task_id": ""})
     monkeypatch.setattr(_impl, "_invoke", cap)

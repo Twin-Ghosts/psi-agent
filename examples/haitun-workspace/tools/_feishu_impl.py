@@ -2929,6 +2929,105 @@ async def download_file_impl(source: str, save_path: str, is_url: bool = False, 
     return {"ok": True, "path": str(path), "bytes": len(data)}
 
 
+# ── Message resources — download an image / file attached to a chat message ────
+#
+# Distinct from the drive medias endpoint above: images and files sent *inside a
+# chat message* are fetched via im/v1/messages/:message_id/resources/:file_key,
+# keyed by the message they belong to. The channel auto-downloads resources on the
+# message that is triggering the agent right now, but an image discovered later in
+# history (via feishu_message_list / feishu_thread_read) can only be pulled with
+# this endpoint. The file_key is the ``image_key``/``file_key`` inside the
+# message's content JSON; ``type`` is "image" for an image message, "file" for a
+# file/audio/video/media attachment.
+
+
+def _build_message_resource_request(message_id: str, file_key: str, resource_type: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.GET
+    req.uri = "/open-apis/im/v1/messages/:message_id/resources/:file_key"
+    req.paths["message_id"] = message_id
+    req.paths["file_key"] = file_key
+    req.add_query("type", resource_type)
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    return req
+
+
+async def _download_msg_resource_as_tenant(
+    message_id: str, file_key: str, resource_type: str
+) -> tuple[bytes | None, str]:
+    client = _get_client()
+    if client is None:
+        return None, "Feishu app not configured."
+    try:
+        resp = await client.arequest(_build_message_resource_request(message_id, file_key, resource_type))
+    except Exception as exc:  # SDK/transport failure
+        return None, f"{type(exc).__name__}: {exc}"
+    return _media_resp_to_bytes(resp)
+
+
+async def _download_msg_resource_as_user(
+    message_id: str, file_key: str, resource_type: str, user_key: str
+) -> tuple[bytes | None, str] | None:
+    """Download as the user's UAT. None → no usable UAT (caller decides need_auth)."""
+    client = _get_uat_client()
+    if client is None:
+        return None
+    uat = await _get_valid_uat(user_key)
+    if uat is None or not uat.access_token:
+        return None
+    from lark_channel.core.model import RequestOption  # noqa: PLC0415
+
+    option = RequestOption.builder().user_access_token(uat.access_token).build()
+    try:
+        resp = await client.arequest(_build_message_resource_request(message_id, file_key, resource_type), option)
+    except Exception as exc:  # SDK/transport failure
+        return None, f"{type(exc).__name__}: {exc}"
+    return _media_resp_to_bytes(resp)
+
+
+async def _download_msg_resource_bytes(
+    message_id: str, file_key: str, resource_type: str, user_key: str = ""
+) -> tuple[bytes | None, str]:
+    # Tenant-first, same policy as _download_media_bytes: the bot's token is tried
+    # first and the UAT only if it's denied (and the user has a cached UAT).
+    data, err = await _download_msg_resource_as_tenant(message_id, file_key, resource_type)
+    if data is not None:
+        return data, ""
+    key = user_key.strip()
+    if not key:
+        return None, err
+    user_out = await _download_msg_resource_as_user(message_id, file_key, resource_type, key)
+    if user_out is None:
+        return None, f"{err} — 或需用户授权后重试. (need_auth)"
+    return user_out
+
+
+async def get_message_image_impl(
+    message_id: str, file_key: str, save_path: str, resource_type: str = "image", user_key: str = ""
+) -> dict[str, Any]:
+    """Download an image/file attached to a chat message to disk.
+
+    Fetches via im/v1/messages/:message_id/resources/:file_key. ``file_key`` is the
+    ``image_key`` (image message) or ``file_key`` (file/media message) inside the
+    message content JSON. Tenant-first; falls back to the user's UAT when the bot
+    can't see it and a user_key is given.
+    """
+    if not message_id or not file_key or not save_path:
+        return _error("message_id, file_key and save_path are required.")
+    rtype = resource_type.strip() or "image"
+    data, err = await _download_msg_resource_bytes(message_id, file_key, rtype, user_key)
+    if data is None:
+        extra = {"need_auth": True} if "need_auth" in (err or "") else {}
+        return _error(err or "download failed", message_id=message_id, file_key=file_key, **extra)
+    path = pathlib.Path(save_path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        await anyio.Path(path).write_bytes(data)
+    except OSError as exc:
+        return _error(f"could not write file: {exc}", path=str(path))
+    return {"ok": True, "path": str(path), "bytes": len(data)}
+
+
 # ── Delete a cloud file / document (to trash) ─────────────────────────────────
 #
 # DELETE /drive/v1/files/:file_token?type=... moves the file to the recycle bin
