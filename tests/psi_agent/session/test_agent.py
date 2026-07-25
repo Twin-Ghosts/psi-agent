@@ -13,6 +13,7 @@ from psi_agent.session.agent import SessionAgent
 from psi_agent.session.ai_client import AiClient
 from psi_agent.session.conversation import Conversation
 from psi_agent.session.protocol import AgentChunk, AgentError
+from psi_agent.session.runtime_context import get_agent, get_workspace, runtime_scope
 from psi_agent.session.tool_registry import FileEntry, ToolFunction, ToolRegistry
 
 
@@ -757,7 +758,17 @@ async def test_create_agent_path_loads_tools_from_agent_keeps_history_on_workspa
     await anyio.Path(agent_pkg / "tools").mkdir()
     await anyio.Path(agent_pkg / "schedules").mkdir()
     await anyio.Path(agent_pkg / "tools" / "echo_tool.py").write_text(
-        'async def echo_tool(text: str) -> str:\n    """Echo.\n\n    Args:\n        text: Input.\n    """\n    return text\n',
+        textwrap.dedent(
+            '''\
+            async def echo_tool(text: str) -> str:
+                """Echo.
+
+                Args:
+                    text: Input.
+                """
+                return text
+            '''
+        ),
         encoding="utf-8",
     )
 
@@ -776,8 +787,6 @@ async def test_create_agent_path_loads_tools_from_agent_keeps_history_on_workspa
 
 @pytest.mark.anyio
 async def test_runtime_scope_exposes_workspace_and_agent(tmp_path: Path) -> None:
-    from psi_agent.session.runtime_context import get_agent, get_workspace, runtime_scope
-
     ws = str(tmp_path / "ws")
     ag = str(tmp_path / "ag")
     with runtime_scope(session_id="sid", workspace=ws, agent=ag):

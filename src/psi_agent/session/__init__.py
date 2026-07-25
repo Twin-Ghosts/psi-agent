@@ -34,14 +34,8 @@ class Session:
     async def run(self) -> None:
         setup_logging(verbose=self.verbose)
 
-        workspace_path = (
-            Path.cwd() if self.workspace == "" else Path(str(await anyio.Path(self.workspace).resolve()))
-        )
-        agent_path = (
-            workspace_path
-            if self.agent == ""
-            else Path(str(await anyio.Path(self.agent).resolve()))
-        )
+        workspace_path = Path.cwd() if self.workspace == "" else Path(str(await anyio.Path(self.workspace).resolve()))
+        agent_path = workspace_path if self.agent == "" else Path(str(await anyio.Path(self.agent).resolve()))
 
         logger.info(f"Loading workspace from {workspace_path}")
         if agent_path != workspace_path:
