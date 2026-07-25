@@ -1,10 +1,16 @@
-"""Per-task session / path identity for in-process tool calls.
+"""Per-task session / path identity for in-process **workspace tool** calls.
 
 Gateway runs many Sessions in one process, so ``sys.argv`` is the gateway CLI
-and cannot identify which Session is executing a tool. Tools that need a
-session id (e.g. workspace ``todo``) should call ``get_session_id()``.
-Tools that need the open folder or agent package may call
-``get_workspace()`` / ``get_agent()``.
+and cannot identify which Session is executing a tool.
+
+**Scope (keep narrow — see ``session/AGENTS.md``):**
+
+- **Writer**: only ``SessionAgent.run`` via ``runtime_scope``.
+- **Readers**: workspace tools only (``get_session_id`` / ``get_workspace`` /
+  ``get_agent``). Framework code must use explicit ``workspace_path`` /
+  ``agent_path`` / ``Conversation.session_id``, not these getters.
+- **Do not** stuff AppData roots, credentials, or Gateway config into
+  ContextVars; prefer DI / dataclass fields.
 
 ``SessionAgent.run`` enters ``runtime_scope`` for the duration of a turn;
 anyio tasks started from that context inherit the values.

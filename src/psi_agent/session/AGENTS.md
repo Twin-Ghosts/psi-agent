@@ -11,7 +11,19 @@ Session 层是 psi-agent 的核心——负责 workspace 解析、agent loop、t
 | `Session.workspace` | `--workspace` | 历史 JSONL 所在根（`{workspace}/histories/`）；空 → `Path.cwd()` |
 | `Session.agent` | `--agent` | Agent 包目录（tools / schedules / `systems/`）；**空 → 与 workspace 相同**（兼容旧单根） |
 
-`SessionAgent.create(workspace_path=…, agent_path=…)`：省略 `agent_path` 时回落到 `workspace_path`。每回合经 ``runtime_scope`` 绑定 `get_session_id()` / `get_workspace()` / `get_agent()`，供工具读取。
+`SessionAgent.create(workspace_path=…, agent_path=…)`：省略 `agent_path` 时回落到 `workspace_path`。每回合经 ``runtime_scope`` 绑定 `get_session_id()` / `get_workspace()` / `get_agent()`（见下节适用范围）。
+
+### `runtime_context` 适用范围（刻意限制）
+
+ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩），但仍是隐藏依赖——应尽量窄用，能传参就传参。
+
+| | 约定 |
+|--|------|
+| **唯一写入方** | 仅 `SessionAgent.run` 经 `runtime_scope`（整轮含 tool 执行）。禁止 Gateway / Channel / AI / 测试外业务代码自行 `set_*` |
+| **`get_session_id()`** | 仅 **workspace 工具**需要「当前会话 id」时（如 `todo`、fusion memory）。框架内部用 `Conversation.session_id` / 显式参数 |
+| **`get_workspace()` / `get_agent()`** | 仅 **workspace 工具**在解析相对路径、找 agent 包根时（`write`/`bash`/`read` 等）。**框架核心**（`SessionAgent` / registries / Gateway / Channel）一律用构造时的 `workspace_path` / `agent_path` 或 REST 入参，**禁止**回读 ContextVar |
+| **禁止扩进 ContextVar 的** | AppData / 记忆区根、API key、provider、Gateway listen、任意「方便全局拿一下」的配置——这些走显式字段 / DI / CLI |
+| **本步消费现状** | 路径 getter **尚无**生产工具调用；先提供绑定 + API，工具侧消费另开小 PR |
 
 ## Workspace 启动流程
 
@@ -29,7 +41,7 @@ Session 层是 psi-agent 的核心——负责 workspace 解析、agent loop、t
 - `SessionAgent` 自包含：持有 `_ai_client`、`_channel_adapter`、`_lock`、`_workspace_path`、`_agent_path`
 - `_session_id` 从 `_history_path.stem` 派生，同时用于 sys.modules 隔离（tools/system 的 module name）
 - `channel_socket` 由 `Session.run()` 直接传给 `serve_session()`，不进入 agent 内部
-- **工具可见的 session id / 路径**：`SessionAgent.run` 用 ``runtime_context.runtime_scope`` 绑定 ContextVar（Gateway 同进程多 Session 时 ``sys.argv`` 无法标识当前会话）。``todo`` 等经 ``get_session_id()`` 读取，勿回落到 ``default``
+- **工具可见的 session id / 路径**：见上方「`runtime_context` 适用范围」。``todo`` 等经 ``get_session_id()`` 读取，勿回落到 ``default``
 - 所有手动模块加载使用 `原名_session_id_文件hash` 作为 module name（tool 和 system prompt 均用 `compile` + `exec` 避免 importlib bytecode 缓存），确保同进程多 session 隔离
 - `SessionAgent.create()` 完成所有初始化——`__init__.py` 只做入口编排
 - Tool / schedule / system 从 **agent_path** 加载；history 仍挂在 **workspace_path**
