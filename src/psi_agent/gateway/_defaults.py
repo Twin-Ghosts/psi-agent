@@ -1,4 +1,4 @@
-"""Step 2 — Gateway path defaults (wiring only; no AppData / no tool I/O).
+"""Gateway path defaults (wiring only; no AppData).
 
 What this module is for
 -----------------------
@@ -10,9 +10,8 @@ these resolvers.
 What this is NOT
 ----------------
 - Not AppData / history relocation.
-- Not workspace tools reading ``get_workspace()`` / ``get_agent()`` (later PR).
-  After wiring, Session *loads* tools from ``agent``; relative-path *writes*
-  still follow whatever each tool does today until that follow-up lands.
+- Tool-side path IO is haitun ``tools/_runtime_paths.py`` (reads
+  ``get_workspace()`` / ``get_agent()``).
 
 Soft default
 ------------

@@ -7,8 +7,6 @@ Session's ``ScheduleRegistry`` loads those files and runs them on cron.
 from __future__ import annotations
 
 import json
-import os
-import pathlib
 import re
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -19,10 +17,10 @@ from croniter import croniter
 
 
 def _schedules_dir() -> anyio.Path:
-    workspace_dir = os.environ.get("WORKSPACE_DIR", "")
-    if workspace_dir:
-        return anyio.Path(workspace_dir) / "schedules"
-    return anyio.Path(str(pathlib.Path(__file__).resolve().parents[1])) / "schedules"
+    import _runtime_paths as _paths
+
+    # Schedules are session/user data under the workspace.
+    return _paths.resolve_workspace() / "schedules"
 
 
 def _validate_schedule_name(schedule_name: str) -> str | None:

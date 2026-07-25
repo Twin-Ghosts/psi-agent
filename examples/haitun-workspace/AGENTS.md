@@ -77,17 +77,31 @@ service tools:
 
 ## Tools (`tools/`)
 
+### Path roots（第 3 步：读 ContextVar；非 AppData）
+
+当 Session `agent ≠ workspace` 时，工具必须分清两根目录。统一入口：
+`tools/_runtime_paths.py`（也经 `_session_helpers.current_workspace` /
+`current_agent` 暴露）。
+
+| 解析 API | 优先顺序 | 典型用途 |
+|----------|----------|----------|
+| `workspace_dir()` / `resolve_workspace()` | 显式参数 → `get_workspace()` → `WORKSPACE_DIR` → 本包父目录 | 相对路径读写、`bash`/`powershell` cwd、`schedules/`、`flows/`、todos、feishu UAT |
+| `agent_dir()` / `resolve_agent()` | 显式参数 → `get_agent()` → 回落 `workspace_dir()` | `skills/`（`skill_manage`） |
+| `resolve_user_path(path)` | 相对 → 拼到 workspace；绝对路径原样 | `read` / `write` / `edit` / `list_dir` / `find_files` |
+
+**刻意为之**：history 仍在 `{workspace}/histories/`；AppData 搬家另 PR，工具不读 AppData。
+
 | Tool | Notes |
 |---|---|
-| `bash` | Shell commands (anyio, Windows-aware bash detection). On Windows the installer bundles MSYS2 at `{app}\msys64`, added to PATH by the launcher, so bash works out-of-the-box. |
-| `powershell` | Windows-native shell. |
-| `read` / `write` / `edit` | Async file ops. |
-| `list_dir` / `find_files` | List one directory level; recursively find files by glob (`**/*.py`), sorted newest-first. |
+| `bash` | Shell commands (anyio, Windows-aware bash detection). On Windows the installer bundles MSYS2 at `{app}\msys64`, added to PATH by the launcher, so bash works out-of-the-box. **cwd = workspace**. |
+| `powershell` | Windows-native shell. **默认 cwd = workspace**. |
+| `read` / `write` / `edit` | Async file ops；相对路径相对 **workspace**. |
+| `list_dir` / `find_files` | List one directory level; recursively find files by glob (`**/*.py`), sorted newest-first；默认根为 **workspace**. |
 | `write_excel` | Build a real `.xlsx` from a 2D array (bold header, column-width fitting). |
 | `write_word` | Build a real `.docx` from structured blocks (headings/paragraphs/tables); sets the East-Asian font (`w:eastAsia`) on every style so Chinese text isn't "字体不齐". |
-| `skill_manage` | CRUD on `skills/<name>/SKILL.md` (agent-created skills are mutable). |
-| `flow_manage` | CRUD + promote on Fusion Flow assets under `flows/`. |
-| `schedule_manage` | CRUD on `schedules/<name>/TASK.md`. **Recurring**: `action=create` + `cron`. **One-shot**: `action=create` + `once_at` (`YYYY-MM-DD HH:MM` local) → writes cron + `run_once: true` (Session deletes TASK.md after first successful fire). **`fire=tool`**: Session calls `tool(**tool_args)` at fire time with no LLM (required for Feishu IM reminders via `feishu_message_send`). `fire=prompt` (default) injects TASK body for an agent turn. Also `visibility` (`display`/`silent`), list/view/patch/delete. |
+| `skill_manage` | CRUD on **agent** `skills/<name>/SKILL.md`（经 `get_agent()`；agent-created skills are mutable）. |
+| `flow_manage` | CRUD + promote on Fusion Flow assets under **workspace** `flows/`. |
+| `schedule_manage` | CRUD on **workspace** `schedules/<name>/TASK.md`. **Recurring**: `action=create` + `cron`. **One-shot**: `action=create` + `once_at` (`YYYY-MM-DD HH:MM` local) → writes cron + `run_once: true` (Session deletes TASK.md after first successful fire). **`fire=tool`**: Session calls `tool(**tool_args)` at fire time with no LLM (required for Feishu IM reminders via `feishu_message_send`). `fire=prompt` (default) injects TASK body for an agent turn. Also `visibility` (`display`/`silent`), list/view/patch/delete. |
 | `memory_add` / `memory_search` / `memory_answer_context` / `memory_health` | Per-Session routed Fusion Memory MCP tools. Authentication comes only from the trusted runtime Session and operator token map. |
 | `search` (`search.py` + `_mcp.py`) | Serper web search via MCP. Requires the `mcp` extra and `uvx serper-mcp-server`; tools surface as `serper_*`. |
 | `x_search` (`x_search.py` + `_x_search_impl.py`) | Search recent public posts on X (Twitter) via the X API v2 recent-search endpoint (last ~7 days). `x_search(query, max_results, sort_order)` supports X search operators (`from:`, `#tag`, `"phrase"`, `lang:`, `-is:retweet`). Uses `aiohttp` (already a core dep), no extra packages. Requires `X_BEARER_TOKEN` (X API v2 App-only OAuth 2.0 bearer token). |

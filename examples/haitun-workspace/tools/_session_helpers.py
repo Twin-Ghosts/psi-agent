@@ -47,6 +47,20 @@ def current_session_id() -> str:
     return _argv_flag(sys.argv, "--session-id")
 
 
+def current_workspace() -> str:
+    """User workspace root for the active turn (see ``_runtime_paths.workspace_dir``)."""
+    import _runtime_paths as _paths
+
+    return _paths.workspace_dir()
+
+
+def current_agent() -> str:
+    """Agent package root for the active turn (see ``_runtime_paths.agent_dir``)."""
+    import _runtime_paths as _paths
+
+    return _paths.agent_dir()
+
+
 def _session_id_from_process_id(process_id: str) -> str:
     process_id = process_id.strip()
     for suffix in ("-session", "-ai"):

@@ -78,9 +78,10 @@ def build_env() -> dict[str, str]:
     env = dict(os.environ)
     env.setdefault("EXPRESS_SERVER_URL", DEFAULT_CANVAS_URL)
     env.setdefault("ENABLE_CANVAS_SYNC", "true")
-    export_dir = env.get("EXCALIDRAW_EXPORT_DIR") or env.get("WORKSPACE_DIR")
-    if export_dir:
-        env["EXCALIDRAW_EXPORT_DIR"] = export_dir
+    if not env.get("EXCALIDRAW_EXPORT_DIR"):
+        import _runtime_paths as _paths
+
+        env["EXCALIDRAW_EXPORT_DIR"] = _paths.workspace_dir()
     return env
 
 

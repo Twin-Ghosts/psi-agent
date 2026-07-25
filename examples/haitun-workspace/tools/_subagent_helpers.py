@@ -305,12 +305,9 @@ async def _fetch_spawn_config(gateway_url: str, ai_id: str) -> dict[str, str] | 
 
 
 def resolve_workspace(raw: str) -> Path:
-    if raw.strip():
-        return Path(raw.strip()).resolve()
-    env = os.environ.get("WORKSPACE_DIR", "").strip()
-    if env:
-        return Path(env).resolve()
-    return Path(__file__).resolve().parents[1]
+    import _runtime_paths as _paths
+
+    return Path(_paths.workspace_dir(raw)).resolve()
 
 
 def resolve_project_root(workspace: Path) -> Path:

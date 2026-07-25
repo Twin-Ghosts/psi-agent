@@ -29,6 +29,8 @@ import threading
 import time
 from contextlib import suppress
 
+import _runtime_paths as _paths
+
 from loguru import logger
 
 _IS_WINDOWS = sys.platform == "win32"
@@ -192,7 +194,7 @@ def ensure_server() -> str:
                 text=True,
                 bufsize=1,
                 env=_build_env(),
-                cwd=os.environ.get("WORKSPACE_DIR") or None,
+                cwd=_paths.workspace_dir() or None,
                 creationflags=creationflags,
                 start_new_session=start_new_session,
             )

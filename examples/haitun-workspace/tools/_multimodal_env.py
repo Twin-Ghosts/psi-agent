@@ -71,9 +71,9 @@ def _parse_env_line(line: str) -> tuple[str, str] | None:
 
 def apply_workspace_env_file(workspace: str) -> None:
     """Load ``{workspace}/.env.multimodal`` into ``os.environ`` once per workspace."""
-    ws = workspace.strip() or os.environ.get("WORKSPACE_DIR", "").strip()
-    if not ws:
-        ws = str(Path(__file__).resolve().parents[1])
+    import _runtime_paths as _paths
+
+    ws = workspace.strip() or _paths.workspace_dir()
     resolved = str(Path(ws).resolve())
     if resolved in _WORKSPACE_ENV_LOADED:
         return

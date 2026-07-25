@@ -48,12 +48,9 @@ class ImageGenResult:
 
 
 def resolve_workspace(raw: str) -> anyio.Path:
-    if raw.strip():
-        return anyio.Path(raw.strip())
-    env = os.environ.get("WORKSPACE_DIR", "").strip()
-    if env:
-        return anyio.Path(env)
-    return anyio.Path(str(Path(__file__).resolve().parents[1]))
+    import _runtime_paths as _paths
+
+    return _paths.resolve_workspace(raw)
 
 
 def _parse_reference_images(raw: str) -> tuple[list[str] | None, str | None]:

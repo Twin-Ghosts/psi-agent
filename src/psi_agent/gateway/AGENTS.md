@@ -68,11 +68,9 @@ Gateway 进程
 11. runner.setup() + create_site + site.start() + tray/webview/browser 等待与 finally 清理
 ```
 
-## 默认 agent / workspace（小步第 2 层：接线；AppData / 工具读路径另 PR）
+## 默认 agent / workspace（小步：Gateway 接线已合；工具读路径见 haitun `_runtime_paths`）
 
-### 本层接口范围（看 PR 先看这段）
-
-三区拆分拆成小 PR 时，**本层只做「路径怎么传进 Session」**，不做「工具怎么按区读盘」。
+### 路径分层（看 PR 先看这段）
 
 ```text
 调用方（spa / 飞书 / haitun sessions_create / …）
@@ -82,23 +80,23 @@ Gateway 进程
 Gateway SessionManager（缺省补 --default-agent / --default-workspace）
     │  Session(workspace=…, agent=…)
     ▼
-Session（#472 已支持）
+Session（#472）
     │  启动时：tools / schedules / system 从 agent_path 加载
     │         history 仍在 workspace/histories/
     │  回合内：runtime_scope 写入 get_agent()/get_workspace() ContextVar
     ▼
-workspace 工具（write/bash/…）按 ContextVar 解析相对路径  ← ❌ 不在本层
-AppData 记忆区（history/state/todos）                   ← ❌ 不在本层
+workspace 工具（haitun `_runtime_paths`）按 ContextVar 解析相对路径  ← ✅ 第 3 步
+AppData 记忆区（history/state/todos）                   ← ❌ 另 PR
 ```
 
-| 已合 / 本 PR / 未做 | 内容 |
-|---------------------|------|
+| 已合 / 未做 | 内容 |
+|-------------|------|
 | ✅ #472 | Session 可选 `agent`；加载能力包；ContextVar **API** |
-| ✅ **本 PR** | Gateway CLI + `GET /defaults` + `POST /sessions.agent`；各**调用方**把路径交给 Gateway；Gateway 再交给 Session |
-| ❌ 后续 | haitun 等工具真正 `get_workspace()`/`get_agent()` 读路径 |
+| ✅ #482 | Gateway CLI + `GET /defaults` + `POST /sessions.agent`；调用方接线 |
+| ✅ 第 3 步 | haitun 工具读 `get_workspace()` / `get_agent()`（`_runtime_paths`） |
 | ❌ 后续 | AppData（history/state/todos 迁出 workspace） |
 
-**可读验收**：新建 Session 后 `GET /sessions` 里有 `agent` 字段；该 Session 的 tools 来自 agent 目录（若与 workspace 不同）。**不可用本 PR 验收**：相对路径是否写入「用户工作区」而非 agent 包——那是工具读 ContextVar 的下一步。
+**可读验收（第 3 步）**：`agent ≠ workspace` 时，`write("a.txt")` 落在 workspace；`skill_manage` 读写 `agent/skills/`。
 
 | CLI | 含义 |
 |-----|------|

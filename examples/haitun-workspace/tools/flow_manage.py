@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import pathlib
 import re
 from datetime import UTC, datetime
 
@@ -11,10 +9,10 @@ import anyio
 
 
 def _flows_dir() -> anyio.Path:
-    workspace_dir = os.environ.get("WORKSPACE_DIR", "")
-    if workspace_dir:
-        return anyio.Path(workspace_dir) / "flows"
-    return anyio.Path(str(pathlib.Path(__file__).resolve().parents[1])) / "flows"
+    import _runtime_paths as _paths
+
+    # Flow task dirs live under the user workspace.
+    return _paths.resolve_workspace() / "flows"
 
 
 def _validate_flow_name(flow_name: str) -> str | None:
