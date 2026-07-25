@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from contextlib import aclosing, suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import anyio
 from croniter import croniter
@@ -188,15 +190,43 @@ class ScheduleRegistry:
     # -- runner coroutine (perpetual) -------------------------------------------
 
     @staticmethod
+    def _schedule_tz() -> ZoneInfo | None:
+        """Resolve the timezone cron schedules are anchored to.
+
+        Reads the standard ``TZ`` env var, e.g. ``Asia/Shanghai``. Returns
+        ``None`` when unset or invalid; the caller then falls back to
+        machine-local wall time via a naive ``datetime.now()``, so no IANA
+        data package (tzdata) is strictly required.
+        """
+        name = os.environ.get("TZ", "").strip()
+        if not name:
+            return None
+        try:
+            return ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError) as e:
+            logger.warning(f"Invalid TZ {name!r}, falling back to machine-local time: {e!r}")
+            return None
+
+    @staticmethod
     def _seconds_until_next(cron: str, *, now: datetime | None = None) -> float:
-        """Seconds until the next cron fire in *machine-local* wall time.
+        """Seconds until the next cron fire in *local* wall time.
 
         刻意为之: ``once_at`` / TASK ``cron`` fields are local clock values
         (see workspace ``schedule_manage``). Passing a Unix timestamp into
         ``croniter`` makes it treat those fields as UTC, so one-shot reminders
         on non-UTC machines fire hours late (e.g. UTC+8 → +8h).
+
+        When the standard ``TZ`` env var is set, anchor to that zone so cron
+        fields mean wall time *there* (e.g. a UTC container with
+        ``TZ=Asia/Shanghai`` fires ``0 9 * * *`` at Beijing 9am). When ``TZ``
+        is unset/invalid, fall back to the machine's naive local clock —
+        croniter reads the naive datetime's fields directly, so behavior is
+        unchanged from the default.
         """
-        base = now if now is not None else datetime.now()
+        if now is None:
+            tz = ScheduleRegistry._schedule_tz()
+            now = datetime.now(tz) if tz is not None else datetime.now()
+        base = now
         nxt = croniter(cron, base).get_next(datetime)
         return max(0.0, (nxt - base).total_seconds())
 

@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import anyio
 import pytest
+from croniter import croniter
 
 from psi_agent._yaml import parse_yaml_header
 from psi_agent.session.conversation import Conversation
@@ -399,6 +400,37 @@ def test_seconds_until_next_uses_local_wall_clock() -> None:
     cron = f"{target.minute} {target.hour} {target.day} {target.month} *"
     wait = ScheduleRegistry._seconds_until_next(cron, now=now)
     assert 0.0 <= wait <= 60.0, f"expected local next-minute wait, got {wait}"
+
+
+def test_schedule_tz_unset_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TZ", raising=False)
+    assert ScheduleRegistry._schedule_tz() is None
+
+
+def test_schedule_tz_invalid_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TZ", "Not/AZone")
+    assert ScheduleRegistry._schedule_tz() is None
+
+
+def test_schedule_tz_valid(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    tz = ScheduleRegistry._schedule_tz()
+    assert tz is not None
+    assert str(tz) == "Asia/Shanghai"
+
+
+def test_cron_anchored_to_tz(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With TZ set, cron fields mean wall time in that zone, not UTC.
+
+    ``0 9 * * *`` must resolve to 09:00 in Asia/Shanghai regardless of the
+    host clock's zone — the next fire's local hour is 9.
+    """
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    tz = ScheduleRegistry._schedule_tz()
+    assert tz is not None
+    base = datetime.now(tz)
+    nxt = croniter("0 9 * * *", base).get_next(datetime)
+    assert nxt.hour == 9, f"expected 09:00 local, got {nxt.hour}"
 
 
 @pytest.mark.anyio
