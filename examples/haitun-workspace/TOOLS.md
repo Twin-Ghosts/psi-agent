@@ -177,7 +177,9 @@ message_id / sender_open_id）。需要群里之前的上下文时：
     这样即使回调没接通也能表达意图。纯粹只是发一段文字仍用 `feishu_message_send`。
 16. **建新群拉人（没有现成群可发时）**：`feishu_message_send` 只能往**已存在**的群发消息；要**从零建一个
     新群并把人拉进来**时，用 `feishu_chat_create(name, user_ids=[...], description=..., owner_id=...)`。
-    机器人用自己 tenant 身份建群、自动入群，`owner_id` 留空时机器人即群主（这样之后还能继续往群里发消息）；
-    建好后拿返回的 `chat_id` 再 `feishu_message_send` 发言。`user_ids` 传的是 **open_id 不是姓名**——先用
+    机器人用自己 tenant 身份建群，**群主默认设成提需求的那个人**——把 `<feishu_context>` 的 `sender_open_id`
+    传给 `owner_id`，群就归他所有；机器人自己留作管理员，所以建好后照样能拿返回的 `chat_id` 用
+    `feishu_message_send` 往群里发言。提需求的人明确说要让别人当群主时，`owner_id` 就传那个人的 open_id；
+    只有纯机器人自建、没有具体发起人时才留空（此时机器人当群主）。`user_ids` 传的是 **open_id 不是姓名**——先用
     `feishu_chat_find_member`（从别的群）或 `feishu_department_members` 把姓名反查成 open_id（单次最多 50 人，
     超了先建再补拉）。返回里的 `invalid_user_ids` 是飞书没能加进来的人（多为不在通讯录权限范围内），如实反馈。

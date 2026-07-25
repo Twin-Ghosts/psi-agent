@@ -82,10 +82,11 @@ async def feishu_chat_create(
 ) -> str:
     """Create a **new** Feishu/Lark group chat and pull the given people in (拉人建群).
 
-    Use this when there is no existing group to post to — the bot creates one, joins
-    it, and (unless you pass ``owner_id``) becomes its owner, so afterwards you can send
-    to the returned ``chat_id`` with ``feishu_message_send``. This is the missing piece
-    versus ``feishu_message_send``, which can only post to a group that already exists.
+    Use this when there is no existing group to post to — the bot creates the group,
+    hands it to the **requester** as owner (``owner_id``), and stays on as an admin so
+    you can still send to the returned ``chat_id`` with ``feishu_message_send``. This is
+    the missing piece versus ``feishu_message_send``, which can only post to a group
+    that already exists.
 
     Members are given as user ids, not names: resolve names to open_ids first with
     ``feishu_chat_find_member`` (from another group) or ``feishu_department_members``.
@@ -98,7 +99,11 @@ async def feishu_chat_create(
             Empty creates a group with just the bot; invite more later.
         description: Group description/topic (optional).
         owner_id: Id (matching ``user_id_type``) of the person to make group owner.
-            Empty leaves the bot as owner (needed for the bot to keep posting).
+            **Default to the requester** — pass the ``sender_open_id`` from
+            ``<feishu_context>`` so the person who asked for the group owns it (the bot
+            stays an admin and can keep posting). Pass someone else's id if the requester
+            explicitly wants another person to be owner. Leave empty only for a
+            bot-authored group with no human requester (the bot then owns it).
         user_id_type: Id form used by user_ids/owner_id — open_id (default), union_id, or user_id.
     """
     return _f.dumps_result(await _f.create_chat_impl(name, user_ids, description, owner_id, user_id_type))

@@ -238,13 +238,25 @@ async def test_create_chat_builds_request_and_returns_chat_id(monkeypatch: pytes
 
 
 @pytest.mark.asyncio
-async def test_create_chat_owner_sets_bot_manager(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"chat_id": "oc_o", "owner_id": "ou_owner"})
+async def test_create_chat_owner_is_requester_bot_stays_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    # owner_id is the requester's sender_open_id: the group is handed to them, and
+    # set_bot_manager keeps the bot on as admin so it can still post afterwards.
+    cap = _CapturedInvoke({"chat_id": "oc_o", "owner_id": "ou_requester"})
     monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_chat_impl("群", ["ou_a"], owner_id="ou_owner")
-    assert cap.request.body["owner_id"] == "ou_owner"
+    result = await _impl.create_chat_impl("群", ["ou_a"], owner_id="ou_requester")
+    assert cap.request.body["owner_id"] == "ou_requester"
     assert _qdict(cap.request).get("set_bot_manager") == "true"
-    assert result["owner_id"] == "ou_owner"
+    assert result["owner_id"] == "ou_requester"
+
+
+@pytest.mark.asyncio
+async def test_create_chat_no_owner_leaves_bot_as_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No requester → bot owns the group; set_bot_manager is not sent.
+    cap = _CapturedInvoke({"chat_id": "oc_b"})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    await _impl.create_chat_impl("群", ["ou_a"])
+    assert "owner_id" not in cap.request.body
+    assert "set_bot_manager" not in _qdict(cap.request)
 
 
 @pytest.mark.asyncio

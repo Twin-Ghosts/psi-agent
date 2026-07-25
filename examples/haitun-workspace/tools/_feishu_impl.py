@@ -845,18 +845,21 @@ async def create_chat_impl(
 ) -> dict[str, Any]:
     """Create a new group chat and pull the given people in. Returns the new chat_id.
 
-    Created with the bot's tenant token, so the bot itself joins the group (and, when
-    ``owner_id`` is empty, becomes its owner) — it can then post to the group with
-    ``feishu_message_send``. ``user_ids`` are the members to invite (max 50, resolve
-    names via ``feishu_chat_find_member`` / ``feishu_department_members``).
+    Created with the bot's tenant token. ``owner_id`` should be the **requester**
+    (the person who asked for the group — their ``sender_open_id``): the group is
+    handed to them, and the bot stays on as an admin (``set_bot_manager``) so it can
+    still post with ``feishu_message_send``. When ``owner_id`` is empty the bot itself
+    owns the group (fallback for bot-authored groups with no human requester).
+    ``user_ids`` are the members to invite (max 50, resolve names via
+    ``feishu_chat_find_member`` / ``feishu_department_members``).
     """
     if not name.strip():
         return _error("name is required to create a group chat.")
     ids = [u.strip() for u in (user_ids or []) if u and u.strip()]
     if len(ids) > 50:
         return _error("Feishu allows at most 50 members per create-chat call; invite the rest afterwards.")
-    # Bot must own the group to be a member and post later, so make it manager when
-    # an explicit owner is set.
+    # Hand the group to the requester (owner_id) but keep the bot as an admin so it
+    # can still post afterwards; only when no owner is given does the bot own it.
     set_bot_manager = bool(owner_id.strip())
     req = _build_create_chat_request(
         name.strip(), description.strip(), ids, owner_id.strip(), user_id_type, set_bot_manager
