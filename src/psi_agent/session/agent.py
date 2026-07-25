@@ -19,7 +19,7 @@ from psi_agent.session.history_display import (
     with_kind,
 )
 from psi_agent.session.protocol import AgentChunk, AgentError
-from psi_agent.session.runtime_context import session_id_scope
+from psi_agent.session.runtime_context import runtime_scope
 from psi_agent.session.schedule_registry import ScheduleRegistry
 from psi_agent.session.system_prompt import SystemPrompt
 from psi_agent.session.tool_registry import ToolRegistry
@@ -36,8 +36,8 @@ class SessionAgent:
 
     Design principle: ``__init__`` takes already-built components.
     ``create()`` is the async factory that assembles everything from a
-    workspace directory.  ``handle_request()`` owns the full request
-    lifecycle: parse → lock+prepare → run → write.
+    workspace directory (and optional agent package).  ``handle_request()``
+    owns the full request lifecycle: parse → lock+prepare → run → write.
     """
 
     def __init__(
@@ -50,6 +50,8 @@ class SessionAgent:
         schedule_registry: ScheduleRegistry | None = None,
         system_prompt: SystemPrompt | None = None,
         max_tool_rounds: int = 128,
+        workspace_path: Path | None = None,
+        agent_path: Path | None = None,
     ) -> None:
         self._ai_client = ai_client
         self._channel_adapter = channel_adapter or ChannelAdapter()
@@ -59,6 +61,8 @@ class SessionAgent:
         self._system_prompt = system_prompt or SystemPrompt()
         self._max_tool_rounds = max_tool_rounds
         self._lock = anyio.Lock()
+        self._workspace_path = workspace_path
+        self._agent_path = agent_path
 
     # -- factory --------------------------------------------------------------
 
@@ -70,13 +74,21 @@ class SessionAgent:
         workspace_path: Path,
         max_tool_rounds: int = 128,
         session_id: str | None = None,
+        agent_path: Path | None = None,
     ) -> SessionAgent:
-        """Production entry point.  Loads everything from *workspace_path*."""
+        """Production entry point.
+
+        *workspace_path* owns history (``histories/``) as before.
+        *agent_path* loads tools / schedules / system; when omitted, falls
+        back to *workspace_path* (single-root compatibility).
+        """
+        agent_root = agent_path if agent_path is not None else workspace_path
+
         ai_client = AiClient(ai_socket)
         conversation = await Conversation.from_workspace(workspace_path, session_id)
-        tool_registry = await ToolRegistry.load(workspace_path / "tools", conversation.session_id)
-        schedule_registry = await ScheduleRegistry.load(workspace_path / "schedules")
-        system_prompt = await SystemPrompt.from_workspace(workspace_path, conversation.session_id)
+        tool_registry = await ToolRegistry.load(agent_root / "tools", conversation.session_id)
+        schedule_registry = await ScheduleRegistry.load(agent_root / "schedules")
+        system_prompt = await SystemPrompt.from_workspace(agent_root, conversation.session_id)
 
         return cls(
             ai_client=ai_client,
@@ -85,6 +97,8 @@ class SessionAgent:
             schedule_registry=schedule_registry,
             system_prompt=system_prompt,
             max_tool_rounds=max_tool_rounds,
+            workspace_path=workspace_path,
+            agent_path=agent_root,
         )
 
     # -- delegation -----------------------------------------------------------
@@ -164,10 +178,14 @@ class SessionAgent:
         user_message = with_kind(user_message, user_kind)
 
         # Gateway embeds many Sessions in one process — bind this turn so
-        # workspace tools (todo, …) do not fall back to session_id "default".
-        with session_id_scope(self._conversation.session_id):
+        # tools can read session id / workspace / agent paths via ContextVars.
+        with runtime_scope(
+            session_id=self._conversation.session_id,
+            workspace=str(self._workspace_path) if self._workspace_path is not None else "",
+            agent=str(self._agent_path) if self._agent_path is not None else "",
+        ):
             async with self._conversation:
-                # reload tools and schedules from workspace (incremental hash-based)
+                # reload tools and schedules from agent package (incremental hash-based)
                 await self._tool_registry.refresh()
                 await self._schedule_registry.refresh()
 

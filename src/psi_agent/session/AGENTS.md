@@ -4,26 +4,35 @@
 
 Session 层是 psi-agent 的核心——负责 workspace 解析、agent loop、tool 执行、schedule 调度以及面向 Channel 的 HTTP/SSE 服务。
 
+## Workspace / Agent 路径
+
+| 字段 | CLI | 用途 |
+|------|-----|------|
+| `Session.workspace` | `--workspace` | 历史 JSONL 所在根（`{workspace}/histories/`）；空 → `Path.cwd()` |
+| `Session.agent` | `--agent` | Agent 包目录（tools / schedules / `systems/`）；**空 → 与 workspace 相同**（兼容旧单根） |
+
+`SessionAgent.create(workspace_path=…, agent_path=…)`：省略 `agent_path` 时回落到 `workspace_path`。每回合经 ``runtime_scope`` 绑定 `get_session_id()` / `get_workspace()` / `get_agent()`，供工具读取。
+
 ## Workspace 启动流程
 
-`Session.run()` 的启动顺序（由 `SessionAgent.create()` 完成 workspace 加载）：
+`Session.run()` 的启动顺序（由 `SessionAgent.create()` 完成加载）：
 
 ```
 1. setup_logging(verbose)
-2. 解析 workspace 路径（空字符串时用 Path.cwd()，否则 anyio.Path.resolve()）
-3. SessionAgent.create() → 生成 session_id、创建 AiClient/ChannelAdapter/anyio.Lock、加载 tools/schedules/system 模块
+2. 解析 workspace（空 → cwd）；解析 agent（空 → 同 workspace）
+3. SessionAgent.create(workspace_path=…, agent_path=…) → session_id、AiClient、从 agent 加载 tools/schedules/system；history 仍在 workspace/histories/
 4. 启动 anyio.task_group：
    ├── serve_session(agent=agent)  ← 从 agent 读取 channel_socket + handle_request
    └── 每个 schedule 一个 run_one_schedule(schedule, agent) task
 
 **关键点**：
-- `SessionAgent` 自包含：持有 `_ai_client`、`_channel_adapter`、`_lock`
+- `SessionAgent` 自包含：持有 `_ai_client`、`_channel_adapter`、`_lock`、`_workspace_path`、`_agent_path`
 - `_session_id` 从 `_history_path.stem` 派生，同时用于 sys.modules 隔离（tools/system 的 module name）
 - `channel_socket` 由 `Session.run()` 直接传给 `serve_session()`，不进入 agent 内部
-- **工具可见的 session id**：`SessionAgent.run` 用 ``runtime_context.session_id_scope`` 绑定 ContextVar（Gateway 同进程多 Session 时 ``sys.argv`` 无法标识当前会话）。workspace ``todo`` 等经 ``current_session_id()`` 读取，勿回落到 ``default``
+- **工具可见的 session id / 路径**：`SessionAgent.run` 用 ``runtime_context.runtime_scope`` 绑定 ContextVar（Gateway 同进程多 Session 时 ``sys.argv`` 无法标识当前会话）。``todo`` 等经 ``get_session_id()`` 读取，勿回落到 ``default``
 - 所有手动模块加载使用 `原名_session_id_文件hash` 作为 module name（tool 和 system prompt 均用 `compile` + `exec` 避免 importlib bytecode 缓存），确保同进程多 session 隔离
 - `SessionAgent.create()` 完成所有初始化——`__init__.py` 只做入口编排
-- Tool 加载：`compile(source)` + `exec(module.__dict__)` 避免 importlib 的 bytecode 缓存导致刷新时读到旧文件内容
+- Tool / schedule / system 从 **agent_path** 加载；history 仍挂在 **workspace_path**
 - System prompt 在首次 `run()` 调用时惰性构建（通过 `system_prompt_builder`）
 - 后续请求可调用 `system_prompt_rebuild_checker()`（如果定义），返回 True 则重建 system prompt
 

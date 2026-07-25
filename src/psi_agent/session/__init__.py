@@ -19,6 +19,14 @@ class Session:
     ai_socket: str
     channel_socket: str
     workspace: str = ""
+    """User / legacy single-root directory. Empty → ``Path.cwd()``."""
+
+    agent: str = ""
+    """Agent package directory (tools / schedules / system).
+
+    Empty → use *workspace* (backward compatible single-root behaviour).
+    """
+
     max_tool_rounds: int = 128
     session_id: str | None = None
     verbose: bool = False
@@ -26,12 +34,23 @@ class Session:
     async def run(self) -> None:
         setup_logging(verbose=self.verbose)
 
-        workspace_path = Path.cwd() if self.workspace == "" else Path(str(await anyio.Path(self.workspace).resolve()))
+        workspace_path = (
+            Path.cwd() if self.workspace == "" else Path(str(await anyio.Path(self.workspace).resolve()))
+        )
+        agent_path = (
+            workspace_path
+            if self.agent == ""
+            else Path(str(await anyio.Path(self.agent).resolve()))
+        )
+
         logger.info(f"Loading workspace from {workspace_path}")
+        if agent_path != workspace_path:
+            logger.info(f"Loading agent package from {agent_path}")
 
         agent = await SessionAgent.create(
             ai_socket=self.ai_socket,
             workspace_path=workspace_path,
+            agent_path=agent_path,
             max_tool_rounds=self.max_tool_rounds,
             session_id=self.session_id,
         )

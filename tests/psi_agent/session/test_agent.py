@@ -741,6 +741,50 @@ async def test_histories_dir_and_gitignore_created(tmp_path: Path) -> None:
     assert await anyio.Path(histories_dir).is_dir()
     assert await anyio.Path(histories_dir / ".gitignore").read_text(encoding="utf-8") == "*\n"
     assert agent._conversation._path is not None
+    assert agent._workspace_path == workspace
+    assert agent._agent_path == workspace
+
+
+@pytest.mark.anyio
+async def test_create_agent_path_loads_tools_from_agent_keeps_history_on_workspace(
+    tmp_path: Path,
+) -> None:
+    """agent_path ≠ workspace_path: tools from agent; histories stay under workspace."""
+    workspace = tmp_path / "user-ws"
+    agent_pkg = tmp_path / "agent-pkg"
+    await anyio.Path(workspace).mkdir()
+    await anyio.Path(agent_pkg).mkdir()
+    await anyio.Path(agent_pkg / "tools").mkdir()
+    await anyio.Path(agent_pkg / "schedules").mkdir()
+    await anyio.Path(agent_pkg / "tools" / "echo_tool.py").write_text(
+        'async def echo_tool(text: str) -> str:\n    """Echo.\n\n    Args:\n        text: Input.\n    """\n    return text\n',
+        encoding="utf-8",
+    )
+
+    session_agent = await SessionAgent.create(
+        ai_socket="http://x",
+        workspace_path=workspace,
+        agent_path=agent_pkg,
+        session_id="split",
+    )
+    assert session_agent._workspace_path == workspace
+    assert session_agent._agent_path == agent_pkg
+    assert "echo_tool" in session_agent._tool_registry.tools
+    assert session_agent._conversation._path == workspace / "histories" / "split.jsonl"
+    assert not await (anyio.Path(agent_pkg) / "histories").exists()
+
+
+@pytest.mark.anyio
+async def test_runtime_scope_exposes_workspace_and_agent(tmp_path: Path) -> None:
+    from psi_agent.session.runtime_context import get_agent, get_workspace, runtime_scope
+
+    ws = str(tmp_path / "ws")
+    ag = str(tmp_path / "ag")
+    with runtime_scope(session_id="sid", workspace=ws, agent=ag):
+        assert get_workspace() == ws
+        assert get_agent() == ag
+    assert get_workspace() == ""
+    assert get_agent() == ""
 
 
 # --- Snapshot / rollback tests ---
