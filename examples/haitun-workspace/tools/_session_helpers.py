@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import _background_process_registry as _bg
+import _runtime_paths as _paths
 import _subagent_helpers as _sub
 import anyio
 
@@ -49,15 +50,11 @@ def current_session_id() -> str:
 
 def current_workspace() -> str:
     """User workspace root for the active turn (see ``_runtime_paths.workspace_dir``)."""
-    import _runtime_paths as _paths
-
     return _paths.workspace_dir()
 
 
 def current_agent() -> str:
     """Agent package root for the active turn (see ``_runtime_paths.agent_dir``)."""
-    import _runtime_paths as _paths
-
     return _paths.agent_dir()
 
 

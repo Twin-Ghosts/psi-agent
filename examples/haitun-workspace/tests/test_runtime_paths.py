@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
+
 from psi_agent.session.runtime_context import path_scope
 
 TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"

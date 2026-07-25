@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import _runtime_paths as _paths
-import anyio
 
 
 async def edit(file_path: str, old_string: str, new_string: str) -> str:

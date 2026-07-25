@@ -5,12 +5,11 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 
+import _runtime_paths as _paths
 import anyio
 
 
 def _skills_dir() -> anyio.Path:
-    import _runtime_paths as _paths
-
     # Skills live in the agent package (not the user workspace).
     return _paths.resolve_agent() / "skills"
 

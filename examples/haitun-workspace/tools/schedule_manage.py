@@ -11,14 +11,13 @@ import re
 from contextlib import suppress
 from datetime import UTC, datetime
 
+import _runtime_paths as _paths
 import anyio
 import yaml
 from croniter import croniter
 
 
 def _schedules_dir() -> anyio.Path:
-    import _runtime_paths as _paths
-
     # Schedules are session/user data under the workspace.
     return _paths.resolve_workspace() / "schedules"
 

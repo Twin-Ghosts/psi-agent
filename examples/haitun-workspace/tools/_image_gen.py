@@ -5,15 +5,14 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
-import os
 import random
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import _minimax as _mx
 import _multimodal_env as _env
+import _runtime_paths as _paths
 import aiohttp
 import anyio
 from loguru import logger
@@ -48,8 +47,6 @@ class ImageGenResult:
 
 
 def resolve_workspace(raw: str) -> anyio.Path:
-    import _runtime_paths as _paths
-
     return _paths.resolve_workspace(raw)
 
 

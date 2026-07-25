@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import _runtime_paths as _paths
-import anyio
 
 
 async def find_files(

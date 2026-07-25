@@ -12,6 +12,7 @@ from contextlib import aclosing
 from pathlib import Path
 from typing import Any
 
+import _runtime_paths as _paths
 import aiohttp
 import anyio
 
@@ -305,8 +306,6 @@ async def _fetch_spawn_config(gateway_url: str, ai_id: str) -> dict[str, str] | 
 
 
 def resolve_workspace(raw: str) -> Path:
-    import _runtime_paths as _paths
-
     return Path(_paths.workspace_dir(raw)).resolve()
 
 

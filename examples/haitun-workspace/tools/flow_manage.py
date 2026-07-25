@@ -5,12 +5,11 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 
+import _runtime_paths as _paths
 import anyio
 
 
 def _flows_dir() -> anyio.Path:
-    import _runtime_paths as _paths
-
     # Flow task dirs live under the user workspace.
     return _paths.resolve_workspace() / "flows"
 

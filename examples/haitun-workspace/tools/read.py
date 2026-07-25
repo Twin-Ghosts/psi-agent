@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import _runtime_paths as _paths
-import anyio
 
 
 async def read(file_path: str, offset: int = 0, limit: int = 0) -> str:

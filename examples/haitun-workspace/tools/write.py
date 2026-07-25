@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import _runtime_paths as _paths
-import anyio
 
 
 async def write(file_path: str, content: str) -> str:

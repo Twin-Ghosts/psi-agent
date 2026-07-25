@@ -30,6 +30,8 @@ from __future__ import annotations
 import os
 import shutil
 
+import _runtime_paths as _paths
+
 # Pinned npx package for the Excalidraw MCP server. Launching it auto-starts the
 # local canvas web server (127.0.0.1:3000) that actually holds the drawing state.
 _MCP_PACKAGE = os.environ.get("CANVAS_MCP_PACKAGE", "mcp-excalidraw-server@latest")
@@ -79,8 +81,6 @@ def build_env() -> dict[str, str]:
     env.setdefault("EXPRESS_SERVER_URL", DEFAULT_CANVAS_URL)
     env.setdefault("ENABLE_CANVAS_SYNC", "true")
     if not env.get("EXCALIDRAW_EXPORT_DIR"):
-        import _runtime_paths as _paths
-
         env["EXCALIDRAW_EXPORT_DIR"] = _paths.workspace_dir()
     return env
 

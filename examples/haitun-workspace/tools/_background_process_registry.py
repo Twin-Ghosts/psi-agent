@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any
 
 import _runtime_paths as _paths
-
 import anyio
 import anyio.to_thread
 from loguru import logger

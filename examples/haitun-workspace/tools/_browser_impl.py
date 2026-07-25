@@ -30,7 +30,6 @@ import time
 from contextlib import suppress
 
 import _runtime_paths as _paths
-
 from loguru import logger
 
 _IS_WINDOWS = sys.platform == "win32"
