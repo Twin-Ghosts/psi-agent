@@ -27,11 +27,12 @@ class SessionInfo:
     backend_type: str
     backend_id: str
     workspace: str
-    """User workspace (open folder)."""
+    """User workspace (open folder). History JSONL still lives here (step 2)."""
 
     channel_socket: str
+    # Step 2: surfaced to REST / state. Empty → Session treats agent ≡ workspace.
     agent: str = ""
-    """Agent package path. Empty → Session uses workspace (single-root compat)."""
+    """Agent package path (tools/schedules/system). Empty → single-root compat."""
 
     @property
     def ai_id(self) -> str:
@@ -54,6 +55,7 @@ class SessionManager:
     _entries: dict[str, _SessionEntry] = field(default_factory=dict)
     _lock: anyio.Lock = field(default_factory=anyio.Lock)
     _persist: Callable[[], Awaitable[None]] = _noop
+    # Injected by Gateway.run from --default-agent / --default-workspace.
     _default_agent: str = ""
     _default_workspace: str = ""
 
@@ -67,6 +69,13 @@ class SessionManager:
         workspace: str = "",
         agent: str = "",
     ) -> SessionInfo:
+        """Spawn a Session.
+
+        Step 2 wiring: *agent* / *workspace* fall back to Gateway defaults when
+        omitted. ``Session(agent=…)`` (from #472) then loads the capability pack
+        from that directory. Tools that resolve relative paths via ContextVar
+        are a later PR — this only passes the path in.
+        """
         session_id = id or _new_uuid()
         workspace = workspace.strip() or self._default_workspace or os.getcwd()
         agent = agent.strip() or self._default_agent
@@ -78,6 +87,7 @@ class SessionManager:
                 raise ValueError(f"Session {session_id!r} already exists")
             channel_socket = _socket_path(self._prefix, "channels", session_id)
             await _ensure_socket_dir(channel_socket)
+            # Hand paths to Session (#472). Empty agent → Session uses workspace.
             sess = Session(
                 workspace=workspace,
                 agent=agent,

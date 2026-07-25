@@ -103,7 +103,7 @@ import { collectDeliverableFiles } from "../utils/filePreviewUtils";
 
 type Props = {
   workspace: string;
-  /** From ``GET /defaults``.agent — passed to ``POST /sessions``. */
+  /** Step 2: from GET /defaults.agent — passed to POST /sessions (not tool I/O). */
   defaultAgent?: string;
   onChangeWorkspace?: () => void;
 };
@@ -805,6 +805,7 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
     const title = titleFromPrompt(clean || userVisible);
     let session;
     try {
+      // Step 2: pass Gateway default agent into Session (capability pack root).
       session = await createSession(resolvedAiId, workspace, {
         ...(defaultAgent ? { agent: defaultAgent } : {}),
       });

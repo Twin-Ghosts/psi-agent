@@ -69,11 +69,16 @@ class Gateway:
     互相隔离。空 = 以 Gateway 进程 cwd 为父目录。"""
 
     default_agent: str = ""
-    """Default agent package directory for new Sessions. Empty → soft-default
-    ``examples/haitun-workspace`` when present under cwd, else Session single-root compat."""
+    """Step 2 CLI: default agent package for new Sessions / GET /defaults.
+
+    Empty → soft-default ``examples/haitun-workspace`` when present under cwd,
+    else Session keeps single-root compat (``agent=\"\"`` → same as workspace).
+    """
 
     default_workspace: str = ""
-    """Default user workspace for new Sessions / ``GET /defaults``. Empty → process cwd."""
+    """Step 2 CLI: default user workspace for new Sessions / GET /defaults.
+    Empty → process cwd. Not AppData; history still under this workspace.
+    """
 
     verbose: bool = False
     """Enable DEBUG-level logging."""
@@ -87,6 +92,7 @@ class Gateway:
         addr = self.listen or f"http://127.0.0.1:{_random_port()}"
         logger.info(f"Starting Gateway service on {addr} (socket_path={self.socket_path})")
 
+        # Step 2: resolve once, inject into SessionManager + create_app (/defaults).
         agent_default = await resolve_default_agent(self.default_agent)
         workspace_default = await resolve_default_workspace(self.default_workspace)
         logger.info(f"Default agent: {agent_default or '(same as workspace)'}")

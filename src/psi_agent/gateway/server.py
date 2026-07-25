@@ -298,6 +298,7 @@ async def _list_routers(request: web.Request) -> web.Response:
 
 
 async def _create_session(request: web.Request) -> web.Response:
+    """POST /sessions — Step 2 accepts optional ``agent`` (else Gateway default)."""
     sm: SessionManager = request.app["sm"]
     try:
         body = await request.json()
@@ -433,7 +434,12 @@ async def _get_cwd(request: web.Request) -> web.Response:
 
 
 async def _get_defaults(request: web.Request) -> web.Response:
-    """Default agent package + user workspace for SPA / tooling (AppData comes later)."""
+    """GET /defaults — Step 2 shared path defaults for every Session creator.
+
+    Returns ``{agent, workspace}`` only (no AppData roots yet). Clients may
+    omit ``agent`` on POST /sessions; SessionManager still applies the same
+    default. Tool-side path resolution is not part of this endpoint.
+    """
     agent = request.app.get("default_agent") or await resolve_default_agent()
     workspace = request.app.get("default_workspace") or await resolve_default_workspace()
     return _json({"agent": agent, "workspace": workspace})

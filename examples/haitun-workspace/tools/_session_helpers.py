@@ -1467,7 +1467,8 @@ async def create_session(
     if sid:
         body["id"] = sid
 
-    # Prefer Gateway defaults.agent so tool-spawned sessions share the same package as SPA.
+    # Step 2: prefer Gateway defaults.agent so tool-spawned sessions share the
+    # same capability pack as SPA / Feishu (relative-path I/O still later).
     try:
         defaults = await _sub._fetch_gateway_json(f"{gateway_url.rstrip('/')}/defaults")
         if isinstance(defaults, dict):

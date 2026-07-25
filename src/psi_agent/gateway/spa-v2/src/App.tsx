@@ -36,9 +36,10 @@ async function pathExistsAsDir(path: string): Promise<boolean> {
 }
 
 /**
- * spa-v2 根编排：
- * - 启动时以 ``GET /defaults``.workspace 为准；localStorage 仅在路径仍存在且非遗留 agent 包时沿用
- * - 「切换工作区」打开选择页；Agent 包路径由 Gateway ``defaults.agent`` 传入建 Session
+ * spa-v2 root (Step 2 wiring):
+ * - Boot from GET /defaults.workspace (not hardcoded cwd / haitun-workspace).
+ * - Pass defaults.agent into POST /sessions via HaiTunAgentWorkspace.
+ * - Does NOT change how tools resolve relative paths (later PR).
  */
 export default function App() {
   const [workspace, setWorkspace] = useState('')

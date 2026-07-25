@@ -66,11 +66,12 @@ export async function listSessions() {
   return api<SessionInfo[]>('GET', '/sessions')
 }
 
-/** Gateway path defaults (agent package + user workspace). */
+/** Step 2: GET /defaults — shared by spa v1/v2 (agent package + user workspace). */
 export async function fetchDefaults() {
   return api<GatewayDefaults>('GET', '/defaults')
 }
 
+/** Step 2: optional ``agent`` is passed through to Gateway → Session (#472). */
 export async function createSession(
   aiId: string,
   workspace: string,

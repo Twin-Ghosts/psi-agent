@@ -13,7 +13,7 @@ function origin() {
   return window.location.origin.replace(/\/+$/, '')
 }
 
-/** Resolve Gateway default agent package (empty if unset / unreachable). */
+/** Step 2: resolve Gateway default agent package (empty if unset / unreachable). */
 async function defaultAgentFromGateway() {
   try {
     const d = await fetchDefaults()
