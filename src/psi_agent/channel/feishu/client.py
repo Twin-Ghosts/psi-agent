@@ -22,6 +22,7 @@ from lark_channel.api.im.v1.model.emoji import Emoji
 from lark_channel.api.im.v1.model.get_message_resource_request import GetMessageResourceRequest
 from lark_channel.core.enum import AccessTokenType, HttpMethod
 from lark_channel.core.model import BaseRequest
+from lark_channel.event.custom import CustomizedEventProcessor
 from loguru import logger
 
 from psi_agent.channel._core import ChannelCore
@@ -609,11 +610,6 @@ def _register_approval_processor(channel: Any, on_event: Callable[[Any], None]) 
     (channel.py 会 ``self._dispatcher = self._build_dispatcher()``), 提前注册会被覆盖。
     p1/p2 两种 schema 都注册 (与 SDK 对 drive 评论的处理一致)。任何 SDK 内部结构
     缺失/改名都降级为告警, 绝不拖垮启动。返回是否至少注册成功一个 schema。"""
-    try:
-        from lark_channel.event.custom import CustomizedEventProcessor  # noqa: PLC0415
-    except Exception as e:
-        logger.warning(f"approval events unavailable — cannot import CustomizedEventProcessor: {e!r}")
-        return False
     dispatcher = getattr(channel, "dispatcher", None)
     proc_map = getattr(dispatcher, "_processorMap", None)
     if not isinstance(proc_map, dict):

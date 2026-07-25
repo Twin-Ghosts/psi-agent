@@ -95,6 +95,9 @@
   从 `form` JSON 解析 `attachments:[{name, type, kind, value}]`
 - `feishu_approval_decide(approve, approval_code, instance_code, approver_user_id, task_id, ...)` —
   `POST /approval/v4/tasks/{approve|reject}`（记在真实审批人名下）
+- `feishu_approval_subscribe(approval_code)` / `feishu_approval_unsubscribe(approval_code)` —
+  `POST /approval/v4/approvals/:approval_code/subscribe|unsubscribe`（tenant，幂等，每定义订阅一次）；
+  开启后审批状态变化由 **channel 层事件推送**给申请人，非轮询——详见 channel 规格/计划「审批状态变化主动推送」（2026-07-25）
 - `feishu_file_download(source, save_path, is_url)` — is_url=True 直下链接；
   否则 `GET /drive/v1/medias/:file_token/download`
 - `feishu_department_members(department_id, department_id_type, user_id_type, recursive)` —
@@ -122,8 +125,11 @@ pyproject / nuitka / pyinstaller。
 ## 六、非目标（YAGNI，跨域汇总）
 
 不做代打卡；不做任务 members/reminders/tasklist 增改；不做评论删除/解决；不做 bitable
-记录删改/字段管理；不做 session 主动推送 / channel 轮询；不在 API 层改
+记录删改/字段管理；不做 session 主动推送 / channel **轮询**；不在 API 层改
 飞书审批流定义（“设条件”靠 agent 作为审批人校验）。
+
+> 注（2026-07-25）：“不做 channel 轮询”仍成立；审批状态变化通知改由 channel 层
+> **事件推送**（订阅 + `approval_instance` 事件 → DM 申请人）实现，非轮询、非 session-push。
 
 > 注：原“不做多用户 UAT”已在第七节落地（按 `user_key` 隔离）。
 

@@ -511,3 +511,24 @@ git add -A && git commit -m "test(feishu): add dataclass and token validation te
 - [x] 测试：评论 header / @门槛 / 白名单 / 不支持目标 / agent 失败回错误 / 回复异常吞掉 / comment 订阅开关（enabled 注册、disabled 不注册）/ **is_whole 强制置 True 回归守卫**
 - [x] 质量门：`ruff check` / `ruff format --check` / `ty check` / `pytest tests/psi_agent/channel/feishu/`（34 passed，需清 `PSI_FEISHU_*` env 避免旧 raise 测试被真 env 干扰）
 - [x] Commit `feat(feishu): 文档评论 @机器人 自动回复`（`559c8ad1`）；ty 修复 `c6542eac`；文档对齐 `9f53ece6`；数据安全修复 `8dbb8434`
+
+## 后续增强：审批状态变化主动推送（2026-07-25，已完成）
+
+**目标**：员工提交的飞书审批在**状态变化**（通过/驳回/撤回等）时，连接的 app 事件驱动地把结果主动推送给**申请人本人**——不轮询。设计详见 spec 第 15 节。此前审批只有 workspace 侧只读/决策工具，且「session 主动推送 / channel 轮询」被列为非目标（extended-tools 规格 §8）；本次以 channel 层**事件推送**（非轮询）实现主动通知。
+
+**缺口**：审批事件经 `FeishuChannel` 长连接**推**来（workspace 工具 pull 接不到，故收事件只能在 channel 层做），但 lark-channel-sdk 1.2.0 **未**给 `approval_instance` 提供 typed processor，且事件载荷**无推送目标**（只有 approval_code/instance_code/status），需回查实例详情解析申请人。
+
+**Files:**
+- Modify: `src/psi_agent/channel/feishu/client.py`
+- Modify: `examples/haitun-workspace/tools/_feishu_impl.py`、`tools/feishu_approval.py`、`TOOLS.md`
+- Modify: `tests/psi_agent/channel/feishu/test_feishu.py`、`examples/haitun-workspace/tests/test_feishu.py`
+- Modify: `src/psi_agent/channel/AGENTS.md`
+- Modify: `docs/superpowers/specs/2026-06-25-feishu-channel.md`（第 15 节）、`docs/superpowers/specs/2026-07-17-feishu-tools-extended-design.md`（§5.5 + §8 非目标更正）
+
+- [x] workspace：`feishu_approval_subscribe(approval_code)` / `feishu_approval_unsubscribe(approval_code)` 调 `POST /approval/v4/approvals/:approval_code/subscribe|unsubscribe`（tenant token，幂等，每定义订阅一次）
+- [x] `_register_approval_processor`：SDK 无 typed processor，走 `CustomizedEventProcessor` 注入 `dispatcher._processorMap` 的 `p1/p2.approval_instance`（**必须在 `start_background()` 之后**，否则被重建 dispatcher 覆盖）；结构缺失降级 WARNING 不阻断启动
+- [x] `_handle_approval_event`：`portal.start_task_soon` 桥回主 loop；缺 instance_code 跳过；`_SeenEvents`（有界 FIFO maxlen=512）按 `instance_code+status+operate_time` 去重；`_fetch_instance_detail`（`GET /approval/v4/instances/:instance_id`，tenant，channel 自搭 `BaseRequest`）→ `_parse_instance_detail` 取申请人 open_id；白名单按申请人 open_id；`_collect_reply` 累积 → `channel.send` DM 给申请人；异常绝不冒泡
+- [x] `_approval_event_header`：注入 `<feishu_approval_event>`（approval_code / instance_code / status）；**刻意为之** 只含协议事实、不含工具名
+- [x] 测试：详情解析 / 去重与有界 / 推送申请人 / 白名单 / 重投去重 / 无申请人跳过 / 异常吞掉 / 缺 instance_code 跳过 / 双 schema 注册 / 无 _processorMap 降级 / run_feishu 注册；workspace：subscribe/unsubscribe 建请求 / 校验 code / 透传错误 / async 带 docstring
+- [x] 质量门：`ruff check` / `ruff format --check` / `ty check` / `pytest`（channel + workspace 全过）
+- [x] Commit `feat(feishu): 审批状态变化主动推送`（`39d7440f`）；文档对齐（本次）

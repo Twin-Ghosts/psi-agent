@@ -362,3 +362,51 @@ SDK `reply_comment(context, content)` 按 `context.is_whole` 分两条路：
 `False` 分支里 `reply_id = context.target_reply_id`，而 `get_comment_context` 在传入 `event_reply_id` 时返回的正是**用户 @机器人 的那条 reply**。飞书官方文档确认该 PUT 是"更新云文档中某条回复的内容"（覆盖，非追加）——若照默认路径,机器人的回答会**抹掉用户 @机器人 的原始评论**（数据丢失）。
 
 SDK 未提供"在已有评论下无损追加一条 reply"的接口（只有 create 整条评论 与 update 覆盖 reply 两个 builder）。故 `_handle_comment` 在调用前**强制 `ctx.is_whole = True`**，锁定安全的 POST-create 路径。代价：机器人的回复另起一条评论，不挂在用户那条评论线程下；换取零数据丢失。这是有意取舍，勿回退。
+
+## 15. 审批状态变化主动推送（2026-07-25 增强）
+
+**目标**：员工提交的飞书审批在**状态变化**（通过/驳回/撤回等）时，连接的 app 事件驱动地把结果主动推送给**申请人本人**——不轮询。此前审批只有 workspace 侧的只读/决策工具（extended-tools 规格 §5.5），且「session 主动推送 / channel 轮询」被列为非目标（extended-tools 规格 §8）；本节以 **channel 层事件推送**（非轮询、非 session-push）实现主动通知，取代该非目标的保守表述。
+
+### 15.1 两半拆分（订阅工具 vs 事件推送）
+
+- **订阅（workspace 工具，pull）**：`feishu_approval_subscribe(approval_code)` 调 `POST /open-apis/approval/v4/approvals/:approval_code/subscribe`（tenant token，幂等，每个审批定义订阅一次即可），`feishu_approval_unsubscribe(approval_code)` 走 `/unsubscribe`。见 extended-tools 规格 §5.5。
+- **收事件 + 推送（channel 层，push）**：审批事件经 `FeishuChannel` 长连接**推**来，workspace 工具（pull）接不到，故收事件这半只能在 channel 层做——与文档评论（§14）同理。
+
+### 15.2 底层机制（SDK 无 typed processor，走 customized）
+
+- lark-channel-sdk 1.2.0 **未**给 `approval_instance` 事件提供归一化 processor（不同于 message / comment）。`_register_approval_processor` 走 SDK 内部的 `CustomizedEventProcessor`，注入 `dispatcher._processorMap` 的 `p1.approval_instance` / `p2.approval_instance` 两个 key（p1/p2 两种 schema 都注册，与 SDK 自身处理 drive 评论同款逃生口）。
+- **必须在 `start_background()` 之后注册**：`start_background` 会重建 dispatcher（`self._dispatcher = self._build_dispatcher()`），提前注册会被覆盖。任何 SDK 内部结构缺失/改名都降级为 WARNING、绝不拖垮启动。
+- 审批事件载荷**只有** `approval_code` / `instance_code` / `status`（PENDING/APPROVED/REJECTED/CANCELED/DELETED/REVERTED）/ `instance_operate_time` / `uuid`——**无推送目标**。
+
+### 15.3 Handler 逻辑（`_handle_approval_event`）
+
+SDK 回调在其后台线程触发；`_on_approval` 经 `portal.start_task_soon(_handle_approval_event, ...)` 桥回主 anyio loop（与 `_handle_and_stream` / `_handle_comment` 同款异步隔离，外层 try/except 兜底、异常绝不冒泡）。流程：
+
+1. **提取载荷**：从事件取 `approval_code` / `instance_code` / `status` / `operate_time`；缺 `instance_code` 记 DEBUG 跳过。
+2. **去重**：飞书事件可能重投，`_SeenEvents`（有界 FIFO，`maxlen=512`）按 `instance_code+status+operate_time` 组键 `add_if_new`，重复则跳过。
+3. **解析申请人**：`_fetch_instance_detail`（`GET /open-apis/approval/v4/instances/:instance_id`，tenant token）→ `_parse_instance_detail` 取 **申请人 open_id**（`user_id` 或 `open_id`）+ `approval_name` + `status`。channel **不能 import workspace 工具**（微内核解耦），故自行手搭 `BaseRequest`（`token_types={AccessTokenType.TENANT}`）经 `channel.client.arequest` 调用。
+4. **白名单**：按**申请人 open_id** 走 `_allowed`（与消息/评论同一函数）；解析不出申请人则记 DEBUG 跳过（无处可推）。
+5. **组 chunks 喂 agent**：`_approval_event_header` + 状态说明喂 `resolve_core(applicant).post()`，`_collect_reply` 累积成整段文本，`channel.send(applicant, {"text": ...}, {"receive_id_type": "open_id"})` DM 给申请人。
+
+### 15.4 消息元数据注入（`_approval_event_header`）
+
+与 `_context_header`（§13）/ `_comment_context_header`（§14.4）同理，注入 `<feishu_approval_event>` 块：`approval_code` / `instance_code` / `status`。**（刻意为之）只含客观协议事实、不含具体 workspace 工具名**——保持 channel 与 workspace 工具解耦。
+
+### 15.5 文件变更
+
+| 操作 | 文件 | 说明 |
+|------|------|------|
+| 修改 | `psi_agent/channel/feishu/client.py` | `_APPROVAL_*` 常量 + `_SeenEvents` + `_build_instance_get_request` / `_parse_instance_detail` / `_fetch_instance_detail` / `_approval_event_header` / `_handle_approval_event` / `_register_approval_processor`；`run_feishu` 加 `approval_seen` + `_on_approval` + `start_background()` 后注册 |
+| 修改 | `examples/haitun-workspace/tools/_feishu_impl.py` | `subscribe_approval_impl` / `unsubscribe_approval_impl` + 两个 `_build_*_request` |
+| 修改 | `examples/haitun-workspace/tools/feishu_approval.py` | `feishu_approval_subscribe` / `feishu_approval_unsubscribe` 薄封装 |
+| 修改 | `examples/haitun-workspace/TOOLS.md` | 订阅审批事件的运行时引导（订阅一次、不轮询、收 `<feishu_approval_event>`） |
+| 修改 | `tests/psi_agent/channel/feishu/test_feishu.py` | 详情解析 / 去重与有界 / 推送申请人 / 白名单 / 重投去重 / 无申请人跳过 / 异常吞掉 / 缺 instance_code 跳过 / 双 schema 注册 / 无 _processorMap 降级 / run_feishu 注册 |
+| 修改 | `examples/haitun-workspace/tests/test_feishu.py` | subscribe/unsubscribe 建请求 / 校验 code / 透传错误 / 工具 async 带 docstring |
+| 修改 | `src/psi_agent/channel/AGENTS.md` | Feishu 约定补「审批状态变化主动推送」一条（含刻意为之留痕） |
+
+### 15.6 前置依赖与非目标
+
+- **前置依赖**：飞书开发者后台须订阅审批事件、给机器人 `approval:approval` 权限，并对每个审批定义调一次 `feishu_approval_subscribe(approval_code)`，否则收不到事件（代码兜底记日志，不阻断启动）。
+- 事件驱动、**不轮询**（对齐 extended-tools 规格 §8「不做 channel 轮询」——本节用推送而非轮询实现主动通知）。
+- **不做**跨进程重启的去重持久化（`_SeenEvents` 是进程内有界内存，重启后短暂重投窗口可接受）。
+- 推送目标固定为**申请人本人**，不做审批人/抄送人通知（可后续扩展）。
