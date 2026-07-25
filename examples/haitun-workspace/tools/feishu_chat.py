@@ -53,3 +53,19 @@ async def feishu_chat_find_member(
         member_id_type: Id form to return — open_id (default), union_id, or user_id.
     """
     return _f.dumps_result(await _f.find_member_id_impl(chat_id, name, exact, member_id_type))
+
+
+async def feishu_chat_list_members(chat_id: str, member_id_type: str = "open_id") -> str:
+    """List every member of a Feishu/Lark group in one call.
+
+    Unlike ``feishu_chat_find_member`` (which searches by a specific name), this
+    returns the group's whole roster — use it when you need everyone in the group,
+    not just a matched person. Pages through the full roster automatically.
+
+    Returns members as ``{name, id, member_id_type}`` plus a total ``count``.
+
+    Args:
+        chat_id: The group's chat_id (from ``feishu_chat_find``). The bot must be a member.
+        member_id_type: Id form to return — open_id (default), union_id, or user_id.
+    """
+    return _f.dumps_result(await _f.list_chat_members_impl(chat_id, member_id_type))

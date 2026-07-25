@@ -774,6 +774,42 @@ async def find_member_id_impl(
     }
 
 
+async def list_chat_members_impl(
+    chat_id: str,
+    member_id_type: str = "open_id",
+) -> dict[str, Any]:
+    """List every member of a group. Pages through the full roster automatically.
+
+    Unlike ``find_member_id_impl`` (which matches by name), this returns the whole
+    roster in one call. Returns members [{name, id, member_id_type}].
+    """
+    members: list[dict[str, str]] = []
+    page_token = ""
+    while True:
+        res = await _invoke(_build_chat_members_request(chat_id, member_id_type, 100, page_token))
+        if not res["ok"]:
+            return res
+        data = res["data"] if isinstance(res["data"], dict) else {}
+        for it in data.get("items", []) if isinstance(data.get("items"), list) else []:
+            members.append(
+                {
+                    "name": it.get("name", ""),
+                    "id": it.get("member_id", ""),
+                    "member_id_type": it.get("member_id_type", member_id_type),
+                }
+            )
+        page_token = data.get("page_token", "") or ""
+        if not data.get("has_more") or not page_token:
+            break
+
+    return {
+        "ok": True,
+        "chat_id": chat_id,
+        "members": members,
+        "count": len(members),
+    }
+
+
 # ── Approval (审批) — list pending tasks, read instance, approve/reject ────────
 #
 # Lets the agent read an approval application's form content and decide whether

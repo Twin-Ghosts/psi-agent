@@ -120,6 +120,7 @@ message_id / sender_open_id）。需要群里之前的上下文时：
     `feishu_user_get(user_ids=<负责人 open_id>)` 取其**联系方式**（`mobile`/`email`/`enterprise_email`/
     `job_title`），回员工"①这归谁负责 ②去找谁 ③怎么联系"。台账里存的是姓名不是 open_id 时，先
     `feishu_department_members(recursive=True)` 或 `feishu_chat_find_member` 按名反查 open_id。
+    要一次拿到某群**全部**成员（不是按名找某个人）时，用 `feishu_chat_list_members(chat_id)` 列全员花名册。
     **联系方式只在私聊回给来问的本人，不群发**；`mobile`/`email` 读到空多是缺
     `contact:user.phone:readonly`/`contact:user.email:readonly` 或通讯录权限范围没覆盖，**如实说明**并
     退回到"在飞书里 @他"，不编号码；台账查不到归属就如实说查不到，别硬安负责人。

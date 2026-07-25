@@ -526,6 +526,57 @@ async def test_chat_find_member_tool_returns_json(monkeypatch: pytest.MonkeyPatc
     assert json.loads(out)["matches"][0]["id"] == "ou_9"
 
 
+@pytest.mark.asyncio
+async def test_list_chat_members_returns_full_roster(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke(
+        {
+            "items": [
+                {"name": "张三", "member_id": "ou_1"},
+                {"name": "李四", "member_id": "ou_2"},
+            ],
+            "has_more": False,
+        }
+    )
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.list_chat_members_impl("oc_x", "open_id")
+    req = cap.request
+    assert req.uri == "/open-apis/im/v1/chats/:chat_id/members"
+    assert req.paths["chat_id"] == "oc_x"
+    assert result["count"] == 2
+    assert result["members"] == [
+        {"name": "张三", "id": "ou_1", "member_id_type": "open_id"},
+        {"name": "李四", "id": "ou_2", "member_id_type": "open_id"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_chat_members_paginates(monkeypatch: pytest.MonkeyPatch) -> None:
+    paged = _PagedInvoke(
+        [
+            {"items": [{"name": "张三", "member_id": "ou_1"}], "has_more": True, "page_token": "pt2"},
+            {"items": [{"name": "李四", "member_id": "ou_2"}], "has_more": False, "page_token": ""},
+        ]
+    )
+    monkeypatch.setattr(_impl, "_invoke", paged)
+    result = await _impl.list_chat_members_impl("oc_x", "open_id")
+    assert len(paged.requests) == 2
+    assert _qdict(paged.requests[1]).get("page_token") == "pt2"
+    assert result["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_chat_list_members_tool_returns_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = importlib.import_module("feishu_chat")
+
+    async def _fake(*a: Any, **k: Any) -> dict[str, Any]:
+        return {"ok": True, "members": [{"name": "张三", "id": "ou_9", "member_id_type": "open_id"}], "count": 1}
+
+    monkeypatch.setattr(_impl, "list_chat_members_impl", _fake)
+    out = await mod.feishu_chat_list_members(chat_id="oc_x")
+    assert inspect.iscoroutinefunction(mod.feishu_chat_list_members)
+    assert json.loads(out)["members"][0]["id"] == "ou_9"
+
+
 # ── Approval — list tasks, read instance, approve/reject ──────────────────────
 
 
