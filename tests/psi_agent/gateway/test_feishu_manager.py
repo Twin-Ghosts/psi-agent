@@ -77,6 +77,53 @@ async def test_route_creates_per_user_workspace(tmp_path: str) -> None:
 
 
 @pytest.mark.anyio
+async def test_route_shared_workspace_uses_root(tmp_path: str) -> None:
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        fm = FeishuManager(
+            _sm=sm,
+            _ai_id="ai1",
+            _workspace_root=str(tmp_path),
+            _shared_workspace=True,
+        )
+
+        await fm.route("ou_alice")
+        await fm.route("ou_bob")
+        assert sm.get_workspace("feishu-ou_alice") == str(tmp_path)
+        assert sm.get_workspace("feishu-ou_bob") == str(tmp_path)
+        assert not await (anyio.Path(tmp_path) / "ou_alice").is_dir()
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_route_recreates_on_workspace_mismatch(tmp_path: str) -> None:
+    """Switching from empty per-user dir to shared root must rebuild the Session."""
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        empty = os.path.join(str(tmp_path), "ou_alice")
+        await sm.create(ai_id="ai1", id="feishu-ou_alice", workspace=empty)
+
+        fm = FeishuManager(
+            _sm=sm,
+            _ai_id="ai1",
+            _workspace_root=str(tmp_path),
+            _shared_workspace=True,
+        )
+        _, sid = await fm.route("ou_alice")
+        assert sid == "feishu-ou_alice"
+        assert sm.get_workspace(sid) == str(tmp_path)
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
 async def test_route_request_ai_id_and_workspace_override(tmp_path: str) -> None:
     tg = anyio.create_task_group()
     await tg.__aenter__()

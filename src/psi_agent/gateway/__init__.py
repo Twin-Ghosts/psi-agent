@@ -64,8 +64,12 @@ class Gateway:
     此时若请求也不带 ``ai_id`` 则 ``/feishu/route`` 返回 400。"""
 
     feishu_workspace_root: str = ""
-    """飞书各用户独立 workspace 的父目录。每个 open_id 得到 ``<root>/<open_id>`` 子目录, 文件/历史
-    互相隔离。空 = 以 Gateway 进程 cwd 为父目录。"""
+    """飞书 workspace 根路径。默认 (``feishu_shared_workspace=False``) 下每个 open_id 得到
+    ``<root>/<open_id>`` 子目录。空 = 以 Gateway 进程 cwd 为父目录。"""
+
+    feishu_shared_workspace: bool = False
+    """True = 所有飞书用户共用 ``feishu_workspace_root`` (或 cwd) 本身作为 Session
+    workspace (不再建 open_id 子目录)。会话 id 仍按人隔离。联调完整 haitun-workspace 时打开。"""
 
     verbose: bool = False
     """Enable DEBUG-level logging."""
@@ -145,6 +149,7 @@ class Gateway:
                 attention=attention,
                 feishu_ai_id=self.feishu_ai_id,
                 feishu_workspace_root=self.feishu_workspace_root,
+                feishu_shared_workspace=self.feishu_shared_workspace,
             )
 
             async def _do_persist() -> None:

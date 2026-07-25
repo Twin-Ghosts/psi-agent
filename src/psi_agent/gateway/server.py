@@ -147,13 +147,19 @@ async def create_app(
     attention: AttentionHub | None = None,
     feishu_ai_id: str = "",
     feishu_workspace_root: str = "",
+    feishu_shared_workspace: bool = False,
 ) -> web.Application:
     app = web.Application(client_max_size=100 * 1024 * 1024)
     app["aim"] = aim
     app["rm"] = rm
     app["sm"] = sm
     app["tm"] = tm
-    app["fm"] = FeishuManager(_sm=sm, _ai_id=feishu_ai_id, _workspace_root=feishu_workspace_root)
+    app["fm"] = FeishuManager(
+        _sm=sm,
+        _ai_id=feishu_ai_id,
+        _workspace_root=feishu_workspace_root,
+        _shared_workspace=feishu_shared_workspace,
+    )
     app["wm"] = WorkspaceManager()
     app["cm"] = ChatManager()
     app["hm"] = HistoryManager()

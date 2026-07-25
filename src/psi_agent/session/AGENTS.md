@@ -159,8 +159,8 @@ AI 的 tool_calls 通过 SSE 流式传输——多个 chunk 中的 `delta.tool_c
 ```
 每个 schedule 一个 run_one_schedule() coroutine：
   while True:
-    croniter.get_next()         ← 计算下次触发时间
-    await anyio.sleep(触发时间 - now) ← 睡到触发
+    _seconds_until_next(cron)   ← 本机本地墙钟下次触发（勿用 time.time() 作 croniter base）
+    await anyio.sleep(wait)     ← 睡到触发
     async with agent._lock:       ← 等当前请求完成
       user = {role:user, content:TASK.md, kind:schedule.silent}  ← user 始终 silent
       response_kind = schedule.display | schedule.silent         ← 由 TASK.md visibility 决定
@@ -171,10 +171,14 @@ AI 的 tool_calls 通过 SSE 流式传输——多个 chunk 中的 `delta.tool_c
 ```
 
 关键点：
-- Schedule 配置：`name, cron, task_content, visibility`（`display`/`silent`，缺省 `display`）
+- Schedule 配置：`name, cron, task_content, visibility`（`display`/`silent`，缺省 `display`），以及 **`run_once`**（缺省 `false`），以及 **`fire`**（`prompt` 缺省 / `tool`）
+- **`fire: tool`（刻意为之）**：到点 Session **直接** `ToolRegistry.get(tool)(**tool_args)`，**不跑 LLM**。用于飞书提醒等必须可靠推送的场景；YAML 含 `tool` + `tool_args`。`fire: prompt` 仍把 TASK 正文当 user message 交给 agent（heartbeat / 日报等）。workspace `schedule_manage` 对飞书提醒应写 `fire=tool`
+- **`run_once: true`（刻意为之）**：成功跑完一轮后删除对应 `TASK.md`（及空目录）并结束该 runner，避免「单次提醒」因 5 段 cron 无年份而次年再触发。workspace 工具 `schedule_manage` 的 `once_at` 会写入此字段
+- **cron 按本机本地时间解释（刻意为之）**：`_run_one` 用 `datetime.now()` + `croniter`，**禁止**把 Unix timestamp 交给 `croniter` 当 base——后者会把 5 段字段当 UTC，导致 `once_at` 写的本地时刻在非 UTC 机器上晚数小时才触发。workspace `schedule_manage` 的 `once_at`/`cron` 语义都是本机墙钟
 - **``kind`` 字段**（敲定协议）：OpenAI ``role`` 不变；用正交字段区分对话来源。Gateway ``/history`` 只返回 ``is_displayable_chat_message``（``kind=chat`` 的 user/assistant，以及 ``kind=schedule.display`` 的 assistant）。AI 请求经 ``messages_for_ai`` 剥掉 ``kind``/遗留 ``chat_type``
 - ``visibility: silent`` 的 schedule（heartbeat）结果永不 pending、永不展示
 - ``visibility: display`` 的 schedule 结果可进 history，并通过 pending 随下次 ``POST /chat`` 带回（``/events/schedule`` 推送通道仍待定）
+- `fire: prompt` 触发只是 Session 内再跑一轮 agent（TASK 正文当 user message）——**不会**自动往飞书推 IM；`fire: tool` 才按 YAML 直调工具（如 `feishu_message_send`）
 - Schedule 响应的 content 和 reasoning 各自存在于各自的消息周期，不会交错
 - 多个 schedule 可以并发 sleep，但通过 lock 串行触发
 - 每个 schedule 在加载时独立处理——IO 错误、YAML 解析问题、cron 验证失败都只跳过该 schedule

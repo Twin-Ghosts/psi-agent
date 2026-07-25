@@ -423,7 +423,7 @@ OPENAPI_SPEC = {
                     },
                     "workspace": {
                         "type": "string",
-                        "description": "Optional, defaults to <feishu_workspace_root>/<open_id>",
+                        "description": "Optional. Default: <feishu_workspace_root>/<open_id>, or the root itself when Gateway --feishu-shared-workspace is set",
                     },
                 },
             },

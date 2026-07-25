@@ -208,18 +208,19 @@ REST ``DELETE /sessions/{id}`` 在 SessionManager.delete 之后还会：
 **字段**：
 - `_sm: SessionManager` — 复用其 spawn/查询能力管理 Session 生命周期
 - `_ai_id: str` — 飞书用户 Session 默认挂载的 AI 实例 id（`create_app(..., feishu_ai_id=...)` 注入，来自 `Gateway.feishu_ai_id`）
-- `_workspace_root: str` — 各用户独立 workspace 的父目录（来自 `Gateway.feishu_workspace_root`；空则以 cwd 为父）
+- `_workspace_root: str` — 飞书 workspace 根（来自 `Gateway.feishu_workspace_root`；空则以 cwd）
+- `_shared_workspace: bool` — **刻意为之**：`True` 时所有 open_id 共用 `_workspace_root`（或 cwd）本身，不再建 `<root>/<open_id>` 空壳；session_id 仍按人隔离。联调完整 haitun-workspace 时用 `--feishu-shared-workspace`。默认 `False` 保持 per-user 子目录隔离。
 - `_routes: dict[str, str]` — open_id → session_id 映射（内存态）
 - `_lock: anyio.Lock` — 首次路由才走，频率低，可接受串行
 
 **派生规则**：
 - `session_id = feishu-<sanitize(open_id)>`——加 `feishu-` 前缀与 SPA 手建 session 命名空间隔离；`sanitize` 用正则 `[^A-Za-z0-9._-] → _`（飞书 open_id 本身即安全字符，此为防御层）
-- `workspace = <root>/<open_id>`——每个 open_id 独立子目录，文件/历史互相隔离
+- `workspace`：默认 `<root>/<open_id>`；`--feishu-shared-workspace` 时为 `<root>` 本身
 
 **route(open_id, *, ai_id=None, workspace=None) → (channel_socket, session_id) 流程**（持 lock）：
-1. 命中 `_routes` 且 `_sm.has(sid)` → 直接返回 `get_socket`
-2. 否则 `_sm.has(sid)`（重启后 Session 被 state 恢复，或 SPA 侧同名建过）→ **adopt** 该 Session，写回 `_routes`
-3. 否则 `mkdir(workspace)` + `_sm.create(ai_id=ai_id or _ai_id, id=sid, workspace=ws)`；捕获 `ValueError("already exists")` 竞态 → 回退 `get_socket`
+1. 命中 `_routes` 且 `_sm.has(sid)` 且 workspace 路径一致 → 直接返回 `get_socket`
+2. 否则 `_sm.has(sid)` 且路径一致 → **adopt**；路径不一致（例如从空壳子目录切到 shared 完整 workspace）→ **delete 旧 Session 再按新路径 create**
+3. 否则 `mkdir(workspace)` + `_sm.create(...)`；捕获 `ValueError("already exists")` 竞态 → 回退 `get_socket`
 4. `ai_id` 最终为空 → `raise ValueError`（handler 转 400）；`open_id` 为空 → `raise ValueError`
 
 **内存态自愈（有意为之）**：`_routes` 不持久化。因 session_id 由 open_id 确定性派生，Gateway 重启后 Session 经 state 恢复，下次 `route()` 走 adopt 分支自愈，无需额外持久化。
@@ -534,7 +535,7 @@ AI 创建对话框支持从 provider 的 `/models` API 实时拉取可用模型�
 ## CLI 集成
 
 ```
-psi-agent gateway [--listen http://127.0.0.1:PORT] [--socket-path psi] [--icon PATH] [--app-name NAME] [--browser/--no-browser] [--webview/--no-webview] [--tray/--no-tray] [--feishu-ai-id ID] [--feishu-workspace-root DIR] [--verbose]
+psi-agent gateway [--listen http://127.0.0.1:PORT] [--socket-path psi] [--icon PATH] [--app-name NAME] [--browser/--no-browser] [--webview/--no-webview] [--tray/--no-tray] [--feishu-ai-id ID] [--feishu-workspace-root DIR] [--feishu-shared-workspace/--no-feishu-shared-workspace] [--verbose]
 ```
 
 默认 listen 为空，会自动绑定 127.0.0.1 随机高端口。`--browser` 开启自动打开浏览器。
@@ -547,7 +548,7 @@ psi-agent gateway [--listen http://127.0.0.1:PORT] [--socket-path psi] [--icon P
 
 `--webview` 使用原生 pywebview 窗口展示 Web Console。与 `--browser` 互斥，两者同时设为 True 时报错。必须同时指定 `--icon`（否则报错）。关闭窗口行为取决于 `--tray`：有托盘时仅隐藏窗口，无托盘时退出 Gateway 进程。
 
-`--feishu-ai-id ID` 指定飞书用户 Session（经 `POST /feishu/route` 按需 spawn）默认挂载的 AI 实例 id。未配时若请求也不带 `ai_id`，`/feishu/route` 返回 400。`--feishu-workspace-root DIR` 指定各飞书用户独立 workspace 的父目录（每个 open_id 得 `<root>/<open_id>` 子目录）；空则以 Gateway 进程 cwd 为父。两者均为飞书多用户独立会话渠道服务（配合飞书 channel 的 `--gateway-url`，见 `channel/AGENTS.md`）。
+`--feishu-ai-id ID` 指定飞书用户 Session（经 `POST /feishu/route` 按需 spawn）默认挂载的 AI 实例 id。未配时若请求也不带 `ai_id`，`/feishu/route` 返回 400。`--feishu-workspace-root DIR` 指定飞书 workspace 根；默认每个 open_id 得 `<root>/<open_id>` 子目录，空则以 Gateway cwd 为父。`--feishu-shared-workspace` 打开后所有飞书用户共用该 root（或 cwd）本身，不再建 open_id 空壳——联调完整 haitun-workspace 时用。配合飞书 channel 的 `--gateway-url`（见 `channel/AGENTS.md`）。
 
 Gateway 不在 `_run.py` 的批量启动中。
 

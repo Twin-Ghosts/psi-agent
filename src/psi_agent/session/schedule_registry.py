@@ -8,9 +8,10 @@ The public ``schedules`` list remains flat for backward compatibility.
 from __future__ import annotations
 
 import hashlib
-import time
-from contextlib import aclosing
-from dataclasses import dataclass
+import json
+from contextlib import aclosing, suppress
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -29,6 +30,11 @@ from psi_agent.session.protocol import AgentChunk
 if TYPE_CHECKING:
     from psi_agent.session.agent import SessionAgent
 
+# fire: prompt (default) — inject TASK body as user message, LLM may call tools.
+# fire: tool — Session invokes tool_name(**tool_args) directly (no LLM).
+FIRE_PROMPT = "prompt"
+FIRE_TOOL = "tool"
+
 
 @dataclass
 class Schedule:
@@ -39,6 +45,14 @@ class Schedule:
     task_content: str
     # Finalized protocol: display | silent (default display for backward compat).
     visibility: str = "display"
+    # When True, delete TASK.md and stop the runner after one successful fire.
+    run_once: bool = False
+    # Absolute path to TASK.md (set on load) — used for run_once cleanup.
+    task_path: str = ""
+    # prompt = LLM turn on task_content; tool = direct ToolRegistry call (刻意为之).
+    fire: str = FIRE_PROMPT
+    tool_name: str = ""
+    tool_args: dict[str, Any] = field(default_factory=dict)
 
 
 # ── ScheduleEntry — per-file storage unit ─────────────────────────────────────
@@ -158,7 +172,7 @@ class ScheduleRegistry:
         """Start a perpetual runner coroutine for *schedule*."""
         cancel_scope = anyio.CancelScope()
         self._runner_scopes[schedule.name] = cancel_scope
-        self._task_group.start_soon(self._run_one, schedule, self._agent, cancel_scope)
+        self._task_group.start_soon(self._run_one, schedule, self._agent, cancel_scope, self)
 
     def _cancel_runner(self, name: str) -> None:
         """Cancel a running schedule by name, removing its scope."""
@@ -166,57 +180,203 @@ class ScheduleRegistry:
         if scope is not None:
             scope.cancel()
 
+    def _forget_schedule_file(self, task_path: str, name: str) -> None:
+        """Drop an entry after run_once deleted its TASK.md (best-effort)."""
+        self._files.pop(task_path, None)
+        self._runner_scopes.pop(name, None)
+
     # -- runner coroutine (perpetual) -------------------------------------------
 
     @staticmethod
-    async def _run_one(schedule: Schedule, agent: SessionAgent, cancel_scope: anyio.CancelScope) -> None:
-        """Perpetual coroutine that fires a schedule on its cron interval."""
-        logger.info(f"Schedule runner started: {schedule.name!r} ({schedule.cron!r})")
+    def _seconds_until_next(cron: str, *, now: datetime | None = None) -> float:
+        """Seconds until the next cron fire in *machine-local* wall time.
 
-        cron_iter = croniter(schedule.cron, time.time())
+        刻意为之: ``once_at`` / TASK ``cron`` fields are local clock values
+        (see workspace ``schedule_manage``). Passing a Unix timestamp into
+        ``croniter`` makes it treat those fields as UTC, so one-shot reminders
+        on non-UTC machines fire hours late (e.g. UTC+8 → +8h).
+        """
+        base = now if now is not None else datetime.now()
+        nxt = croniter(cron, base).get_next(datetime)
+        return max(0.0, (nxt - base).total_seconds())
+
+    @staticmethod
+    async def _run_one(
+        schedule: Schedule,
+        agent: SessionAgent,
+        cancel_scope: anyio.CancelScope,
+        registry: ScheduleRegistry,
+    ) -> None:
+        """Perpetual coroutine that fires a schedule on its cron interval.
+
+        If ``schedule.run_once`` is True, deletes ``TASK.md`` after one successful
+        fire and exits (刻意为之: one-shot reminders must not re-fire next year).
+        """
+        logger.info(
+            f"Schedule runner started: {schedule.name!r} ({schedule.cron!r}, run_once={schedule.run_once})"
+        )
 
         try:
             with cancel_scope:
                 while True:
                     try:
-                        next_run = cron_iter.get_next()
-                        wait = max(0.0, next_run - time.time())
+                        wait = ScheduleRegistry._seconds_until_next(schedule.cron)
+                        logger.debug(
+                            f"Schedule {schedule.name!r} sleeping {wait:.1f}s until next fire"
+                        )
                         await anyio.sleep(wait)
 
                         logger.info(f"Schedule triggered: {schedule.name!r}")
-                        user_msg = with_kind(
-                            {"role": "user", "content": schedule.task_content},
-                            KIND_SCHEDULE_SILENT,
-                        )
                         response_kind = (
                             KIND_SCHEDULE_DISPLAY if schedule.visibility == "display" else KIND_SCHEDULE_SILENT
                         )
 
                         async with agent._lock:
-                            pending_chunks: list[AgentChunk] = []
-                            async with aclosing(agent.run(user_msg, response_kind=response_kind)) as chunks:
-                                async for chunk in chunks:
-                                    pending_chunks.append(chunk)
-                                    logger.debug(
-                                        f"Schedule chunk: content={chunk.content!r}, reasoning={chunk.reasoning!r}"
-                                    )
-                                # silent → never push into the next Channel turn
-                                if schedule.visibility == "display" and pending_chunks:
-                                    agent.set_pending_schedule_chunks(pending_chunks)
-                                    logger.info(
-                                        f"Schedule {schedule.name!r} response stored "
-                                        f"({len(pending_chunks)} chunks, visibility=display)"
-                                    )
-                                else:
-                                    logger.info(
-                                        f"Schedule {schedule.name!r} completed "
-                                        f"(visibility={schedule.visibility!r}, "
-                                        f"chunks={len(pending_chunks)}, not pending)"
-                                    )
+                            if schedule.fire == FIRE_TOOL:
+                                pending_chunks = await ScheduleRegistry._fire_tool(
+                                    schedule, agent, response_kind
+                                )
+                            else:
+                                pending_chunks = await ScheduleRegistry._fire_prompt(
+                                    schedule, agent, response_kind
+                                )
+                            # silent → never push into the next Channel turn
+                            if schedule.visibility == "display" and pending_chunks:
+                                agent.set_pending_schedule_chunks(pending_chunks)
+                                logger.info(
+                                    f"Schedule {schedule.name!r} response stored "
+                                    f"({len(pending_chunks)} chunks, visibility=display)"
+                                )
+                            else:
+                                logger.info(
+                                    f"Schedule {schedule.name!r} completed "
+                                    f"(visibility={schedule.visibility!r}, "
+                                    f"fire={schedule.fire!r}, "
+                                    f"chunks={len(pending_chunks)}, not pending)"
+                                )
+
+                        if schedule.run_once:
+                            await ScheduleRegistry._consume_run_once(schedule, registry)
+                            break
                     except Exception as e:
                         logger.error(f"Error processing schedule {schedule.name!r}: {e!r}")
         finally:
             logger.info(f"Schedule runner stopped: {schedule.name!r}")
+
+    @staticmethod
+    async def _fire_prompt(
+        schedule: Schedule,
+        agent: SessionAgent,
+        response_kind: str,
+    ) -> list[AgentChunk]:
+        """Default path: TASK body as user message → agent loop (LLM)."""
+        user_msg = with_kind(
+            {"role": "user", "content": schedule.task_content},
+            KIND_SCHEDULE_SILENT,
+        )
+        pending_chunks: list[AgentChunk] = []
+        async with aclosing(agent.run(user_msg, response_kind=response_kind)) as chunks:
+            async for chunk in chunks:
+                pending_chunks.append(chunk)
+                logger.debug(
+                    f"Schedule chunk: content={chunk.content!r}, reasoning={chunk.reasoning!r}"
+                )
+        return pending_chunks
+
+    @staticmethod
+    async def _fire_tool(
+        schedule: Schedule,
+        agent: SessionAgent,
+        response_kind: str,
+    ) -> list[AgentChunk]:
+        """Direct tool invocation — no LLM.
+
+        刻意为之: Feishu reminders and similar must not depend on the model
+        voluntarily emitting tool_calls from a TASK prose/pseudocode body.
+        """
+        await agent.reload_tools()
+        tool_name = schedule.tool_name.strip()
+        args = dict(schedule.tool_args)
+        logger.info(f"Schedule tool fire: {schedule.name!r} → {tool_name!r}({args!r})")
+
+        chunks: list[AgentChunk] = []
+        async with agent._conversation:
+            agent._conversation.add(
+                with_kind(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"[schedule tool] {schedule.name}: call {tool_name}"
+                            + (f"\n{schedule.task_content}" if schedule.task_content else "")
+                        ),
+                    },
+                    KIND_SCHEDULE_SILENT,
+                )
+            )
+            await agent._conversation.commit()
+
+            func = agent._tool_registry.get(tool_name) if tool_name else None
+            if func is None:
+                result = f"Error: Tool {tool_name!r} not found"
+                logger.error(f"Schedule {schedule.name!r}: {result}")
+            else:
+                try:
+                    raw = await func(**args)
+                    result = str(raw)
+                    logger.info(f"Schedule tool result ({tool_name!r}): {result[:1000]!r}")
+                except Exception as e:
+                    result = f"Error executing tool {tool_name!r}: {e}"
+                    logger.error(f"Schedule {schedule.name!r} tool error: {e!r}")
+
+            chunks.append(
+                AgentChunk(
+                    reasoning=f"[Tool Call: {tool_name}({json.dumps(args, ensure_ascii=False)})]"
+                )
+            )
+            chunks.append(AgentChunk(reasoning=f"[Tool Result: {result[:1000]}]"))
+            if schedule.visibility == "display":
+                chunks.append(AgentChunk(content=result[:2000]))
+
+            # Do not invent OpenAI tool_calls rows — they can confuse later AI turns.
+            agent._conversation.add(
+                with_kind(
+                    {
+                        "role": "assistant",
+                        "content": (
+                            f"[schedule tool {tool_name}] {result[:3500]}"
+                            if schedule.visibility == "display"
+                            else f"[schedule tool {tool_name}] ok"
+                        ),
+                    },
+                    response_kind,
+                )
+            )
+            await agent._conversation.commit()
+
+        return chunks
+
+    @staticmethod
+    async def _consume_run_once(schedule: Schedule, registry: ScheduleRegistry) -> None:
+        """Delete TASK.md for a run_once schedule after a successful fire."""
+        path_str = schedule.task_path
+        if not path_str:
+            logger.warning(f"run_once schedule {schedule.name!r} has no task_path; cannot delete")
+            return
+        path = anyio.Path(path_str)
+        with anyio.CancelScope(shield=True):
+            try:
+                if await path.exists():
+                    await path.unlink()
+                    parent = path.parent
+                    with suppress(OSError):
+                        await parent.rmdir()
+                    logger.info(f"run_once schedule {schedule.name!r} removed {path_str!r}")
+                else:
+                    logger.warning(f"run_once schedule {schedule.name!r}: {path_str!r} already gone")
+            except Exception as e:
+                logger.error(f"run_once cleanup failed for {schedule.name!r}: {e!r}")
+            finally:
+                registry._forget_schedule_file(path_str, schedule.name)
 
     # -- disk loading -----------------------------------------------------------
 
@@ -287,14 +447,69 @@ class ScheduleRegistry:
                     logger.warning(f"Invalid visibility {raw_visibility!r} in {task_file!r}, defaulting to 'display'")
                     visibility = "display"
 
+                raw_once = header.get("run_once", False)
+                if isinstance(raw_once, str):
+                    run_once = raw_once.strip().casefold() in {"1", "true", "yes", "on"}
+                else:
+                    run_once = bool(raw_once)
+
+                raw_fire = header.get("fire", FIRE_PROMPT)
+                fire = str(raw_fire).strip().casefold() if isinstance(raw_fire, str) else FIRE_PROMPT
+                if fire not in {FIRE_PROMPT, FIRE_TOOL}:
+                    logger.warning(
+                        f"Invalid fire {raw_fire!r} in {task_file!r}, defaulting to {FIRE_PROMPT!r}"
+                    )
+                    fire = FIRE_PROMPT
+
+                tool_name = ""
+                tool_args: dict[str, Any] = {}
+                if fire == FIRE_TOOL:
+                    raw_tool = header.get("tool") or header.get("tool_name") or ""
+                    tool_name = str(raw_tool).strip()
+                    raw_args = header.get("tool_args", {})
+                    if isinstance(raw_args, dict):
+                        tool_args = dict(raw_args)
+                    elif isinstance(raw_args, str) and raw_args.strip():
+                        try:
+                            parsed = json.loads(raw_args)
+                        except json.JSONDecodeError as e:
+                            logger.error(
+                                f"Invalid tool_args JSON for schedule {name!r} in {task_file!r}: {e!r}"
+                            )
+                            continue
+                        if not isinstance(parsed, dict):
+                            logger.error(
+                                f"tool_args for schedule {name!r} must be a JSON object, got "
+                                f"{type(parsed).__name__}"
+                            )
+                            continue
+                        tool_args = parsed
+                    else:
+                        tool_args = {}
+                    if not tool_name:
+                        logger.error(
+                            f"fire=tool schedule {name!r} in {task_file!r} missing 'tool'; skipping"
+                        )
+                        continue
+
                 schedule = Schedule(
                     name=str(name),
                     cron=str(cron),
                     task_content=body.strip(),
                     visibility=visibility,
+                    run_once=run_once,
+                    task_path=str_path,
+                    fire=fire,
+                    tool_name=tool_name,
+                    tool_args=tool_args,
                 )
                 files[str_path] = ScheduleEntry(file_hash=file_hash, schedule=schedule, fresh=True)
-                logger.debug(f"Loaded schedule: {name!r} (cron: {cron!r}, visibility: {visibility!r})")
+                logger.debug(
+                    f"Loaded schedule: {name!r} (cron: {cron!r}, visibility: {visibility!r}, "
+                    f"run_once={run_once}, fire={fire!r}"
+                    + (f", tool={tool_name!r}" if fire == FIRE_TOOL else "")
+                    + ")"
+                )
             except Exception as e:
                 logger.error(f"Failed to load schedule from {task_dir!r}: {e!r}")
                 continue

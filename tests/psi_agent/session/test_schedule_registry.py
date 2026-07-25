@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import textwrap
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -8,7 +9,9 @@ import anyio
 import pytest
 
 from psi_agent._yaml import parse_yaml_header
+from psi_agent.session.conversation import Conversation
 from psi_agent.session.schedule_registry import Schedule, ScheduleEntry, ScheduleRegistry
+from psi_agent.session.tool_registry import FileEntry, ToolFunction, ToolRegistry
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -380,8 +383,145 @@ async def test_run_one_handles_agent_error() -> None:
     s = Schedule(name="test", cron="* * * * * *", task_content="ping")
     agent = _RaisingAgent()
     cancel_scope = anyio.CancelScope()
+    registry = ScheduleRegistry()
     with anyio.move_on_after(3):
-        await ScheduleRegistry._run_one(s, cast(Any, agent), cancel_scope)
+        await ScheduleRegistry._run_one(s, cast(Any, agent), cancel_scope, registry)
+
+
+def test_seconds_until_next_uses_local_wall_clock() -> None:
+    """once_at cron fields are local; must not treat Unix epoch as UTC base.
+
+    On a UTC+N machine, croniter(cron, time.time()) would sleep ~N hours past
+    a same-day local minute; datetime.now() base keeps wait under one minute.
+    """
+    now = datetime.now().replace(second=0, microsecond=0)
+    target = now + timedelta(minutes=1)
+    cron = f"{target.minute} {target.hour} {target.day} {target.month} *"
+    wait = ScheduleRegistry._seconds_until_next(cron, now=now)
+    assert 0.0 <= wait <= 60.0, f"expected local next-minute wait, got {wait}"
+
+
+@pytest.mark.anyio
+async def test_load_fire_tool_header(tmp_path: Path) -> None:
+    schedules_dir = tmp_path / "schedules" / "ping"
+    await anyio.Path(schedules_dir).mkdir(parents=True)
+    await anyio.Path(schedules_dir / "TASK.md").write_text(
+        textwrap.dedent("""\
+        ---
+        name: ping
+        cron: "0 12 * * *"
+        fire: tool
+        tool: feishu_message_send
+        tool_args:
+          receive_id: oc_abc
+          text: hello
+          receive_id_type: chat_id
+        run_once: true
+        visibility: silent
+        ---
+        notes ignored for tool fire
+    """),
+        encoding="utf-8",
+    )
+    files = await ScheduleRegistry._load_from_dir(tmp_path / "schedules")
+    entry = next(iter(files.values()))
+    assert entry.schedule.fire == "tool"
+    assert entry.schedule.tool_name == "feishu_message_send"
+    assert entry.schedule.tool_args["receive_id"] == "oc_abc"
+    assert entry.schedule.run_once is True
+
+
+@pytest.mark.anyio
+async def test_fire_tool_calls_registry_directly() -> None:
+    called: dict[str, object] = {}
+
+    async def feishu_message_send(
+        receive_id: str, text: str, receive_id_type: str = "chat_id"
+    ) -> str:
+        called["receive_id"] = receive_id
+        called["text"] = text
+        called["receive_id_type"] = receive_id_type
+        return '{"ok": true}'
+
+    class _ToolAgent:
+        _lock = anyio.Lock()
+
+        def __init__(self) -> None:
+            self._conversation = Conversation()
+            self._tool_registry = ToolRegistry()
+            tf = ToolFunction.from_callable(feishu_message_send)
+            self._tool_registry._files["x"] = FileEntry(
+                file_hash="h",
+                tools={tf.name: tf},
+                funcs={tf.name: feishu_message_send},
+                fresh=True,
+            )
+
+        async def reload_tools(self) -> dict[str, str]:
+            return {}
+
+        def set_pending_schedule_chunks(self, chunks: object) -> None:
+            pass
+
+    agent = _ToolAgent()
+    s = Schedule(
+        name="r1",
+        cron="0 12 * * *",
+        task_content="",
+        fire="tool",
+        tool_name="feishu_message_send",
+        tool_args={"receive_id": "oc_1", "text": "hi", "receive_id_type": "chat_id"},
+        visibility="silent",
+    )
+    chunks = await ScheduleRegistry._fire_tool(s, cast(Any, agent), "schedule.silent")
+    assert called["receive_id"] == "oc_1"
+    assert called["text"] == "hi"
+    assert any(c.reasoning and "Tool Call" in c.reasoning for c in chunks)
+
+
+@pytest.mark.anyio
+async def test_load_run_once_and_task_path(tmp_path: Path) -> None:
+    schedules_dir = tmp_path / "schedules" / "once-job"
+    await anyio.Path(schedules_dir).mkdir(parents=True)
+    task = schedules_dir / "TASK.md"
+    await anyio.Path(task).write_text(
+        textwrap.dedent("""\
+        ---
+        name: once-job
+        cron: "0 12 1 1 *"
+        run_once: true
+        visibility: display
+        ---
+        Remind once.
+    """),
+        encoding="utf-8",
+    )
+    files = await ScheduleRegistry._load_from_dir(tmp_path / "schedules")
+    entry = next(iter(files.values()))
+    assert entry.schedule.run_once is True
+    assert entry.schedule.task_path.endswith("TASK.md")
+
+
+@pytest.mark.anyio
+async def test_consume_run_once_deletes_task(tmp_path: Path) -> None:
+    schedules_dir = tmp_path / "schedules" / "once-job"
+    await anyio.Path(schedules_dir).mkdir(parents=True)
+    task = schedules_dir / "TASK.md"
+    await anyio.Path(task).write_text("x", encoding="utf-8")
+    s = Schedule(
+        name="once-job",
+        cron="0 12 1 1 *",
+        task_content="hi",
+        run_once=True,
+        task_path=str(task),
+    )
+    registry = ScheduleRegistry(
+        files={str(task): ScheduleEntry(file_hash="a", schedule=s)},
+        work_dir=tmp_path / "schedules",
+    )
+    await ScheduleRegistry._consume_run_once(s, registry)
+    assert not await anyio.Path(task).exists()
+    assert str(task) not in registry._files
 
 
 # ── YAML parse helper ─────────────────────────────────────────────────────────
