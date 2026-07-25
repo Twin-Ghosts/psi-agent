@@ -36,11 +36,6 @@ class FeishuRoute:
     session_id: str
 
 
-def _norm_workspace(path: str) -> str:
-    """Compare workspace paths across Windows/Unix without false mismatches."""
-    return os.path.normcase(os.path.abspath(path))
-
-
 @dataclass
 class FeishuManager:
     """按 open_id 幂等地把飞书用户路由到各自的 Session。
@@ -48,17 +43,11 @@ class FeishuManager:
     ``_ai_id`` / ``_workspace_root`` 是缺省值, 单次 ``route`` 可覆盖。``_routes`` 是内存态
     (open_id → session_id); 因 session_id 由 open_id 确定性派生, 重启后经 ``route`` 的 adopt
     分支自愈, 无需额外持久化。
-
-    ``_shared_workspace`` (刻意为之): True 时所有飞书用户共用 ``_workspace_root`` (或 cwd)
-    本身作为 Session workspace——不再建 ``<root>/<open_id>`` 空壳子目录。会话仍按
-    ``feishu-<open_id>`` 隔离 (history JSONL 不同); 工具/skills 共享同一 agent 家。
-    适合单租户联调或「锁死完整 haitun-workspace」; 多用户文件隔离请保持 False。
     """
 
     _sm: SessionManager
     _ai_id: str = ""
     _workspace_root: str = ""
-    _shared_workspace: bool = False
     _routes: dict[str, str] = field(default_factory=dict)
     _lock: anyio.Lock = field(default_factory=anyio.Lock)
 
@@ -67,14 +56,8 @@ class FeishuManager:
         return f"feishu-{_sanitize_open_id(open_id)}"
 
     def _workspace_for(self, open_id: str) -> str:
-        """Resolve default workspace for an open_id.
-
-        - shared: ``<root>`` (root 空则 cwd)
-        - per-user (default): ``<root>/<open_id>``
-        """
+        """每个 open_id 得到 ``<root>/<open_id>`` 独立子目录 (root 空则以 cwd 为父)。"""
         root = self._workspace_root or os.getcwd()
-        if self._shared_workspace:
-            return root
         return os.path.join(root, _sanitize_open_id(open_id))
 
     async def route(
@@ -87,47 +70,28 @@ class FeishuManager:
         """按 open_id 幂等地拿到其 Session 的 (channel_socket, session_id)。
 
         首次见到某 open_id 时按需 spawn 一个 Session; 之后命中缓存或 adopt 已存在 Session。
-        若已存在 Session 的 workspace 与本次解析路径不一致 (例如从 per-user 空壳切到
-        shared 完整 workspace), 删掉旧 Session 再按新路径重建——避免一直卡在无 tools 的旧目录。
         ``ai_id`` 最终为空时抛 ``ValueError`` (由 handler 转 400)。
         """
         if not open_id:
             raise ValueError("open_id must not be empty")
         sid = self._session_id(open_id)
-        ws = workspace or self._workspace_for(open_id)
-
         async with self._lock:
             logger.debug(f"FeishuManager: acquired lock for route {open_id!r}")
-            # 命中路由表且 Session 仍活且 workspace 一致 → 直接复用。
+            # 命中路由表且 Session 仍活 → 直接复用。
             cached = self._routes.get(open_id)
             if cached is not None and self._sm.has(cached):
-                if _norm_workspace(self._sm.get_workspace(cached)) == _norm_workspace(ws):
-                    return self._sm.get_socket(cached), cached
-                logger.info(
-                    f"FeishuManager: cached session {cached!r} workspace mismatch "
-                    f"(have={self._sm.get_workspace(cached)!r}, want={ws!r}); recreating"
-                )
-                await self._sm.delete(cached)
-                self._routes.pop(open_id, None)
+                return self._sm.get_socket(cached), cached
 
-            # 路由表未命中但 Session 已存在 (重启后被 state 恢复, 或 SPA 侧同名建过)。
+            # 路由表未命中但 Session 已存在 (重启后被 state 恢复, 或 SPA 侧同名建过) → adopt。
             if self._sm.has(sid):
-                if _norm_workspace(self._sm.get_workspace(sid)) == _norm_workspace(ws):
-                    self._routes[open_id] = sid
-                    logger.debug(
-                        f"FeishuManager: adopted existing session {sid!r} for open_id={open_id!r}"
-                    )
-                    return self._sm.get_socket(sid), sid
-                logger.info(
-                    f"FeishuManager: existing session {sid!r} workspace mismatch "
-                    f"(have={self._sm.get_workspace(sid)!r}, want={ws!r}); recreating"
-                )
-                await self._sm.delete(sid)
+                self._routes[open_id] = sid
+                logger.debug(f"FeishuManager: adopted existing session {sid!r} for open_id={open_id!r}")
+                return self._sm.get_socket(sid), sid
 
             resolved_ai = ai_id or self._ai_id
             if not resolved_ai:
                 raise ValueError("no ai_id: set Gateway --feishu-ai-id or pass ai_id in the request")
-
+            ws = workspace or self._workspace_for(open_id)
             await anyio.Path(ws).mkdir(parents=True, exist_ok=True)
 
             try:
