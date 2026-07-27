@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import socket
 import webbrowser
 from dataclasses import dataclass
@@ -81,10 +82,11 @@ class Gateway:
     """
 
     appdata: str = ""
-    """AppData Step A CLI: memory-area root announced via GET /defaults.
+    """AppData memory-area root (``GET /defaults.appdata``, env ``PSI_APPDATA``).
 
-    Empty → ``PSI_APPDATA`` env, else ``platformdirs.user_data_dir(Haitun)``.
-    This step does **not** relocate history / Gateway state / todos yet.
+    Empty → ``PSI_APPDATA`` → ``platformdirs.user_data_dir(Haitun)``.
+    Step 4B: todos write under ``{appdata}/todos/`` (legacy workspace path dual-read).
+    History / Gateway ``state/`` still use old locations until later PRs.
     """
 
     verbose: bool = False
@@ -103,9 +105,11 @@ class Gateway:
         agent_default = await resolve_default_agent(self.default_agent)
         workspace_default = await resolve_default_workspace(self.default_workspace)
         appdata_root = await resolve_appdata_root(self.appdata)
+        # So in-process Session tools (todo, …) see the same root as GET /defaults.
+        os.environ["PSI_APPDATA"] = appdata_root
         logger.info(f"Default agent: {agent_default or '(same as workspace)'}")
         logger.info(f"Default workspace: {workspace_default}")
-        logger.info(f"AppData root (announce only; writers unchanged): {appdata_root}")
+        logger.info(f"AppData root: {appdata_root}")
 
         state = GatewayState()
         snapshot = await state.load()

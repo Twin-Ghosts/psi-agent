@@ -237,7 +237,7 @@ OPENAPI_SPEC = {
         },
         "/sessions/{session_id}/todos": {
             "get": {
-                "summary": "Get session todo list (workspace .psi/todos)",
+                "summary": "Get session todo list (AppData todos/ with legacy dual-read)",
                 "operationId": "getTodos",
                 "parameters": [
                     {
@@ -445,7 +445,7 @@ OPENAPI_SPEC = {
                         "type": "string",
                         "description": (
                             "AppData memory root (platformdirs / --appdata / PSI_APPDATA). "
-                            "Announce only until history/state/todos relocate."
+                            "Todos live under {appdata}/todos/; history/state relocate later."
                         ),
                     },
                 },

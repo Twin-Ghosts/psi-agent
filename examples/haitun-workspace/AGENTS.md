@@ -85,11 +85,12 @@ service tools:
 
 | 解析 API | 优先顺序 | 典型用途 |
 |----------|----------|----------|
-| `workspace_dir()` / `resolve_workspace()` | 显式参数 → `get_workspace()` → `WORKSPACE_DIR` → 本包父目录 | 相对路径读写、`bash`/`powershell` cwd、`schedules/`、`flows/`、todos、feishu UAT |
+| `workspace_dir()` / `resolve_workspace()` | 显式参数 → `get_workspace()` → `WORKSPACE_DIR` → 本包父目录 | 相对路径读写、`bash`/`powershell` cwd、`schedules/`、`flows/`、feishu UAT |
 | `agent_dir()` / `resolve_agent()` | 显式参数 → `get_agent()` → 回落 `workspace_dir()` | `skills/`（`skill_manage`） |
 | `resolve_user_path(path)` | 相对 → 拼到 workspace；绝对路径原样 | `read` / `write` / `edit` / `list_dir` / `find_files` |
+| AppData todos（第 4B） | `resolve_appdata_root()` → `{appdata}/todos/{session_id}.json`；读时双读 legacy `{workspace}/.psi/todos/` | `todo` tool / Gateway `GET …/todos` |
 
-**刻意为之**：history 仍在 `{workspace}/histories/`；AppData 搬家另 PR，工具不读 AppData。
+**刻意为之**：history 仍在 `{workspace}/histories/`；Gateway `state/` 仍在进程 cwd 旁。todos 已迁 AppData。
 
 | Tool | Notes |
 |---|---|

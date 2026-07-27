@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import anyio
 import pytest
 
@@ -7,17 +9,20 @@ from psi_agent.gateway._todo_manager import TodoManager
 
 
 @pytest.mark.anyio
-async def test_todos_missing_file_returns_empty(tmp_path: str) -> None:
+async def test_todos_missing_file_returns_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PSI_APPDATA", str(tmp_path / "appdata"))
     todom = TodoManager()
-    result = await todom.get(str(tmp_path), "nope")
+    result = await todom.get(str(tmp_path / "ws"), "nope")
     assert result["todos"] == []
     assert result["summary"]["total"] == 0
 
 
 @pytest.mark.anyio
-async def test_todos_reads_valid_items_and_skips_bad(tmp_path: str) -> None:
+async def test_todos_reads_appdata_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    appdata = tmp_path / "appdata"
+    monkeypatch.setenv("PSI_APPDATA", str(appdata))
     todom = TodoManager()
-    todo_dir = anyio.Path(str(tmp_path)) / ".psi" / "todos"
+    todo_dir = anyio.Path(str(appdata)) / "todos"
     await todo_dir.mkdir(parents=True)
     payload = """{
   "session_id": "s1",
@@ -33,7 +38,7 @@ async def test_todos_reads_valid_items_and_skips_bad(tmp_path: str) -> None:
 """
     await (todo_dir / "s1.json").write_text(payload, encoding="utf-8")
 
-    result = await todom.get(str(tmp_path), "s1")
+    result = await todom.get(str(tmp_path / "ws"), "s1", appdata=str(appdata))
     assert [t["id"] for t in result["todos"]] == ["1", "2", "3"]
     assert result["summary"] == {
         "total": 3,
@@ -45,10 +50,51 @@ async def test_todos_reads_valid_items_and_skips_bad(tmp_path: str) -> None:
 
 
 @pytest.mark.anyio
-async def test_todos_malformed_json_returns_empty(tmp_path: str) -> None:
+async def test_todos_dual_read_falls_back_to_workspace_legacy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    appdata = tmp_path / "appdata"
+    ws = tmp_path / "ws"
+    monkeypatch.setenv("PSI_APPDATA", str(appdata))
+    await anyio.Path(appdata).mkdir()
+    legacy_dir = anyio.Path(str(ws)) / ".psi" / "todos"
+    await legacy_dir.mkdir(parents=True)
+    await (legacy_dir / "old.json").write_text(
+        '{"todos":[{"id":"1","content":"legacy","status":"pending"}]}',
+        encoding="utf-8",
+    )
     todom = TodoManager()
-    todo_dir = anyio.Path(str(tmp_path)) / ".psi" / "todos"
+    result = await todom.get(str(ws), "old", appdata=str(appdata))
+    assert result["todos"] == [{"id": "1", "content": "legacy", "status": "pending"}]
+
+
+@pytest.mark.anyio
+async def test_todos_appdata_wins_over_legacy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    appdata = tmp_path / "appdata"
+    ws = tmp_path / "ws"
+    monkeypatch.setenv("PSI_APPDATA", str(appdata))
+    app_dir = anyio.Path(str(appdata)) / "todos"
+    legacy_dir = anyio.Path(str(ws)) / ".psi" / "todos"
+    await app_dir.mkdir(parents=True)
+    await legacy_dir.mkdir(parents=True)
+    await (app_dir / "s1.json").write_text(
+        '{"todos":[{"id":"a","content":"from-appdata","status":"completed"}]}',
+        encoding="utf-8",
+    )
+    await (legacy_dir / "s1.json").write_text(
+        '{"todos":[{"id":"b","content":"from-legacy","status":"pending"}]}',
+        encoding="utf-8",
+    )
+    todom = TodoManager()
+    result = await todom.get(str(ws), "s1", appdata=str(appdata))
+    assert result["todos"][0]["content"] == "from-appdata"
+
+
+@pytest.mark.anyio
+async def test_todos_malformed_json_returns_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    appdata = tmp_path / "appdata"
+    monkeypatch.setenv("PSI_APPDATA", str(appdata))
+    todom = TodoManager()
+    todo_dir = anyio.Path(str(appdata)) / "todos"
     await todo_dir.mkdir(parents=True)
     await (todo_dir / "bad.json").write_text("{not json", encoding="utf-8")
-    result = await todom.get(str(tmp_path), "bad")
+    result = await todom.get(str(tmp_path / "ws"), "bad", appdata=str(appdata))
     assert result["todos"] == []

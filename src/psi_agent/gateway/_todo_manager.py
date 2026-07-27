@@ -1,6 +1,10 @@
 """Read session todo lists written by the workspace ``todo`` tool.
 
-Path convention (haitun-workspace): ``{workspace}/.psi/todos/{session_id}.json``.
+Path convention (Step 4B):
+- **Write / prefer read**: ``{appdata}/todos/{session_id}.json``
+- **Legacy dual-read**: ``{workspace}/.psi/todos/{session_id}.json`` if AppData
+  file is missing (old sessions keep working until rewritten).
+
 Gateway only reads; the agent tool owns writes.
 """
 
@@ -12,17 +16,30 @@ from typing import Any
 import anyio
 from loguru import logger
 
+from psi_agent.gateway._defaults import resolve_appdata_root, resolve_todo_read_path
+
 _VALID_STATUSES = frozenset({"pending", "in_progress", "completed", "cancelled"})
 
 
 class TodoManager:
-    async def get(self, workspace: str, session_id: str) -> dict[str, Any]:
+    async def get(
+        self,
+        workspace: str,
+        session_id: str,
+        *,
+        appdata: str = "",
+    ) -> dict[str, Any]:
         """Return ``{todos, summary}`` for a session; empty list if missing/invalid."""
-        path = anyio.Path(workspace) / ".psi" / "todos" / f"{session_id}.json"
+        appdata_root = appdata.strip() or await resolve_appdata_root()
+        path = await resolve_todo_read_path(
+            appdata_root=appdata_root,
+            workspace=workspace,
+            session_id=session_id,
+        )
         items = await self._read_items(path)
         summary = self._summary(items)
         logger.debug(
-            f"Todos for session {session_id!r}: total={summary['total']} "
+            f"Todos for session {session_id!r} path={path!s}: total={summary['total']} "
             f"completed={summary['completed']} in_progress={summary['in_progress']}"
         )
         return {"todos": items, "summary": summary}

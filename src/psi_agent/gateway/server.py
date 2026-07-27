@@ -498,7 +498,7 @@ async def _get_history(request: web.Request) -> web.Response:
 
 
 async def _get_todos(request: web.Request) -> web.Response:
-    """Read workspace ``.psi/todos/{session_id}.json`` written by the ``todo`` tool."""
+    """Read session todos (AppData preferred; legacy workspace path dual-read)."""
     sm: SessionManager = request.app["sm"]
     todom: TodoManager = request.app["todom"]
     session_id = request.match_info["session_id"]
@@ -506,7 +506,8 @@ async def _get_todos(request: web.Request) -> web.Response:
         workspace = sm.get_workspace(session_id)
     except LookupError:
         return _error(f"Session '{session_id}' not found", status=404)
-    return _json(await todom.get(workspace, session_id))
+    appdata = str(request.app.get("appdata") or "")
+    return _json(await todom.get(workspace, session_id, appdata=appdata))
 
 
 async def _handle_chat(request: web.Request) -> web.StreamResponse:

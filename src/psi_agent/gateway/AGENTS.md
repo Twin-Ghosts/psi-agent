@@ -17,7 +17,7 @@ Gateway 进程
 ├── WorkspaceManager   — 目录浏览
 ├── ChatManager        — SSE 流式对话管理
 ├── HistoryManager     — JSONL 历史读取
-├── TodoManager        — 会话 todo 列表只读（workspace `.psi/todos/`）
+├── TodoManager        — 会话 todo 列表只读（AppData `todos/` + legacy workspace 双读）
 ├── GatewayState       — 状态持久化到 state/latest.json
 ├── aiohttp REST Server  — OpenAPI CRUD + Web UI chat
 ├── spa/               — Vue 3 SPA 前端项目 (Vite + SFC)
@@ -43,7 +43,7 @@ Gateway 进程
 | `server.py` | aiohttp Application + REST handlers |
 | `_chat_manager.py` | SSE 流式对话管理（复用 ChannelCore） |
 | `_history_manager.py` | JSONL 历史读取 |
-| `_todo_manager.py` | 会话 todo 列表读取（workspace ``.psi/todos/{session_id}.json``，由 workspace ``todo`` tool 写入） |
+| `_todo_manager.py` | 会话 todo 列表读取（``{appdata}/todos/{session_id}.json``，legacy ``{workspace}/.psi/todos/`` 双读） |
 | `_workspace_manager.py` | 目录浏览 + 快捷路径列表 + cwd 查询 |
 | `spa/` | Vue 3 SPA v1（对话气泡），构建输出 `spa/dist/`；路径 `/spa/` |
 | `spa-v2/` | React SPA v2（任务工作台 + 宝箱），构建输出 `spa-v2/dist/`；**默认** `GET /` → `/spa-v2/`（无 dist 时回退 v1） |
@@ -86,8 +86,9 @@ Session（#472）
     │  回合内：runtime_scope 写入 get_agent()/get_workspace() ContextVar
     ▼
 workspace 工具（haitun `_runtime_paths`）按 ContextVar 解析相对路径  ← ✅ 第 3 步
-AppData 记忆区根（`--appdata` / `PSI_APPDATA` / platformdirs）     ← ✅ 第 4A 宣布；落盘仍旧路径
-AppData 真正搬家（history / state / todos）                        ← ❌ 后续小 PR
+AppData 记忆区根（`--appdata` / `PSI_APPDATA` / platformdirs）     ← ✅ 第 4A
+todos → `{appdata}/todos/`（双读旧 `{workspace}/.psi/todos/`）   ← ✅ 第 4B
+AppData 继续搬家（history / Gateway state）                        ← ❌ 后续小 PR
 ```
 
 | 已合 / 未做 | 内容 |
@@ -95,10 +96,11 @@ AppData 真正搬家（history / state / todos）                        ← ❌
 | ✅ #472 | Session 可选 `agent`；加载能力包；ContextVar **API** |
 | ✅ #482 | Gateway CLI + `GET /defaults` + `POST /sessions.agent`；调用方接线 |
 | ✅ 第 3 步 | haitun 工具读 `get_workspace()` / `get_agent()`（`_runtime_paths`） |
-| ✅ **第 4A（本层）** | 解析并暴露 AppData 根：`GET /defaults.appdata`、CLI `--appdata`、env `PSI_APPDATA`；**不**改 history/state/todos 写入位置 |
-| ❌ 后续 | 分 PR 迁 todos / history / Gateway `state/`（建议双读后再停写旧路径） |
+| ✅ 第 4A | 解析并暴露 AppData 根：`GET /defaults.appdata`、CLI `--appdata`、env `PSI_APPDATA` |
+| ✅ **第 4B（本层）** | todos：**写** `{appdata}/todos/{session_id}.json`；**读**优先 AppData，缺则双读 legacy workspace 路径；Gateway 启动把解析后的根写入 `PSI_APPDATA` 供同进程工具共用 |
+| ❌ 后续 | history / Gateway `state/` 搬家（建议继续双读） |
 
-**可读验收（第 4A）**：`GET /defaults` 含非空 `appdata`（默认来自 `platformdirs.user_data_dir("Haitun")`）；Gateway 日志打印该根。**不可用本步验收**：history/state/todos 是否已写进 AppData——仍在旧路径。
+**可读验收（第 4B）**：`todo` 写入后文件出现在 AppData `todos/`；仅有旧 workspace `.psi/todos/` 时 `GET /sessions/{id}/todos` 仍能读到；再次写入后落在 AppData。**仍未搬家**：history JSONL、Gateway `state/latest.json`。
 
 | CLI | 含义 |
 |-----|------|
@@ -235,10 +237,11 @@ REST ``DELETE /sessions/{id}`` 在 SessionManager.delete 之后还会：
 
 ## TodoManager
 
-只读：从 session workspace 读取 Agent ``todo`` tool 写入的清单。
+只读：从 AppData（优先）或 legacy workspace 读取 Agent ``todo`` tool 写入的清单。
 
-- 路径：``{workspace}/.psi/todos/{session_id}.json``
-- ``get(workspace, session_id)`` → ``{todos: [{id, content, status}], summary: {total, pending, in_progress, completed, cancelled}}``
+- **新路径**：``{appdata}/todos/{session_id}.json``（``appdata`` 来自 Gateway ``--appdata`` / ``PSI_APPDATA`` / platformdirs）
+- **Legacy 双读**：``{workspace}/.psi/todos/{session_id}.json``（仅当 AppData 文件不存在）
+- ``get(workspace, session_id, *, appdata="")`` → ``{todos: [{id, content, status}], summary: {…}}``
 - 文件缺失 / JSON 损坏 → 空列表（不 404；路由层仅在 session 不存在时 404）
 - spa-v2 任务卡中间步据此显示 ``N/M``（当前步/总数）
 
@@ -296,7 +299,7 @@ REST ``DELETE /sessions/{id}`` 在 SessionManager.delete 之后还会：
 | GET | `/sessions` | 列出所有 Session（含 `agent`） |
 | POST | `/sessions/{session_id}/chat` | Web UI chat（SSE） |
 | GET | `/sessions/{session_id}/history` | 获取会话历史（``is_displayable_chat_message`` 白名单 + 剥 `[SEND:]`/`[RECV:]`；assistant 行另附 ``sends`` 路径列表供交付物重水合） |
-| GET | `/sessions/{session_id}/todos` | 读取 workspace ``.psi/todos/{session_id}.json``（``todo`` tool 写入）；返回 ``{todos, summary}``，文件缺失则为空列表 |
+| GET | `/sessions/{session_id}/todos` | 读取 todos（AppData ``todos/{id}.json`` 优先，否则 legacy workspace ``.psi/todos``）；返回 ``{todos, summary}``，文件缺失则为空列表 |
 | POST | `/feishu/route` | 按飞书 `open_id` 幂等路由到其独立 Session（首次按需 spawn）`{open_id, ai_id?, workspace?}` → 201 `{open_id, session_id, channel_socket}`；缺 open_id / 无 ai_id → 400 |
 | GET | `/feishu/routes` | 列出所有飞书 open_id → Session 路由 `[{open_id, session_id}]` |
 | GET | `/defaults` | 默认 `agent` + `workspace` + `appdata`（**所有**建 Session 调用方可读；`appdata` 为记忆区根宣布，本步不搬家；省略 `agent` 时服务端也会用同一默认） |
