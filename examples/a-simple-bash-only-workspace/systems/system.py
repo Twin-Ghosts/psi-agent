@@ -90,3 +90,4 @@ async def compact_history(history: list[dict[str, Any]], complete_fn) -> str:
         return summary + "\n" + recent_text
     except Exception:
         return "\n".join(parts) + "\n" + recent_text
+
