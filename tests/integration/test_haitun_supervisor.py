@@ -1,3 +1,5 @@
+# ruff: noqa: RUF001
+
 from __future__ import annotations
 
 import json
@@ -387,6 +389,51 @@ async def test_store_heatmap_default_update_and_latest_advice_roundtrip(tmp_path
     assert updated["intent_history"][-1] == "compare"
     assert len(updated["last_seen"]) > 0
     assert await store.load_latest_advice(_ALICE_HASH) == advice
+
+
+def test_heatmap_preserves_history_and_rolls_back_only_active_branch() -> None:
+    store_module = _load_store()
+    heatmap = {"history": [], "active_branches": {}, "visited_nodes": []}
+    deep = store_module.update_heatmap(
+        heatmap,
+        node_ids=["overfitting"],
+        cognitive_level="0.8",
+        intent="explain",
+        surface=False,
+        branch_id="machine-learning/overfitting",
+        requested_depth="deep",
+    )
+    simple = store_module.update_heatmap(
+        deep,
+        node_ids=["overfitting"],
+        cognitive_level="0.25",
+        intent="explain",
+        surface=True,
+        branch_id="machine-learning/overfitting",
+        requested_depth="simple",
+    )
+    assert len(simple["history"]) == 2
+    assert simple["history"][0]["requested_depth"] == "deep"
+    assert simple["history"][1]["transition"] == "rollback"
+    branch = simple["active_branches"]["machine-learning/overfitting"]
+    assert branch["active_depth"] == "simple"
+    assert branch["rolled_back_from"] == "deep"
+
+
+def test_supervisor_cache_requires_same_identity_topic_and_fresh_timestamp() -> None:
+    module = _load_supervisor_manager()
+    now = module.datetime.now(module.UTC)
+    advice = {
+        "user_id_hash": module.hash_identity("alice"),
+        "profile_id": "learning",
+        "classification": {"topic": "overfitting"},
+        "diagnostics": {"source": "live", "created_at": now.isoformat()},
+    }
+    message = {"user_id": "alice", "profile_id": "learning", "content": "请继续解释 overfitting"}
+    assert module.is_cache_eligible(advice, message, now=now)
+    assert not module.is_cache_eligible(advice, {**message, "user_id": "bob"}, now=now)
+    assert not module.is_cache_eligible(advice, {**message, "content": "简单解释，不要深入"}, now=now)
+    assert not module.is_cache_eligible(advice, message, now=now + module.timedelta(minutes=11))
 
 
 @pytest.mark.anyio

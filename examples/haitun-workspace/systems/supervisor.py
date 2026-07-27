@@ -8,6 +8,7 @@ import re
 import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,44 @@ StopFn = Callable[..., Awaitable[dict[str, Any]]]
 WaitFn = Callable[..., Awaitable[dict[str, Any]]]
 ChatFn = Callable[..., Awaitable[dict[str, Any]]]
 _TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
+_FAST_ADVICE_TTL = timedelta(minutes=10)
+
+
+def is_cache_eligible(
+    advice: dict[str, Any] | None,
+    user_message: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Accept only fresh, same-user/profile/topic Advice cache."""
+    if not isinstance(advice, dict):
+        return False
+    diagnostics = advice.get("diagnostics")
+    if not isinstance(diagnostics, dict) or diagnostics.get("source") not in {"live", "repaired", "cache"}:
+        return False
+    if advice.get("user_id_hash") != hash_identity(resolve_identity(user_message)):
+        return False
+    profile_id = user_message.get("profile_id")
+    if isinstance(profile_id, str) and advice.get("profile_id") != profile_id:
+        return False
+    created = diagnostics.get("created_at") or advice.get("created_at")
+    if not isinstance(created, str):
+        return False
+    try:
+        timestamp = datetime.fromisoformat(created.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if (now or datetime.now(UTC)) - timestamp > _FAST_ADVICE_TTL:
+        return False
+    question = user_message.get("content")
+    classification = advice.get("classification")
+    topic = classification.get("topic") if isinstance(classification, dict) else ""
+    if not isinstance(question, str) or not isinstance(topic, str) or not topic:
+        return False
+    lowered = question.lower()
+    if any(signal in lowered for signal in ("不要深入", "简单解释", "换个话题", "broaden", "reframe")):
+        return False
+    return topic.replace("_", " ").lower() in lowered or topic.lower() in lowered
 
 
 def hash_identity(value: str) -> str:
@@ -291,6 +330,14 @@ class SupervisorManager:
         session_hash = hash_identity(session_id) if isinstance(session_id, str) else hash_identity("")
         async with self.store.user_lock(user_hash):
             previous = await self.store.load_latest_advice(user_hash)
+            if isinstance(previous, dict) and is_cache_eligible(previous, user_message):
+                cached = dict(previous)
+                diagnostics = dict(cached.get("diagnostics", {}))
+                diagnostics["source"] = "cache"
+                diagnostics["cache_reason"] = "same_user_profile_topic_fresh"
+                cached["diagnostics"] = diagnostics
+                logger.debug("Supervisor cache hit: source=cache")
+                return cached
             prior_domain = "general"
             if previous is not None:
                 classification = previous.get("classification")
@@ -340,6 +387,9 @@ class SupervisorManager:
             if advice is None:
                 logger.warning("Supervisor unavailable for hashed user")
                 return empty_advice()
+            diagnostics = dict(advice.get("diagnostics", {}))
+            diagnostics.setdefault("created_at", datetime.now(UTC).isoformat())
+            advice["diagnostics"] = diagnostics
             await self._apply_updates(user_hash, advice, heatmap)
             await self.store.save_latest_advice(user_hash, advice)
             return advice
@@ -372,6 +422,8 @@ class SupervisorManager:
             cognitive_level=str(state["depth"]),
             intent=advice["response_strategy"]["goal_mode"],
             surface=not advice["breakout"]["needed"],
+            branch_id=f"{domain}/{classification.get('topic', 'general')}",
+            requested_depth=advice["response_strategy"]["answer_depth"],
         )
         await self.store.heatmap_path(user_hash, domain).parent.mkdir(parents=True, exist_ok=True)
         await self.store.save_heatmap(user_hash, domain, updated)

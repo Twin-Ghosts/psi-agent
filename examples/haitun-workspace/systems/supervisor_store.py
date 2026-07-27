@@ -73,6 +73,8 @@ class SupervisorStore:
             "repeated_surface_questions": 0,
             "cognitive_history": [],
             "intent_history": [],
+            "history": [],
+            "active_branches": {},
             "last_seen": "",
         }
 
@@ -154,8 +156,10 @@ def update_heatmap(
     cognitive_level: str,
     intent: str,
     surface: bool,
+    branch_id: str = "",
+    requested_depth: str = "",
 ) -> dict[str, Any]:
-    """Return a bounded heatmap update for one user question."""
+    """Return a heatmap update while preserving complete historical evidence."""
     updated = dict(heatmap)
     question_count = updated.get("question_count", 0)
     updated["question_count"] = (question_count if isinstance(question_count, int) else 0) + 1
@@ -186,7 +190,40 @@ def update_heatmap(
     updated["repeated_surface_questions"] = surface_count + int(surface)
     updated["cognitive_history"] = _append_history(updated.get("cognitive_history"), cognitive_level)
     updated["intent_history"] = _append_history(updated.get("intent_history"), intent)
-    updated["last_seen"] = datetime.now(UTC).isoformat()
+    raw_history = updated.get("history")
+    history = list(raw_history) if isinstance(raw_history, list) else []
+    raw_branches = updated.get("active_branches")
+    active_branches = dict(raw_branches) if isinstance(raw_branches, dict) else {}
+    timestamp = datetime.now(UTC).isoformat()
+    if branch_id:
+        previous_branch = active_branches.get(branch_id)
+        previous_depth = previous_branch.get("active_depth", "") if isinstance(previous_branch, dict) else ""
+        if previous_depth == "deep" and requested_depth == "simple":
+            transition = "rollback"
+        elif previous_depth == "simple" and requested_depth == "deep":
+            transition = "advance"
+        else:
+            transition = "steady"
+        event = {
+            "timestamp": timestamp,
+            "branch_id": branch_id,
+            "requested_depth": requested_depth,
+            "cognitive_level": cognitive_level,
+            "intent": intent,
+            "transition": transition,
+            "surface": surface,
+        }
+        history.append(event)
+        branch = dict(previous_branch) if isinstance(previous_branch, dict) else {}
+        branch["active_depth"] = requested_depth
+        branch["last_seen"] = timestamp
+        if transition == "rollback":
+            branch["rolled_back_from"] = previous_depth
+            branch["rollback_count"] = int(branch.get("rollback_count", 0)) + 1
+        active_branches[branch_id] = branch
+    updated["history"] = history
+    updated["active_branches"] = active_branches
+    updated["last_seen"] = timestamp
     return updated
 
 
@@ -194,4 +231,4 @@ def _append_history(history: Any, value: str) -> list[str]:
     values = [item for item in history if isinstance(item, str)] if isinstance(history, list) else []
     if value:
         values.append(value)
-    return values[-_HISTORY_LIMIT:]
+    return values

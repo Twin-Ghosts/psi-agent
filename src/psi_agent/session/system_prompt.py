@@ -52,7 +52,7 @@ class SystemPrompt:
         checker: Callable[..., Any] | None = None,
         before_turn: Callable[..., Any] | None = None,
         after_turn: Callable[..., Any] | None = None,
-        before_turn_timeout_seconds: float = 60.0,
+        before_turn_timeout_seconds: float = 10.0,
     ) -> None:
         self._builder: Callable[..., Any] = builder if builder is not None else self._default_builder
         self._checker: Callable[..., Any] = checker if checker is not None else self._default_checker

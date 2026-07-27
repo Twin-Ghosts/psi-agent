@@ -156,6 +156,11 @@ async def test_before_turn_hook_timeout_returns_empty_dict() -> None:
     assert await sp.run_before_turn({"content": "learn"}) == {}
 
 
+async def test_before_turn_default_timeout_is_short() -> None:
+    sp = SystemPrompt()
+    assert sp._before_turn_timeout_seconds == 10.0
+
+
 @pytest.mark.anyio
 async def test_before_turn_hook_invalid_result_returns_empty_dict() -> None:
     async def invalid(_user_message: dict[str, Any]) -> str:
