@@ -22,7 +22,6 @@ from croniter import croniter
 from loguru import logger
 
 from psi_agent._yaml import parse_yaml_header
-from psi_agent.session import schedule_lease
 from psi_agent.session.history_display import (
     KIND_SCHEDULE_DISPLAY,
     KIND_SCHEDULE_SILENT,
@@ -41,13 +40,6 @@ if TYPE_CHECKING:
 # fire: tool — Session invokes tool_name(**tool_args) directly (no LLM).
 FIRE_PROMPT = "prompt"
 FIRE_TOOL = "tool"
-
-
-def _holder_id(agent: SessionAgent) -> str:
-    """租约持有者标识 - session id 优先, 退化用对象身份 (测试 mock 无 session id)。"""
-    conversation = getattr(agent, "_conversation", None)
-    session_id = str(getattr(conversation, "session_id", "") or "")
-    return session_id or f"agent-{id(agent):x}"
 
 
 @dataclass
@@ -97,10 +89,12 @@ class ScheduleRegistry:
     on update or removal.
 
     **调度归属 workspace, 不归属 session (刻意为之)**: schedules 目录取自
-    *workspace*, 且触发权由 ``schedule_lease`` 的进程内租约裁决 - 同一个
-    schedules 目录只有租约持有者会起 runner。飞书按 open_id 给每个用户
-    spawn 独立 Session, 若按 session 触发则一条定时任务会被推送 N 次。
-    非持有者仍然加载 schedules (``schedules`` 属性、SPA 展示不变), 只是不触发。
+    *workspace*, 且只有 ``scheduler=True`` 的 Session (每 workspace 恰好一个,
+    由 Gateway ``SchedulerManager`` 保证) 才构造出非空 registry。飞书按 open_id
+    给每个用户 spawn 独立 Session, 若按 session 触发则一条定时任务会被在线用户
+    数乘一遍; 让调度只住在专用 Session 里, 「重复触发」在构造期就不存在, 无需
+    运行时抢锁。普通用户 Session 拿到的是空 registry (``work_dir`` 为 ``None``),
+    ``start_all`` / ``refresh`` 都是 no-op。
     """
 
     def __init__(self, *, files: dict[str, ScheduleEntry] | None = None, work_dir: Path | None = None) -> None:
@@ -109,19 +103,11 @@ class ScheduleRegistry:
         self._agent: SessionAgent | None = None
         self._task_group: Any = None
         self._runner_scopes: dict[str, anyio.CancelScope] = {}
-        # 本 registry 是否持有 work_dir 的触发租约; False -> 只加载不触发。
-        self._fires = False
-        self._lease_holder = ""
 
     @property
     def schedules(self) -> list[Schedule]:
         """Flat list of all registered schedules."""
         return [entry.schedule for entry in self._files.values()]
-
-    @property
-    def fires(self) -> bool:
-        """本 registry 是否负责触发 (持有 workspace 租约)。"""
-        return self._fires
 
     # -- factory ----------------------------------------------------------------
 
@@ -135,41 +121,11 @@ class ScheduleRegistry:
 
     def start_all(self, task_group: Any, agent: SessionAgent) -> None:
         """Start a runner for every registered schedule in *task_group*.
-
-        Stores *agent* and *task_group* for use by ``refresh()``.  先竞争
-        workspace 租约: 抢不到说明同一 workspace 已有别的 Session 在跑这些
-        schedule, 本 Session 只保留列表、不起任何 runner。
-        """
+        Stores *agent* and *task_group* for use by ``refresh()``."""
         self._agent = agent
         self._task_group = task_group
-        self._fires = self._acquire_lease(agent)
-        if not self._fires:
-            logger.info(
-                f"Schedules loaded but not started for {self._work_dir!r} "
-                f"({len(self._files)} schedule(s)) — another session holds the workspace lease"
-            )
-            return
         for entry in self._files.values():
             self._start_runner(entry.schedule)
-
-    def _acquire_lease(self, agent: SessionAgent) -> bool:
-        """竞争 ``work_dir`` 的触发租约; 无 work_dir 时退化为「不触发」。"""
-        if self._work_dir is None:
-            return False
-        self._lease_holder = _holder_id(agent)
-        return schedule_lease.acquire(self._work_dir, self._lease_holder)
-
-    def stop_all(self) -> None:
-        """取消全部 runner 并释放租约 - ``Session.run`` 退出时调用。
-
-        释放后同 workspace 的其它 Session 下一次 ``start_all`` / ``refresh``
-        即可接管触发权, 不至于因持有者退出而永久停摆。
-        """
-        for name in list(self._runner_scopes):
-            self._cancel_runner(name)
-        if self._work_dir is not None and self._lease_holder:
-            schedule_lease.release(self._work_dir, self._lease_holder)
-        self._fires = False
 
     async def refresh(self) -> dict[str, str]:
         """Incremental reload — adds, updates, removes schedules.
@@ -192,14 +148,6 @@ class ScheduleRegistry:
         if self._task_group is None:
             logger.warning("No task group set, cannot start/restart runners")
             return {}
-
-        # 每次 refresh 重试租约: 持有者 Session 退出后由后来者接管, 不会永久停摆。
-        if not self._fires and self._agent is not None:
-            self._fires = self._acquire_lease(self._agent)
-            if self._fires:
-                logger.info(f"Took over schedule lease for {self._work_dir!r}; starting runners")
-                for entry in self._files.values():
-                    self._start_runner(entry.schedule)
 
         logger.debug("Starting schedule refresh")
         new_files = await self._load_from_dir(self._work_dir, self._files)
@@ -235,14 +183,7 @@ class ScheduleRegistry:
     # -- runner management ------------------------------------------------------
 
     def _start_runner(self, schedule: Schedule) -> None:
-        """Start a perpetual runner coroutine for *schedule*.
-
-        非租约持有者是 no-op: schedule 仍在 ``_files`` 里 (列表 / 展示可见),
-        只是不会有 runner 到点触发 (刻意为之, 见类 docstring)。
-        """
-        if not self._fires:
-            logger.debug(f"Not the lease holder; skipping runner for schedule {schedule.name!r}")
-            return
+        """Start a perpetual runner coroutine for *schedule*."""
         cancel_scope = anyio.CancelScope()
         self._runner_scopes[schedule.name] = cancel_scope
         self._task_group.start_soon(self._run_one, schedule, self._agent, cancel_scope, self)

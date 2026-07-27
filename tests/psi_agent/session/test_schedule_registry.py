@@ -10,7 +10,6 @@ import pytest
 from croniter import croniter
 
 from psi_agent._yaml import parse_yaml_header
-from psi_agent.session import schedule_lease
 from psi_agent.session.conversation import Conversation
 from psi_agent.session.schedule_registry import Schedule, ScheduleEntry, ScheduleRegistry
 from psi_agent.session.tool_registry import FileEntry, ToolFunction, ToolRegistry
@@ -555,12 +554,11 @@ async def test_consume_run_once_deletes_task(tmp_path: Path) -> None:
     assert str(task) not in registry._files
 
 
-# ── workspace lease — 一个 workspace 只触发一次 ─────────────────────────────────
+# ── scheduler session ownership — 一个 workspace 只有调度 Session 触发 ────────
 
 
 @pytest.mark.anyio
-async def test_start_all_first_session_fires(tmp_path: Path) -> None:
-    schedule_lease.reset()
+async def test_start_all_starts_one_runner_per_schedule(tmp_path: Path) -> None:
     sched_dir = tmp_path / "schedules" / "daily"
     await anyio.Path(sched_dir).mkdir(parents=True)
     await anyio.Path(sched_dir / "TASK.md").write_text(
@@ -570,101 +568,30 @@ async def test_start_all_first_session_fires(tmp_path: Path) -> None:
     sr = await ScheduleRegistry.load(tmp_path / "schedules")
     async with anyio.create_task_group() as tg:
         sr.start_all(tg, cast(Any, _MockAgent()))
-        assert sr.fires is True
         assert len(sr._runner_scopes) == 1
         tg.cancel_scope.cancel()
 
 
 @pytest.mark.anyio
-async def test_start_all_second_session_same_workspace_does_not_fire(tmp_path: Path) -> None:
-    """同一 workspace 的第二个 Session 只加载 schedules, 不起 runner (飞书多用户场景)。"""
-    schedule_lease.reset()
-    sched_dir = tmp_path / "schedules" / "daily"
-    await anyio.Path(sched_dir).mkdir(parents=True)
-    await anyio.Path(sched_dir / "TASK.md").write_text(
-        '---\nname: daily\ncron: "0 12 * * *"\n---\nTask', encoding="utf-8"
-    )
-
-    first = await ScheduleRegistry.load(tmp_path / "schedules")
-    second = await ScheduleRegistry.load(tmp_path / "schedules")
+async def test_empty_registry_start_all_is_noop(tmp_path: Path) -> None:
+    """普通用户 Session 拿到的空 registry: 不加载、不触发 (刻意为之)。"""
+    sr = ScheduleRegistry()
     async with anyio.create_task_group() as tg:
-        first.start_all(tg, cast(Any, _MockAgent()))
-        second.start_all(tg, cast(Any, _MockAgent()))
-        assert first.fires is True
-        assert second.fires is False
-        # 非持有者仍看得见 schedule 列表, 只是没有 runner。
-        assert len(second.schedules) == 1
-        assert second._runner_scopes == {}
+        sr.start_all(tg, cast(Any, _MockAgent()))
+        assert sr.schedules == []
+        assert sr._runner_scopes == {}
         tg.cancel_scope.cancel()
 
 
 @pytest.mark.anyio
-async def test_stop_all_releases_lease_for_takeover(tmp_path: Path) -> None:
-    schedule_lease.reset()
-    sched_dir = tmp_path / "schedules" / "daily"
-    await anyio.Path(sched_dir).mkdir(parents=True)
-    await anyio.Path(sched_dir / "TASK.md").write_text(
-        '---\nname: daily\ncron: "0 12 * * *"\n---\nTask', encoding="utf-8"
-    )
-
-    first = await ScheduleRegistry.load(tmp_path / "schedules")
-    second = await ScheduleRegistry.load(tmp_path / "schedules")
+async def test_empty_registry_refresh_is_noop() -> None:
+    """空 registry 的 refresh 不扫盘 —— 非调度 Session 每回合都会调它。"""
+    sr = ScheduleRegistry()
+    sr._agent = cast(Any, _MockAgent())
     async with anyio.create_task_group() as tg:
-        first.start_all(tg, cast(Any, _MockAgent()))
-        second.start_all(tg, cast(Any, _MockAgent()))
-        assert second.fires is False
-
-        first.stop_all()
-        assert first.fires is False
-        assert first._runner_scopes == {}
-
-        # 持有者退出后, 后来者经 refresh 接管触发权并起 runner。
-        await second.refresh()
-        assert second.fires is True
-        assert len(second._runner_scopes) == 1
-        tg.cancel_scope.cancel()
-
-
-@pytest.mark.anyio
-async def test_non_holder_refresh_tracks_files_without_runners(tmp_path: Path) -> None:
-    """非持有者 refresh 照旧更新列表 (added/removed), 但不产生 runner。"""
-    schedule_lease.reset()
-    await anyio.Path(tmp_path / "schedules").mkdir(parents=True)
-    holder = await ScheduleRegistry.load(tmp_path / "schedules")
-    other = await ScheduleRegistry.load(tmp_path / "schedules")
-
-    async with anyio.create_task_group() as tg:
-        holder.start_all(tg, cast(Any, _MockAgent()))
-        other.start_all(tg, cast(Any, _MockAgent()))
-        assert other.fires is False
-
-        sched_dir = tmp_path / "schedules" / "extra"
-        await anyio.Path(sched_dir).mkdir(parents=True)
-        await anyio.Path(sched_dir / "TASK.md").write_text(
-            '---\nname: extra\ncron: "0 12 * * *"\n---\nTask', encoding="utf-8"
-        )
-        assert await other.refresh() == {"extra": "added"}
-        assert len(other.schedules) == 1
-        assert other._runner_scopes == {}
-        tg.cancel_scope.cancel()
-
-
-@pytest.mark.anyio
-async def test_different_workspaces_both_fire(tmp_path: Path) -> None:
-    """两个用户各自 workspace → 各自独立触发, 互不压制。"""
-    schedule_lease.reset()
-    for user in ("user-a", "user-b"):
-        d = tmp_path / user / "schedules" / "daily"
-        await anyio.Path(d).mkdir(parents=True)
-        await anyio.Path(d / "TASK.md").write_text('---\nname: daily\ncron: "0 12 * * *"\n---\nTask', encoding="utf-8")
-
-    a = await ScheduleRegistry.load(tmp_path / "user-a" / "schedules")
-    b = await ScheduleRegistry.load(tmp_path / "user-b" / "schedules")
-    async with anyio.create_task_group() as tg:
-        a.start_all(tg, cast(Any, _MockAgent()))
-        b.start_all(tg, cast(Any, _MockAgent()))
-        assert a.fires is True
-        assert b.fires is True
+        sr._task_group = tg
+        assert await sr.refresh() == {}
+        assert sr.schedules == []
         tg.cancel_scope.cancel()
 
 

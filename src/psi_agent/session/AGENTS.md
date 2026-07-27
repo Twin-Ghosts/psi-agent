@@ -16,18 +16,19 @@ Session 层是 psi-agent 的核心——负责 workspace 解析、agent loop、t
 
 ### 调度归属 workspace，不归属 session（刻意为之）
 
-`schedules/` 从 **workspace** 加载（不是 agent 包），且触发权由 `schedule_lease` 的进程内租约裁决。
+`schedules/` 从 **workspace** 加载，且只有 **调度 Session**（`Session.scheduler=True`）拥有它。
 
 | | |
 |--|--|
-| **为什么** | Gateway 一个进程跑多个 Session；飞书 channel 更是**按 open_id 给每个用户 spawn 独立 Session**（`gateway/_feishu_manager.py`），多 Session 共用同一个 agent 包。旧行为「每个 Session 为自己加载到的每条 schedule 各起一个 runner」会让一条定时任务被在线用户数 N 乘一遍 → 飞书上一条提醒推 N 次 |
+| **为什么** | Gateway 一个进程跑多个 Session；飞书 channel 更是**按 open_id 给每个用户 spawn 独立 Session**（`gateway/_feishu_manager.py`），多 Session 共用同一个 agent 包。旧行为「每个 Session 为自己加载到的每条 schedule 各起一个 runner」会让一条定时任务被在线会话数乘一遍 → 飞书上一条提醒推 N 次 |
 | **加载源** | `workspace_path / "schedules"`。单根模式（`agent=""` → agent≡workspace）行为不变 |
-| **触发去重** | `schedule_lease.acquire(schedules_dir, holder)`：同一 schedules 目录只有第一个 Session 成为持有者并起 runner。**非持有者照旧加载** schedules（`schedules` 属性 / SPA 展示 / `refresh()` 的 add/remove 统计都不变），只是 `_start_runner` 是 no-op |
-| **接管** | `Session.run()` 退出（正常或被 Gateway cancel）时 `agent.stop_all()` 释放租约；同 workspace 的其它 Session 在下一次 `refresh()` 自动接管并补起 runner，不会因持有者退出而永久停摆 |
-| **不做** | 跨进程锁（文件锁 / DB）。部署形态是单 Gateway 进程持有全部 Session；陈旧锁文件的运维负担不值得 |
-| **路径归一** | 租约 key 经 `normcase` + `realpath`，Windows 大小写 / 斜杠差异不会绕过租约 |
+| **谁触发** | 仅 `scheduler=True` 的 Session。`SessionAgent.create(scheduler=False)`（默认）直接构造**空** `ScheduleRegistry`，`start_all` / `refresh` 都是 no-op。去重发生在**构造期**，不是运行时抢锁，所以没有租约、没有选主、没有「持有者退出谁接管」 |
+| **谁创建** | Gateway `SchedulerManager.ensure(workspace)`（见 `gateway/AGENTS.md`），按 workspace 幂等去重（key 经 `normcase` + `realpath` 归一），每 workspace 至多一个；**按需**——workspace 无 `schedules/*/TASK.md` 时不 spawn |
+| **display 结果** | 调度 Session 没有 channel 连着它，`visibility: display` 的结果只写它自己的 JSONL，**不再回流给用户**（刻意接受的降级）。要可靠推送就用 `fire=tool` + `feishu_message_send`，那条路不依赖 pending |
+| **`fire=prompt` 的历史** | 落在 AppData 的 `histories/scheduler-<hash>.jsonl`（第 4C 起 history 归 AppData），与用户对话历史分开 |
 | **workspace 工具侧** | `schedule_manage` 经 `_runtime_paths.resolve_workspace()`（#485 起的统一路径解析）落盘到 `{workspace}/schedules`。否则内核读 workspace、工具写 agent 包，两边对不上 |
 | **迁移注意** | agent 包（如 `examples/haitun-workspace/schedules/heartbeat`）里的 schedules 在**分离根**部署下不再被加载；需要它跑就放进 workspace |
+| **单进程 CLI** | `psi-agent session` 默认 `scheduler=False`（不跑定时任务）；要跑就显式 `--scheduler`。`psi-agent run` 的 session 配置项同理 |
 
 ### `runtime_context` 适用范围（刻意限制）
 
@@ -174,7 +175,7 @@ Session 层使用两个对称的协议适配器，将 `SessionAgent.run()` 包�
   - 文件内 tool 增删 → 分别标记 `added` / `removed`
 - `fresh` 标志保证 skipped 文件不被误删
 - `ScheduleRegistry` 以 per-file `ScheduleEntry` 存储（含 hash），`refresh()` 支持 add/update/remove/skip。每个 schedule 有独立 `CancelScope`，update/remove 时取消旧 runner 并启动新 runner。`refresh()` 内部已 try/except，失败时 log warning 返回 `{}`，不修改内部状态，调用方可直接 await 无需自行容错
-- `ScheduleRegistry.fires` 表示本 registry 是否持有 workspace 触发租约；`False` 时 `_start_runner` 是 no-op（只加载不触发）。`refresh()` 每次会重试 `acquire`，实现持有者退出后的接管；`stop_all()` 取消全部 runner 并 `release`
+- 非调度 Session（`scheduler=False`，即所有用户会话）的 `ScheduleRegistry` 是空的（`work_dir=None`）：`start_all` 不起 runner，`refresh()` 直接返回 `{}` 不扫盘。「一条定时任务只触发一次」由此在构造期成立，无需运行时协调
 - Schedule 刷新的两个时机：
   1. 每次 `run()` 入口（turn 开始），与 tool 一并刷新
   2. `finish_reason="stop"` 后（turn 结束），仅刷新 schedule——因本轮 tool 可能修改了 workspace schedules 下的文件，需立即生效，不等下次 turn

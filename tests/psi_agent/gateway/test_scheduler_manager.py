@@ -1,0 +1,256 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import anyio
+import pytest
+
+from psi_agent.gateway._ai_manager import AIManager
+from psi_agent.gateway._scheduler_manager import (
+    SchedulerManager,
+    _scheduler_session_id,
+    _workspace_key,
+)
+from psi_agent.gateway._session_manager import SessionManager
+
+
+async def _make_managers(tg: object) -> tuple[AIManager, SessionManager]:
+    am = AIManager(_prefix="sched-test", _tg=tg)
+    sm = SessionManager(_aim=am, _prefix="sched-test", _tg=tg)
+    await am.create(provider="o", model="m", api_key="k", base_url="b", id="ai1")
+    return am, sm
+
+
+async def _drain(sm: SessionManager, am: AIManager) -> None:
+    for info in await sm.list_all(include_scheduler=True):
+        await sm.delete(info.id)
+    for info in await am.list_all():
+        await am.delete(info.id)
+
+
+async def _write_schedule(workspace: Path, name: str = "daily") -> None:
+    task_dir = anyio.Path(workspace) / "schedules" / name
+    await task_dir.mkdir(parents=True, exist_ok=True)
+    await (task_dir / "TASK.md").write_text(f'---\nname: {name}\ncron: "0 12 * * *"\n---\nTask body', encoding="utf-8")
+
+
+# ── id 派生 ───────────────────────────────────────────────────────────────────
+
+
+def test_scheduler_session_id_is_deterministic(tmp_path: Path) -> None:
+    assert _scheduler_session_id(str(tmp_path)) == _scheduler_session_id(str(tmp_path))
+    assert _scheduler_session_id(str(tmp_path)).startswith("scheduler-")
+
+
+def test_scheduler_session_id_differs_per_workspace(tmp_path: Path) -> None:
+    a = tmp_path / "ws-a"
+    b = tmp_path / "ws-b"
+    a.mkdir()
+    b.mkdir()
+    assert _scheduler_session_id(str(a)) != _scheduler_session_id(str(b))
+
+
+def test_workspace_key_normalises_path_variants(tmp_path: Path) -> None:
+    """大小写 / 斜杠差异不该产出两个调度 Session。"""
+    plain = str(tmp_path)
+    assert _workspace_key(plain) == _workspace_key(plain.replace("\\", "/"))
+    assert _workspace_key(plain) == _workspace_key(str(tmp_path / "."))
+
+
+# ── ensure ────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_ensure_spawns_one_scheduler_session(tmp_path: Path) -> None:
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        await _write_schedule(tmp_path)
+        schedm = SchedulerManager(_sm=sm, _ai_id="ai1")
+
+        sid = await schedm.ensure(str(tmp_path))
+        assert sid == _scheduler_session_id(str(tmp_path))
+        assert sm.has(sid)
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_ensure_is_idempotent(tmp_path: Path) -> None:
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        await _write_schedule(tmp_path)
+        schedm = SchedulerManager(_sm=sm, _ai_id="ai1")
+
+        first = await schedm.ensure(str(tmp_path))
+        second = await schedm.ensure(str(tmp_path))
+        assert first == second
+        assert len(await sm.list_all(include_scheduler=True)) == 1
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_ensure_skips_workspace_without_schedules(tmp_path: Path) -> None:
+    """按需 spawn: 没有 schedules 就不开 Session (免得 N 个飞书用户各挂一个空的)。"""
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        schedm = SchedulerManager(_sm=sm, _ai_id="ai1")
+
+        assert await schedm.ensure(str(tmp_path)) == ""
+        assert await sm.list_all(include_scheduler=True) == []
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_ensure_skips_empty_schedules_dir(tmp_path: Path) -> None:
+    """schedules/ 存在但没有任何 TASK.md 也算没有定时任务。"""
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        await anyio.Path(tmp_path / "schedules" / "stub").mkdir(parents=True)
+        schedm = SchedulerManager(_sm=sm, _ai_id="ai1")
+
+        assert await schedm.ensure(str(tmp_path)) == ""
+        assert await sm.list_all(include_scheduler=True) == []
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_ensure_picks_up_schedules_created_later(tmp_path: Path) -> None:
+    """用户建第一个定时任务后, 下一次 ensure 把调度 Session 拉起来。"""
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        schedm = SchedulerManager(_sm=sm, _ai_id="ai1")
+
+        assert await schedm.ensure(str(tmp_path)) == ""
+        await _write_schedule(tmp_path)
+        sid = await schedm.ensure(str(tmp_path))
+        assert sid != ""
+        assert sm.has(sid)
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_ensure_without_ai_id_does_not_spawn(tmp_path: Path) -> None:
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        await _write_schedule(tmp_path)
+        schedm = SchedulerManager(_sm=sm)
+
+        assert await schedm.ensure(str(tmp_path)) == ""
+        assert await sm.list_all(include_scheduler=True) == []
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_ensure_empty_workspace_returns_blank(tmp_path: Path) -> None:
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        schedm = SchedulerManager(_sm=sm, _ai_id="ai1")
+        assert await schedm.ensure("   ") == ""
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_different_workspaces_get_separate_schedulers(tmp_path: Path) -> None:
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        a = tmp_path / "user-a"
+        b = tmp_path / "user-b"
+        await _write_schedule(a)
+        await _write_schedule(b)
+        schedm = SchedulerManager(_sm=sm, _ai_id="ai1")
+
+        sid_a = await schedm.ensure(str(a))
+        sid_b = await schedm.ensure(str(b))
+        assert sid_a != sid_b
+        assert len(await sm.list_all(include_scheduler=True)) == 2
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_path_variants_reuse_same_scheduler(tmp_path: Path) -> None:
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        await _write_schedule(tmp_path)
+        schedm = SchedulerManager(_sm=sm, _ai_id="ai1")
+
+        first = await schedm.ensure(str(tmp_path))
+        second = await schedm.ensure(str(tmp_path).replace("\\", "/"))
+        assert first == second
+        assert len(await sm.list_all(include_scheduler=True)) == 1
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
+# ── 对 SPA / state 隐藏 ────────────────────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_scheduler_session_hidden_from_list_all(tmp_path: Path) -> None:
+    """调度 Session 不出现在用户会话列表 (也因此不进 state/latest.json)。"""
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        await _write_schedule(tmp_path)
+        schedm = SchedulerManager(_sm=sm, _ai_id="ai1")
+
+        await sm.create(ai_id="ai1", id="user-1", workspace=str(tmp_path))
+        await schedm.ensure(str(tmp_path))
+
+        visible = await sm.list_all()
+        assert [info.id for info in visible] == ["user-1"]
+        assert len(await sm.list_all(include_scheduler=True)) == 2
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_scheduler_flag_set_on_session_info(tmp_path: Path) -> None:
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        await _write_schedule(tmp_path)
+        schedm = SchedulerManager(_sm=sm, _ai_id="ai1")
+        sid = await schedm.ensure(str(tmp_path))
+
+        infos = {i.id: i for i in await sm.list_all(include_scheduler=True)}
+        assert infos[sid].scheduler is True
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)

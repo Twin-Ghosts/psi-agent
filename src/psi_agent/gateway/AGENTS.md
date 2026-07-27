@@ -13,6 +13,7 @@ Gateway 进程
 ├── AIManager          — AI 实例注册表 + 生命周期管理
 ├── RouterManager      — Gateway 内部语义路由服务注册表 + 生命周期管理
 ├── SessionManager     — Session 实例注册表 + 生命周期管理
+├── SchedulerManager   — 每 workspace 一个调度 Session（拥有其 schedules/，对 SPA 隐藏）
 ├── TitleManager       — 会话标题 CRUD + AI 自动生成
 ├── WorkspaceManager   — 目录浏览
 ├── ChatManager        — SSE 流式对话管理
@@ -34,7 +35,8 @@ Gateway 进程
 | `_manager.py` | 共享 helpers（_new_uuid/_noop/_socket_path/_ensure_socket_dir/_remove_socket/_wait_socket） |
 | `_ai_manager.py` | `AIManager` — AI 实例注册表 + 生命周期 + AiInfo |
 | `_router_manager.py` | `RouterManager` — Router 实例注册表、AI ID 到 socket 解析和生命周期管理 |
-| `_session_manager.py` | `SessionManager` — Session 实例注册表 + 生命周期 + SessionInfo（含 `agent`） |
+| `_session_manager.py` | `SessionManager` — Session 实例注册表 + 生命周期 + SessionInfo（含 `agent`、`scheduler`） |
+| `_scheduler_manager.py` | `SchedulerManager` — 每个 workspace 恰好一个**调度 Session**（拥有其 `schedules/`），按需 spawn，对 SPA / state 隐藏 |
 | `_defaults.py` | `resolve_default_agent` / `resolve_default_workspace`；再导出 ``psi_agent._appdata`` 路径助手 — CLI / `GET /defaults` 用 |
 | `_feishu_manager.py` | `FeishuManager` — 飞书 open_id → Session 路由表（复用 SessionManager 按需 spawn）+ FeishuRoute |
 | `_title_manager.py` | 会话标题 CRUD + AI 自动生成 |
@@ -125,6 +127,24 @@ Gateway state → `{appdata}/state/`（双读旧 cwd `state/`）          ← �
 | **state 恢复** | snapshot 的 `agent`；缺省回落到 Gateway default |
 | **OpenAPI / 其它客户端** | 同一 REST；可显式传或依赖服务端默认 |
 
+## SchedulerManager（定时任务归 workspace，不归 session）
+
+定时任务的正确归属是 **workspace**。Gateway 一个进程跑多个 Session，飞书更是按 open_id 给每个用户 spawn 独立 Session；若每个 Session 都加载并触发 `{workspace}/schedules`，一条提醒就会被在线会话数乘一遍。
+
+`SchedulerManager` 让调度**只住在专用 Session 里**：`ensure(workspace)` 幂等地为一个 workspace 拿到/创建唯一的 `scheduler=True` Session。**「重复触发」在构造期就不存在**——不需要运行时抢锁，也没有「持有者退出后谁接管」的选主问题。
+
+| | |
+|--|--|
+| **去重键** | workspace 路径，经 `normcase` + `realpath` 归一（Windows 大小写 / 斜杠差异不产出两个调度 Session） |
+| **session id** | `scheduler-<workspace sha256 前16位>`，确定性派生 → 重启后 `ensure` 重建同名，无需持久化 |
+| **按需 spawn** | 仅当 workspace 真有 `schedules/*/TASK.md` 时才建。否则 N 个从不用定时任务的飞书用户会各挂一个空调度 Session（每个都付 tools 加载成本）。用户建第一个定时任务后，下一次 `ensure` 把它拉起来 |
+| **谁调 `ensure`** | `POST /sessions`（建会话后）、`POST /feishu/route`（路由用户后）、`Gateway.run` 启动恢复 state 后 |
+| **AI 实例** | `--scheduler-ai-id`，空则回落 `--feishu-ai-id`；两者都空时不 spawn（记 warning）——`fire=prompt` 需要 AI 后端，spawn 一个连不上上游的 Session 更糟 |
+| **失败不扩散** | `ensure` 捕获全部异常，只记 warning 返回 `""`。调度起不来不该拖垮建会话 / 收消息的主链路 |
+| **对 SPA / state 隐藏** | 见上方 `list_all(include_scheduler=False)` |
+
+Session 侧的对应契约（`scheduler=True` 才加载 `schedules/`、display 结果不再回流用户）见 `session/AGENTS.md` 的「调度归属 workspace」。
+
 ## 系统托盘 (GatewayTray)
 
 Gateway 启动时可通过 `--tray` 开启系统托盘，图标由 `--icon` 指定。`--tray` 未设置时不创建托盘；`--icon` 未设置时仅不提供 favicon，不影响其他功能。`--webview` 同样要求 `--icon`，用于设置 webview 窗口图标。
@@ -209,7 +229,9 @@ Gateway 不重复实现语义选择或 SSE 代理。状态恢复顺序固定为 
 
 每个 `_SessionEntry` 包含：
 - `scope: anyio.CancelScope` — 独立取消
-- `info: SessionInfo` — 包含 `id`、`backend_type`、`backend_id`、`workspace`、`channel_socket`
+- `info: SessionInfo` — 包含 `id`、`backend_type`、`backend_id`、`workspace`、`channel_socket`、`agent`、`scheduler`
+
+**`list_all(include_scheduler=False)`**：默认**不返回**调度 Session（`scheduler=True`）。因此 `GET /sessions` 与 `state/latest.json`（快照走 `list_all()`）都自动排除它——刻意为之：调度 Session 不是用户会话，列在 SPA 里只会让人误删。内部去重 / 运维需要看到它时传 `include_scheduler=True`。
 
 `backend_type="ai"` 时通过 `AIManager` 解析 socket；`backend_type="router"` 时
 通过 `RouterManager` 解析 socket。旧 REST 请求中的 `ai_id` 仍兼容为直接 AI

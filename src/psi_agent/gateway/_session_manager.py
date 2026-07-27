@@ -33,7 +33,15 @@ class SessionInfo:
     channel_socket: str
     # Step 2: surfaced to REST / state. Empty → Session treats agent ≡ workspace.
     agent: str = ""
-    """Agent package path (tools/schedules/system). Empty → single-root compat."""
+    """Agent package path (tools/system). Empty → single-root compat."""
+
+    scheduler: bool = False
+    """本 Session 是否是该 workspace 的调度 Session (拥有 ``schedules/``)。
+
+    调度 Session 由 ``SchedulerManager`` 按 workspace 去重地创建, 对 SPA 与
+    ``state/latest.json`` **完全隐藏** (``list_all`` 默认过滤, 持久化跳过)。
+    刻意为之: 它不是用户会话, 出现在会话列表里只会让人误删。
+    """
 
     @property
     def ai_id(self) -> str:
@@ -70,6 +78,7 @@ class SessionManager:
         id: str = "",
         workspace: str = "",
         agent: str = "",
+        scheduler: bool = False,
     ) -> SessionInfo:
         """Spawn a Session.
 
@@ -77,6 +86,9 @@ class SessionManager:
         omitted. ``Session(agent=…)`` (from #472) then loads the capability pack
         from that directory. Tools that resolve relative paths via ContextVar
         are a later PR — this only passes the path in.
+
+        *scheduler* 标记「这是该 workspace 的调度 Session」: 只有它加载并触发
+        ``{workspace}/schedules``, 且对 SPA / state 隐藏。普通调用方不传此参数。
         """
         session_id = id or _new_uuid()
         workspace = workspace.strip() or self._default_workspace or os.getcwd()
@@ -101,6 +113,7 @@ class SessionManager:
                 channel_socket=channel_socket,
                 ai_socket=upstream_socket,
                 session_id=session_id,
+                scheduler=scheduler,
             )
             scope = anyio.CancelScope()
 
@@ -123,6 +136,7 @@ class SessionManager:
                 workspace=workspace,
                 channel_socket=channel_socket,
                 agent=agent,
+                scheduler=scheduler,
             )
             self._entries[session_id] = _SessionEntry(scope=scope, info=info)
         try:
@@ -163,8 +177,16 @@ class SessionManager:
         await self._persist()
         logger.info(f"Session {session_id!r} deleted")
 
-    async def list_all(self) -> list[SessionInfo]:
-        return [e.info for e in list(self._entries.values())]
+    async def list_all(self, *, include_scheduler: bool = False) -> list[SessionInfo]:
+        """用户会话列表。
+
+        调度 Session 默认**不**出现 (刻意为之: 它不是用户会话, 列在 SPA 里只会
+        让人误删)。运维 / 内部去重需要看到它时传 ``include_scheduler=True``。
+        """
+        infos = [e.info for e in list(self._entries.values())]
+        if include_scheduler:
+            return infos
+        return [info for info in infos if not info.scheduler]
 
     def get_socket(self, session_id: str) -> str:
         if session_id not in self._entries:
@@ -183,3 +205,9 @@ class SessionManager:
         if session_id not in self._entries:
             raise LookupError(f"Session {session_id!r} not found")
         return self._entries[session_id].info.agent
+
+    def get_backend_id(self, session_id: str) -> str:
+        """会话挂载的后端 id — 调度 Session 复用同一个 AI 实例时要它。"""
+        if session_id not in self._entries:
+            raise LookupError(f"Session {session_id!r} not found")
+        return self._entries[session_id].info.backend_id

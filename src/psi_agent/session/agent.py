@@ -83,6 +83,7 @@ class SessionAgent:
         session_id: str | None = None,
         agent_path: Path | None = None,
         appdata_root: str = "",
+        scheduler: bool = False,
     ) -> SessionAgent:
         """Production entry point.
 
@@ -93,10 +94,12 @@ class SessionAgent:
         *appdata_root* holds history JSONL (Step 4C); empty → resolve via
         ``PSI_APPDATA`` / platformdirs.
 
-        刻意为之: schedules 归 workspace 而非 agent 包 - 飞书按 open_id 给每个
-        用户 spawn 独立 Session, 多个 Session 共用同一个 agent 包, 若从 agent 包
-        加载则同一条定时任务会被每个 Session 各触发一次。触发去重另由
-        ``schedule_lease`` 兜住 (同一 workspace 被多 Session 打开时)。
+        *scheduler* 决定本 Session 是否拥有该 workspace 的定时任务: 只有调度
+        Session 加载 ``{workspace}/schedules``, 普通用户 Session 得到一个空
+        ``ScheduleRegistry``。刻意为之 —— 飞书按 open_id 给每个用户 spawn 独立
+        Session, 让每个 Session 都触发会把一条定时任务乘以在线用户数; 由
+        Gateway ``SchedulerManager`` 保证每 workspace 只有一个调度 Session,
+        「重复触发」在构造期即不存在。
         """
         agent_root = agent_path if agent_path is not None else workspace_path
 
@@ -107,7 +110,11 @@ class SessionAgent:
             appdata_root=appdata_root,
         )
         tool_registry = await ToolRegistry.load(agent_root / "tools", conversation.session_id)
-        schedule_registry = await ScheduleRegistry.load(workspace_path / "schedules")
+        if scheduler:
+            schedule_registry = await ScheduleRegistry.load(workspace_path / "schedules")
+        else:
+            # 非调度 Session: 不加载、更不触发 —— 空 registry 让 refresh() 成为 no-op。
+            schedule_registry = ScheduleRegistry()
         system_prompt = await SystemPrompt.from_workspace(agent_root, conversation.session_id)
 
         return cls(
@@ -124,12 +131,11 @@ class SessionAgent:
     # -- delegation -----------------------------------------------------------
 
     def start_all(self, task_group: object) -> None:
-        """Start schedule runners — called by ``Session.run()``."""
-        self._schedule_registry.start_all(task_group, self)
+        """Start schedule runners — called by ``Session.run()``.
 
-    def stop_all(self) -> None:
-        """Stop schedule runners + release the workspace lease — ``Session.run()`` teardown."""
-        self._schedule_registry.stop_all()
+        非调度 Session 的 registry 是空的, 这里自然是 no-op。
+        """
+        self._schedule_registry.start_all(task_group, self)
 
     def set_pending_schedule_chunks(self, chunks: list[AgentChunk]) -> None:
         self._conversation.stash(chunks)
