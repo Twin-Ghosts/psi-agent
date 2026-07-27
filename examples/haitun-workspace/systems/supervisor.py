@@ -15,7 +15,7 @@ from typing import Any
 import anyio
 from loguru import logger
 from supervisor_protocol import empty_advice, extract_json_object, validate_advice
-from supervisor_store import SupervisorStore, update_heatmap
+from supervisor_store import SupervisorStore, merge_map, update_heatmap
 
 PlanFn = Callable[..., Awaitable[dict[str, Any]]]
 StartFn = Callable[..., Awaitable[dict[str, Any]]]
@@ -402,15 +402,21 @@ class SupervisorManager:
             domain_map = await self.store.load_map(domain)
             proposed = updates["proposed_map"]
             if domain_map is None and isinstance(proposed, dict):
-                domain_map = proposed
+                domain_map = merge_map(None, proposed)
             if domain_map is not None:
                 node_ids = {node.get("id") for node in domain_map.get("nodes", []) if isinstance(node, dict)}
+                additions_nodes: list[dict[str, Any]] = []
+                additions_edges: list[dict[str, Any]] = []
                 for addition in updates["branch_additions"]:
                     if addition["parent_id"] not in node_ids:
                         continue
-                    domain_map.setdefault("nodes", []).extend(addition["nodes"])
-                    domain_map.setdefault("edges", []).extend(addition["edges"])
+                    additions_nodes.extend(addition["nodes"])
+                    additions_edges.extend(addition["edges"])
                     node_ids.update(node["id"] for node in addition["nodes"])
+                domain_map = merge_map(
+                    domain_map,
+                    {"domain_id": domain, "nodes": additions_nodes, "edges": additions_edges},
+                )
                 await self.store.save_map(domain, domain_map)
         heatmap = (
             prior_heatmap if prior_heatmap.get("domain") == domain else await self.store.load_heatmap(user_hash, domain)

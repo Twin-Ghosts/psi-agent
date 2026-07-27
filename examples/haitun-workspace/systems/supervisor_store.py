@@ -22,6 +22,73 @@ _USER_LOCKS: dict[str, anyio.Lock] = {}
 _DOMAIN_LOCKS: dict[str, anyio.Lock] = {}
 
 
+def _node_terms(node: dict[str, Any]) -> set[str]:
+    values = [node.get("id"), node.get("label")]
+    aliases = node.get("aliases")
+    if isinstance(aliases, list):
+        values.extend(aliases)
+    return {
+        _DOMAIN_UNSAFE.sub("-", value.lower()).strip("-")
+        for value in values
+        if isinstance(value, str) and value.strip()
+    }
+
+
+def merge_map(existing: dict[str, Any] | None, incoming: dict[str, Any]) -> dict[str, Any]:
+    """Merge map nodes conservatively using identifiers, labels, and aliases."""
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    revision = merged.get("map_revision", 0)
+    merged["map_revision"] = (revision if isinstance(revision, int) else 0) + 1
+    merged["schema_version"] = "2.0"
+    merged["domain_id"] = incoming.get("domain_id", merged.get("domain_id", "general"))
+    timestamp = datetime.now(UTC).isoformat()
+    merged.setdefault("first_seen", timestamp)
+    merged["last_seen"] = timestamp
+    raw_nodes = merged.get("nodes")
+    nodes = [dict(node) for node in raw_nodes if isinstance(node, dict)] if isinstance(raw_nodes, list) else []
+    incoming_nodes = incoming.get("nodes")
+    if isinstance(incoming_nodes, list):
+        for raw_node in incoming_nodes:
+            if not isinstance(raw_node, dict):
+                continue
+            node = dict(raw_node)
+            terms = _node_terms(node)
+            matched = next((candidate for candidate in nodes if terms & _node_terms(candidate)), None)
+            if matched is None:
+                node.setdefault("aliases", [])
+                node.setdefault("confidence", 0.5)
+                node.setdefault("source_count", 1)
+                node.setdefault("first_seen", timestamp)
+                node["last_seen"] = timestamp
+                nodes.append(node)
+                continue
+            aliases = matched.get("aliases")
+            alias_values = [value for value in aliases if isinstance(value, str)] if isinstance(aliases, list) else []
+            raw_node_aliases = node.get("aliases")
+            node_aliases = raw_node_aliases if isinstance(raw_node_aliases, list) else []
+            for value in (node.get("id"), node.get("label"), *node_aliases):
+                if isinstance(value, str) and value not in alias_values and value != matched.get("id"):
+                    alias_values.append(value)
+            matched["aliases"] = alias_values
+            matched["source_count"] = int(matched.get("source_count", 1)) + 1
+            matched["confidence"] = min(1.0, float(matched.get("confidence", 0.5)) + 0.1)
+            matched["last_seen"] = timestamp
+    merged["nodes"] = nodes
+    raw_edges = merged.get("edges")
+    edges = [edge for edge in raw_edges if isinstance(edge, dict)] if isinstance(raw_edges, list) else []
+    incoming_edges = incoming.get("edges")
+    if isinstance(incoming_edges, list):
+        seen = {(edge.get("source"), edge.get("target"), edge.get("type")) for edge in edges}
+        for edge in incoming_edges:
+            if isinstance(edge, dict):
+                key = (edge.get("source"), edge.get("target"), edge.get("type"))
+                if key not in seen:
+                    edges.append(dict(edge))
+                    seen.add(key)
+    merged["edges"] = edges
+    return merged
+
+
 class SupervisorStore:
     """Persist shared supervisor maps and isolated per-user state."""
 

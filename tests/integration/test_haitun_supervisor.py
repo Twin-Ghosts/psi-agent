@@ -436,6 +436,29 @@ def test_supervisor_cache_requires_same_identity_topic_and_fresh_timestamp() -> 
     assert not module.is_cache_eligible(advice, message, now=now + module.timedelta(minutes=11))
 
 
+def test_map_normalization_merges_aliases_and_increments_revision() -> None:
+    store_module = _load_store()
+    existing = {
+        "domain_id": "ml",
+        "map_revision": 3,
+        "nodes": [{"id": "cicd", "label": "CI/CD", "aliases": ["continuous delivery"]}],
+        "edges": [],
+    }
+    incoming = {
+        "domain_id": "ml",
+        "nodes": [
+            {"id": "continuous-delivery", "label": "Continuous Delivery", "aliases": ["CI/CD"]},
+            {"id": "rollback", "label": "Rollback"},
+        ],
+        "edges": [],
+    }
+    merged = store_module.merge_map(existing, incoming)
+    assert merged["map_revision"] == 4
+    assert len(merged["nodes"]) == 2
+    assert "continuous delivery" in merged["nodes"][0]["aliases"]
+    assert merged["nodes"][1]["id"] == "rollback"
+
+
 @pytest.mark.anyio
 async def test_store_malformed_files_return_safe_values(tmp_path: Path) -> None:
     store_module = _load_store()
