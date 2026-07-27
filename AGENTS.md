@@ -115,8 +115,8 @@ src/
 项目使用 **src-layout**（`src/psi_agent/`），由 `uv sync` 安装为 editable package。
 
 各层的详细设计文档见：
-- **AI 层**: `src/psi_agent/ai/AGENTS.md` — provider 配置、请求透传、错误处理
-- **Session 层**: `src/psi_agent/session/AGENTS.md` — workspace 启动、agent loop、tool 加载调用、schedule 机制、history 持久化
+- **AI 层**: `src/psi_agent/ai/AGENTS.md` — provider 配置、请求透传、错误处理、context compaction 触发
+- **Session 层**: `src/psi_agent/session/AGENTS.md` — workspace 启动、agent loop、tool 加载调用、schedule 机制、history 持久化、context compaction
 - **Channel 层**: `src/psi_agent/channel/AGENTS.md` — ChannelCore 公共部件、REPL/CLI/Telegram/Feishu 约定
 - **Gateway 层**: `src/psi_agent/gateway/AGENTS.md` — 生命周期管理、REST API、Web Console SPA、CI 打包
 
@@ -146,6 +146,13 @@ SSE 流中的特殊字段：
    所有层统一使用 `finish_reason="error"` 标记流式错误，Session 检测到后不写入 conversation history。
 
 > `finish_reason="error"` 是 psi-agent 的扩展，不在 OpenAI 标准枚举内（标准仅 `stop`/`length`/`tool_calls`/`content_filter`/`function_call`）。仅用于内部层间通信，不暴露给外部。
+
+3. **Compaction 信号（SSE 层面）**：Token 用量超过 `max_context_tokens` 阈值时，AI 层在上游 stream 结束后发送额外 SSE 事件，通知 Session 触发 context compaction：
+   ```json
+   {"choices": [{"delta": {}, "finish_reason": "compaction_needed"}],
+    "psi_compaction": {"needed": true, "prompt_tokens": N, "threshold": M}}
+   ```
+   `psi_compaction` 和 `finish_reason="compaction_needed"` 均为 psi-agent 内部扩展。
 
 ## 日志约定
 
@@ -285,4 +292,5 @@ uv build                         # 构建
 - [x] 更多 channel 类型 — Gateway REST API + Web Console SPA
 - [ ] 更多 AI 后端（Gemini、本地模型等）
 - [x] Session history 持久化（已完成）
+- [x] Context compaction — 超 token 阈值时 AI 层发信号，Session 调用 system.py compact_history 压缩
 - [ ] Channel 广播/多客户端队列
