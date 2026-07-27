@@ -43,14 +43,17 @@ Available:
 
 
 async def compact_history(history: list[dict[str, Any]], complete_fn) -> str:
-    """Summarize older conversation turns, keeping the last 2 turns verbatim.
+    """Summarize older conversation turns via LLM, keeping recent turns verbatim.
 
-    Returns the summary string; the framework merges it into the system prompt.
+    Returns the summary string with recent turns appended; the framework
+    merges the whole result into the system prompt.
     """
     if len(history) <= 6:
         return ""
 
-    older = history[:-4]
+    recent_count = 4
+    older = history[:-recent_count]
+    recent = history[-recent_count:]
 
     parts: list[str] = []
     for msg in older:
@@ -59,8 +62,18 @@ async def compact_history(history: list[dict[str, Any]], complete_fn) -> str:
         if isinstance(content, str) and content.strip() and role in ("user", "assistant"):
             parts.append(f"[{role}]: {content}")
 
+    recent_text = ""
+    recent_parts: list[str] = []
+    for msg in recent:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if isinstance(content, str) and content.strip() and role in ("user", "assistant"):
+            recent_parts.append(f"[{role}]: {content}")
+    if recent_parts:
+        recent_text = "\n[Recent turns]\n" + "\n".join(recent_parts)
+
     if not parts:
-        return ""
+        return recent_text
 
     summary_prompt = [
         {"role": "system", "content": (
@@ -74,6 +87,7 @@ async def compact_history(history: list[dict[str, Any]], complete_fn) -> str:
 
     try:
         summary = await complete_fn(summary_prompt)
-        return summary
+        return summary + "\n" + recent_text
     except Exception:
-        return "\n".join(parts)
+        return "\n".join(parts) + "\n" + recent_text
+
