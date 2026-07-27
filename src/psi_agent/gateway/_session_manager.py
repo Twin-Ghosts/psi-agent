@@ -9,6 +9,7 @@ import anyio
 from loguru import logger
 
 from psi_agent.gateway._ai_manager import AIManager
+from psi_agent.gateway._defaults import ensure_workspace_dir
 from psi_agent.gateway._manager import (
     _ensure_socket_dir,
     _new_uuid,
@@ -79,6 +80,9 @@ class SessionManager:
         """
         session_id = id or _new_uuid()
         workspace = workspace.strip() or self._default_workspace or os.getcwd()
+        # 刻意为之：默认桌面工作区等路径在 GET /defaults 只宣布；此处（新建 Session /
+        # 开始对话）才 mkdir，避免打开 Haitun 就在桌面出现空文件夹。
+        workspace = await ensure_workspace_dir(workspace)
         agent = agent.strip() or self._default_agent
         backend_id = backend_id or ai_id
         upstream_socket = self.resolve_backend_socket(backend_type, backend_id)

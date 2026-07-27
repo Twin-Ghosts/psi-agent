@@ -6,7 +6,9 @@ import anyio
 import pytest
 
 from psi_agent.gateway._defaults import (
+    DEFAULT_USER_WORKSPACE_NAME,
     appdata_history_path,
+    ensure_workspace_dir,
     resolve_appdata_root,
     resolve_default_agent,
     resolve_default_workspace,
@@ -24,9 +26,27 @@ async def test_resolve_default_workspace_explicit(tmp_path: Path, monkeypatch: p
 
 
 @pytest.mark.anyio
-async def test_resolve_default_workspace_falls_back_to_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.chdir(tmp_path)
-    assert await resolve_default_workspace("") == str(await anyio.Path.cwd())
+async def test_resolve_default_workspace_soft_desktop_announces_without_mkdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    desktop = tmp_path / "Desktop"
+    await anyio.Path(desktop).mkdir()
+    monkeypatch.setattr(
+        "psi_agent.gateway._defaults.platformdirs.user_desktop_dir",
+        lambda: str(desktop),
+    )
+    expected = desktop / DEFAULT_USER_WORKSPACE_NAME
+    assert await resolve_default_workspace("") == str(await anyio.Path(expected).resolve())
+    assert not await anyio.Path(expected).exists()
+
+
+@pytest.mark.anyio
+async def test_ensure_workspace_dir_creates(tmp_path: Path) -> None:
+    ws = tmp_path / "Desktop" / DEFAULT_USER_WORKSPACE_NAME
+    assert not await anyio.Path(ws).exists()
+    got = await ensure_workspace_dir(str(ws))
+    assert got == str(await anyio.Path(ws).resolve())
+    assert await anyio.Path(ws).is_dir()
 
 
 @pytest.mark.anyio

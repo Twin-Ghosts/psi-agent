@@ -78,7 +78,10 @@ class Gateway:
 
     default_workspace: str = ""
     """Step 2 CLI: default user workspace for new Sessions / GET /defaults.
-    Empty → process cwd. Not AppData; history still under this workspace.
+
+    Empty → soft-default ``{Desktop}/haitun交付`` (path announced only; directory
+    created on first Session / conversation, not on Gateway boot).
+    Not AppData; todos/history/Gateway state live under ``--appdata``.
     """
 
     appdata: str = ""

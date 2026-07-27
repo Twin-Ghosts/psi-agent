@@ -15,11 +15,20 @@ Soft default (agent)
 If CLI ``--default-agent`` is empty and ``examples/haitun-workspace`` exists
 under cwd, that directory is used so repo-local Gateway open-and-use works.
 Otherwise agent stays ``\"\"`` → Session single-root compat (agent ≡ workspace).
+
+Soft default (workspace)
+------------------------
+If CLI ``--default-workspace`` is empty, announce ``{Desktop}/haitun交付``
+(**path only** — do not mkdir here). Ordinary users get deliverables on the
+Desktop without picking a folder; power users override via CLI / spa settings.
+**刻意为之**：目录在 ``SessionManager.create``（开始对话 / 新建任务）时才创建，
+避免一打开 Haitun 就在桌面多一个空文件夹。 Not AppData.
 """
 
 from __future__ import annotations
 
 import anyio
+import platformdirs
 
 from psi_agent._appdata import (
     appdata_history_path,
@@ -35,11 +44,16 @@ from psi_agent._appdata import (
     resolve_todo_read_path,
 )
 
+# Soft default under the OS Desktop — layered for non-technical users.
+DEFAULT_USER_WORKSPACE_NAME = "haitun交付"
+
 __all__ = [
+    "DEFAULT_USER_WORKSPACE_NAME",
     "appdata_history_path",
     "appdata_state_dir",
     "appdata_state_latest_path",
     "appdata_todo_path",
+    "ensure_workspace_dir",
     "legacy_history_path",
     "legacy_state_latest_path",
     "legacy_todo_path",
@@ -53,11 +67,32 @@ __all__ = [
 
 
 async def resolve_default_workspace(explicit: str = "") -> str:
-    """Absolute user workspace path; empty *explicit* → process cwd."""
+    """Absolute user workspace path (announce only — does not create).
+
+    *explicit* non-empty → resolve that path.
+    Empty → ``{Desktop}/haitun交付`` via ``platformdirs.user_desktop_dir``
+    (never hand-written ``%USERPROFILE%``). Directory creation is deferred to
+    ``ensure_workspace_dir`` at Session create time.
+    """
     raw = explicit.strip()
     if raw:
         return str(await anyio.Path(raw).resolve())
-    return str(await anyio.Path.cwd())
+    # Sync platformdirs call is path math only (no IO); fine inside async.
+    desktop = anyio.Path(platformdirs.user_desktop_dir())
+    ws = desktop / DEFAULT_USER_WORKSPACE_NAME
+    return str(await ws.resolve())
+
+
+async def ensure_workspace_dir(path: str) -> str:
+    """Create *path* if missing; return absolute path.
+
+    Call from Session spawn only (``SessionManager.create``), not from
+    ``GET /defaults`` / Gateway boot — so the soft Desktop folder appears only
+    when the user actually starts a conversation.
+    """
+    ws = anyio.Path(path.strip())
+    await ws.mkdir(parents=True, exist_ok=True)
+    return str(await ws.resolve())
 
 
 async def resolve_default_agent(explicit: str = "") -> str:

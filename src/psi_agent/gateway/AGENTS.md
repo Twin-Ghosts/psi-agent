@@ -109,7 +109,7 @@ Gateway state → `{appdata}/state/`（双读旧 cwd `state/`）          ← �
 | CLI | 含义 |
 |-----|------|
 | `--default-agent` | 新建 Session 的 Agent 包目录；空且 cwd 下存在 `examples/haitun-workspace` 时软默认到该路径；仍空则 Session `agent=""`（与 workspace 同根兼容） |
-| `--default-workspace` | 新建 Session / `GET /defaults` 的用户工作区；空 → 进程 cwd |
+| `--default-workspace` | 新建 Session / `GET /defaults` 的用户工作区；空 → 软默认 `{Desktop}/haitun交付`（**只宣布路径**；目录在 `SessionManager.create` / 开始对话时才 mkdir。`platformdirs.user_desktop_dir`） |
 | `--appdata` | AppData 记忆区根；空 → `PSI_APPDATA` → `platformdirs`（**禁止**手写死 `%AppData%`） |
 
 `POST /sessions` 可显式带 `agent` / `workspace`；省略时用上述默认。`SessionInfo` 与 `state/latest.json` 持久化含 `agent`。
@@ -218,14 +218,15 @@ Gateway 不重复实现语义选择或 SSE 代理。状态恢复顺序固定为 
 **`_persist` 回调**：同 AIManager，默认 no-op，Gateway.run() 注入。
 
 **create(ai_id, *, id="", workspace="") 流程**：
-1. 获取 lock，断言不重复
-2. `aimanager.get_socket(ai_id)` 查 AI socket（AI 不存在时计算路径返回，不抛异常——支持启动恢复时 AI 尚未就绪）
-3. `_socket_path(prefix, "channels", session_id)` 生成 channel socket
-4. `_ensure_socket_dir(socket)` 创建父目录
-5. 构造 `Session(...)`，创建 `CancelScope`，`task_group.start_soon`
-6. 存入 `_entries`
-7. `_wait_socket()` 轮询等待 channel socket 就绪
-8. 成功后调用 `_persist`，返回 `SessionInfo`
+1. 解析 `workspace`（缺省用 Gateway `_default_workspace`）→ ``ensure_workspace_dir`` mkdir（**刻意为之**：`GET /defaults` 只宣布路径，目录到此才创建）
+2. 获取 lock，断言不重复
+3. `aimanager.get_socket(ai_id)` 查 AI socket（AI 不存在时计算路径返回，不抛异常——支持启动恢复时 AI 尚未就绪）
+4. `_socket_path(prefix, "channels", session_id)` 生成 channel socket
+5. `_ensure_socket_dir(socket)` 创建父目录
+6. 构造 `Session(...)`，创建 `CancelScope`，`task_group.start_soon`
+7. 存入 `_entries`
+8. `_wait_socket()` 轮询等待 channel socket 就绪
+9. 成功后调用 `_persist`，返回 `SessionInfo`
    失败则 rollback：pop entry + cancel scope + remove socket + 调用 `_persist`
 
 **delete(session_id)**：

@@ -25,7 +25,7 @@
 | 对话 | Gateway SSE | 同左（同一套 API） |
 | 交付物 | 气泡 blob chip | 宝箱 UI；SSE `blob` 写入 `deliverables`；抽屉内按 blob 真实渲染 MD/HTML/图片/文本（无 blob 时明确空态，非占位纸面） |
 | 账户区 | 头像菜单合一 | 头像菜单仅资料/登录；**模型池**与**设置**为侧栏独立快捷入口 |
-| 默认工作区 | 无 / 必须先选 | 启动读 ``GET /defaults``.workspace；遗留 `*-workspace` / 字面量 `workspace` 会忽略 |
+| 默认工作区 | 无 / 必须先选 | 启动读 ``GET /defaults``.workspace（Gateway 软默认 `{Desktop}/haitun交付`，**只宣布不建目录**；首个 Session/对话时服务端再 mkdir）；遗留 `*-workspace` / 字面量 `workspace` / `haitun-workspace` 会忽略 |
 | 工作区切换 | 侧栏打开 PathPicker | 设置「切换工作区」→ 选择页；**浏览**按钮走 `/workspace/places` + `/browse`（对齐 v1） |
 | 顶栏新建 | — | 右上角「新建任务」+ 侧栏同入口（`⌘/Ctrl N`） |
 | Agent 包 | 与 workspace 合一 | ``GET /defaults``.agent → 新建任务 ``POST /sessions`` 带 `agent`（可与用户工作区不同） |
@@ -43,7 +43,7 @@
 卡片内对话      ↔  POST /sessions/{id}/chat（multipart chunks）
 任务历史文案    ↔  GET /sessions/{id}/history（AppData `histories/` 优先 + legacy 双读）
 任务卡中间步 N/M ↔  GET /sessions/{id}/todos（``todo`` tool → AppData `todos/{id}.json`，legacy `.psi/todos` 双读）
-路径默认        ↔  GET /defaults（agent + workspace + appdata）；UI 主要用 agent/workspace；appdata 为记忆区根（todos/history/Gateway state 已迁 AppData，前端仍走 REST，不直读盘）；打开即用 AI 仍走空池惰性 POST `/ais`
+路径默认        ↔  GET /defaults（agent + workspace + appdata）；workspace 软默认 `{Desktop}/haitun交付`（宣布路径；目录随首个 Session 创建）；UI 主要用 agent/workspace；appdata 为记忆区根（todos/history/Gateway state 已迁 AppData，前端仍走 REST，不直读盘）；打开即用 AI 仍走空池惰性 POST `/ais`
 ```
 
 **新建任务输入**：单个大框（对齐总览 `context-chat`）——框内上部是预设快捷按钮（单行），底部是细条真输入（回形针 + 文本框 + 发送）；附件 chip 在细条上方。发送时随首轮 `streamSessionChat` 上传；可纯附件无文案。页内「返回任务总览」始终回总览（`goHome`）；顶栏在从模板进入时可显示「返回模板库」（`newTaskReturnView`）。
