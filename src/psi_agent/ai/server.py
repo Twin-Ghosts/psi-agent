@@ -36,6 +36,7 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
     body.pop("api_key", None)
     body.pop("api_base", None)
     body.pop("routing", None)
+    body["stream_options"] = {"include_usage": True}
     logger.debug(f"Body keys to passthrough: {list(body)}")
 
     response = web.StreamResponse(
@@ -58,6 +59,7 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
     logger.debug(f"Forwarding to upstream: provider={provider!r}, model={model!r}, base_url={base_url!r}")
     upstream_error = False
     client_gone = False
+    compaction_needed = False
     stream: AsyncIterator[ChatCompletionChunk] | None = None
     try:
         stream = cast(
@@ -76,10 +78,43 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
             ),
         )
         logger.debug("Starting to consume upstream SSE stream")
+        max_context_tokens: int = request.app.get("max_context_tokens", 0)
+        compaction_usage: dict[str, int] = {}
         async for chunk in stream:
+            if (
+                max_context_tokens > 0
+                and chunk.usage
+                and chunk.usage.prompt_tokens > max_context_tokens
+            ):
+                compaction_needed = True
+                compaction_usage = {
+                    "prompt_tokens": chunk.usage.prompt_tokens,
+                    "completion_tokens": chunk.usage.completion_tokens,
+                    "total_tokens": chunk.usage.total_tokens,
+                }
+                logger.info(
+                    f"Compaction needed: "
+                    f"prompt_tokens={chunk.usage.prompt_tokens} > threshold={max_context_tokens}"
+                )
             data = chunk.model_dump_json()
             logger.debug(f"SSE chunk: {data[:1000]}")
             await response.write(f"data: {data}\n\n".encode())
+        if compaction_needed:
+            signal = json.dumps(
+                {
+                    "id": "compaction",
+                    "choices": [
+                        {"index": 0, "delta": {}, "finish_reason": "compaction_needed"}
+                    ],
+                    "psi_compaction": {
+                        "needed": True,
+                        "prompt_tokens": compaction_usage.get("prompt_tokens", 0),
+                        "threshold": max_context_tokens,
+                    },
+                }
+            )
+            logger.debug(f"SSE compaction signal: {signal[:500]}")
+            await response.write(f"data: {signal}\n\n".encode())
     except ConnectionResetError:
         # Downstream client (session/channel) disconnected — e.g. user pressed
         # "stop". The finally block closes the upstream provider stream.
@@ -100,7 +135,10 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
         except Exception:
             logger.warning("Failed to send upstream error chunk to client")
     else:
-        logger.debug("Upstream stream completed successfully")
+        if compaction_needed:
+            logger.info("Request completed with compaction signal")
+        else:
+            logger.debug("Upstream stream completed successfully")
     finally:
         # Always release the upstream connection, even on cancellation
         # (client disconnect / shutdown). Shielded so aclose() completes
