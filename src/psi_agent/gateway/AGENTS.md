@@ -340,16 +340,23 @@ AI 和 Session 的 `id` 字段可选，不传自动生成 UUID。
 
 **Response (SSE)**：
 ```
+data: {"type": "reasoning", "text": "[Tool Call: read({…})]", "kind": "tool_call"}
 data: {"type": "text", "text": "Hello! "}
 data: {"type": "blob", "name": "generated.png", "data": "base64..."}
 data: [DONE]
 ```
 
+| `type` | 字段 | 说明 |
+|--------|------|------|
+| `text` | `text` | 助手正文（`TextChunk`） |
+| `reasoning` | `text` + 可选 `kind` | 过程流（thinking / tool 进度仍走同一槽）；`kind` 为 `thinking` \| `tool_call` \| `tool_result`（Session yield 打标）。**≠** JSONL 消息 provenance 的 `kind`（`chat` / `schedule.*`） |
+| `blob` | `name` + `data` | 交付物 base64（`FileChunk`） |
+
 **内部实现**：
 - 查 `SessionManager.get_socket(session_id)` 获取 channel socket
 - 复用 `channel._core.ChannelCore` 构造连接
 - 输入：`TextChunk(text)`、blob（base64 解码后由 `_save_upload()` 落至 `~/Downloads/.psi/<date>/`，持久保留，转为 `FileChunk`）；multipart 文件上传通过 blob 通道走相同路径
-- 输出：`TextChunk` → yield `{"type": "text"}`，`FileChunk` → 读取文件内容 base64 编码后 yield `{"type": "blob"}`
+- 输出：`TextChunk` → `{"type":"text"}`；`ReasoningChunk` → `{"type":"reasoning","text":…}`（有 `chunk.kind` 则附带）；`FileChunk` → 读盘 base64 → `{"type":"blob"}`
 
 ## Web Console (SPA)
 
