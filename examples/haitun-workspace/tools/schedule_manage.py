@@ -18,7 +18,9 @@ from croniter import croniter
 
 
 def _schedules_dir() -> anyio.Path:
-    # Schedules are session/user data under the workspace.
+    # Schedules are session/user data under the workspace (刻意为之: 归用户
+    # workspace 而非 agent 包 —— Gateway 一进程多 Session、飞书按 open_id 每人
+    # 一个, 写进 agent 包会让所有人共享同一份定时任务)。
     return _paths.resolve_workspace() / "schedules"
 
 

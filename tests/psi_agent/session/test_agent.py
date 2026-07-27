@@ -821,6 +821,31 @@ async def test_conversation_dual_read_legacy_workspace_history(
 
 
 @pytest.mark.anyio
+async def test_create_loads_schedules_from_workspace_not_agent_package(tmp_path: Path) -> None:
+    """schedules 归 workspace (刻意为之) - 飞书多用户共用 agent 包时不能共享定时任务。"""
+    workspace = tmp_path / "user-ws"
+    agent_pkg = tmp_path / "agent-pkg"
+    await anyio.Path(workspace / "schedules" / "mine").mkdir(parents=True)
+    await anyio.Path(workspace / "schedules" / "mine" / "TASK.md").write_text(
+        '---\nname: mine\ncron: "0 12 * * *"\n---\nMy task', encoding="utf-8"
+    )
+    await anyio.Path(agent_pkg / "tools").mkdir(parents=True)
+    await anyio.Path(agent_pkg / "schedules" / "shared").mkdir(parents=True)
+    await anyio.Path(agent_pkg / "schedules" / "shared" / "TASK.md").write_text(
+        '---\nname: shared\ncron: "0 12 * * *"\n---\nShared task', encoding="utf-8"
+    )
+
+    session_agent = await SessionAgent.create(
+        ai_socket="http://x",
+        workspace_path=workspace,
+        agent_path=agent_pkg,
+        session_id="sched-src",
+    )
+    names = {s.name for s in session_agent._schedule_registry.schedules}
+    assert names == {"mine"}
+
+
+@pytest.mark.anyio
 async def test_runtime_scope_exposes_workspace_and_agent(tmp_path: Path) -> None:
     ws = str(tmp_path / "ws")
     ag = str(tmp_path / "ag")

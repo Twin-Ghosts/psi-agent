@@ -86,11 +86,17 @@ class SessionAgent:
     ) -> SessionAgent:
         """Production entry point.
 
-        *workspace_path* is the user open-folder (relative file tools).
-        *agent_path* loads tools / schedules / system; when omitted, falls
+        *workspace_path* is the user open-folder (relative file tools) and owns
+        **schedules** (``schedules/``).
+        *agent_path* loads tools / system; when omitted, falls
         back to *workspace_path* (single-root compatibility).
         *appdata_root* holds history JSONL (Step 4C); empty → resolve via
         ``PSI_APPDATA`` / platformdirs.
+
+        刻意为之: schedules 归 workspace 而非 agent 包 - 飞书按 open_id 给每个
+        用户 spawn 独立 Session, 多个 Session 共用同一个 agent 包, 若从 agent 包
+        加载则同一条定时任务会被每个 Session 各触发一次。触发去重另由
+        ``schedule_lease`` 兜住 (同一 workspace 被多 Session 打开时)。
         """
         agent_root = agent_path if agent_path is not None else workspace_path
 
@@ -101,7 +107,7 @@ class SessionAgent:
             appdata_root=appdata_root,
         )
         tool_registry = await ToolRegistry.load(agent_root / "tools", conversation.session_id)
-        schedule_registry = await ScheduleRegistry.load(agent_root / "schedules")
+        schedule_registry = await ScheduleRegistry.load(workspace_path / "schedules")
         system_prompt = await SystemPrompt.from_workspace(agent_root, conversation.session_id)
 
         return cls(
@@ -120,6 +126,10 @@ class SessionAgent:
     def start_all(self, task_group: object) -> None:
         """Start schedule runners — called by ``Session.run()``."""
         self._schedule_registry.start_all(task_group, self)
+
+    def stop_all(self) -> None:
+        """Stop schedule runners + release the workspace lease — ``Session.run()`` teardown."""
+        self._schedule_registry.stop_all()
 
     def set_pending_schedule_chunks(self, chunks: list[AgentChunk]) -> None:
         self._conversation.stash(chunks)

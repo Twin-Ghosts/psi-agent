@@ -61,6 +61,11 @@ class Session:
             session_id=self.session_id,
         )
 
-        async with anyio.create_task_group() as task_group:
-            agent.start_all(task_group)
-            task_group.start_soon(partial(serve_session, channel_socket=self.channel_socket, agent=agent))
+        try:
+            async with anyio.create_task_group() as task_group:
+                agent.start_all(task_group)
+                task_group.start_soon(partial(serve_session, channel_socket=self.channel_socket, agent=agent))
+        finally:
+            # Session 退出 (正常结束或被 Gateway cancel) 即释放 schedules 触发租约,
+            # 同 workspace 的其它 Session 才能接管调度, 详见 schedule_lease。
+            agent.stop_all()
