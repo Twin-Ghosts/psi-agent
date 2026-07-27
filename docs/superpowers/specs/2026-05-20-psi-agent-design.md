@@ -156,7 +156,7 @@ Channel (REPL/CLI/Telegram/Feishu)        Session                     AI (OpenAI
      │                         │ 释放锁                       │
 ```
 
-**通信协议**：所有 socket 端点使用标准 HTTP/SSE（OpenAI Chat Completions 兼容格式），支持 Unix socket、TCP、Windows Named Pipe。传输类型由地址前缀自动检测：`http(s)://` → TCP，`\\\\.\\pipe\\` → Named Pipe，裸路径 → Unix socket。检测逻辑位于 `psi_agent._sockets`。
+**通信协议**：所有 socket 端点使用标准 HTTP/SSE（OpenAI Chat Completions 兼容格式），支持 Unix socket、TCP、Windows Named Pipe。传输类型由地址前缀自动检测：`http(s)://` → TCP，`\\\\.\\pipe\\` → Named Pipe，裸路径 → Unix socket。检测逻辑位于 `psi_agent._sockets`。两种非 TCP 传输各自只在对应平台可用（Unix socket 仅 POSIX、Named Pipe 仅 Windows），平台与地址不匹配时 `_sockets` 主动抛 `ValueError` 快速失败，而不是放任 aiohttp 在深处抛无上下文的 `NotImplementedError` / `AttributeError`。
 
 **错误响应格式**（两种形式）：
 

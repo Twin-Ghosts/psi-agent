@@ -115,7 +115,7 @@ uv run psi-agent gateway --listen http://127.0.0.1:8080   # 指定端口
 - **管理**：侧边栏切换会话、双击改名、删除确认
 - **自动标题**：首次对话后 AI 自动生成会话标题
 
-注意 `--listen` 参数需要 `http://` 前缀，裸 `IP:PORT` 会被误判为 Unix socket 路径。
+注意 `--listen` 参数需要 `http://` 前缀，裸 `IP:PORT` 不会被当成 TCP 地址：它匹配不上任何前缀，于是落到裸路径分支——在 POSIX 上被当成 Unix socket 路径，在 Windows 上则直接抛 `ValueError`（见下文「传输层抽象」）。
 
 Gateway 还支持系统托盘图标（`--tray --icon icon.png`）、自动打开浏览器（`--browser`）、原生 webview 窗口（`--webview`）和自定义 socket 路径前缀（`--socket-path psi`，控制 AI/Session Unix socket 的 `/tmp/{prefix}/ais/...` 和 `/tmp/{prefix}/channels/...` 路径）。
 

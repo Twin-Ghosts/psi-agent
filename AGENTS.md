@@ -118,7 +118,7 @@ src/
 
 ## 核心通信协议
 
-所有组件通过 **aiohttp** 以 **OpenAI Chat Completions HTTP/SSE** 格式通信。传输支持 Unix socket、TCP、Windows Named Pipe，由地址前缀自动检测（`psi_agent._sockets`）：
+所有组件通过 **aiohttp** 以 **OpenAI Chat Completions HTTP/SSE** 格式通信。传输支持 Unix socket（仅 POSIX）、TCP、Windows Named Pipe（仅 Windows），由地址前缀自动检测（`psi_agent._sockets`）；平台与地址不匹配时抛 `ValueError` 快速失败，详见「关键注意事项」第 17 条：
 
 - **AI socket**: Session 作为客户端访问，`POST /chat/completions`
 - **Channel socket**: Session 作为服务端，`POST /chat/completions`

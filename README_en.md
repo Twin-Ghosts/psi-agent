@@ -115,7 +115,7 @@ Open the printed address to see a Material Design 3 Web Console. From the UI you
 - **Manage**: Sidebar session switching, double-click rename, delete with confirmation
 - **Automatic titles**: AI generates session titles after first conversation
 
-The `--listen` value must include the `http://` prefix; bare `IP:PORT` is interpreted as a Unix socket path.
+The `--listen` value must include the `http://` prefix. A bare `IP:PORT` matches no prefix and falls through to the bare-path branch: on POSIX it is interpreted as a Unix socket path, while on Windows it raises `ValueError` outright (see "Transport Abstraction" below).
 
 Gateway also supports system tray icon (`--tray --icon icon.png`), auto browser open (`--browser`), native webview window (`--webview`), and custom socket path prefix (`--socket-path psi`, controlling the `/tmp/{prefix}/ais/...` and `/tmp/{prefix}/channels/...` layout for AI/Session Unix sockets).
 
