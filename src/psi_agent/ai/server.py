@@ -36,7 +36,9 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
     body.pop("api_key", None)
     body.pop("api_base", None)
     body.pop("routing", None)
-    body["stream_options"] = {"include_usage": True}
+    stream_opts = body.get("stream_options", {})
+    stream_opts["include_usage"] = True
+    body["stream_options"] = stream_opts
     logger.debug(f"Body keys to passthrough: {list(body)}")
 
     response = web.StreamResponse(
@@ -88,7 +90,7 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
                     "completion_tokens": chunk.usage.completion_tokens,
                     "total_tokens": chunk.usage.total_tokens,
                 }
-                logger.info(
+                logger.debug(
                     f"Compaction needed: prompt_tokens={chunk.usage.prompt_tokens} > threshold={max_context_tokens}"
                 )
             data = chunk.model_dump_json()
