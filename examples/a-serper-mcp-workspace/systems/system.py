@@ -1,4 +1,4 @@
-"""Build the system prompt for the bash-only agent workspace."""
+"""Build the system prompt for the Serper MCP workspace."""
 
 from __future__ import annotations
 
@@ -7,51 +7,32 @@ from typing import Any
 
 import anyio
 
-from psi_agent._yaml import parse_yaml_header
-
 
 async def system_prompt_builder() -> str:
     current_file = anyio.Path(inspect.getfile(system_prompt_builder))
     workspace_root = current_file.parent.parent
-    skills_dir = workspace_root / "skills"
 
-    skills: list[str] = []
-    if await skills_dir.is_dir():
-        skill_dirs = sorted([p async for p in skills_dir.iterdir()], key=lambda p: p.name)
-        for skill_dir in skill_dirs:
-            if not await skill_dir.is_dir():
-                continue
-            skill_md = skill_dir / "SKILL.md"
-            if not await skill_md.exists():
-                continue
-            header, _ = parse_yaml_header(await skill_md.read_text(encoding="utf-8"))
-            if header and header.get("name") and header.get("description"):
-                skills.append(f"- {header['name']}: {header['description']}")
+    return f"""You are a helpful AI assistant with web search capabilities.
 
-    skills_text = "\n".join(skills) if skills else "(None)"
-
-    return f"""You are a helpful AI assistant.
+You have access to a `serper` tool that searches Google via the Serper API.
+Use it to look up current information, facts, and web content.
 
 ## Workspace
 Location: {workspace_root}
 
-## Skills
-Location: {skills_dir}
-
-Available:
-{skills_text}"""
+## Tools
+- serper: search the web via Google Serper API"""
 
 
 async def compact_history(history: list[dict[str, Any]], complete_fn) -> str:
-    """Summarize older conversation turns via LLM, keeping recent turns verbatim.
+    """Summarize older conversation turns, keeping the last 2 turns verbatim.
 
     Returns the summary string; the framework merges it into the system prompt.
     """
     if len(history) <= 6:
         return ""
 
-    recent_count = 4
-    older = history[:-recent_count]
+    older = history[:-4]
 
     parts: list[str] = []
     for msg in older:
@@ -74,6 +55,7 @@ async def compact_history(history: list[dict[str, Any]], complete_fn) -> str:
     ]
 
     try:
-        return await complete_fn(summary_prompt)
+        summary = await complete_fn(summary_prompt)
+        return summary
     except Exception:
         return "\n".join(parts)

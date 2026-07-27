@@ -6,6 +6,7 @@ import logging
 import sys
 import types
 from pathlib import Path
+from typing import Any
 
 import anyio
 
@@ -90,3 +91,40 @@ async def _load_workspace_skills(skills_dir: anyio.Path) -> list[str]:
         if header and header.get("name") and header.get("description"):
             skills.append(f"- {header['name']}: {header['description']}")
     return skills
+
+
+async def compact_history(history: list[dict[str, Any]], complete_fn) -> str:
+    """Summarize older conversation turns, keeping the last 2 turns verbatim.
+
+    Returns the summary string; the framework merges it into the system prompt.
+    """
+    if len(history) <= 6:
+        return ""
+
+    older = history[:-4]
+
+    parts: list[str] = []
+    for msg in older:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if isinstance(content, str) and content.strip() and role in ("user", "assistant"):
+            parts.append(f"[{role}]: {content}")
+
+    if not parts:
+        return ""
+
+    summary_prompt = [
+        {"role": "system", "content": (
+            "Summarize the following conversation concisely. "
+            "Preserve all key facts, decisions, task context, file paths, "
+            "and information the user or assistant explicitly mentioned. "
+            "Do not omit anything that could be needed later."
+        )},
+        {"role": "user", "content": "Summarize:\n\n" + "\n".join(parts)},
+    ]
+
+    try:
+        summary = await complete_fn(summary_prompt)
+        return summary
+    except Exception:
+        return "\n".join(parts)

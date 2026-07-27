@@ -548,3 +548,40 @@ async def system_prompt_builder() -> str:
     """
     workspace_dir = (await anyio.Path(__file__).resolve()).parent.parent
     return await System(workspace_dir).build_system_prompt()
+
+
+async def compact_history(history: list[dict[str, Any]], complete_fn) -> str:
+    """Summarize older conversation turns via LLM, keeping recent turns verbatim.
+
+    Returns the summary string; the framework merges it into the system prompt.
+    """
+    if len(history) <= 6:
+        return ""
+
+    recent_count = 4
+    older = history[:-recent_count]
+
+    parts: list[str] = []
+    for msg in older:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if isinstance(content, str) and content.strip() and role in ("user", "assistant"):
+            parts.append(f"[{role}]: {content}")
+
+    if not parts:
+        return ""
+
+    summary_prompt = [
+        {"role": "system", "content": (
+            "Summarize the following conversation concisely. "
+            "Preserve all key facts, decisions, task context, file paths, "
+            "and information the user or assistant explicitly mentioned. "
+            "Do not omit anything that could be needed later."
+        )},
+        {"role": "user", "content": "Summarize:\n\n" + "\n".join(parts)},
+    ]
+
+    try:
+        return await complete_fn(summary_prompt)
+    except Exception:
+        return "\n".join(parts)
