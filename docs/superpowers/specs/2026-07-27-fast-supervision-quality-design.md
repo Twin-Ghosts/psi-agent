@@ -81,17 +81,18 @@ Merges use normalized lowercase identifiers and conservative alias matching. A m
 
 ## Long-Term Heatmap Quality
 
-Heatmaps gain:
+Heatmaps retain complete historical evidence and do not apply time decay or automatic deletion. They gain:
 
-- decayed heat rather than only raw counts;
-- last-seen timestamp;
+- immutable event records for every observed question and advice decision;
+- current branch state separate from the historical event log;
+- last-seen timestamp without reducing the evidentiary weight of older events;
 - repeated-surface count;
 - explored-node count;
 - accepted and rejected breakout counts when known;
-- confidence and evidence age;
-- cognitive and intent histories with bounded length.
+- confidence and evidence age as descriptive metadata, not decay factors;
+- cognitive and intent transition history without truncation.
 
-Decay is deterministic and applied on read/update, so old activity gradually loses influence without a periodic scheduler requirement.
+When the user explicitly changes direction—for example, from deep derivation to a simple explanation, or from strategic planning back to basic understanding—the system may roll back the *active response strategy* for the affected topic branch. This rollback changes the next-answer starting point and branch-local active depth; it must not delete, lower, or rewrite historical heatmap events. Later renewed depth can build forward from the preserved history.
 
 ## Failure and Observability
 
@@ -114,7 +115,7 @@ Never log raw user IDs, raw questions, API keys, main reasoning, or tool results
 - A mismatched or stale cache is rejected and cannot leak across users or domains.
 - Background map/heatmap updates do not delay the first main response chunk.
 - Map revisions preserve aliases and do not duplicate normalized nodes.
-- Heatmap heat decays deterministically and retains bounded evidence.
+- Heatmaps preserve complete history, and explicit depth/goal changes can roll back only the affected branch's active response strategy without deleting historical events.
 - Existing supervisor tests remain green; new tests cover timeout, cache eligibility, fallback order, background failure, map merge, and heat decay.
 - Real multi-turn tests report P50/P95 supervision and first-token latency separately.
 
