@@ -7,8 +7,8 @@
 psi-agent 是一个**微内核**式的 agent 框架。核心理念是：
 
 1. **最小化核心**: 框架本身只提供通信协议、组件组合和 tool/Schedule 加载机制
-2. **功能由 workspace 定义**: agent 的能力（tools、system prompt、定时任务）完全由 workspace 目录中的文件定义
-3. **组件无状态**: AI 后端不保存任何状态；Session 只维护一个内存中的 history；Channel 不管理历史
+2. **功能由 agent 包定义**: tools、system prompt、定时任务从 **agent** 目录加载（``Session.agent``；空则与 workspace 同根兼容）。用户 **workspace** 是打开目录（相对文件 IO）；**AppData** 是进程记忆区（todos / history / Gateway state）
+3. **组件无状态**: AI 后端不保存任何状态；Session 只维护一个内存中的 history（落盘在 AppData）；Channel 不管理历史
 4. **组合优于继承**: 三个独立组件通过 socket 任意组合
 5. **一切异步**: 所有 IO 操作使用 `anyio`，永不使用 `asyncio` 原生 API 或 `pathlib`
 6. **零抑制**: 不堆 `noqa`，不设 `per-file-ignores`。代码本身应符合规则
@@ -31,7 +31,10 @@ Socket 文件天然隔离——不同项目用不同文件路径，互不干扰�
 AI 后端无状态，不保存任何信息。多个 Session 可以共享同一个 AI backend。如果反过来（Session 是 Server），每个 Session 都要自行配置上游 API，违反"组合"原则。
 
 **为什么 Session history 持久化为 JSONL？**
-JSONL 格式零依赖，逐行追加读写简单。文件按 `workspace/histories/{session_id}.jsonl` 存储（workspace 默认当前目录），`session_id` 可由 CLI 传入以 resume 之前的会话。`SessionAgent.run()` 每次调用通过 ``async with self._conversation`` 进入上下文管理器——``Conversation`` 的 ``add / commit / rollback`` 实现回合级原子性。仅在回合成功完成（stop / tool_calls 全部执行 / unexpected finish / max rounds）时落盘；异常时 ``__aexit__`` 自动 ``rollback()`` 恢复内存到快照，磁盘不落地任何新消息。
+JSONL 格式零依赖，逐行追加读写简单。现路径为 AppData ``{appdata}/histories/{session_id}.jsonl``（legacy ``{workspace}/histories/`` 双读），`session_id` 可由 CLI 传入以 resume。`SessionAgent.run()` 每次调用通过 ``async with self._conversation`` 进入上下文管理器——``Conversation`` 的 ``add / commit / rollback`` 实现回合级原子性。仅在回合成功完成（stop / tool_calls 全部执行 / unexpected finish / max rounds）时落盘；异常时 ``__aexit__`` 自动 ``rollback()`` 恢复内存到快照，磁盘不落地任何新消息。细节见 `session/AGENTS.md` / `gateway/AGENTS.md`。
+
+**为什么拆 agent / workspace / AppData 三区？**
+能力包（tools / schedules / system）与用户打开目录、进程记忆区解耦：同一 agent 可挂多个 workspace；todos / history / Gateway `state/` 进 AppData（`platformdirs` / `--appdata` / `PSI_APPDATA`），避免写进用户项目树。路径助手在 ``psi_agent._appdata``（跨 Session/Gateway，避免循环导入）；**禁止**把 AppData 根塞进 Session ContextVar。分层细节见各层 `AGENTS.md`。
 
 **为什么 socket 文件不自动 unlink？**
 支持热换 Server。每个 `session.post()` 新建 TCP/Unix 连接，由 `UnixConnector` 按路径重新 connect。只要新的服务进程绑定到同一 socket 路径，客户端无需重启即可继续通信。auto-unlink 会破坏这个能力——socket 文件需要保留，由新进程手动接管。
@@ -59,6 +62,7 @@ src/
     ├── cli.py                  # tyro CLI 入口，定义 top-level Union
     ├── _yaml.py               # 共享 YAML header 解析（scheduler + workspace system.py）
     ├── _sockets.py             # 共享 socket 工具（prefix-based transport 解析）
+    ├── _appdata.py             # AppData 路径助手（todos/history/state；Session↔Gateway 共享）
     ├── _run.py                 # YAML 配置批量启动（psi-agent run config.yml）
     ├── _logging.py              # loguru 配置，verbose→DEBUG
     ├── ai/

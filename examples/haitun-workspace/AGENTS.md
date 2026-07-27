@@ -77,11 +77,12 @@ service tools:
 
 ## Tools (`tools/`)
 
-### Path roots（第 3 步：读 ContextVar；非 AppData）
+### Path roots（workspace / agent ContextVar + AppData）
 
 当 Session `agent ≠ workspace` 时，工具必须分清两根目录。统一入口：
 `tools/_runtime_paths.py`（也经 `_session_helpers.current_workspace` /
-`current_agent` 暴露）。
+`current_agent` 暴露）。AppData（todos / history / Gateway state）经
+``psi_agent._appdata`` / ``resolve_appdata_root()``，**不**进 ContextVar。
 
 | 解析 API | 优先顺序 | 典型用途 |
 |----------|----------|----------|

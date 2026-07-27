@@ -45,7 +45,8 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 - **工具可见的 session id / 路径**：见上方「`runtime_context` 适用范围」。``todo`` 等经 ``get_session_id()`` 读取，勿回落到 ``default``
 - 所有手动模块加载使用 `原名_session_id_文件hash` 作为 module name（tool 和 system prompt 均用 `compile` + `exec` 避免 importlib bytecode 缓存），确保同进程多 session 隔离
 - `SessionAgent.create()` 完成所有初始化——`__init__.py` 只做入口编排
-- Tool / schedule / system 从 **agent_path** 加载；history 仍挂在 **workspace_path**
+- Tool / schedule / system 从 **agent_path** 加载；history 写 **AppData** ``histories/``（第 4C；legacy ``{workspace}/histories/`` 双读）
+- AppData 路径助手在 ``psi_agent._appdata``（与 Gateway 共享；**禁止**经 ContextVar 传递 AppData 根）
 - System prompt 在首次 `run()` 调用时惰性构建（通过 `system_prompt_builder`）
 - 后续请求可调用 `system_prompt_rebuild_checker()`（如果定义），返回 True 则重建 system prompt
 

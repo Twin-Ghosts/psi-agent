@@ -35,7 +35,7 @@ Gateway 进程
 | `_ai_manager.py` | `AIManager` — AI 实例注册表 + 生命周期 + AiInfo |
 | `_router_manager.py` | `RouterManager` — Router 实例注册表、AI ID 到 socket 解析和生命周期管理 |
 | `_session_manager.py` | `SessionManager` — Session 实例注册表 + 生命周期 + SessionInfo（含 `agent`） |
-| `_defaults.py` | `resolve_default_agent` / `resolve_default_workspace` / `resolve_appdata_root` — CLI / `GET /defaults` 用 |
+| `_defaults.py` | `resolve_default_agent` / `resolve_default_workspace`；再导出 ``psi_agent._appdata`` 路径助手 — CLI / `GET /defaults` 用 |
 | `_feishu_manager.py` | `FeishuManager` — 飞书 open_id → Session 路由表（复用 SessionManager 按需 spawn）+ FeishuRoute |
 | `_title_manager.py` | 会话标题 CRUD + AI 自动生成 |
 | `_state.py` | `GatewayState` — `{appdata}/state/latest.json` + 时间戳快照；缺则双读 cwd `state/latest.json` |
@@ -68,17 +68,17 @@ Gateway 进程
 11. runner.setup() + create_site + site.start() + tray/webview/browser 等待与 finally 清理
 ```
 
-## 默认 agent / workspace / AppData（小步：接线与宣布；搬家另 PR）
+## 默认 agent / workspace / AppData（三区路径；记忆区搬家已完成）
 
 ### 路径分层（看 PR 先看这段）
 
 ```text
 调用方（spa / 飞书 / haitun sessions_create / …）
-    │  GET /defaults  → 得知默认 agent、workspace、appdata（宣布）
+    │  GET /defaults  → 得知默认 agent、workspace、appdata
     │  POST /sessions { workspace?, agent? }
     ▼
-Gateway SessionManager（缺省补 --default-agent / --default-workspace）
-    │  Session(workspace=…, agent=…)
+Gateway SessionManager（缺省补 --default-agent / --default-workspace；注入 _appdata）
+    │  Session(workspace=…, agent=…, appdata=…)
     ▼
 Session（#472 / 第 4C）
     │  启动时：tools / schedules / system 从 agent_path 加载
@@ -92,17 +92,19 @@ history → `{appdata}/histories/`（双读旧 `{workspace}/histories/`） ← �
 Gateway state → `{appdata}/state/`（双读旧 cwd `state/`）          ← ✅ 第 4D
 ```
 
-| 已合 / 未做 | 内容 |
-|-------------|------|
+路径助手：``psi_agent._appdata``（Session / Gateway / haitun 共用；**刻意**放在 gateway 包外以免循环导入）。``gateway._defaults`` 再导出同名助手。Gateway 启动把解析后的根写入 ``PSI_APPDATA``，同进程工具与 ``GET /defaults.appdata`` 一致。**禁止**把 AppData 根塞进 Session ContextVar。
+
+| 已合 | 内容 |
+|------|------|
 | ✅ #472 | Session 可选 `agent`；加载能力包；ContextVar **API** |
 | ✅ #482 | Gateway CLI + `GET /defaults` + `POST /sessions.agent`；调用方接线 |
 | ✅ 第 3 步 | haitun 工具读 `get_workspace()` / `get_agent()`（`_runtime_paths`） |
 | ✅ 第 4A | 解析并暴露 AppData 根：`GET /defaults.appdata`、CLI `--appdata`、env `PSI_APPDATA` |
 | ✅ 第 4B | todos：**写** `{appdata}/todos/{session_id}.json`；**读**优先 AppData，缺则双读 legacy |
 | ✅ 第 4C | history：**写** `{appdata}/histories/{session_id}.jsonl`；**读**优先 AppData，缺则双读 legacy |
-| ✅ **第 4D（本层）** | Gateway state：**写** `{appdata}/state/latest.json`；**读**优先 AppData，缺则双读 cwd `state/latest.json` |
+| ✅ 第 4D | Gateway state：**写** `{appdata}/state/latest.json`；**读**优先 AppData，缺则双读 cwd `state/latest.json` |
 
-**可读验收（第 4D）**：Gateway 重启后 AI/Session/Title 从 AppData `state/latest.json` 恢复；仅有旧 cwd `state/latest.json` 时仍能加载，下次 persist 写入 AppData。三区路径拆分（agent / workspace / AppData）记忆区侧至此完成。
+**可读验收**：新 todos/history/state 落在 AppData；仅有 legacy 文件时仍可读；再次写入落 AppData。三区路径（agent / workspace / AppData）记忆区侧至此完成。
 
 | CLI | 含义 |
 |-----|------|
