@@ -71,7 +71,7 @@
 - **停止生成**：流式进行中输入栏右侧为红色停止键（替换发送）。中止后撤回本轮乐观 user+agent，把原文案与附件还原到输入框（对齐 Cursor）。**刻意为之**：停止键用 `pointerdown` + 短时 `suppressSubmit`，避免 Stop 变回 Send 后同一次点击误触重发（旧逻辑清空输入框，误触 submit 是空操作所以「一点就停」；回填草稿后误触会立刻再跑一轮，看起来像打断后又在气泡里重出）。另用 `streamEpoch` / `signal.aborted` 丢掉中止后的迟到 SSE。网络等非 Abort 失败仍标记 `failed` / 可重试。
 - **粘贴附件**：对话栏 / 新建任务输入 `Ctrl/Cmd+V` 时，剪贴板中的**任意文件**（含截图）等价于回形针选文件，进入同一附件 chip 再走 multipart；纯文字粘贴不拦截。识图等由 workspace tool 处理。
 - **换行**：输入为 `textarea`；`Enter` 发送，`Ctrl/Cmd+Enter` 换行（`Shift+Enter` 亦换行）。
-- SSE `reasoning` 故意不渲染（与 v1 一致：不拆多气泡、不展示 thinking 流）。
+- SSE `reasoning`：**刻意压缩**仍走同一字段；用 `kind` 区分。spa-v2 过程轴见 `services/turnProgress.ts`（对标 Cursor）：**上面**是短暂活动概括（`tool_call` → `读取 \`a.py\`` / `执行 \`…\`` 等，带对象 basename，不落 raw thinking / marker）；**底下尾行**才是「规划下一步…」或「撰写回复…」——**刻意**不把「规划下一步」写进历史行。正式气泡仍等回合结束再露；`preferResultBelowRule` 处理 `---` 分节（不改 JSONL）。
 - 流式进行中不显示助手操作栏。
 
 ### 历史展示隔离（对齐敲定协议 / spa v1）

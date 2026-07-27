@@ -4366,11 +4366,39 @@ textarea:focus-visible {
   background: #fff;
 }
 .focus-chat-bubble.thinking {
-  display: grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 0.55rem;
   min-width: 56px;
   min-height: 40px;
   padding: 10px 16px;
+}
+.focus-chat-progress-log {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+  text-align: left;
+}
+.focus-chat-progress-line {
+  font-size: 0.85rem;
+  color: var(--text-muted, #6b7280);
+  letter-spacing: 0.01em;
+  line-height: 1.35;
+}
+.focus-chat-progress-line.is-current {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--text-secondary, #4b5563);
+}
+.focus-chat-progress-line.is-current .typing {
+  flex: none;
+}
+.focus-chat-progress {
+  font-size: 0.85rem;
+  color: var(--text-muted, #6b7280);
+  letter-spacing: 0.01em;
 }
 
 /* Message actions (spa v1 parity: copy / like / dislike / regenerate / retry) */

@@ -75,6 +75,7 @@ class AiClient:
                 yield AiDelta(
                     content=delta_data.get("content"),
                     reasoning=delta_data.get("reasoning"),
+                    kind=delta_data.get("kind") if isinstance(delta_data.get("kind"), str) else None,
                     tool_calls=delta_data.get("tool_calls"),
                     finish_reason=c.get("finish_reason"),
                 )

@@ -128,9 +128,10 @@ src/
 - **Channel socket**: Session 作为服务端，`POST /chat/completions`
 
 SSE 流中的特殊字段：
+- `delta.reasoning` — 过程流（刻意压缩）：AI thinking + tool 进度仍走同一槽，便于 Session 出口与 AI 层 OpenAI 形协议同构复用；用正交字段 ``delta.kind``（`thinking` / `tool_call` / `tool_result`）供 UI 白名单渲染（Cursor 风进程行只订 tool_*，默认不晒 thinking）
 - `delta.content` — AI 最终文本回复
-- `delta.reasoning` — 聚合了 AI thinking + tool_call 意图 + tool_call 结果
-- `delta.tool_calls` — 部分 tool call 定义（流式累积）
+- `delta.tool_calls` — 部分 tool call 定义（流式累积；Agent 侧协议，与 UI 的 tool 进度 `kind` 不同）
+- `delta.kind` — 仅当本帧带 `reasoning` 时有效的 provenance（见上）
 
 错误响应有两种形式：
 

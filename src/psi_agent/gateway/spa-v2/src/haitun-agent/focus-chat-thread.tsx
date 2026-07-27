@@ -6,6 +6,8 @@ import { readStoredAvatar, readStoredName } from "../services/userProfile";
 import { htmlEscape, renderMd } from "../services/renderMd";
 import { stripTransferMarkers } from "../services/sendMarkers";
 import { downloadMatrixXlsx, matrixToTsv, tableToMatrix } from "../services/mdTable";
+import { preferResultBelowRule } from "../services/assistantDisplay";
+import type { ProgressLog } from "../services/turnProgress";
 import { FAILED_REASON_LABEL, isCompleteAgent } from "../services/messageTurn";
 import FilePreview from "../components/FilePreview";
 
@@ -134,6 +136,7 @@ export function FocusChatThread({
   messages,
   typing,
   title,
+  progressLog,
   onFeedback,
   onRegenerate,
   onRetry,
@@ -141,6 +144,8 @@ export function FocusChatThread({
   messages: ChatMessage[];
   typing: boolean;
   title: string;
+  /** Growing Cursor-style process log (summary lines + 规划下一步 trailer). */
+  progressLog?: ProgressLog | null;
   onFeedback?: (index: number, kind: Exclude<MessageFeedback, "">) => void;
   onRegenerate?: (index: number) => void;
   onRetry?: (index: number) => void;
@@ -152,15 +157,34 @@ export function FocusChatThread({
     const el = scrollerRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [messages, typing]);
+  }, [messages, typing, progressLog]);
 
-  const hasContent = messages.some((m) => m.text.trim() || (m.files?.length ?? 0) > 0) || typing;
+  const hasContent =
+    messages.some((m) => m.text.trim() || (m.files?.length ?? 0) > 0) || typing;
 
   const showAgentActions = (msg: ChatMessage) => {
     if (msg.role !== "agent") return false;
     if (typing) return false;
     return isCompleteAgent(msg);
   };
+
+  const thinkingBubble = (
+    <div className="focus-chat-bubble thinking focus-chat-progress-wrap">
+      {progressLog ? (
+        <div className="focus-chat-progress-log" aria-live="polite">
+          {progressLog.lines.map((line, i) => (
+            <div key={`p-${i}-${line}`} className="focus-chat-progress-line">{line}</div>
+          ))}
+          <div className="focus-chat-progress-line is-current">
+            <span>{progressLog.current}</span>
+            <span className="typing" aria-label="正在输入"><i /><i /><i /></span>
+          </div>
+        </div>
+      ) : (
+        <span className="typing" aria-label="正在输入"><i /><i /><i /></span>
+      )}
+    </div>
+  );
 
   return (
     <div
@@ -178,27 +202,28 @@ export function FocusChatThread({
         </div>
       )}
       {messages.map((message, index) => {
+        const isLast = index === messages.length - 1;
+        // Cursor-style: while the turn is live, never paint interim agent prose
+        // (plans / "我先看看…") into the bubble — only the bouncing process line.
+        // Content is revealed when typing ends (final result).
+        const hideAgentProse = typing && isLast && message.role === "agent";
         const clean = stripTransferMarkers(message.text);
-        const emptyStreaming =
-          message.role === "agent" &&
-          !clean.trim() &&
-          !(message.files?.length) &&
-          typing &&
-          index === messages.length - 1;
-        if (emptyStreaming) {
+        const displayText = hideAgentProse ? "" : preferResultBelowRule(clean);
+        const showFiles = !hideAgentProse && (message.files?.length ?? 0) > 0;
+
+        if (hideAgentProse) {
           return (
             <ChatBlock role="agent" key={`typing-${index}`}>
-              <div className="focus-chat-bubble thinking">
-                <span className="typing" aria-label="正在输入"><i /><i /><i /></span>
-              </div>
+              {thinkingBubble}
             </ChatBlock>
           );
         }
-        if (!clean.trim() && !(message.files?.length)) return null;
+
+        if (!displayText.trim() && !showFiles) return null;
 
         const html = message.role === "agent"
-          ? renderMd(clean)
-          : htmlEscape(clean).replace(/\n/g, "<br>");
+          ? renderMd(displayText)
+          : htmlEscape(displayText).replace(/\n/g, "<br>");
 
         const failedLabel = message.failed
           ? (FAILED_REASON_LABEL[message.failedReason ?? "incomplete"] ?? FAILED_REASON_LABEL.incomplete)
@@ -224,14 +249,14 @@ export function FocusChatThread({
                   )}
                 </div>
               )}
-              {clean.trim() ? (
+              {displayText.trim() ? (
                 <div
                   className="focus-chat-bubble"
                   dangerouslySetInnerHTML={{ __html: html }}
                 />
               ) : null}
             </div>
-            {(message.files?.length ?? 0) > 0 && (
+            {showFiles && (
               <div className="focus-chat-files">
                 {message.files!.map((f, fi) => (
                   <button
@@ -280,7 +305,7 @@ export function FocusChatThread({
                 >
                   <RefreshCw size={16} aria-hidden />
                 </button>
-                <CopyButton text={clean} className="focus-chat-action-btn" />
+                <CopyButton text={displayText || clean} className="focus-chat-action-btn" />
               </div>
             )}
           </ChatBlock>
@@ -288,9 +313,7 @@ export function FocusChatThread({
       })}
       {typing && messages[messages.length - 1]?.role === "user" && (
         <ChatBlock role="agent">
-          <div className="focus-chat-bubble thinking">
-            <span className="typing" aria-label="正在输入"><i /><i /><i /></span>
-          </div>
+          {thinkingBubble}
         </ChatBlock>
       )}
       {preview && <FilePreview file={preview} onClose={() => setPreview(null)} />}

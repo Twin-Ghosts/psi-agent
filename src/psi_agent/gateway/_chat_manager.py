@@ -36,7 +36,7 @@ class ChatManager:
             Dicts suitable for SSE output:
 
             - ``{"type": "text", "text": "..."}``
-            - ``{"type": "reasoning", "text": "..."}``
+            - ``{"type": "reasoning", "text": "...", "kind": "thinking"|"tool_call"|"tool_result"?}``
             - ``{"type": "blob", "name": "...", "data": "<base64>"}``
             - ``{"type": "error", "error": "..."}`` — on blob read failure
         """
@@ -75,7 +75,10 @@ class ChatManager:
                 if isinstance(chunk, TextChunk):
                     yield {"type": "text", "text": chunk.text}
                 elif isinstance(chunk, ReasoningChunk):
-                    yield {"type": "reasoning", "text": chunk.text}
+                    event: dict[str, Any] = {"type": "reasoning", "text": chunk.text}
+                    if chunk.kind:
+                        event["kind"] = chunk.kind
+                    yield event
                 elif isinstance(chunk, FileChunk):
                     yield await self._file_blob(chunk.path)
 

@@ -18,7 +18,13 @@ from psi_agent.session.history_display import (
     messages_for_ai,
     with_kind,
 )
-from psi_agent.session.protocol import AgentChunk, AgentError
+from psi_agent.session.protocol import (
+    REASONING_KIND_THINKING,
+    REASONING_KIND_TOOL_CALL,
+    REASONING_KIND_TOOL_RESULT,
+    AgentChunk,
+    AgentError,
+)
 from psi_agent.session.runtime_context import runtime_scope
 from psi_agent.session.schedule_registry import ScheduleRegistry
 from psi_agent.session.system_prompt import SystemPrompt
@@ -259,7 +265,10 @@ class SessionAgent:
                                 yield AgentChunk(content=delta.content)
                                 accumulated_content += delta.content
                             if delta.reasoning:
-                                yield AgentChunk(reasoning=delta.reasoning)
+                                # Compressed process slot: model thinking stays in
+                                # ``reasoning``; tag provenance for Channel/SPA filter.
+                                r_kind = delta.kind or REASONING_KIND_THINKING
+                                yield AgentChunk(reasoning=delta.reasoning, kind=r_kind)
                                 accumulated_reasoning += delta.reasoning
 
                             if delta.finish_reason and not finish_reason:
@@ -333,7 +342,8 @@ class SessionAgent:
 
                                     logger.info(f"Executing tool: {func_name!r}({args!r})")
                                     yield AgentChunk(
-                                        reasoning=f"[Tool Call: {func_name}({json.dumps(args, ensure_ascii=False)})]"
+                                        reasoning=(f"[Tool Call: {func_name}({json.dumps(args, ensure_ascii=False)})]"),
+                                        kind=REASONING_KIND_TOOL_CALL,
                                     )
                                     tool_args.append((i, tc, func_name, args))
 
@@ -364,7 +374,10 @@ class SessionAgent:
                                 # yield results in order, save
                                 for i, tc, func_name, _args in tool_args:
                                     result = results[i]
-                                    yield AgentChunk(reasoning=f"[Tool Result: {str(result)[:1000]}]")
+                                    yield AgentChunk(
+                                        reasoning=f"[Tool Result: {str(result)[:1000]}]",
+                                        kind=REASONING_KIND_TOOL_RESULT,
+                                    )
                                     self._conversation.add(
                                         with_kind(
                                             {

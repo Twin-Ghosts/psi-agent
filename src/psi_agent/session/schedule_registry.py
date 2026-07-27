@@ -27,7 +27,11 @@ from psi_agent.session.history_display import (
     KIND_SCHEDULE_SILENT,
     with_kind,
 )
-from psi_agent.session.protocol import AgentChunk
+from psi_agent.session.protocol import (
+    REASONING_KIND_TOOL_CALL,
+    REASONING_KIND_TOOL_RESULT,
+    AgentChunk,
+)
 
 if TYPE_CHECKING:
     from psi_agent.session.agent import SessionAgent
@@ -348,8 +352,18 @@ class ScheduleRegistry:
                     result = f"Error executing tool {tool_name!r}: {e}"
                     logger.error(f"Schedule {schedule.name!r} tool error: {e!r}")
 
-            chunks.append(AgentChunk(reasoning=f"[Tool Call: {tool_name}({json.dumps(args, ensure_ascii=False)})]"))
-            chunks.append(AgentChunk(reasoning=f"[Tool Result: {result[:1000]}]"))
+            chunks.append(
+                AgentChunk(
+                    reasoning=f"[Tool Call: {tool_name}({json.dumps(args, ensure_ascii=False)})]",
+                    kind=REASONING_KIND_TOOL_CALL,
+                )
+            )
+            chunks.append(
+                AgentChunk(
+                    reasoning=f"[Tool Result: {result[:1000]}]",
+                    kind=REASONING_KIND_TOOL_RESULT,
+                )
+            )
             if schedule.visibility == "display":
                 chunks.append(AgentChunk(content=result[:2000]))
 

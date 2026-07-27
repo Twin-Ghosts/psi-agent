@@ -62,7 +62,8 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 4. 通过 `AiClient.stream()` 发送 `history + tools + extra_params` 到 AI backend（streaming）
 5. 消费 `AiDelta` 流（AiClient 已做好 SSE 解析、错误检测）：
    - content → `yield AgentChunk(content=...)` 给 ChannelAdapter
-   - reasoning → `yield AgentChunk(reasoning=...)` 给 ChannelAdapter
+   - reasoning（模型 thinking）→ `yield AgentChunk(reasoning=..., kind="thinking")`（上游 `delta.kind` 优先）
+   - tool 执行起止 → 仍写入 **同一** `reasoning` 槽（刻意压缩，便于 Session↔AI OpenAI 形同构），`kind="tool_call"|"tool_result"`；正文可继续带 `[Tool Call:]`/`[Tool Result:]` 过渡标记
    - tool_calls → 累积（按 index 拼接 partial JSON）
     - `finish_reason="tool_calls"` → 执行 tool → 结果追加到 history → 回到步骤 4
     - finish_reason="stop" → 最终 content 追加到 history + `commit()` + 刷新 schedule registry（本轮 tool 可能修改了 schedule 文件）→ 释放锁
@@ -106,7 +107,7 @@ Session 层使用两个对称的协议适配器，将 `SessionAgent.run()` 包�
 | 类型 | 方向 | 职责 |
 |------|------|------|
 | `AiDelta` | AI→SessionAgent | SSE 解析后的内部流元素 |
-| `AgentChunk` | SessionAgent→Channel | 纯语义输出（仅 content / reasoning） |
+| `AgentChunk` | SessionAgent→Channel | 纯语义输出（`content` / `reasoning` + 可选 `kind` provenance） |
 | `AgentError` | SessionAgent→Channel | 不可恢复错误信号 |
 
 ## SessionAgent 支持多种传输

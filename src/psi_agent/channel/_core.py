@@ -24,9 +24,11 @@ class ChannelCore:
 
     @staticmethod
     def _to_chunk(kind: str, text: str) -> OutputChunk:
-        if kind == "reasoning":
-            return ReasoningChunk(text)
-        return TextChunk(text)
+        # Buffer keys: "text" | "reasoning" | "reasoning:<provenance>".
+        if kind == "text" or not kind.startswith("reasoning"):
+            return TextChunk(text)
+        provenance = kind.split(":", 1)[1] if ":" in kind else None
+        return ReasoningChunk(text=text, kind=provenance or None)
 
     async def __aenter__(self) -> ChannelCore:
         connector, self._endpoint = resolve_connector_and_endpoint(self.session_socket)
@@ -67,9 +69,16 @@ class ChannelCore:
             async with aclosing(iter_sse_events(resp.content)) as events:
                 logger.debug("Starting to consume SSE stream")
                 async for delta in events:
+                    reasoning_text = delta.get("reasoning") or ""
+                    content_text = delta.get("content") or ""
+                    raw_kind = delta.get("kind")
+                    reasoning_buf_kind = "reasoning"
+                    if reasoning_text and isinstance(raw_kind, str) and raw_kind.strip():
+                        reasoning_buf_kind = f"reasoning:{raw_kind.strip()}"
+
                     for incoming_kind, text in (
-                        ("reasoning", delta.get("reasoning") or ""),
-                        ("text", delta.get("content") or ""),
+                        (reasoning_buf_kind, reasoning_text),
+                        ("text", content_text),
                     ):
                         if not text:
                             continue
@@ -82,7 +91,7 @@ class ChannelCore:
                             for file_chunk in scanner.feed(text):
                                 yield file_chunk
                         else:
-                            logger.debug(f"delta.reasoning ({len(text)} chars): {text[:1000]!r}")
+                            logger.debug(f"delta.reasoning kind={raw_kind!r} ({len(text)} chars): {text[:1000]!r}")
 
                         for k, t in buffer.append(text):
                             yield self._to_chunk(k, t)
