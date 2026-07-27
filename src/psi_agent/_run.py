@@ -19,6 +19,10 @@ Config format (``run-config.yml``):
       workspace: ./examples/a-simple-bash-only-workspace  # optional, defaults to .
       channel_socket: ./channel.sock
       ai_socket: ./ai.sock
+      scheduler: true              # optional, default false. Only a scheduler session
+                                   # loads and fires {workspace}/schedules (定时任务归
+                                   # workspace 不归 session — 多个 Session 都触发会让
+                                   # 一条提醒被会话数乘一遍)。
 
     - type: channel
       name: repl                    # "cli", "repl", "telegram", or "feishu"

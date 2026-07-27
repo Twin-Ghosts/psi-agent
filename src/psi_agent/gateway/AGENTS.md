@@ -64,10 +64,12 @@ Gateway 进程
 5. anyio.create_task_group()                          — 手动管理 task group
 6. 创建 AIManager + RouterManager + SessionManager（注入 `_default_agent` / `_default_workspace`）+ TitleManager
 7. 恢复 AI / Router / Session（Session 恢复时带 `agent`，缺省用 Gateway default）/ titles
-8. await create_app(..., default_agent=..., default_workspace=..., appdata=...)  — 注册 REST（含 `GET /defaults`）
-9. 创建 _do_persist 闭包（快照 managers → state.save，sessions 含 `agent`）
-10. 注入 _persist + 初始全量持久化
-11. runner.setup() + create_site + site.start() + tray/webview/browser 等待与 finally 清理
+8. 创建 SchedulerManager（`--scheduler-ai-id`，空则回落 `--feishu-ai-id`）
+9. await create_app(..., default_agent=..., default_workspace=..., appdata=..., schedm=...)  — 注册 REST（含 `GET /defaults`）
+10. 为每个已恢复 Session 的 workspace `schedm.ensure(...)` — 按需拉起调度 Session（无 `schedules/` 则跳过）
+11. 创建 _do_persist 闭包（快照 managers → state.save，sessions 含 `agent`；`list_all()` 默认已排除调度 Session）
+12. 注入 _persist + 初始全量持久化
+13. runner.setup() + create_site + site.start() + tray/webview/browser 等待与 finally 清理
 ```
 
 ## 默认 agent / workspace / AppData（三区路径；记忆区搬家已完成）
@@ -83,7 +85,8 @@ Gateway SessionManager（缺省补 --default-agent / --default-workspace；注�
     │  Session(workspace=…, agent=…, appdata=…)
     ▼
 Session（#472 / 第 4C）
-    │  启动时：tools / schedules / system 从 agent_path 加载
+    │  启动时：tools / system 从 agent_path 加载
+    │         schedules 从 workspace_path 加载（且仅 scheduler=True 的调度 Session）
     │         history 写 `{appdata}/histories/`（legacy 双读）
     │  回合内：runtime_scope 写入 get_agent()/get_workspace() ContextVar
     ▼
@@ -92,6 +95,7 @@ AppData 记忆区根（`--appdata` / `PSI_APPDATA` / platformdirs）     ← ✅
 todos → `{appdata}/todos/`（双读旧 `{workspace}/.psi/todos/`）   ← ✅ 第 4B
 history → `{appdata}/histories/`（双读旧 `{workspace}/histories/`） ← ✅ 第 4C
 Gateway state → `{appdata}/state/`（双读旧 cwd `state/`）          ← ✅ 第 4D
+schedules → `{workspace}/schedules/`（归 workspace，非 agent 包 / 非 AppData）
 ```
 
 路径助手：``psi_agent._appdata``（Session / Gateway / haitun 共用；**刻意**放在 gateway 包外以免循环导入）。``gateway._defaults`` 再导出同名助手。Gateway 启动把解析后的根写入 ``PSI_APPDATA``，同进程工具与 ``GET /defaults.appdata`` 一致。**禁止**把 AppData 根塞进 Session ContextVar。
@@ -113,6 +117,7 @@ Gateway state → `{appdata}/state/`（双读旧 cwd `state/`）          ← �
 | `--default-agent` | 新建 Session 的 Agent 包目录；空则软默认：① `cwd/examples/haitun-workspace`（仓库开发）；② cwd 自身含 `tools/`+`skills/`（Inno 安装布局 `{app}` 即能力包）；仍空则 Session `agent=""`（与 workspace 同根兼容）。Windows 安装包 `haitun.exe` **显式**传 `--default-agent {app}` |
 | `--default-workspace` | 新建 Session / `GET /defaults` 的用户工作区；空 → 软默认 `{Desktop}/haitun交付`（**只宣布路径**；目录在 `SessionManager.create` / 开始对话时才 mkdir。`platformdirs.user_desktop_dir`）。安装包 `haitun.exe` **显式**传该路径（运行时解析桌面，不写死用户名） |
 | `--appdata` | AppData 记忆区根；空 → `PSI_APPDATA` → `platformdirs`（**禁止**手写死 `%AppData%`） |
+| `--scheduler-ai-id` | 调度 Session 挂载的 AI 实例；空 → 回落 `--feishu-ai-id`；两者都空则有 `schedules/` 的 workspace 只记 warning 不启动调度 |
 
 `POST /sessions` 可显式带 `agent` / `workspace`；省略时用上述默认。`SessionInfo` 与 `state/latest.json` 持久化含 `agent`。
 
@@ -126,6 +131,7 @@ Gateway state → `{appdata}/state/`（双读旧 cwd `state/`）          ← �
 | **haitun** `sessions_create` / session 工具 | `GET /defaults` 后 `POST /sessions` 带 `agent` |
 | **state 恢复** | snapshot 的 `agent`；缺省回落到 Gateway default |
 | **OpenAPI / 其它客户端** | 同一 REST；可显式传或依赖服务端默认 |
+| **调度 Session** | 不由外部调用方创建——`SchedulerManager.ensure()` 在上述任一调用方建会话后按 workspace 去重地 spawn（见下节）。`POST /sessions` 传 `scheduler` 无效，该参数不在 REST 入参里 |
 
 ## SchedulerManager（定时任务归 workspace，不归 session）
 

@@ -166,6 +166,17 @@ service tools:
   `schedules/<name>/TASK.md` by hand.
 - `schedules/heartbeat/` uses `visibility: silent` so HEARTBEAT turns stay out of Web Console
   history and are not injected into the next chat SSE.
+- **Schedules belong to the *workspace*, not to this agent package.** The Session loads
+  `{workspace}/schedules/`, and only the per-workspace **scheduler session**
+  (`Session.scheduler=True`, spawned by Gateway `SchedulerManager`) owns them — otherwise one
+  reminder would fire once per online session (Feishu spawns one Session per `open_id`).
+  Consequence: when this package is used as a **separate agent root** (`--agent` ≠
+  `--workspace`), the `schedules/heartbeat/` shipped here is **not** loaded. Put schedules
+  under the workspace if you need them to run. Single-root usage (`agent` ≡ `workspace`) is
+  unaffected.
+- `visibility: display` results are stashed to pending, but the scheduler session has no
+  channel attached, so under Gateway they do not reach any user. Use `fire=tool` (e.g.
+  `feishu_message_send`) for anything that must actually be delivered.
 
 ## Prerequisites
 

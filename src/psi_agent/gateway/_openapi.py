@@ -464,6 +464,14 @@ OPENAPI_SPEC = {
                     "workspace": {"type": "string"},
                     "agent": {"type": "string"},
                     "channel_socket": {"type": "string"},
+                    "scheduler": {
+                        "type": "boolean",
+                        "description": (
+                            "True only for the per-workspace scheduler session that owns "
+                            "{workspace}/schedules. Such sessions are hidden from GET /sessions, "
+                            "so this is always false in list responses"
+                        ),
+                    },
                 },
             },
             "GatewayDefaults": {

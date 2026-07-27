@@ -18,7 +18,8 @@ workspace 拿到/创建唯一的 ``scheduler=True`` Session。于是「重复触
 
 **对 SPA / state 完全隐藏**: ``SessionInfo.scheduler=True`` 使其从
 ``SessionManager.list_all()`` 与 ``state/latest.json`` 中排除。session id 由
-workspace 路径确定性派生, 因此重启后 ``ensure`` 会重建同名 Session, 无需持久化。
+workspace 路径确定性派生 (``_workspace_key`` 归一后取 sha256 前 16 位), 因此重启后
+``ensure`` 会重建同名 Session, 无需持久化。
 """
 
 from __future__ import annotations
@@ -31,20 +32,6 @@ import anyio
 from loguru import logger
 
 from psi_agent.gateway._session_manager import SessionManager
-
-
-def _workspace_key(workspace: str) -> str:
-    """规范化 workspace 路径 - 大小写 / 斜杠差异不该产出两个调度 Session。"""
-    return os.path.normcase(os.path.realpath(workspace))
-
-
-def _scheduler_session_id(workspace: str) -> str:
-    """由 workspace 派生确定性 session id, 加 ``scheduler-`` 前缀隔离命名空间。
-
-    用 hash 而非路径本身: 路径含分隔符 / 中文 / 超长, 不适合做 socket 文件名。
-    """
-    digest = hashlib.sha256(_workspace_key(workspace).encode("utf-8")).hexdigest()[:16]
-    return f"scheduler-{digest}"
 
 
 @dataclass
@@ -60,6 +47,27 @@ class SchedulerManager:
     _ai_id: str = ""
     _routes: dict[str, str] = field(default_factory=dict)
     _lock: anyio.Lock = field(default_factory=anyio.Lock)
+
+    @staticmethod
+    async def _workspace_key(workspace: str) -> str:
+        """规范化 workspace 路径 - 大小写 / 斜杠差异不该产出两个调度 Session。
+
+        用 ``anyio.Path.resolve()`` 而非 ``os.path.realpath`` —— 后者在 async
+        上下文里是同步 IO (会 stat 磁盘), 违反「一切异步」约定。``normcase``
+        是纯字符串运算, 无 IO, 可直接用。
+        """
+        resolved = str(await anyio.Path(workspace).resolve())
+        return os.path.normcase(resolved)
+
+    @staticmethod
+    def _session_id_from_key(key: str) -> str:
+        """由**已规范化**的 workspace key 派生确定性 session id。
+
+        加 ``scheduler-`` 前缀与用户会话 / 飞书会话的命名空间隔离; 用 hash 而非
+        路径本身: 路径含分隔符 / 中文 / 超长, 不适合做 socket 文件名。
+        """
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+        return f"scheduler-{digest}"
 
     async def ensure(self, workspace: str, *, ai_id: str = "", agent: str = "") -> str:
         """确保 *workspace* 有且仅有一个调度 Session; 返回其 session id (跳过时 ``""``)。
@@ -77,15 +85,17 @@ class SchedulerManager:
             return ""
 
     async def _do_ensure(self, workspace: str, *, ai_id: str, agent: str) -> str:
-        key = _workspace_key(workspace)
-        sid = _scheduler_session_id(workspace)
+        key = await self._workspace_key(workspace)
+        sid = self._session_id_from_key(key)
         async with self._lock:
+            logger.debug(f"SchedulerManager: acquired lock for ensure {workspace!r}")
             cached = self._routes.get(key)
             if cached is not None and self._sm.has(cached):
                 return cached
             # 路由表未命中但 Session 已在 (重启后 ensure 重建同名, 或并发抢先) → adopt。
             if self._sm.has(sid):
                 self._routes[key] = sid
+                logger.debug(f"SchedulerManager: adopted existing scheduler session {sid!r}")
                 return sid
 
             if not await self._has_schedules(workspace):
@@ -123,6 +133,6 @@ class SchedulerManager:
                 return True
         return False
 
-    def session_id_for(self, workspace: str) -> str:
+    async def session_id_for(self, workspace: str) -> str:
         """已知的调度 session id, 未创建时返回 ``""`` (诊断 / 测试用)。"""
-        return self._routes.get(_workspace_key(workspace), "")
+        return self._routes.get(await self._workspace_key(workspace), "")

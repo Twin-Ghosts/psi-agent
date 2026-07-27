@@ -6,11 +6,7 @@ import anyio
 import pytest
 
 from psi_agent.gateway._ai_manager import AIManager
-from psi_agent.gateway._scheduler_manager import (
-    SchedulerManager,
-    _scheduler_session_id,
-    _workspace_key,
-)
+from psi_agent.gateway._scheduler_manager import SchedulerManager
 from psi_agent.gateway._session_manager import SessionManager
 
 
@@ -37,24 +33,33 @@ async def _write_schedule(workspace: Path, name: str = "daily") -> None:
 # ── id 派生 ───────────────────────────────────────────────────────────────────
 
 
-def test_scheduler_session_id_is_deterministic(tmp_path: Path) -> None:
-    assert _scheduler_session_id(str(tmp_path)) == _scheduler_session_id(str(tmp_path))
-    assert _scheduler_session_id(str(tmp_path)).startswith("scheduler-")
+async def _sid(workspace: Path | str) -> str:
+    key = await SchedulerManager._workspace_key(str(workspace))
+    return SchedulerManager._session_id_from_key(key)
 
 
-def test_scheduler_session_id_differs_per_workspace(tmp_path: Path) -> None:
+@pytest.mark.anyio
+async def test_scheduler_session_id_is_deterministic(tmp_path: Path) -> None:
+    assert await _sid(tmp_path) == await _sid(tmp_path)
+    assert (await _sid(tmp_path)).startswith("scheduler-")
+
+
+@pytest.mark.anyio
+async def test_scheduler_session_id_differs_per_workspace(tmp_path: Path) -> None:
     a = tmp_path / "ws-a"
     b = tmp_path / "ws-b"
     a.mkdir()
     b.mkdir()
-    assert _scheduler_session_id(str(a)) != _scheduler_session_id(str(b))
+    assert await _sid(a) != await _sid(b)
 
 
-def test_workspace_key_normalises_path_variants(tmp_path: Path) -> None:
+@pytest.mark.anyio
+async def test_workspace_key_normalises_path_variants(tmp_path: Path) -> None:
     """大小写 / 斜杠差异不该产出两个调度 Session。"""
+    key = SchedulerManager._workspace_key
     plain = str(tmp_path)
-    assert _workspace_key(plain) == _workspace_key(plain.replace("\\", "/"))
-    assert _workspace_key(plain) == _workspace_key(str(tmp_path / "."))
+    assert await key(plain) == await key(plain.replace("\\", "/"))
+    assert await key(plain) == await key(str(tmp_path / "."))
 
 
 # ── ensure ────────────────────────────────────────────────────────────────────
@@ -70,7 +75,7 @@ async def test_ensure_spawns_one_scheduler_session(tmp_path: Path) -> None:
         schedm = SchedulerManager(_sm=sm, _ai_id="ai1")
 
         sid = await schedm.ensure(str(tmp_path))
-        assert sid == _scheduler_session_id(str(tmp_path))
+        assert sid == await _sid(tmp_path)
         assert sm.has(sid)
     finally:
         await _drain(sm, am)

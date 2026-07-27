@@ -264,6 +264,7 @@ cron: "0 12 * * *"
 - 每个 schedule 有独立 CancelScope，支持热重载
 - 每个 schedule 独立加载——IO 错误、YAML 解析问题、cron 验证失败只跳过该 schedule
 - Schedule 触发时自动获取 session lock，串行处理
+- **定时任务归 workspace，不归 session**：`schedules/` 始终从 workspace 加载（分离根部署时不从 `--agent` 包加载），且只有 `--scheduler` 的 Session 会触发它们。Gateway 下由 `SchedulerManager` 保证每个 workspace 恰好一个调度 Session——否则一条提醒会被在线会话数乘一遍（飞书为每个用户各开一个 Session）
 
 ### Skills
 

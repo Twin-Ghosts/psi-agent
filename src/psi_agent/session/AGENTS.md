@@ -52,7 +52,7 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 3. SessionAgent.create(workspace_path=…, agent_path=…, appdata_root=…) → session_id、AiClient、从 agent 加载 tools/system、**从 workspace 加载 schedules**；history 在 AppData（legacy 双读）
 4. 启动 anyio.task_group：
    ├── serve_session(agent=agent)  ← 从 agent 读取 channel_socket + handle_request
-   └── 每个 schedule 一个 run_one_schedule(schedule, agent) task
+   └── 每个 schedule 一个 run_one_schedule(schedule, agent) task（**仅 `scheduler=True` 的调度 Session**；普通用户 Session registry 为空，无 runner）
 
 **关键点**：
 - `SessionAgent` 自包含：持有 `_ai_client`、`_channel_adapter`、`_lock`、`_workspace_path`、`_agent_path`
@@ -224,7 +224,7 @@ AI 的 tool_calls 通过 SSE 流式传输——多个 chunk 中的 `delta.tool_c
 - **cron 按本地时间解释（刻意为之，勿改回 UTC）**：`_seconds_until_next` 用 `datetime.now()` + `croniter`，**禁止**把 Unix timestamp 交给 `croniter` 当 base——后者会把 5 段字段当 UTC，导致 `once_at` 写的本地时刻在非 UTC 机器上晚数小时才触发。workspace `schedule_manage` 的 `once_at`/`cron` 语义都是本机墙钟。此外若设了标准 `TZ` 环境变量，`ScheduleRegistry._schedule_tz()` 解析成 `ZoneInfo` 并以 `datetime.now(tz)` 作 base，让 cron 字段按该时区解释（如 UTC 容器设 `TZ=Asia/Shanghai` 则 `0 9 * * *` 按北京 9 点触发）；`TZ` 未设 / 非法时退回 naive `datetime.now()`，行为与默认一致，不额外依赖 `tzdata`
 - **消息 ``kind``（JSONL provenance，敲定协议）**：OpenAI ``role`` 不变；用正交字段区分对话来源（``chat`` / ``schedule.display`` / ``schedule.silent`` / …）。Gateway ``/history`` 只返回 ``is_displayable_chat_message``。AI 请求经 ``messages_for_ai`` 剥掉消息 ``kind``/遗留 ``chat_type``。**≠** SSE / ``AgentChunk.kind``（``thinking`` / ``tool_call`` / ``tool_result``）——后者只标过程流 provenance，不进 history 白名单语义
 - ``visibility: silent`` 的 schedule（heartbeat）结果永不 pending、永不展示
-- ``visibility: display`` 的 schedule 结果可进 history，并通过 pending 随下次 ``POST /chat`` 带回（``/events/schedule`` 推送通道仍待定）
+- ``visibility: display`` 的 schedule 结果进 history 并 stash 到 pending——但**调度 Session 没有 channel 连着它**，所以这份 pending 实际不会回流给任何用户（刻意接受的降级，见上方「调度归属 workspace」的 display 结果一行）。要可靠推送就用 `fire=tool` 直调 `feishu_message_send` 等工具。pending 机制本身保留：单根 CLI（`psi-agent session --scheduler`）下同一 Session 既跑调度又接 channel 时仍会带回
 - `fire: prompt` 触发只是 Session 内再跑一轮 agent（TASK 正文当 user message）——**不会**自动往飞书推 IM；`fire: tool` 才按 YAML 直调工具（如 `feishu_message_send`）
 - Schedule 响应的 content 和 reasoning 各自存在于各自的消息周期，不会交错
 - 多个 schedule 可以并发 sleep，但通过 lock 串行触发

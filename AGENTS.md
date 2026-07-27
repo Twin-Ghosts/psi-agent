@@ -99,6 +99,7 @@ src/
         ├── _manager.py             # 共享类型 + helpers
         ├── _ai_manager.py         # AIManager
         ├── _session_manager.py    # SessionManager
+        ├── _scheduler_manager.py  # SchedulerManager — 每 workspace 一个调度 Session（拥有其 schedules/）
         ├── _title_manager.py       # 会话标题 CRUD + AI 生成
         ├── _state.py               # GatewayState — 状态持久化 (state/latest.json)
         ├── server.py               # aiohttp REST handlers
@@ -207,6 +208,8 @@ SSE 流中的特殊字段：
 16. **消费 async generator 必须用 `aclosing()`**：`async for` 在提前退出或被 cancel 时不调用 generator 的 `aclose()`，导致 generator 内 `async with` 持有的资源（aiohttp 连接、文件句柄等）被遗弃给 GC。正确做法：`async with aclosing(gen) as g: async for chunk in g: ...`。对标 `ai/server.py` 的 `finally` + shielded `aclose()` 模式。参见 `agent.py`、`channel_adapter.py`、`schedule_registry.py`。
 
 17. **Windows 上裸路径地址直接拒绝（刻意为之，勿"修掉"）**：`_sockets.py` 的 `resolve_connector_and_endpoint` / `create_site` 在 `sys.platform == "win32"` 且地址落到 Unix 分支时**主动 `raise ValueError`**。因为 Windows 的 asyncio 没有 `create_unix_connection` / `create_unix_server`，若继续走 `UnixConnector` / `UnixSite`，aiohttp 会在 connect/listen 深处抛一个**不带任何上下文的 `NotImplementedError`**，极难定位（曾导致飞书 channel 每条消息崩、只显示 `generation interrupted`）。真实诱因：`channel feishu --session-socket \\.\pipe\...` 经 POSIX shell 传参时反斜杠被吞成单反斜杠 `\.\pipe\...`，匹配不上命名管道前缀而落到裸路径分支。**这是 fail-fast 前置校验，不是可删的多余检查**——非 Windows（POSIX）行为完全不变，Unix socket 照常工作。Windows/bash 下传管道地址需用四反斜杠 `'\\\\.\\pipe\\...'` 才能让程序收到两根反斜杠开头的 `\\.\pipe\...`。反方向同样门控：非 Windows 上传 `\\.\pipe\name` 也**主动 `raise ValueError`**，因为命名管道要 `ProactorEventLoop`，而 asyncio 在非 win32 平台根本不导出 `ProactorEventLoop`（`asyncio/__init__.py` 只在 `sys.platform == 'win32'` 时 `from .windows_events import *`），aiohttp 那句 `isinstance(loop, asyncio.ProactorEventLoop)` 门控自己会先抛裸 `AttributeError`。两个方向都是 fail-fast 前置校验。
+
+18. **定时任务归 workspace，不归 session（刻意为之，勿"修"回每个 Session 都加载）**：`schedules/` 从 **workspace** 加载（不是 agent 包），且只有 `Session.scheduler=True` 的**调度 Session** 构造出非空 `ScheduleRegistry`；普通用户 Session 拿到空 registry，`start_all` / `refresh` 都是 no-op。因为 Gateway 一进程多 Session、飞书按 `open_id` 给每个用户各 spawn 一个，若每个 Session 都触发，一条定时提醒会被在线会话数乘一遍。每 workspace 恰好一个调度 Session 由 Gateway `SchedulerManager.ensure()` 保证——去重发生在**构造期**，因此没有租约 / 选主 / 接管这类运行时协调。详见 `session/AGENTS.md`「调度归属 workspace」与 `gateway/AGENTS.md`「SchedulerManager」。
 
 ## 测试约定
 

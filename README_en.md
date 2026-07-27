@@ -264,6 +264,7 @@ Generate a daily progress report.
 - Each schedule has an independent CancelScope and supports hot-reload
 - Each schedule is loaded independently — IO errors, YAML parsing issues, or cron validation failures only skip that schedule
 - Schedule triggers acquire the session lock and execute serially
+- **Schedules belong to the workspace, not to a session**: `schedules/` is always loaded from the workspace (never from the `--agent` package under a split-root setup), and only a Session started with `--scheduler` fires them. Under Gateway, `SchedulerManager` guarantees exactly one scheduler session per workspace — otherwise a single reminder would fire once per online session (Feishu spawns one Session per user)
 
 ### Skills
 
