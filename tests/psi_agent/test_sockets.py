@@ -122,3 +122,26 @@ async def test_create_site_unix_path_on_windows_raises_clear_error(monkeypatch: 
             create_site(runner, "/tmp/some.sock")
     finally:
         await runner.cleanup()
+
+
+@pytest.mark.anyio
+async def test_resolve_named_pipe_off_windows_raises_clear_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Mirror of the Windows/Unix-socket guard: named pipes need asyncio's
+    # ProactorEventLoop, which is not even defined off Windows, so the pipe
+    # branch must fail with an actionable ValueError rather than the
+    # AttributeError aiohttp's own isinstance guard would raise.
+    monkeypatch.setattr("psi_agent._sockets.sys.platform", "linux")
+    with pytest.raises(ValueError, match="only available on Windows"):
+        resolve_connector_and_endpoint("\\\\.\\pipe\\psi\\channels\\abc")
+
+
+@pytest.mark.anyio
+async def test_create_site_named_pipe_off_windows_raises_clear_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("psi_agent._sockets.sys.platform", "darwin")
+    runner = web.AppRunner(web.Application())
+    await runner.setup()
+    try:
+        with pytest.raises(ValueError, match="only available on Windows"):
+            create_site(runner, "\\\\.\\pipe\\psi\\channels\\abc")
+    finally:
+        await runner.cleanup()

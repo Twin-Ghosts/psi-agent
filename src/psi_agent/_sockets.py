@@ -7,7 +7,9 @@ detection convention:
 - \\\\.\\pipe\\name → Windows Named Pipe
 
 Named pipe support requires aiohttp >= 3.6.0 and the Proactor
-event loop (Windows only).
+event loop (Windows only); a named-pipe address on a non-Windows
+platform — like a Unix-socket path on Windows — raises ValueError
+instead of failing deep inside aiohttp.
 """
 
 from __future__ import annotations
@@ -29,6 +31,15 @@ _WIN_UNIX_SOCKET_HINT = (
     "branch. Got addr={addr!r}."
 )
 
+_NON_WIN_NAMED_PIPE_HINT = (
+    "Named-pipe transport is only available on Windows (it needs asyncio's "
+    "ProactorEventLoop). Off Windows asyncio does not even define "
+    "ProactorEventLoop, so aiohttp's own guard fails with a bare AttributeError "
+    "inside the connector/site constructor. On {platform} use a Unix-socket "
+    "path (e.g. '/tmp/psi/channels/<id>.sock') or a TCP address "
+    "('http://127.0.0.1:<port>') instead. Got addr={addr!r}."
+)
+
 
 def resolve_connector_and_endpoint(
     addr: str,
@@ -45,6 +56,8 @@ def resolve_connector_and_endpoint(
         endpoint = addr.rstrip("/") + path_prefix
         logger.debug(f"Resolved transport: addr={addr!r} → TCP endpoint={endpoint!r}")
     elif addr.startswith("\\\\.\\pipe\\"):
+        if sys.platform != "win32":
+            raise ValueError(_NON_WIN_NAMED_PIPE_HINT.format(addr=addr, platform=sys.platform))
         connector = aiohttp.NamedPipeConnector(path=addr)
         endpoint = f"http://localhost{path_prefix}"
         logger.debug(f"Resolved transport: addr={addr!r} → Named Pipe endpoint={endpoint!r}")
@@ -73,6 +86,8 @@ def create_site(
         logger.debug(f"Creating TCP site: {host}:{port}")
         return web.TCPSite(runner, host, port)
     if addr.startswith("\\\\.\\pipe\\"):
+        if sys.platform != "win32":
+            raise ValueError(_NON_WIN_NAMED_PIPE_HINT.format(addr=addr, platform=sys.platform))
         logger.debug(f"Creating Named Pipe site: {addr}")
         return web.NamedPipeSite(runner, addr)
     if sys.platform == "win32":

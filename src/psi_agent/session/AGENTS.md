@@ -100,6 +100,11 @@ Session 层使用两个对称的协议适配器，将 `SessionAgent.run()` 包�
 - `\\\\.\\pipe\\name` → `NamedPipeSite`（Windows only）
 - 裸文件系统路径 → `UnixSite`
 
+两端都会做平台门控，避免深处抛出无上下文的异常：
+- Windows 上传裸路径（含被误引成单反斜杠的 `\.\pipe\...`）→ 抛 `ValueError`，提示改用命名管道地址；否则 asyncio 无 `create_unix_connection`，aiohttp 会抛裸 `NotImplementedError`。
+- 非 Windows 上传 `\\\\.\\pipe\\name` → 抛 `ValueError`，提示改用 Unix socket 或 TCP 地址；否则 aiohttp 的 `isinstance(..., asyncio.ProactorEventLoop)` 门控本身会因该属性在非 Windows 不存在而抛 `AttributeError`。
+- bash 里传管道地址要用四反斜杠 `'\\\\.\\pipe\\...'`，保证程序收到两根反斜杠开头。
+
 ## Tool 加载约定
 
 - `workspace/tools/*.py` 中的每个 `.py` 文件（不含 `_` 开头）
