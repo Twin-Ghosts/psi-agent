@@ -407,15 +407,18 @@ def parse_gantt_tasks(
         name = str(item.get("name", "")).strip()
         if not name:
             raise ChartDataError(f'tasks[{i}] needs a non-empty "name".')
-        if not str(item.get("start", "")).strip():
+        start_raw = str(item.get("start", "")).strip()
+        if not start_raw:
             raise ChartDataError(f'tasks[{i}] ({name}) needs a "start" date like 2026-08-01.')
-        begin = _parse_date(item["start"], f"tasks[{i}].start")
-        if str(item.get("end", "")).strip():
-            finish = _parse_date(item["end"], f"tasks[{i}].end")
+        begin = _parse_date(start_raw, f"tasks[{i}].start")
+        end_raw = str(item.get("end", "")).strip()
+        days_raw = item.get("days")
+        if end_raw:
+            finish = _parse_date(end_raw, f"tasks[{i}].end")
             if finish < begin:
                 raise ChartDataError(f"tasks[{i}] ({name}) ends before it starts.")
-        elif item.get("days") is not None:
-            days = _as_float(item["days"], f"tasks[{i}].days")
+        elif days_raw is not None:
+            days = _as_float(days_raw, f"tasks[{i}].days")
             if days <= 0:
                 raise ChartDataError(f"tasks[{i}] ({name}) needs days greater than 0.")
             finish = begin + timedelta(days=int(days) - 1)
@@ -487,7 +490,7 @@ async def render_to_png(draw: Any, out_path: str) -> str:
     target = anyio.Path(out_path)
     await target.parent.mkdir(parents=True, exist_ok=True)
     async with _style_lock:
-        await anyio.to_thread.run_sync(_render_sync, draw, os.fspath(target))
+        await anyio.to_thread.run_sync(_render_sync, draw, os.fspath(target))  # ty: ignore
     return os.fspath(target)
 
 
