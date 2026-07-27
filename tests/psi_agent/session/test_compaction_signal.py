@@ -39,7 +39,6 @@ async def test_ai_client_parses_compaction_signal() -> None:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
-    s.close()
     site = web.SockSite(runner, s)
     await site.start()
     await anyio.sleep(0.05)
@@ -85,7 +84,6 @@ async def test_ai_client_no_compaction_when_field_absent() -> None:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
-    s.close()
     site = web.SockSite(runner, s)
     await site.start()
     await anyio.sleep(0.05)
