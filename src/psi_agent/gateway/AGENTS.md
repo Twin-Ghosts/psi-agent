@@ -35,7 +35,7 @@ Gateway 进程
 | `_ai_manager.py` | `AIManager` — AI 实例注册表 + 生命周期 + AiInfo |
 | `_router_manager.py` | `RouterManager` — Router 实例注册表、AI ID 到 socket 解析和生命周期管理 |
 | `_session_manager.py` | `SessionManager` — Session 实例注册表 + 生命周期 + SessionInfo（含 `agent`） |
-| `_defaults.py` | `resolve_default_agent` / `resolve_default_workspace` — CLI / `GET /defaults` 用 |
+| `_defaults.py` | `resolve_default_agent` / `resolve_default_workspace` / `resolve_appdata_root` — CLI / `GET /defaults` 用 |
 | `_feishu_manager.py` | `FeishuManager` — 飞书 open_id → Session 路由表（复用 SessionManager 按需 spawn）+ FeishuRoute |
 | `_title_manager.py` | 会话标题 CRUD + AI 自动生成 |
 | `_state.py` | `GatewayState` dataclass — `state/latest.json` 的 load/save + 历史快照 `state/YYYYMMDD-HHMMSS.json` |
@@ -62,19 +62,19 @@ Gateway 进程
 5. anyio.create_task_group()                          — 手动管理 task group
 6. 创建 AIManager + RouterManager + SessionManager（注入 `_default_agent` / `_default_workspace`）+ TitleManager
 7. 恢复 AI / Router / Session（Session 恢复时带 `agent`，缺省用 Gateway default）/ titles
-8. await create_app(..., default_agent=..., default_workspace=...)  — 注册 REST（含 `GET /defaults`）
+8. await create_app(..., default_agent=..., default_workspace=..., appdata=...)  — 注册 REST（含 `GET /defaults`）
 9. 创建 _do_persist 闭包（快照 managers → state.save，sessions 含 `agent`）
 10. 注入 _persist + 初始全量持久化
 11. runner.setup() + create_site + site.start() + tray/webview/browser 等待与 finally 清理
 ```
 
-## 默认 agent / workspace（小步：Gateway 接线已合；工具读路径见 haitun `_runtime_paths`）
+## 默认 agent / workspace / AppData（小步：接线与宣布；搬家另 PR）
 
 ### 路径分层（看 PR 先看这段）
 
 ```text
 调用方（spa / 飞书 / haitun sessions_create / …）
-    │  GET /defaults  → 得知默认 agent、workspace
+    │  GET /defaults  → 得知默认 agent、workspace、appdata（宣布）
     │  POST /sessions { workspace?, agent? }
     ▼
 Gateway SessionManager（缺省补 --default-agent / --default-workspace）
@@ -86,7 +86,8 @@ Session（#472）
     │  回合内：runtime_scope 写入 get_agent()/get_workspace() ContextVar
     ▼
 workspace 工具（haitun `_runtime_paths`）按 ContextVar 解析相对路径  ← ✅ 第 3 步
-AppData 记忆区（history/state/todos）                   ← ❌ 另 PR
+AppData 记忆区根（`--appdata` / `PSI_APPDATA` / platformdirs）     ← ✅ 第 4A 宣布；落盘仍旧路径
+AppData 真正搬家（history / state / todos）                        ← ❌ 后续小 PR
 ```
 
 | 已合 / 未做 | 内容 |
@@ -94,14 +95,16 @@ AppData 记忆区（history/state/todos）                   ← ❌ 另 PR
 | ✅ #472 | Session 可选 `agent`；加载能力包；ContextVar **API** |
 | ✅ #482 | Gateway CLI + `GET /defaults` + `POST /sessions.agent`；调用方接线 |
 | ✅ 第 3 步 | haitun 工具读 `get_workspace()` / `get_agent()`（`_runtime_paths`） |
-| ❌ 后续 | AppData（history/state/todos 迁出 workspace） |
+| ✅ **第 4A（本层）** | 解析并暴露 AppData 根：`GET /defaults.appdata`、CLI `--appdata`、env `PSI_APPDATA`；**不**改 history/state/todos 写入位置 |
+| ❌ 后续 | 分 PR 迁 todos / history / Gateway `state/`（建议双读后再停写旧路径） |
 
-**可读验收（第 3 步）**：`agent ≠ workspace` 时，`write("a.txt")` 落在 workspace；`skill_manage` 读写 `agent/skills/`。
+**可读验收（第 4A）**：`GET /defaults` 含非空 `appdata`（默认来自 `platformdirs.user_data_dir("Haitun")`）；Gateway 日志打印该根。**不可用本步验收**：history/state/todos 是否已写进 AppData——仍在旧路径。
 
 | CLI | 含义 |
 |-----|------|
 | `--default-agent` | 新建 Session 的 Agent 包目录；空且 cwd 下存在 `examples/haitun-workspace` 时软默认到该路径；仍空则 Session `agent=""`（与 workspace 同根兼容） |
 | `--default-workspace` | 新建 Session / `GET /defaults` 的用户工作区；空 → 进程 cwd |
+| `--appdata` | AppData 记忆区根（仅宣布）；空 → `PSI_APPDATA` → `platformdirs`（**禁止**手写死 `%AppData%`） |
 
 `POST /sessions` 可显式带 `agent` / `workspace`；省略时用上述默认。`SessionInfo` 与 `state/latest.json` 持久化含 `agent`。
 
@@ -296,7 +299,7 @@ REST ``DELETE /sessions/{id}`` 在 SessionManager.delete 之后还会：
 | GET | `/sessions/{session_id}/todos` | 读取 workspace ``.psi/todos/{session_id}.json``（``todo`` tool 写入）；返回 ``{todos, summary}``，文件缺失则为空列表 |
 | POST | `/feishu/route` | 按飞书 `open_id` 幂等路由到其独立 Session（首次按需 spawn）`{open_id, ai_id?, workspace?}` → 201 `{open_id, session_id, channel_socket}`；缺 open_id / 无 ai_id → 400 |
 | GET | `/feishu/routes` | 列出所有飞书 open_id → Session 路由 `[{open_id, session_id}]` |
-| GET | `/defaults` | 默认 `agent` + `workspace`（**所有**建 Session 调用方可读：spa v1/v2、haitun `sessions_create`、外部 OpenAPI 客户端；省略 `agent` 时服务端也会用同一默认） |
+| GET | `/defaults` | 默认 `agent` + `workspace` + `appdata`（**所有**建 Session 调用方可读；`appdata` 为记忆区根宣布，本步不搬家；省略 `agent` 时服务端也会用同一默认） |
 | GET | `/workspace/cwd` | Gateway 进程当前工作目录 |
 | GET | `/workspace/places` | PathPicker 快捷位置（cwd / home / desktop / documents / downloads）+ 盘符 |
 | GET | `/workspace/browse` | 浏览目录 `?path=...&kind=directory|file|all&q=...`，默认 `kind=directory` |
@@ -575,7 +578,7 @@ AI 创建对话框支持从 provider 的 `/models` API 实时拉取可用模型�
 ## CLI 集成
 
 ```
-psi-agent gateway [--listen http://127.0.0.1:PORT] [--socket-path psi] [--icon PATH] [--app-name NAME] [--browser/--no-browser] [--webview/--no-webview] [--tray/--no-tray] [--feishu-ai-id ID] [--feishu-workspace-root DIR] [--default-agent DIR] [--default-workspace DIR] [--verbose]
+psi-agent gateway [--listen http://127.0.0.1:PORT] [--socket-path psi] [--icon PATH] [--app-name NAME] [--browser/--no-browser] [--webview/--no-webview] [--tray/--no-tray] [--feishu-ai-id ID] [--feishu-workspace-root DIR] [--default-agent DIR] [--default-workspace DIR] [--appdata DIR] [--verbose]
 ```
 
 默认 listen 为空，会自动绑定 127.0.0.1 随机高端口。`--browser` 开启自动打开浏览器。

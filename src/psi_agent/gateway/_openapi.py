@@ -325,11 +325,11 @@ OPENAPI_SPEC = {
         },
         "/defaults": {
             "get": {
-                "summary": "Default agent package and user workspace paths (all session creators)",
+                "summary": "Default agent, workspace, and AppData root paths",
                 "operationId": "getDefaults",
                 "responses": {
                     "200": {
-                        "description": "Path defaults for SPA / tooling",
+                        "description": "Path defaults for SPA / tooling (AppData announce-only until relocate PRs)",
                         "content": {
                             "application/json": {
                                 "schema": {"$ref": "#/components/schemas/GatewayDefaults"},
@@ -441,6 +441,13 @@ OPENAPI_SPEC = {
                 "properties": {
                     "agent": {"type": "string", "description": "Default agent package path"},
                     "workspace": {"type": "string", "description": "Default user workspace"},
+                    "appdata": {
+                        "type": "string",
+                        "description": (
+                            "AppData memory root (platformdirs / --appdata / PSI_APPDATA). "
+                            "Announce only until history/state/todos relocate."
+                        ),
+                    },
                 },
             },
             "FeishuRouteRequest": {

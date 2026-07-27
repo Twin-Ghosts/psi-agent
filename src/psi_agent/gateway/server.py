@@ -14,7 +14,11 @@ from loguru import logger
 from psi_agent.gateway._ai_manager import AIManager
 from psi_agent.gateway._attention import AttentionHub
 from psi_agent.gateway._chat_manager import ChatManager
-from psi_agent.gateway._defaults import resolve_default_agent, resolve_default_workspace
+from psi_agent.gateway._defaults import (
+    resolve_appdata_root,
+    resolve_default_agent,
+    resolve_default_workspace,
+)
 from psi_agent.gateway._feishu_manager import FeishuManager
 from psi_agent.gateway._history_manager import HistoryManager
 from psi_agent.gateway._openapi import render_openapi
@@ -150,6 +154,7 @@ async def create_app(
     feishu_workspace_root: str = "",
     default_agent: str = "",
     default_workspace: str = "",
+    appdata: str = "",
 ) -> web.Application:
     app = web.Application(client_max_size=100 * 1024 * 1024)
     app["aim"] = aim
@@ -166,6 +171,7 @@ async def create_app(
     app["attention"] = attention if attention is not None else AttentionHub()
     app["default_agent"] = default_agent
     app["default_workspace"] = default_workspace
+    app["appdata"] = appdata
 
     spa_dist = anyio.Path(__file__).parent / "spa" / "dist"
     spa_v2_dist = anyio.Path(__file__).parent / "spa-v2" / "dist"
@@ -434,15 +440,17 @@ async def _get_cwd(request: web.Request) -> web.Response:
 
 
 async def _get_defaults(request: web.Request) -> web.Response:
-    """GET /defaults — Step 2 shared path defaults for every Session creator.
+    """GET /defaults — shared path defaults for Session creators + AppData announce.
 
-    Returns ``{agent, workspace}`` only (no AppData roots yet). Clients may
-    omit ``agent`` on POST /sessions; SessionManager still applies the same
-    default. Tool-side path resolution is not part of this endpoint.
+    Returns ``{agent, workspace, appdata}``. ``appdata`` is the memory-area root
+    that later PRs will use for history / Gateway state / todos; this step does
+    not relocate writers. Clients may omit ``agent`` on POST /sessions;
+    SessionManager still applies the same default.
     """
     agent = request.app.get("default_agent") or await resolve_default_agent()
     workspace = request.app.get("default_workspace") or await resolve_default_workspace()
-    return _json({"agent": agent, "workspace": workspace})
+    appdata = request.app.get("appdata") or await resolve_appdata_root()
+    return _json({"agent": agent, "workspace": workspace, "appdata": appdata})
 
 
 async def _list_workspace_places(request: web.Request) -> web.Response:

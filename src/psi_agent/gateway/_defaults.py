@@ -1,4 +1,4 @@
-"""Gateway path defaults (wiring only; no AppData).
+"""Gateway path defaults (agent / workspace / AppData root).
 
 What this module is for
 -----------------------
@@ -7,14 +7,21 @@ need a shared answer to: "what is the default agent package?" and "what is the
 default user workspace?". ``GET /defaults`` and ``SessionManager`` both use
 these resolvers.
 
+AppData root (Step A)
+---------------------
+``resolve_appdata_root`` announces where history / Gateway state / todos **will**
+live after later PRs. This step only resolves and exposes the path — it does
+**not** relocate writers. Prefer ``platformdirs.user_data_dir`` over hardcoded
+``%AppData%`` / ``~/Library/...``.
+
 What this is NOT
 ----------------
-- Not AppData / history relocation.
+- Not history / state / todos relocation (later AppData PRs).
 - Tool-side path IO is haitun ``tools/_runtime_paths.py`` (reads
-  ``get_workspace()`` / ``get_agent()``).
+  ``get_workspace()`` / ``get_agent()`` only — never AppData ContextVars).
 
-Soft default
-------------
+Soft default (agent)
+--------------------
 If CLI ``--default-agent`` is empty and ``examples/haitun-workspace`` exists
 under cwd, that directory is used so repo-local Gateway open-and-use works.
 Otherwise agent stays ``\"\"`` → Session single-root compat (agent ≡ workspace).
@@ -22,7 +29,14 @@ Otherwise agent stays ``\"\"`` → Session single-root compat (agent ≡ workspa
 
 from __future__ import annotations
 
+import os
+
 import anyio
+import platformdirs
+
+# Directory name under the OS user-data root (not the Gateway --app-name label).
+_APPDATA_APPNAME = "Haitun"
+_APPDATA_ENV = "PSI_APPDATA"
 
 
 async def resolve_default_workspace(explicit: str = "") -> str:
@@ -43,3 +57,15 @@ async def resolve_default_agent(explicit: str = "") -> str:
     if await candidate.is_dir():
         return str(await candidate.resolve())
     return ""
+
+
+async def resolve_appdata_root(explicit: str = "") -> str:
+    """Absolute AppData (memory) root — announce only; writers still use old paths.
+
+    Priority: *explicit* CLI → ``PSI_APPDATA`` env → ``platformdirs.user_data_dir``.
+    """
+    raw = explicit.strip() or os.environ.get(_APPDATA_ENV, "").strip()
+    if raw:
+        return str(await anyio.Path(raw).resolve())
+    # Sync platformdirs call is path math only (no IO); fine inside async.
+    return str(await anyio.Path(platformdirs.user_data_dir(appname=_APPDATA_APPNAME, appauthor=False)).resolve())

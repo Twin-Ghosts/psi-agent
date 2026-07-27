@@ -14,7 +14,7 @@ from psi_agent._logging import setup_logging
 from psi_agent._sockets import create_site
 from psi_agent.gateway._ai_manager import AIManager
 from psi_agent.gateway._attention import AttentionHub
-from psi_agent.gateway._defaults import resolve_default_agent, resolve_default_workspace
+from psi_agent.gateway._defaults import resolve_appdata_root, resolve_default_agent, resolve_default_workspace
 from psi_agent.gateway._router_manager import RouterManager, RouterUpstreamInfo
 from psi_agent.gateway._session_manager import SessionManager
 from psi_agent.gateway._spa_shell import DEFAULT_APP_NAME
@@ -80,6 +80,13 @@ class Gateway:
     Empty → process cwd. Not AppData; history still under this workspace.
     """
 
+    appdata: str = ""
+    """AppData Step A CLI: memory-area root announced via GET /defaults.
+
+    Empty → ``PSI_APPDATA`` env, else ``platformdirs.user_data_dir(Haitun)``.
+    This step does **not** relocate history / Gateway state / todos yet.
+    """
+
     verbose: bool = False
     """Enable DEBUG-level logging."""
 
@@ -92,11 +99,13 @@ class Gateway:
         addr = self.listen or f"http://127.0.0.1:{_random_port()}"
         logger.info(f"Starting Gateway service on {addr} (socket_path={self.socket_path})")
 
-        # Step 2: resolve once, inject into SessionManager + create_app (/defaults).
+        # Path defaults: agent/workspace (Step 2) + AppData root announce (Step A).
         agent_default = await resolve_default_agent(self.default_agent)
         workspace_default = await resolve_default_workspace(self.default_workspace)
+        appdata_root = await resolve_appdata_root(self.appdata)
         logger.info(f"Default agent: {agent_default or '(same as workspace)'}")
         logger.info(f"Default workspace: {workspace_default}")
+        logger.info(f"AppData root (announce only; writers unchanged): {appdata_root}")
 
         state = GatewayState()
         snapshot = await state.load()
@@ -174,6 +183,7 @@ class Gateway:
                 feishu_workspace_root=self.feishu_workspace_root,
                 default_agent=agent_default,
                 default_workspace=workspace_default,
+                appdata=appdata_root,
             )
 
             async def _do_persist() -> None:
