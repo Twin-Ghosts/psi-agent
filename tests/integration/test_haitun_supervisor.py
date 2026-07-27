@@ -460,6 +460,33 @@ def test_map_normalization_merges_aliases_and_increments_revision() -> None:
 
 
 @pytest.mark.anyio
+async def test_participation_state_roundtrip_and_safe_default(tmp_path: Path) -> None:
+    store_module = _load_store()
+    store = store_module.SupervisorStore(anyio.Path(tmp_path))
+    assert await store.load_participation(_ALICE_HASH) == {
+        "eligible_turns": 0,
+        "warmup_status": "new",
+        "last_supervised_turn": 0,
+    }
+    state = {"eligible_turns": 1, "warmup_status": "completed", "last_supervised_turn": 1}
+    await store.save_participation(_ALICE_HASH, state)
+    assert await store.load_participation(_ALICE_HASH) == state
+
+
+@pytest.mark.anyio
+async def test_supervisor_metrics_are_append_only_and_identity_safe(tmp_path: Path) -> None:
+    store_module = _load_store()
+    store = store_module.SupervisorStore(anyio.Path(tmp_path))
+    await store.append_metric(_ALICE_HASH, {"turn_index": 1, "source": "warmup", "elapsed_ms": 120})
+    await store.append_metric(_ALICE_HASH, {"turn_index": 2, "source": "cache", "elapsed_ms": 2})
+    metrics = await store.load_metrics(_ALICE_HASH)
+    assert [item["source"] for item in metrics] == ["warmup", "cache"]
+    serialized = json.dumps(metrics)
+    assert "alice" not in serialized
+    assert "user_question" not in serialized
+
+
+@pytest.mark.anyio
 async def test_store_malformed_files_return_safe_values(tmp_path: Path) -> None:
     store_module = _load_store()
     store = store_module.SupervisorStore(anyio.Path(tmp_path))
@@ -890,6 +917,56 @@ async def test_supervisor_reuses_handle_and_payload_is_whitelisted(tmp_path: Pat
     assert len(calls["start"]) == 1
     assert calls["plan"][0]["child_workspace_raw"].endswith("haitun-supervisor-workspace")
     assert len(calls["chat"]) == 2
+
+
+@pytest.mark.anyio
+async def test_first_turn_is_warmup_and_second_turn_requires_supervision(tmp_path: Path) -> None:
+    supervisor = _load_supervisor_manager()
+    calls = 0
+
+    async def plan_fn(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "session_id": kwargs["session_id"],
+            "reuse_parent_ai": True,
+            "ai_socket": "ai",
+            "channel_socket": "channel",
+            "session_command": "session",
+            "session_process_id": "p",
+            "shell": "bash",
+        }
+
+    async def start_fn(**kwargs: Any) -> dict[str, Any]:
+        return {"ok": True}
+
+    async def wait_fn(addr: str, **kwargs: Any) -> dict[str, Any]:
+        return {"ok": True}
+
+    advice = _valid_advice()
+    advice["classification"]["topic"] = "overfitting"
+    advice["user_id_hash"] = supervisor.hash_identity("alice")
+    advice["profile_id"] = "learning"
+
+    async def chat_fn(**kwargs: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {"ok": True, "text": json.dumps(advice)}
+
+    manager = supervisor.SupervisorManager(
+        anyio.Path(tmp_path), plan_fn=plan_fn, start_fn=start_fn, wait_fn=wait_fn, chat_fn=chat_fn
+    )
+    message = {"content": "What is overfitting?", "user_id": "alice", "profile_id": "learning", "session_id": "main"}
+    assert await manager.before_turn(message) is None
+    assert calls == 0
+    assert await manager.prime(message) is not None
+    assert calls == 1
+    second = await manager.before_turn({**message, "content": "Please explain overfitting"})
+    assert second is not None
+    assert second["diagnostics"]["source"] == "cache"
+    assert calls == 1
+    participation = await manager.store.load_participation(supervisor.hash_identity("alice"))
+    assert participation["eligible_turns"] == 2
+    assert participation["warmup_status"] == "completed"
 
 
 @pytest.mark.anyio

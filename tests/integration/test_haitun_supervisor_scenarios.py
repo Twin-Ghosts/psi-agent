@@ -21,10 +21,10 @@ def test_scenario_schema_and_identities() -> None:
     legal = scenarios["legal-agent-governance"]
     assert ceo.user_id == "demo-ceo-cicd"
     assert ceo.profile_id == "executive-decision"
-    assert len(ceo.turns) == 5
+    assert len(ceo.turns) == 8
     assert legal.user_id == "demo-legal-agent-governance"
     assert legal.profile_id == "legal-learning"
-    assert len(legal.turns) == 7
+    assert len(legal.turns) == 8
     assert all(not scenario.session_id.startswith("supervisor-") for scenario in scenarios.values())
 
 
@@ -52,8 +52,8 @@ def test_evidence_schema_is_complete() -> None:
 def test_deterministic_scenarios_break_out_and_isolate_users(tmp_path: Path) -> None:
     module = _module()
     result = module["run_deterministic"](tmp_path)
-    assert len(result["ceo-cicd"]["turns"]) == 5
-    assert len(result["legal-agent-governance"]["turns"]) == 7
+    assert len(result["ceo-cicd"]["turns"]) == 8
+    assert len(result["legal-agent-governance"]["turns"]) == 8
     assert any(turn["validated_advice"]["breakout"]["needed"] for turn in result["ceo-cicd"]["turns"])
     assert any(turn["validated_advice"]["breakout"]["needed"] for turn in result["legal-agent-governance"]["turns"])
     assert result["ceo-cicd"]["user_hash"] != result["legal-agent-governance"]["user_hash"]

@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import anyio
@@ -393,6 +394,73 @@ class SupervisorManager:
             await self._apply_updates(user_hash, advice, heatmap)
             await self.store.save_latest_advice(user_hash, advice)
             return advice
+
+    async def before_turn(self, user_message: dict[str, Any]) -> dict[str, Any] | None:
+        """Skip a user's first eligible turn and require supervision thereafter."""
+        identity = resolve_identity(user_message)
+        user_hash = hash_identity(identity)
+        async with self.store.user_lock(user_hash):
+            state = await self.store.load_participation(user_hash)
+            turns = state.get("eligible_turns", 0)
+            turns = turns if isinstance(turns, int) else 0
+            state["eligible_turns"] = turns + 1
+            if turns == 0:
+                state["warmup_status"] = "requested"
+                await self.store.save_participation(user_hash, state)
+                logger.info("Supervisor first-turn warmup requested")
+                await self.store.append_metric(
+                    user_hash,
+                    {
+                        "turn_index": 1,
+                        "first_turn": True,
+                        "supervisor_required": False,
+                        "source": "warmup-requested",
+                        "elapsed_ms": 0,
+                    },
+                )
+                return None
+            state["last_supervised_turn"] = turns + 1
+            await self.store.save_participation(user_hash, state)
+        started = perf_counter()
+        advice = await self.supervise(user_message)
+        source = advice.get("diagnostics", {}).get("source", "unavailable") if advice else "unavailable"
+        await self.store.append_metric(
+            user_hash,
+            {
+                "turn_index": turns + 1,
+                "first_turn": False,
+                "supervisor_required": True,
+                "source": source,
+                "elapsed_ms": round((perf_counter() - started) * 1000),
+            },
+        )
+        return advice
+
+    async def prime(self, user_message: dict[str, Any]) -> dict[str, Any] | None:
+        """Warm a first-turn supervisor without receiving the assistant response."""
+        identity = resolve_identity(user_message)
+        user_hash = hash_identity(identity)
+        state = await self.store.load_participation(user_hash)
+        if state.get("warmup_status") != "requested":
+            return None
+        started = perf_counter()
+        advice = await self.supervise(user_message)
+        successful = bool(advice and advice.get("diagnostics", {}).get("source") != "unavailable")
+        state["warmup_status"] = "completed" if successful else "failed"
+        await self.store.save_participation(user_hash, state)
+        await self.store.append_metric(
+            user_hash,
+            {
+                "turn_index": 1,
+                "first_turn": True,
+                "supervisor_required": False,
+                "source": "warmup",
+                "warmup_status": state["warmup_status"],
+                "elapsed_ms": round((perf_counter() - started) * 1000),
+            },
+        )
+        logger.info(f"Supervisor first-turn warmup finished: status={state['warmup_status']}")
+        return advice
 
     async def _apply_updates(self, user_hash: str, advice: dict[str, Any], prior_heatmap: dict[str, Any]) -> None:
         classification = advice["classification"]

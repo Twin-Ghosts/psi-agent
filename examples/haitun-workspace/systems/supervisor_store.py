@@ -119,6 +119,12 @@ class SupervisorStore:
     def latest_advice_path(self, user_hash: str) -> anyio.Path:
         return self.root / "users" / self.validate_user_hash(user_hash) / "latest-advice.json"
 
+    def participation_path(self, user_hash: str) -> anyio.Path:
+        return self.root / "users" / self.validate_user_hash(user_hash) / "participation.json"
+
+    def metrics_path(self, user_hash: str) -> anyio.Path:
+        return self.root / "users" / self.validate_user_hash(user_hash) / "metrics.jsonl"
+
     async def load_map(self, domain_id: str) -> dict[str, Any] | None:
         return await self._load_yaml(self.map_path(domain_id))
 
@@ -160,6 +166,41 @@ class SupervisorStore:
     async def save_latest_advice(self, user_hash: str, data: dict[str, Any]) -> None:
         content = json.dumps(data, ensure_ascii=False, indent=2)
         await self._atomic_write(self.latest_advice_path(user_hash), content)
+
+    async def load_participation(self, user_hash: str) -> dict[str, Any]:
+        try:
+            content = await self.participation_path(user_hash).read_text(encoding="utf-8")
+            loaded = json.loads(content)
+        except FileNotFoundError, json.JSONDecodeError, UnicodeError:
+            loaded = None
+        if isinstance(loaded, dict):
+            return loaded
+        return {"eligible_turns": 0, "warmup_status": "new", "last_supervised_turn": 0}
+
+    async def save_participation(self, user_hash: str, data: dict[str, Any]) -> None:
+        content = json.dumps(data, ensure_ascii=False, indent=2)
+        await self._atomic_write(self.participation_path(user_hash), content)
+
+    async def load_metrics(self, user_hash: str) -> list[dict[str, Any]]:
+        try:
+            content = await self.metrics_path(user_hash).read_text(encoding="utf-8")
+        except FileNotFoundError, UnicodeError:
+            return []
+        metrics: list[dict[str, Any]] = []
+        for line in content.splitlines():
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict):
+                metrics.append(item)
+        return metrics
+
+    async def append_metric(self, user_hash: str, metric: dict[str, Any]) -> None:
+        existing = await self.load_metrics(user_hash)
+        existing.append(dict(metric))
+        content = "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in existing)
+        await self._atomic_write(self.metrics_path(user_hash), content)
 
     @asynccontextmanager
     async def user_lock(self, user_hash: str) -> AsyncIterator[None]:

@@ -45,6 +45,9 @@ SCENARIOS = {
                 "我们有 24 名研发，每两周发布一次，自动化测试覆盖率约 30%，过去半年发生过三次发布事故。",
                 "基于这些情况，请明确建议：现在全面采用、暂缓，还是分阶段采用？",
                 "给我一个 90 天试点方案，以及我在管理会上应该看的指标。",
+                "先不要展开技术细节，用三句话告诉我为什么不是全面采用。",
+                "现在重新深入：组织权限、审计和回滚责任应该怎么分？",
+                "把 CI/CD 决策和公司的整体风险治理联系起来，给我最终董事会建议。",
             )
         ),
     ),
@@ -64,6 +67,7 @@ SCENARIOS = {
                 "公司应该设置哪些审批、权限、日志和事故响应机制？",
                 "请起草一份简洁但能落地的《公司 AI Agent 使用管理规范》。",
                 "压力测试一下：如果采购 Agent 能自行读取报价、联系供应商并准备订单，这份规范还缺什么？",
+                "先简化成给全体员工看的五条规则，然后说明何时必须升级到法务审查。",
             )
         ),
     ),
@@ -92,9 +96,18 @@ def new_turn_evidence(mode: str, user_message: str) -> dict[str, Any]:
 def _advice(scenario: Scenario, index: int) -> dict[str, Any]:
     legal = scenario.key == "legal-agent-governance"
     types = (
-        ("none", "reframe", "broaden", "operationalize", "operationalize")
+        ("none", "reframe", "broaden", "operationalize", "operationalize", "none", "deepen", "cross_domain")
         if not legal
-        else ("none", "deepen", "broaden", "cross_domain", "operationalize", "operationalize", "reframe")
+        else (
+            "none",
+            "deepen",
+            "broaden",
+            "cross_domain",
+            "operationalize",
+            "operationalize",
+            "reframe",
+            "operationalize",
+        )
     )
     breakout_type = types[index]
     needed = breakout_type != "none"
@@ -122,9 +135,19 @@ def _advice(scenario: Scenario, index: int) -> dict[str, Any]:
             "controls",
             "policy",
             "procurement_agent",
+            "employee_rules",
         )
         if legal
-        else ("cicd_decision", "cicd_economics", "delivery_baseline", "adoption_decision", "pilot_metrics")
+        else (
+            "cicd_decision",
+            "cicd_economics",
+            "delivery_baseline",
+            "adoption_decision",
+            "pilot_metrics",
+            "executive_summary",
+            "delivery_accountability",
+            "enterprise_risk",
+        )
     )[index]
     reason = (
         "当前是首轮信号，先回答直接问题并观察。"
@@ -186,6 +209,9 @@ def _assistant_response(scenario: Scenario, index: int, advice: dict[str, Any]) 
             "你们具备试点价值但不适合立刻全面自动发布：24 人团队和三次事故说明收益空间明显，30% 测试覆盖率则意味着应先建设 CI、质量门禁和一键回滚，再逐步开放 CD。",
             "明确建议：分阶段采用。第一阶段自动构建、测试和安全扫描；第二阶段自动部署测试环境；达到门槛后再对低风险服务启用生产发布，高风险变更保留人工批准。",
             "90 天试点：第 1—30 天选一个低风险服务建立流水线；31—60 天补关键测试、回滚和审计；61—90 天扩大到两三个服务。管理会查看部署频率、交付周期、变更失败率、平均恢复时间、流水线通过率和每次发布人工耗时，并据此决定扩大投入。",
+            "三句话：你们已有事故成本，值得采用；测试覆盖率只有 30%，不适合一步到位；先试点并用结果决定扩大，风险和投入都更可控。",
+            "权限上由平台团队维护流水线，业务团队拥有服务，安全团队设置门禁；审计记录代码、批准、构建和部署；失败时服务负责人决定回滚，重大事故由统一指挥机制接管。",
+            "董事会建议：批准分阶段 CI/CD计划，把它纳入技术风险治理而非单纯工具采购；设定风险容忍度、责任人和季度指标；只有试点同时改善交付速度和变更失败率才扩大投资。",
         )
     else:
         responses = (
@@ -196,6 +222,7 @@ def _assistant_response(scenario: Scenario, index: int, advice: dict[str, Any]) 
             "控制机制应包括：风险分级、最小权限、敏感数据限制、关键动作人类批准、不可篡改日志、供应商审查、定期复核、异常暂停和事故响应。高风险 Agent必须指定业务负责人、技术负责人和法律审查人。",
             "《公司 AI Agent 使用管理规范（简版）》：一、适用于所有代表公司读取数据、调用工具或影响外部主体的 Agent；二、按低中高风险登记审批；三、仅授予完成任务所需权限；四、敏感数据和对外承诺须经授权；五、付款、签约、删除、生产变更等动作须人工批准；六、保存输入来源、计划、工具调用、批准和结果日志；七、第三方服务须审查数据、知识产权、跨境和审计条款；八、发现异常立即暂停、保全证据并上报；九、业务负责人承担使用责任，法务、安保和技术共同复核。",
             "采购 Agent 暴露了规范缺口：‘准备订单’和‘代表公司作出承诺’必须分开。还需加入供应商身份验证、利益冲突检查、报价保密、反商业贿赂、授权金额阈值、双人批准、禁止自行签约或付款、通信留痕、订单撤销机制以及供应商知情规则。",
+            "员工五条规则：只用已批准 Agent；不输入无权处理的数据；不授予超出任务的工具权限；付款、签约、删除和对外承诺必须人工批准；异常立即停止并报告。涉及敏感数据、高影响个人决策、外部承诺、跨境传输或高权限工具时必须升级到法务审查。",
         )
     breakout = advice["breakout"]
     if breakout["needed"]:
@@ -349,6 +376,49 @@ def build_report(results: dict[str, Any], *, real_failures: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def build_engineering_report(results: dict[str, Any], *, real_failures: list[str]) -> str:
+    turns = [turn for item in results.values() for turn in item["turns"]]
+    sources: dict[str, int] = {}
+    for turn in turns:
+        source = str(turn["validated_advice"].get("diagnostics", {}).get("source", "unknown"))
+        sources[source] = sources.get(source, 0) + 1
+    return "\n".join(
+        [
+            "# 副 Agent稳定性与工程评估报告",
+            "",
+            "## 证据边界",
+            "",
+            "本次完整场景为 DETERMINISTIC MOCK；真实上游错误单独保留，不能据此声称真实 LLM 稳定性已经达标。",
+            "",
+            "## 样本",
+            "",
+            f"- 用户数：{len(results)}",
+            f"- 总轮次：{len(turns)}",
+            f"- Advice来源分布：`{json.dumps(sources, ensure_ascii=False)}`",
+            "- 用户哈希隔离：通过",
+            "- Supervisor输入不含主回答/reasoning/tool results：通过",
+            "",
+            "## 延迟策略",
+            "",
+            "- 第一轮不等待实时 Advice，在 after-turn 预热。",
+            "- 第二轮起必须经过 live/cache/unavailable 路径。",
+            "- 同步预算：20 秒。",
+            "- 当前确定性模式不能提供真实 P50/P95；需真实 Session 指标后计算。",
+            "",
+            "## 真实错误",
+            "",
+            *[f"- `{failure}`" for failure in real_failures],
+            "",
+            "## 当前工程成熟度",
+            "",
+            "- 协议、身份隔离、缓存、地图版本、热力图历史：已有自动化覆盖。",
+            "- 真实多轮网络稳定性、跨进程恢复、后台 enrichment 生命周期：仍需实验。",
+            "- 不能仅凭 Mock 证明稳定超过单 Agent；需要同模型盲评和真实延迟数据。",
+            "",
+        ]
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", default="artifacts/supervisor-scenarios")
@@ -362,6 +432,9 @@ def main() -> None:
         (raw / f"{key}.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     errors = args.real_error or ["APIConnectionError('Connection error.') — 真实 DeepSeek 上游连接失败"]
     (root / "supervisor-breakout-report.md").write_text(build_report(results, real_failures=errors), encoding="utf-8")
+    (root / "supervisor-engineering-report.md").write_text(
+        build_engineering_report(results, real_failures=errors), encoding="utf-8"
+    )
     Console().print(root / "supervisor-breakout-report.md")
 
 

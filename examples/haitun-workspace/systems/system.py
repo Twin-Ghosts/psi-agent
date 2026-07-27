@@ -1289,7 +1289,9 @@ async def system_before_turn(
         return {}
     logger.debug("Background supervisor eligible")
     try:
-        advice = await _get_supervisor_manager(_resolve_workspace(workspace_raw)).supervise(user_message)
+        manager = _get_supervisor_manager(_resolve_workspace(workspace_raw))
+        before_turn = getattr(manager, "before_turn", None)
+        advice = await before_turn(user_message) if callable(before_turn) else await manager.supervise(user_message)
     except Exception as exc:
         logger.warning("Background supervisor unavailable: %r", exc, exc_info=True)
         return {}
@@ -1352,8 +1354,7 @@ async def system_prompt_builder(
             advice_text = protocol.render_advice_prompt(protocol.validate_advice(raw_advice))
             if advice_text:
                 advice_text += (
-                    "\n- 用户当前消息中的直接范围和深度要求优先; 若用户要求不展开, "
-                    "则抑制破圈, 不得强制扩展。"
+                    "\n- 用户当前消息中的直接范围和深度要求优先; 若用户要求不展开, 则抑制破圈, 不得强制扩展。"
                 )
 
     if topic_profile:
@@ -1427,6 +1428,16 @@ async def system_after_turn(
         logger.debug("Learning profile updated (after-turn).")
     except Exception as exc:
         logger.warning("Failed to update learner profile: %r", exc, exc_info=True)
+
+    supervisor = importlib.import_module("supervisor")
+    if supervisor.is_learning_question(user_text):
+        try:
+            manager = _get_supervisor_manager(workspace_dir)
+            prime = getattr(manager, "prime", None)
+            if callable(prime):
+                await prime(user_message)
+        except Exception as exc:
+            logger.warning("Background supervisor warmup failed: %r", exc, exc_info=True)
 
 
 if __name__ == "__main__":
