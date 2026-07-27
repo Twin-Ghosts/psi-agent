@@ -9,6 +9,7 @@ import { downloadMatrixXlsx, matrixToTsv, tableToMatrix } from "../services/mdTa
 import { preferResultBelowRule } from "../services/assistantDisplay";
 import type { ProgressLog } from "../services/turnProgress";
 import { FAILED_REASON_LABEL, isCompleteAgent } from "../services/messageTurn";
+import { ensureChatFileData } from "../utils/filePreviewUtils";
 import FilePreview from "../components/FilePreview";
 
 function ChatAvatar({ role }: { role: "agent" | "user" }) {
@@ -137,6 +138,7 @@ export function FocusChatThread({
   typing,
   title,
   progressLog,
+  workspaceRoot = "",
   onFeedback,
   onRegenerate,
   onRetry,
@@ -146,18 +148,40 @@ export function FocusChatThread({
   title: string;
   /** Growing Cursor-style process log (summary lines + 规划下一步 trailer). */
   progressLog?: ProgressLog | null;
+  /** Session workspace — used to resolve relative SEND paths after refresh. */
+  workspaceRoot?: string;
   onFeedback?: (index: number, kind: Exclude<MessageFeedback, "">) => void;
   onRegenerate?: (index: number) => void;
   onRetry?: (index: number) => void;
 }) {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const [preview, setPreview] = useState<ChatFile | null>(null);
+  const [previewBusy, setPreviewBusy] = useState<string | null>(null);
 
   useEffect(() => {
     const el = scrollerRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
   }, [messages, typing, progressLog]);
+
+  const openPreview = async (file: ChatFile) => {
+    if (!isPreviewable(file.name)) return;
+    const key = file.path || file.name;
+    if (file.data.trim()) {
+      setPreview(file);
+      return;
+    }
+    if (!file.path?.trim()) return;
+    setPreviewBusy(key);
+    try {
+      const loaded = await ensureChatFileData(file, workspaceRoot);
+      setPreview(loaded);
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPreviewBusy(null);
+    }
+  };
 
   const hasContent =
     messages.some((m) => m.text.trim() || (m.files?.length ?? 0) > 0) || typing;
@@ -258,21 +282,26 @@ export function FocusChatThread({
             </div>
             {showFiles && (
               <div className="focus-chat-files">
-                {message.files!.map((f, fi) => (
-                  <button
-                    type="button"
-                    key={`${f.name}-${fi}`}
-                    className="focus-chat-file-chip"
-                    disabled={!isPreviewable(f.name) || !f.data}
-                    onClick={() => {
-                      if (isPreviewable(f.name) && f.data) setPreview(f);
-                    }}
-                    title={isPreviewable(f.name) ? `预览 ${f.name}` : f.name}
-                  >
-                    <span>{f.name}</span>
-                    {isPreviewable(f.name) ? <em>预览</em> : null}
-                  </button>
-                ))}
+                {message.files!.map((f, fi) => {
+                  const canPreview = isPreviewable(f.name) && Boolean(f.data.trim() || f.path?.trim());
+                  const busyKey = f.path || f.name;
+                  const busy = previewBusy === busyKey;
+                  return (
+                    <button
+                      type="button"
+                      key={`${f.name}-${fi}`}
+                      className="focus-chat-file-chip"
+                      disabled={!canPreview || busy}
+                      onClick={() => {
+                        void openPreview(f);
+                      }}
+                      title={canPreview ? `预览 ${f.name}` : f.name}
+                    >
+                      <span>{f.name}</span>
+                      {isPreviewable(f.name) ? <em>{busy ? "加载中" : "预览"}</em> : null}
+                    </button>
+                  );
+                })}
               </div>
             )}
             {showAgentActions(message) && (

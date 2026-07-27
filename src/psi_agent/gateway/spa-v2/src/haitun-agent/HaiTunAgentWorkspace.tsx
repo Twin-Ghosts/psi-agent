@@ -1141,6 +1141,7 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
               typing={typingCard === unitCard.id}
               title={unitCard.title}
               progressLog={typingCard === unitCard.id ? turnProgressLog : null}
+              workspaceRoot={workspace}
               onFeedback={(index, kind) => setMessageFeedback(unitCard.id, index, kind)}
               onRegenerate={(index) => void regenerateAgentMessage(unitCard.id, index)}
               onRetry={(index) => void retryFailedMessage(unitCard.id, index)}

@@ -521,12 +521,8 @@ async def test_post_reasoning_kind_switch_emits_separate_chunks(tmp_path):
         resp = web.StreamResponse()
         resp.headers["Content-Type"] = "text/event-stream"
         await resp.prepare(request)
-        await resp.write(
-            b'data: {"choices":[{"index":0,"delta":{"reasoning":"think","kind":"thinking"}}]}\n\n'
-        )
-        await resp.write(
-            b'data: {"choices":[{"index":0,"delta":{"reasoning":"call","kind":"tool_call"}}]}\n\n'
-        )
+        await resp.write(b'data: {"choices":[{"index":0,"delta":{"reasoning":"think","kind":"thinking"}}]}\n\n')
+        await resp.write(b'data: {"choices":[{"index":0,"delta":{"reasoning":"call","kind":"tool_call"}}]}\n\n')
         await resp.write(b"data: [DONE]\n\n")
         return resp
 

@@ -23,7 +23,7 @@
 | 技术栈 | Vue 3 + Pinia | React 19 + Vite |
 | base | `/spa/` | `/spa-v2/` |
 | 对话 | Gateway SSE | 同左（同一套 API） |
-| 交付物 | 气泡 blob chip | 宝箱 UI；SSE `blob` 写入 `deliverables`；抽屉内按 blob 真实渲染 MD/HTML/图片/文本（无 blob 时明确空态，非占位纸面） |
+| 交付物 | 气泡 blob chip | 宝箱 UI；SSE `blob` 写入 `deliverables`；抽屉内按 blob 真实渲染 MD/HTML/图片/文本（无 blob 时明确空态，非占位纸面）；MD 预览与聊天气泡共用 `renderMd` + `.md-table-card` 表格样式（`globals.css` 中 `.focus-chat-bubble` / `.file-preview-md` 并列选择器） |
 | 账户区 | 头像菜单合一 | 头像菜单仅资料/登录；**模型池**与**设置**为侧栏独立快捷入口 |
 | 默认工作区 | 无 / 必须先选 | 启动读 ``GET /defaults``.workspace（Gateway 软默认 `{Desktop}/haitun交付`，**只宣布不建目录**；首个 Session/对话时服务端再 mkdir）；遗留 `*-workspace` / 字面量 `workspace` / `haitun-workspace` 会忽略 |
 | 工作区切换 | 侧栏打开 PathPicker | 设置「切换工作区」→ 选择页；**浏览**按钮走 `/workspace/places` + `/browse`（对齐 v1） |
@@ -76,6 +76,7 @@
   - **尾行**：只活「规划下一步…」/「撰写回复…」；**刻意**永不把「规划下一步」推进 `lines`。
   - **`hideAgentProse`（刻意为之）**：流式且该助手气泡仍在回合中时，藏正文与附件 chip，避免半截散文与过程轴抢戏；回合结束 / 非 typing 再露。
   - **`preferResultBelowRule`（刻意为之）**：仅展示层——短计划在 `---` 之上时偏好渲染下半段结果；**不改** JSONL / 复制源可选策略以实现为准。
+
 - 流式进行中不显示助手操作栏。
 
 ### 历史展示隔离（对齐敲定协议 / spa v1）
@@ -90,7 +91,7 @@
 |------|------|
 | `deliverables` | **历史交付物**：当前 Session 累计全部产出（从 `/history` 的 `sends` 重水合，刷新后列表仍在） |
 | `newDeliverables` | **新交付物**：本轮未确认的；宝箱金色 / 侧栏「新交付物」只看这个；「保存到成果库」后清空 |
-| `deliverablePaths` | basename → `[SEND:]` 路径；刷新后抽屉经 `GET /workspace/file` 读盘预览 |
+| `deliverablePaths` | basename → `[SEND:]` 路径；刷新后抽屉/气泡经 `GET /workspace/file` 懒加载预览（**刻意**不传 `root`，避免绝对 SEND 路径被 workspace 门禁 403） |
 
 SSE `blob` 到达时同时写入 `deliverables` + `newDeliverables`。流式追加文本时必须保留 `message.files`。
 

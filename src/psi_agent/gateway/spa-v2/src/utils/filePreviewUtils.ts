@@ -1,5 +1,6 @@
 import type { ChatFile, ChatMessage } from '../haitun-agent/model'
 import { mimeType } from '../services/renderMd'
+import { readWorkspaceFile } from '../services/api'
 
 export { mimeType }
 
@@ -21,6 +22,48 @@ export function downloadChatFile(file: ChatFile): void {
   a.href = dataUrlForChatFile(file)
   a.download = file.name
   a.click()
+}
+
+/** Absolute Windows / POSIX / UNC path — SEND markers are usually absolute. */
+export function isAbsoluteFsPath(path: string): boolean {
+  const p = path.trim()
+  return /^([a-zA-Z]:[\\/]|\\\\|\/)/.test(p)
+}
+
+/** Join relative SEND path under workspace; leave absolute paths unchanged. */
+export function resolveDeliverablePath(path: string, workspaceRoot = ''): string {
+  const raw = path.trim()
+  if (!raw) return raw
+  if (isAbsoluteFsPath(raw)) return raw
+  const root = workspaceRoot.replace(/[\\/]+$/, '')
+  const rel = raw.replace(/^[\\/]+/, '')
+  if (!root) return rel
+  return `${root}/${rel}`.replace(/\\/g, '/')
+}
+
+/**
+ * Ensure a chat/deliverable file has base64 ``data`` for preview/download.
+ * After refresh, history only has ``path`` from ``[SEND:]`` — load via Gateway.
+ *
+ * **刻意为之**：不传 ``root`` 约束。SEND 路径来自本会话历史，可能在 workspace
+ * 内，也可能在 ``Downloads/.psi/`` 等绝对位置；用 workspace root 会误 403。
+ */
+export async function ensureChatFileData(
+  file: ChatFile,
+  workspaceRoot = '',
+): Promise<ChatFile> {
+  if (file.data.trim()) return file
+  const src = file.path?.trim()
+  if (!src) {
+    throw new Error('历史记录中没有该文件的路径，无法从磁盘读取预览。')
+  }
+  const full = resolveDeliverablePath(src, workspaceRoot)
+  const res = await readWorkspaceFile(full, '')
+  return {
+    name: res.name || file.name,
+    data: res.data,
+    path: full,
+  }
 }
 
 /** Latest ChatFile per basename from message attachments (live SSE blobs). */
