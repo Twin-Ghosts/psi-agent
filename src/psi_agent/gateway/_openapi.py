@@ -445,8 +445,8 @@ OPENAPI_SPEC = {
                         "type": "string",
                         "description": (
                             "AppData memory root (platformdirs / --appdata / PSI_APPDATA). "
-                            "Todos live under {appdata}/todos/; history under {appdata}/histories/ "
-                            "(legacy workspace paths dual-read). Gateway state relocates later."
+                            "Todos live under {appdata}/todos/; history under {appdata}/histories/; "
+                            "Gateway state under {appdata}/state/ (legacy paths dual-read)."
                         ),
                     },
                 },

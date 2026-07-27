@@ -5,8 +5,8 @@ Shared by Session, Gateway, and workspace tools. Lives outside
 (``gateway`` → ``Session`` → ``conversation`` → here).
 
 ``resolve_appdata_root`` uses ``platformdirs.user_data_dir`` (never hardcoded
-``%AppData%``). Step 4B relocates todos; Step 4C relocates history — both with
-legacy workspace dual-read.
+``%AppData%``). Step 4B relocates todos; Step 4C relocates history; Step 4D
+relocates Gateway ``state/`` — all with legacy dual-read where noted.
 """
 
 from __future__ import annotations
@@ -80,6 +80,37 @@ async def resolve_history_read_path(
     if await primary.is_file():
         return primary
     legacy = legacy_history_path(workspace, session_id)
+    if await legacy.is_file():
+        return legacy
+    return primary
+
+
+def legacy_state_dir() -> anyio.Path:
+    """Pre-AppData Gateway state dir: ``./state`` relative to process cwd."""
+    return anyio.Path("state")
+
+
+def legacy_state_latest_path() -> anyio.Path:
+    """Pre-AppData path: ``./state/latest.json`` (cwd-relative)."""
+    return legacy_state_dir() / "latest.json"
+
+
+def appdata_state_dir(appdata_root: str) -> anyio.Path:
+    """AppData path (Step 4D): ``{appdata}/state/``."""
+    return anyio.Path(appdata_root) / "state"
+
+
+def appdata_state_latest_path(appdata_root: str) -> anyio.Path:
+    """AppData path (Step 4D): ``{appdata}/state/latest.json``."""
+    return appdata_state_dir(appdata_root) / "latest.json"
+
+
+async def resolve_state_read_path(*, appdata_root: str) -> anyio.Path:
+    """Dual-read: prefer AppData ``state/latest.json``, else legacy cwd ``state/``."""
+    primary = appdata_state_latest_path(appdata_root)
+    if await primary.is_file():
+        return primary
+    legacy = legacy_state_latest_path()
     if await legacy.is_file():
         return legacy
     return primary

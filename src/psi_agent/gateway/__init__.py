@@ -87,7 +87,7 @@ class Gateway:
     Empty → ``PSI_APPDATA`` → ``platformdirs.user_data_dir(Haitun)``.
     Step 4B: todos write under ``{appdata}/todos/`` (legacy workspace path dual-read).
     Step 4C: history writes under ``{appdata}/histories/`` (legacy dual-read).
-    Gateway ``state/`` still uses the old location until a later PR.
+    Step 4D: Gateway ``state/`` under ``{appdata}/state/`` (legacy cwd dual-read).
     """
 
     verbose: bool = False
@@ -112,7 +112,7 @@ class Gateway:
         logger.info(f"Default workspace: {workspace_default}")
         logger.info(f"AppData root: {appdata_root}")
 
-        state = GatewayState()
+        state = await GatewayState.from_appdata(appdata_root)
         snapshot = await state.load()
 
         async with anyio.create_task_group() as tg:

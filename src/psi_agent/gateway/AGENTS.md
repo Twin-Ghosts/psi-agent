@@ -18,7 +18,7 @@ Gateway 进程
 ├── ChatManager        — SSE 流式对话管理
 ├── HistoryManager     — JSONL 历史读取（AppData `histories/` + legacy 双读）
 ├── TodoManager        — 会话 todo 列表只读（AppData `todos/` + legacy workspace 双读）
-├── GatewayState       — 状态持久化到 state/latest.json
+├── GatewayState       — 状态持久化到 AppData `state/latest.json`（legacy cwd 双读）
 ├── aiohttp REST Server  — OpenAPI CRUD + Web UI chat
 ├── spa/               — Vue 3 SPA 前端项目 (Vite + SFC)
 ├── GatewayWebView     — 原生 webview 窗口 (pywebview)
@@ -38,7 +38,7 @@ Gateway 进程
 | `_defaults.py` | `resolve_default_agent` / `resolve_default_workspace` / `resolve_appdata_root` — CLI / `GET /defaults` 用 |
 | `_feishu_manager.py` | `FeishuManager` — 飞书 open_id → Session 路由表（复用 SessionManager 按需 spawn）+ FeishuRoute |
 | `_title_manager.py` | 会话标题 CRUD + AI 自动生成 |
-| `_state.py` | `GatewayState` dataclass — `state/latest.json` 的 load/save + 历史快照 `state/YYYYMMDD-HHMMSS.json` |
+| `_state.py` | `GatewayState` — `{appdata}/state/latest.json` + 时间戳快照；缺则双读 cwd `state/latest.json` |
 | `_spa_shell.py` | SPA 外壳注入 — `DEFAULT_APP_NAME`、`inject_app_name()`、`read_spa_index_template()`；`GET /spa/index.html` 替换 `__GATEWAY_APP_NAME__` |
 | `server.py` | aiohttp Application + REST handlers |
 | `_chat_manager.py` | SSE 流式对话管理（复用 ChannelCore） |
@@ -58,7 +58,7 @@ Gateway 进程
 1. setup_logging(verbose)                             — 第一行
 2. if self.browser and self.webview: raise ValueError  — 互斥校验
 3. resolve default_agent / default_workspace（见 `_defaults.py`）
-4. state = GatewayState() + snapshot = await state.load()  — 加载持久化状态
+4. state = GatewayState.from_appdata(appdata_root) + snapshot = await state.load()  — AppData state（legacy 双读）
 5. anyio.create_task_group()                          — 手动管理 task group
 6. 创建 AIManager + RouterManager + SessionManager（注入 `_default_agent` / `_default_workspace`）+ TitleManager
 7. 恢复 AI / Router / Session（Session 恢复时带 `agent`，缺省用 Gateway default）/ titles
@@ -89,7 +89,7 @@ workspace 工具（haitun `_runtime_paths`）按 ContextVar 解析相对路径  
 AppData 记忆区根（`--appdata` / `PSI_APPDATA` / platformdirs）     ← ✅ 第 4A
 todos → `{appdata}/todos/`（双读旧 `{workspace}/.psi/todos/`）   ← ✅ 第 4B
 history → `{appdata}/histories/`（双读旧 `{workspace}/histories/`） ← ✅ 第 4C
-AppData 继续搬家（Gateway state）                                  ← ❌ 后续小 PR
+Gateway state → `{appdata}/state/`（双读旧 cwd `state/`）          ← ✅ 第 4D
 ```
 
 | 已合 / 未做 | 内容 |
@@ -99,10 +99,10 @@ AppData 继续搬家（Gateway state）                                  ← ❌
 | ✅ 第 3 步 | haitun 工具读 `get_workspace()` / `get_agent()`（`_runtime_paths`） |
 | ✅ 第 4A | 解析并暴露 AppData 根：`GET /defaults.appdata`、CLI `--appdata`、env `PSI_APPDATA` |
 | ✅ 第 4B | todos：**写** `{appdata}/todos/{session_id}.json`；**读**优先 AppData，缺则双读 legacy |
-| ✅ **第 4C（本层）** | history：**写** `{appdata}/histories/{session_id}.jsonl`；**读**优先 AppData，缺则双读 legacy；`HistoryManager` / Session / haitun 扫描同约定 |
-| ❌ 后续 | Gateway `state/` 搬家（建议继续双读） |
+| ✅ 第 4C | history：**写** `{appdata}/histories/{session_id}.jsonl`；**读**优先 AppData，缺则双读 legacy |
+| ✅ **第 4D（本层）** | Gateway state：**写** `{appdata}/state/latest.json`；**读**优先 AppData，缺则双读 cwd `state/latest.json` |
 
-**可读验收（第 4C）**：新会话 JSONL 出现在 AppData `histories/`；仅有旧 workspace `histories/` 时 `GET /sessions/{id}/history` 仍能读到；再次写入后落在 AppData；删除 Session 时 AppData + legacy 两侧文件都清掉。**仍未搬家**：Gateway `state/latest.json`。
+**可读验收（第 4D）**：Gateway 重启后 AI/Session/Title 从 AppData `state/latest.json` 恢复；仅有旧 cwd `state/latest.json` 时仍能加载，下次 persist 写入 AppData。三区路径拆分（agent / workspace / AppData）记忆区侧至此完成。
 
 | CLI | 含义 |
 |-----|------|
@@ -304,7 +304,7 @@ REST ``DELETE /sessions/{id}`` 在 SessionManager.delete 之后还会：
 | GET | `/sessions/{session_id}/todos` | 读取 todos（AppData ``todos/{id}.json`` 优先，否则 legacy workspace ``.psi/todos``）；返回 ``{todos, summary}``，文件缺失则为空列表 |
 | POST | `/feishu/route` | 按飞书 `open_id` 幂等路由到其独立 Session（首次按需 spawn）`{open_id, ai_id?, workspace?}` → 201 `{open_id, session_id, channel_socket}`；缺 open_id / 无 ai_id → 400 |
 | GET | `/feishu/routes` | 列出所有飞书 open_id → Session 路由 `[{open_id, session_id}]` |
-| GET | `/defaults` | 默认 `agent` + `workspace` + `appdata`（**所有**建 Session 调用方可读；`appdata` 为记忆区根宣布，本步不搬家；省略 `agent` 时服务端也会用同一默认） |
+| GET | `/defaults` | 默认 `agent` + `workspace` + `appdata`（建 Session 调用方可读；`appdata` 为记忆区根：todos / history / Gateway state） |
 | GET | `/workspace/cwd` | Gateway 进程当前工作目录 |
 | GET | `/workspace/places` | PathPicker 快捷位置（cwd / home / desktop / documents / downloads）+ 盘符 |
 | GET | `/workspace/browse` | 浏览目录 `?path=...&kind=directory|file|all&q=...`，默认 `kind=directory` |
@@ -473,7 +473,7 @@ GET /ais + GET /sessions → 恢复上次 AI/Session → 无 AI 时由 SPA 自�
 ```
 Chat SSE 在长空闲时写 `: keepalive` 注释，**不得**对上游 `agen.__anext__()` 使用 `fail_after`（会拆掉 ChatManager，导致前端「正在同步」挂死）。打开即用默认模型 / 域名由 SPA 维护，Gateway 不内置默认 AI。
 
-服务端通过 `state/latest.json` 自动持久化 AI、Session、Title 状态，重启后自动恢复。对话历史仍通过 JSONL 文件独立持久化。浏览器 localStorage 仅保留 UI 状态（active ids、sidebar 折叠、主题偏好）和对话历史缓存。
+服务端通过 AppData `{appdata}/state/latest.json` 自动持久化 AI、Session、Title 状态（legacy cwd `state/` 双读），重启后自动恢复。对话历史经 AppData `histories/` JSONL 独立持久化。浏览器 localStorage 仅保留 UI 状态（active ids、sidebar 折叠、主题偏好）和对话历史缓存。
 
 ### 移动端键盘适配（visualViewport）
 
