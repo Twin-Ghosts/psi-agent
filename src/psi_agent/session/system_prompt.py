@@ -18,14 +18,18 @@ if TYPE_CHECKING:
 
 
 class SystemPrompt:
-    """Manages the system prompt lifecycle — lazy build and optional rebuild.
+    """Manages the system prompt lifecycle — lazy build, optional rebuild,
+    and compaction.
 
     ``builder() → str`` is called to construct the system prompt.
     ``checker() → bool`` is called before every agent turn; returning
     ``True`` triggers an in-place rebuild.
+    ``compaction_fn(history, complete_fn) → str`` summarises the
+    conversation history when the token budget is exceeded.
 
     Defaults: if no builder is provided, an empty prompt is used.  If
-    no checker is provided, the prompt is never rebuilt.
+    no checker is provided, the prompt is never rebuilt.  If no
+    compaction_fn is provided, compaction is silently skipped.
     """
 
     @staticmethod
