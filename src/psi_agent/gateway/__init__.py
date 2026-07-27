@@ -96,9 +96,10 @@ class Gateway:
     """
 
     scheduler_ai_id: str = ""
-    """调度 Session 挂载的 AI 实例 id。每个有 ``schedules/`` 的 workspace 会得到一个
-    专用调度 Session (对 SPA / state 隐藏) 来拥有其定时任务 —— 定时任务归 workspace,
-    不归 session, 否则飞书多用户下一条提醒会被在线会话数乘一遍。
+    """调度 Session 挂载的 AI 实例 id。每个 workspace 会得到一个专用调度 Session
+    (对 SPA / state 隐藏), 以 ``active_schedules=("*",)`` 激活该 workspace 下的全部
+    定时任务 —— 定时任务从 workspace 加载, 但**触发权是 (session x schedule) 逐条的**,
+    一条必须恰好被一个 Session 激活, 否则飞书多用户下一条提醒会被在线会话数乘一遍。
 
     空 = 回落 ``--feishu-ai-id``; 两者都空则不启动调度 Session (记 warning)。
     """

@@ -143,7 +143,7 @@ schedules → `{workspace}/schedules/`（归 workspace，非 agent 包 / 非 App
 
 | | |
 |--|--|
-| **去重键** | workspace 路径，经 `normcase` + `realpath` 归一（Windows 大小写 / 斜杠差异不产出两个调度 Session） |
+| **去重键** | workspace 路径，经 `await anyio.Path(...).resolve()` + `os.path.normcase` 归一（Windows 大小写 / 斜杠差异不产出两个调度 Session）。不用 `os.path.realpath`——同步 IO，违反「一切异步」 |
 | **session id** | `scheduler-<workspace sha256 前16位>`，确定性派生 → 重启后 `ensure` 重建同名，无需持久化 |
 | **激活名单** | `("*",)`（`ACTIVATE_ALL`）——整个 workspace 的定时任务都归它；用户会话为 `()` |
 | **按需 spawn** | 仅当 workspace 真有 `schedules/*/TASK.md` 时才建。否则 N 个从不用定时任务的飞书用户会各挂一个空调度 Session（每个都付 tools 加载成本）。用户建第一个定时任务后，下一次 `ensure` 把它拉起来 |

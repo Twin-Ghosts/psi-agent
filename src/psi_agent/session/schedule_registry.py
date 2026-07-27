@@ -96,8 +96,8 @@ class ScheduleRegistry:
     on update or removal.
 
     **激活是 (session x schedule) 的属性, 不是 session 的 (刻意为之)**: schedules
-    目录取自 *workspace* (每个 Session 都能读到全部条目, ``schedules`` 属性、SPA
-    展示、``refresh()`` 的 add/update/remove 统计都不受激活影响), 但**是否起
+    目录取自 *workspace* (每个 Session 都能读到全部条目, ``schedules`` 属性与
+    ``refresh()`` 的 add/update/remove 统计都不受激活影响), 但**是否起
     runner** 由 ``active_names`` 逐条决定 —— 同一 workspace 的不同 Session 可以各
     自激活不同的子集。
 

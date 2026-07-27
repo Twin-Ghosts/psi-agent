@@ -89,11 +89,13 @@ def test_workspace_empty_string_uses_cwd(tmp_path: Path) -> None:
 # ── 激活名单归一 (--scheduler / --schedules) ───────────────────────────────────
 
 
-def _session(tmp_path: Path, **kwargs: object) -> Session:
+def _session(tmp_path: Path, *, scheduler: bool = False, schedules: str = "") -> Session:
+    """只关心激活名单的 Session —— socket 路径给合法值即可, 不会被连接。"""
     return Session(
         channel_socket=str(tmp_path / "c.sock"),
         ai_socket=str(tmp_path / "a.sock"),
-        **kwargs,  # type: ignore[arg-type]
+        scheduler=scheduler,
+        schedules=schedules,
     )
 
 
