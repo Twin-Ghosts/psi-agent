@@ -318,6 +318,103 @@ def _sheet_values_to_text(data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+async def list_sheet_tabs_impl(token: str) -> dict[str, Any]:
+    """List a spreadsheet's worksheets (sheet_id + title + size).
+
+    Ranges are addressed as ``"<SHEET_ID>!A1:B2"``, and a SHEET_ID is not derivable
+    from the spreadsheet URL — so anything that reads or writes a range generically
+    needs this first.
+    """
+    if not token.strip():
+        return _error("token (spreadsheet_token) is required.")
+    res = await _invoke(_build_sheet_meta_request(token.strip()))
+    if not res["ok"]:
+        return res
+    raw = res["data"].get("sheets", []) if isinstance(res["data"], dict) else []
+    sheets: list[dict[str, Any]] = []
+    for sh in raw if isinstance(raw, list) else []:
+        if not isinstance(sh, dict):
+            continue
+        grid = sh.get("grid_properties") or {}
+        sheets.append(
+            {
+                "sheet_id": sh.get("sheet_id") or sh.get("sheetId") or "",
+                "title": sh.get("title", ""),
+                "index": sh.get("index"),
+                "row_count": grid.get("row_count") if isinstance(grid, dict) else None,
+                "column_count": grid.get("column_count") if isinstance(grid, dict) else None,
+            }
+        )
+    return {"ok": True, "token": token.strip(), "sheets": sheets, "count": len(sheets)}
+
+
+def _flatten_sheet_cell(cell: Any) -> str:
+    """Flatten one Feishu sheet cell into plain text.
+
+    A cell is not always a scalar: mention cells (``@somebody``) arrive as a dict
+    with ``type="mention"``, and styled cells arrive as a list of run segments
+    (``{"type": "text", "text": ..., "segmentStyle": ...}``). Reading the "人名"
+    or "mentor" column of a todo board therefore needs this flattening, otherwise
+    the name is buried in JSON.
+    """
+    if cell is None:
+        return ""
+    if isinstance(cell, bool):
+        return "TRUE" if cell else "FALSE"
+    if isinstance(cell, str):
+        return cell
+    if isinstance(cell, (int, float)):
+        return str(cell)
+    if isinstance(cell, list):
+        return "".join(_flatten_sheet_cell(part) for part in cell)
+    if isinstance(cell, dict):
+        for key in ("text", "name", "en_name", "link"):
+            val = cell.get(key)
+            if isinstance(val, str) and val:
+                return val
+        return ""
+    return str(cell)
+
+
+async def read_sheet_range_impl(token: str, range_: str, max_chars: int = 20000) -> dict[str, Any]:
+    """Read one explicit range of a spreadsheet as a grid of plain-text cells.
+
+    Complements ``read_doc_impl(file_type="sheet")``, which dumps *every* sheet
+    whole. Reading an explicit range is what lets a caller (a) locate a person's
+    row by scanning just the name column and (b) check whether one target cell is
+    already occupied before overwriting it.
+    """
+    if not token.strip():
+        return _error("token (spreadsheet_token) is required.")
+    if not range_.strip():
+        return _error("range is required, e.g. 'SHEET_ID!A1:H30' or just 'SHEET_ID'.")
+    res = await _invoke(_build_sheet_values_request(token.strip(), range_.strip()))
+    if not res["ok"]:
+        return res
+    value_range = res["data"].get("valueRange", {}) if isinstance(res["data"], dict) else {}
+    raw_rows = value_range.get("values") or []
+    rows: list[list[str]] = []
+    truncated = False
+    budget = max_chars
+    for raw_row in raw_rows if isinstance(raw_rows, list) else []:
+        cells = [_flatten_sheet_cell(c) for c in (raw_row if isinstance(raw_row, list) else [])]
+        if max_chars > 0:
+            spent = sum(len(c) for c in cells)
+            if spent > budget:
+                truncated = True
+                break
+            budget -= spent
+        rows.append(cells)
+    return {
+        "ok": True,
+        "token": token.strip(),
+        "range": value_range.get("range", range_.strip()),
+        "rows": rows,
+        "row_count": len(rows),
+        "truncated": truncated,
+    }
+
+
 async def _read_sheet(token: str) -> dict[str, Any]:
     meta = await _invoke(_build_sheet_meta_request(token))
     if not meta["ok"]:

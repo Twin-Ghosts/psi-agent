@@ -1,8 +1,10 @@
-"""Feishu/Lark spreadsheet write tools — put values/formulas + set cell style.
+"""Feishu/Lark spreadsheet range read + write tools.
 
-Complements ``feishu_doc_read(file_type="sheet", ...)`` (which only *reads* a
-spreadsheet). These tools *write* to a spreadsheet:
+Complements ``feishu_doc_read(file_type="sheet", ...)``, which dumps every sheet
+whole. These tools target an explicit range:
 
+- ``feishu_sheet_tabs`` — list worksheets (get a ``SHEET_ID`` for the ranges below).
+- ``feishu_sheet_read`` — read a range as plain-text rows (mentions flattened).
 - ``feishu_sheet_write`` — overwrite a range with a grid of values/formulas.
 - ``feishu_sheet_append`` — append rows after the last used row.
 - ``feishu_sheet_format`` — set cell style (font/color/border/align/number-format).
@@ -23,6 +25,44 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 import _feishu_impl as _f
+
+
+async def feishu_sheet_tabs(token: str) -> str:
+    """List a spreadsheet's worksheets — their ``sheet_id``, title and size.
+
+    Every range is addressed as ``"<SHEET_ID>!A1:B2"``, and a ``SHEET_ID`` cannot be
+    read off the spreadsheet URL — so call this first whenever you don't already know
+    it, then pass it to ``feishu_sheet_read`` / ``feishu_sheet_write``.
+
+    Args:
+        token: The spreadsheet_token (from the sheet URL, the part after ``/sheets/``).
+            For a wiki-hosted sheet, convert the node token first with
+            ``feishu_wiki_get_node`` and use its ``obj_token``.
+    """
+    return _f.dumps_result(await _f.list_sheet_tabs_impl(token))
+
+
+async def feishu_sheet_read(token: str, range: str, max_chars: int = 20000) -> str:
+    """Read one range of a spreadsheet as rows of plain-text cells.
+
+    Use this instead of ``feishu_doc_read(file_type="sheet")`` when you need a
+    specific area rather than the whole workbook — e.g. scan just the name column
+    to find which row a person is on, or check whether one target cell is already
+    filled before overwriting it.
+
+    Cells that are mentions (``@somebody``) or styled rich text are flattened to
+    their visible text, so a name column reads as ``"张三"`` rather than raw JSON.
+
+    Args:
+        token: The spreadsheet_token (from the sheet URL, the part after ``/sheets/``).
+            For a wiki-hosted sheet, convert the node token first with
+            ``feishu_wiki_get_node`` and use its ``obj_token``.
+        range: Range to read, e.g. ``"SHEET_ID!A1:H30"`` or just ``"SHEET_ID"``
+            for the sheet's used range.
+        max_chars: Stop after roughly this many characters of cell text (0 = no
+            limit). Guards against pulling a huge board into the conversation.
+    """
+    return _f.dumps_result(await _f.read_sheet_range_impl(token, range, max_chars))
 
 
 async def feishu_sheet_write(token: str, range: str, values_json: str, user_key: str = "") -> str:

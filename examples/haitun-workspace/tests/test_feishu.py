@@ -496,6 +496,110 @@ def test_doc_tool_is_async_with_docstring() -> None:
     assert (inspect.getdoc(fn) or "").strip()
 
 
+# ── Sheet tabs — list worksheets to get a SHEET_ID ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sheet_tabs_lists_worksheets(monkeypatch: pytest.MonkeyPatch) -> None:
+    data = {
+        "sheets": [
+            {
+                "sheet_id": "46a582",
+                "title": "Sheet1",
+                "index": 0,
+                "grid_properties": {"row_count": 201, "column_count": 20},
+            },
+            {"sheetId": "zz999", "title": "备份"},
+        ]
+    }
+    cap = _CapturedInvoke(data)
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.list_sheet_tabs_impl("sht1")
+    assert result["ok"] is True
+    assert result["count"] == 2
+    first = result["sheets"][0]
+    assert first["sheet_id"] == "46a582"
+    assert first["title"] == "Sheet1"
+    assert first["row_count"] == 201
+    assert first["column_count"] == 20
+    # camelCase sheetId is accepted too, and a tab with no grid_properties still lists
+    assert result["sheets"][1]["sheet_id"] == "zz999"
+    assert result["sheets"][1]["row_count"] is None
+    req = cap.request
+    assert req.http_method.name == "GET"
+    assert req.paths["spreadsheet_token"] == "sht1"
+    assert "sheets/v3/spreadsheets/:spreadsheet_token/sheets/query" in req.uri
+
+
+@pytest.mark.asyncio
+async def test_sheet_tabs_requires_token() -> None:
+    assert (await _impl.list_sheet_tabs_impl("  "))["ok"] is False
+
+
+# ── Sheet range read — plain-text rows, mentions flattened ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sheet_read_builds_get_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"valueRange": {"range": "S1!A1:B2", "values": [["a", 1], [True, None]]}})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.read_sheet_range_impl("sht1", "S1!A1:B2")
+    assert result["ok"] is True
+    assert result["range"] == "S1!A1:B2"
+    assert result["rows"] == [["a", "1"], ["TRUE", ""]]
+    assert result["row_count"] == 2
+    assert result["truncated"] is False
+    req = cap.request
+    assert req.http_method.name == "GET"
+    assert req.paths["spreadsheet_token"] == "sht1"
+    assert req.paths["range"] == "S1!A1:B2"
+    assert "sheets/v2/spreadsheets/:spreadsheet_token/values/:range" in req.uri
+
+
+@pytest.mark.asyncio
+async def test_sheet_read_flattens_mentions_and_rich_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    grid = [
+        [
+            {"type": "mention", "name": "牛志宇", "text": "@牛志宇", "token": "7662722911182015754"},
+            [
+                {"type": "text", "text": "大目标：", "segmentStyle": {"bold": True}},  # noqa: RUF001
+                {"type": "text", "text": "做最牛的 Agent", "segmentStyle": {"bold": False}},
+            ],
+        ]
+    ]
+    cap = _CapturedInvoke({"valueRange": {"range": "S1!B7:C7", "values": grid}})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.read_sheet_range_impl("sht1", "S1!B7:C7")
+    # a mention cell reads as its visible text, not raw JSON
+    assert result["rows"] == [["@牛志宇", "大目标：做最牛的 Agent"]]  # noqa: RUF001
+
+
+@pytest.mark.asyncio
+async def test_sheet_read_truncates_on_max_chars(monkeypatch: pytest.MonkeyPatch) -> None:
+    grid = [["x" * 40], ["y" * 40], ["z" * 40]]
+    cap = _CapturedInvoke({"valueRange": {"range": "S1", "values": grid}})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.read_sheet_range_impl("sht1", "S1", max_chars=60)
+    assert result["truncated"] is True
+    assert result["row_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_sheet_read_no_limit_keeps_all_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    grid = [["x" * 40], ["y" * 40]]
+    cap = _CapturedInvoke({"valueRange": {"range": "S1", "values": grid}})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.read_sheet_range_impl("sht1", "S1", max_chars=0)
+    assert result["truncated"] is False
+    assert result["row_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_sheet_read_requires_token_and_range() -> None:
+    assert (await _impl.read_sheet_range_impl("", "S1"))["ok"] is False
+    assert (await _impl.read_sheet_range_impl("sht1", ""))["ok"] is False
+
+
 # ── Sheet writes — put values/formulas, append rows, set cell style ────────────
 
 

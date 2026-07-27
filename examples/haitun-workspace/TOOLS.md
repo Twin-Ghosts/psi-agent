@@ -104,6 +104,14 @@ message_id / sender_open_id）。需要群里之前的上下文时：
     `lanes_json` 可传对象 `{"客户":["下单","付款"],"仓库":["发货"]}`（列=泳道，自动排格），
     或传泳道名数组 `["客户","客服","仓库"]` 再用 `stages_json` 给二维正文行。同样用表格如实呈现。
   一句话：用户要「表格/流程图/泳道图」时别再往正文里塞纯文本，改用这三个工具。
+- **列出电子表格的工作表**：`feishu_sheet_tabs(token)` 返回每个工作表的
+  `sheet_id`/`title`/行列数。**`SHEET_ID` 不在表格 URL 里**，而所有区域都写成
+  `"SHEET_ID!A1:B2"`，所以不知道 `SHEET_ID` 时先调它，再去读写区域。
+- **读电子表格的一个区域**：`feishu_sheet_read(token, range, max_chars)`——只读指定区域
+  （`feishu_doc_read(file_type="sheet", ...)` 是整本工作簿一次性倒出来，定位不了单格）。
+  返回拍平成纯文本的行数组：**mention 单元格（`@某人`）和带样式的富文本都会拍成可见文字**，
+  所以人名列读出来是 `"@张三"` 而不是一坨 JSON（匹配人名时记得去掉开头的 `@`）。
+  用它来「按人名列找出某人在第几行」和「写之前查目标单元格是否已被占」。
 - **往电子表格写数据/公式/格式**（表格只能读不能写的缺口已补上）：
   `feishu_sheet_write(token, range, values_json, user_key)` 覆盖写一个区域；
   `feishu_sheet_append(token, range, values_json, insert_data_option, user_key)` 在数据末尾追加行；
