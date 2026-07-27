@@ -80,8 +80,9 @@ class SessionManager:
         """
         session_id = id or _new_uuid()
         workspace = workspace.strip() or self._default_workspace or os.getcwd()
-        # 刻意为之：默认桌面工作区等路径在 GET /defaults 只宣布；此处（新建 Session /
-        # 开始对话）才 mkdir，避免打开 Haitun 就在桌面出现空文件夹。
+        # Intentional: GET /defaults only announces the path; mkdir here at
+        # Session create / start-chat so Haitun open does not leave an empty
+        # Desktop folder.
         workspace = await ensure_workspace_dir(workspace)
         agent = agent.strip() or self._default_agent
         backend_id = backend_id or ai_id

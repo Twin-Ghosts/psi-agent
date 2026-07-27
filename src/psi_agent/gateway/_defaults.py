@@ -21,8 +21,8 @@ Soft default (workspace)
 If CLI ``--default-workspace`` is empty, announce ``{Desktop}/haitun交付``
 (**path only** — do not mkdir here). Ordinary users get deliverables on the
 Desktop without picking a folder; power users override via CLI / spa settings.
-**刻意为之**：目录在 ``SessionManager.create``（开始对话 / 新建任务）时才创建，
-避免一打开 Haitun 就在桌面多一个空文件夹。 Not AppData.
+Intentional: mkdir only in ``SessionManager.create`` (start chat / new task),
+so opening Haitun does not leave an empty Desktop folder. Not AppData.
 """
 
 from __future__ import annotations

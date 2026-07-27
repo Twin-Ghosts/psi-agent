@@ -415,7 +415,10 @@ OPENAPI_SPEC = {
                     "ai_id": {"type": "string"},
                     "workspace": {
                         "type": "string",
-                        "description": "User workspace (open folder). Empty → Gateway default ({Desktop}/haitun交付); dir created on Session create",
+                        "description": (
+                            "User workspace. Empty → Gateway default "
+                            "({Desktop}/haitun交付); mkdir on Session create"
+                        ),
                     },
                     "agent": {
                         "type": "string",
