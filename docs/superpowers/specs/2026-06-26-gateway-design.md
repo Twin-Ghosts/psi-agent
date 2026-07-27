@@ -34,7 +34,7 @@ Gateway 自身是一个独立的 aiohttp 进程，AI/Session 作为进程内 any
 └───────────────────────────────────────────────────┘
 ```
 
-- AI 和 Session 之间仍通过 Unix socket（`_sockets.py` 抽象层）以 OpenAI Chat Completions HTTP/SSE 通信
+- AI 和 Session 之间仍通过 `_sockets.py` 抽象层以 OpenAI Chat Completions HTTP/SSE 通信（POSIX 上是 Unix socket，Windows 上是 Named Pipe；平台与地址不匹配时抛 `ValueError`）
 - Gateway 对外仅暴露 TCP（`--listen`）
 - Web UI chat endpoint 内部复用 `ChannelCore` 连接 Session
 
@@ -340,7 +340,7 @@ Chat endpoint 流式错误复用现有 `finish_reason="error"` SSE chunk 透传�
 - `X | None` 非 `Optional[X]`
 - 参数透传原则（chat endpoint 额外字段穿透到 ChannelCore→Session）
 - 可取消：`finally` 清理所有 task scope
-- 跨平台 socket 路径：Linux 使用 `/tmp/{prefix}/...` (Unix socket)，Windows 使用 `\\.\pipe\{prefix}\...` (Named Pipe)，由 `_socket_path()` 函数统一处理
+- 跨平台 socket 路径：Linux 使用 `/tmp/{prefix}/...` (Unix socket)，Windows 使用 `\\.\pipe\{prefix}\...` (Named Pipe)，由 `_socket_path()` 函数统一处理。这不只是命名约定而是硬约束——`_sockets` 会拒绝平台与地址不匹配的组合（抛 `ValueError`）。
 
 ## 12. 测试策略
 

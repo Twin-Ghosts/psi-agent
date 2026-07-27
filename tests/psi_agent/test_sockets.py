@@ -114,12 +114,17 @@ async def test_resolve_named_pipe_on_windows_ok() -> None:
 
 @pytest.mark.anyio
 async def test_create_site_unix_path_on_windows_raises_clear_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psi_agent._sockets.sys.platform", "win32")
+    # `psi_agent._sockets.sys` *is* the global sys module, so patching its
+    # platform is a process-wide mutation. Keep it scoped to the call under
+    # test so aiohttp's own platform-dependent setup/cleanup still sees the
+    # real platform.
     runner = web.AppRunner(web.Application())
     await runner.setup()
     try:
-        with pytest.raises(ValueError, match="named-pipe"):
-            create_site(runner, "/tmp/some.sock")
+        with monkeypatch.context() as mp:
+            mp.setattr("psi_agent._sockets.sys.platform", "win32")
+            with pytest.raises(ValueError, match="named-pipe"):
+                create_site(runner, "/tmp/some.sock")
     finally:
         await runner.cleanup()
 
@@ -137,11 +142,12 @@ async def test_resolve_named_pipe_off_windows_raises_clear_error(monkeypatch: py
 
 @pytest.mark.anyio
 async def test_create_site_named_pipe_off_windows_raises_clear_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psi_agent._sockets.sys.platform", "darwin")
     runner = web.AppRunner(web.Application())
     await runner.setup()
     try:
-        with pytest.raises(ValueError, match="only available on Windows"):
-            create_site(runner, "\\\\.\\pipe\\psi\\channels\\abc")
+        with monkeypatch.context() as mp:
+            mp.setattr("psi_agent._sockets.sys.platform", "darwin")
+            with pytest.raises(ValueError, match="only available on Windows"):
+                create_site(runner, "\\\\.\\pipe\\psi\\channels\\abc")
     finally:
         await runner.cleanup()

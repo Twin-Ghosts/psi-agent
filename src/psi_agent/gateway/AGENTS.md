@@ -100,7 +100,7 @@ Gateway 启动时可通过 `--tray` 开启系统托盘，图标由 `--icon` 指�
 
 ## Socket 路径约定
 
-AI 和 Session 之间通过 `_sockets.py` 抽象层以 Unix socket / Named Pipe 通信。
+AI 和 Session 之间通过 `_sockets.py` 抽象层以 Unix socket（仅 POSIX）/ Named Pipe（仅 Windows）通信。`_socket_path()` 的平台分支是**必须**的：`_sockets` 对平台与地址不匹配的组合主动抛 `ValueError`（Windows 上的裸路径、非 Windows 上的 `\\.\pipe\...`），详见根 `AGENTS.md`「关键注意事项」第 17 条。
 
 ```python
 def _socket_path(prefix: str, kind: str, entity_id: str) -> str:

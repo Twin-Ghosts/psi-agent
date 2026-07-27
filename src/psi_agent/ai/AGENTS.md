@@ -35,7 +35,7 @@ Session ── POST /chat/completions ──► AI
 ```
 1. CLI → Ai.run()
 2. run() → serve_ai(provider, model, api_key, base_url, handler)
-3. serve_ai → aiohttp UnixSite + 注册 handler
+3. serve_ai → `create_site(runner, socket_path)`（按地址前缀选 UnixSite / TCPSite / NamedPipeSite，见 `psi_agent._sockets`）+ 注册 handler
 4. 请求到达 → handle_chat_completions()
 5. 解析 body → await any_llm.acompletion(provider=..., stream=True, ...)
 6. async for chunk → chunk.model_dump_json() → SSE write

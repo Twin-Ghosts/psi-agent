@@ -40,7 +40,7 @@ class Gateway:
     """Listen address. Empty = random high port on 127.0.0.1."""
 
     socket_path: str = "psi"
-    """Prefix for AI/Session Unix socket paths."""
+    """Prefix for AI/Session socket paths (Unix sockets on POSIX, Named Pipes on Windows)."""
 
     icon: str | None = None
     """Path to icon image file (png/jpg/ico). Used as favicon, tray icon (--tray), and webview icon (--webview)."""

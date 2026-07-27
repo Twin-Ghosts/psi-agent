@@ -1,4 +1,4 @@
-"""AI backend — unified multi-provider LLM client served over a Unix socket."""
+"""AI backend — unified multi-provider LLM client served over a Unix socket, TCP or Named Pipe."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ async def serve_ai(
     base_url: str,
     handler: Handler,
 ) -> None:
-    """Serve an AI backend on a Unix socket."""
+    """Serve an AI backend on a Unix socket, TCP address or Named Pipe (see ``psi_agent._sockets``)."""
 
     api_key_status = "set" if api_key else "empty"
     logger.info(
@@ -71,7 +71,7 @@ class Ai:
     """Start an AI backend service that forwards to any LLM provider."""
 
     session_socket: str
-    """Path to the Unix domain socket to listen on."""
+    """Address to listen on: Unix socket path (POSIX), ``http(s)://host:port``, or ``\\\\.\\pipe\\name`` (Windows)."""
 
     provider: str = ""
     """Provider key (openai, anthropic, gemini, etc.). Falls back to PSI_AI_PROVIDER env var."""
