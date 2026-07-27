@@ -87,9 +87,7 @@ async def test_resolve_history_read_path_prefers_appdata(tmp_path: Path, monkeyp
 
 
 @pytest.mark.anyio
-async def test_resolve_history_read_path_falls_back_to_legacy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_resolve_history_read_path_falls_back_to_legacy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     appdata = tmp_path / "appdata"
     ws = tmp_path / "ws"
     monkeypatch.setenv("PSI_APPDATA", str(appdata))
