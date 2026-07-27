@@ -49,7 +49,7 @@ Session ── POST /chat/completions ──► AI
 | `model` | `--model` | `PSI_AI_MODEL` | 模型名 |
 | `api_key` | `--api-key` | `PSI_AI_API_KEY` | 上游 API key |
 | `base_url` | `--base-url` | `PSI_AI_BASE_URL` | 上游 base URL |
-| `max_context_tokens` | `--max-context-tokens` | `PSI_MAX_CONTEXT_TOKENS` | Token 阈值，超过时触发 compaction（0 = 禁用） |
+| `max_context_tokens` | `--max-context-tokens` | `PSI_MAX_CONTEXT_TOKENS` | Token 阈值，超过时触发 compaction（默认 100K，0 = 禁用） |
 
 全部参数可选，CLI 优先于环境变量。`model` 在请求处理中被启动配置覆盖（AI 层隐藏上游 model 细节）。
 

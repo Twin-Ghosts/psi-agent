@@ -90,8 +90,8 @@ class Ai:
     verbose: bool = False
     """Enable DEBUG-level logging."""
 
-    max_context_tokens: int = 0
-    """Prompt token threshold for triggering compaction.
+    max_context_tokens: int = 100000
+    """Prompt token threshold for triggering compaction (default 100K).
     0 disables compaction. Falls back to PSI_MAX_CONTEXT_TOKENS env var.
     CLI: --max-context-tokens."""
 
