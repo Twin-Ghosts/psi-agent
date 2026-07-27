@@ -49,8 +49,10 @@ export type Task = {
 
 export type ChatFile = {
   name: string
-  /** Base64 payload (with or without data-URL prefix). */
+  /** Base64 payload (with or without data-URL prefix). Empty after history rehydrate until lazy-loaded. */
   data: string
+  /** Disk path from ``[SEND:]`` — used to reload preview after refresh. */
+  path?: string
 }
 
 export type MessageFeedback = "up" | "down" | "";

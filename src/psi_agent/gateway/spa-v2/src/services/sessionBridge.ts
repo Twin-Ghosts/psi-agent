@@ -1,4 +1,4 @@
-import type { ChatMessage, DeliveryState, Task } from '../haitun-agent/model'
+import type { ChatFile, ChatMessage, DeliveryState, Task } from '../haitun-agent/model'
 import type { HistoryMessage, SessionInfo, SessionTodo } from './api'
 import { stripTransferMarkers } from './sendMarkers'
 import { applyTaskProgress } from './taskProgress'
@@ -30,6 +30,8 @@ export function basenameOf(path: string): string {
  * Project Gateway `/history` rows into workspace chat bubbles.
  * Server already whitelists by ``kind``; still strip transfer markers and drop empties
  * (parity with spa v1 useSession / historyReconcile).
+ * Assistant ``sends`` become file stubs (name + path, empty data) so chat chips
+ * survive refresh and can lazy-load via ``GET /workspace/file``.
  */
 export function historyToChat(messages: HistoryMessage[]): ChatMessage[] {
   const out: ChatMessage[] = []
@@ -37,11 +39,32 @@ export function historyToChat(messages: HistoryMessage[]): ChatMessage[] {
     // Defense in depth: never surface silent schedule rows if a proxy leaks them.
     if (m.kind === 'schedule.silent') continue
     const text = stripTransferMarkers(typeof m.text === 'string' ? m.text : '')
+    const files = filesFromHistorySends(m)
+    // Empty text + no files → skip (SEND-only rows still feed historyToDeliverables).
+    if (!text.trim() && !files.length) continue
+    // Pure SEND bubble (no prose): still skip chat row; chest owns those files.
     if (!text.trim()) continue
     out.push({
       role: m.role === 'assistant' ? 'agent' : 'user',
       text,
+      ...(files.length ? { files } : {}),
     })
+  }
+  return out
+}
+
+/** Build chat file stubs from history ``sends`` (no base64 until preview load). */
+export function filesFromHistorySends(m: HistoryMessage): ChatFile[] {
+  if (m.role !== 'assistant' || !Array.isArray(m.sends)) return []
+  const out: ChatFile[] = []
+  const seen = new Set<string>()
+  for (const raw of m.sends) {
+    if (typeof raw !== 'string' || !raw.trim()) continue
+    const path = raw.trim()
+    const name = basenameOf(path)
+    if (seen.has(name)) continue
+    seen.add(name)
+    out.push({ name, data: '', path })
   }
   return out
 }

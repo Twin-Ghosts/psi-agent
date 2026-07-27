@@ -62,6 +62,7 @@ import { chatFileToFile, filesToChatFiles } from "../services/chatFiles";
 import { filesFromClipboard } from "../services/clipboardFiles";
 import { onComposerEnterKey } from "../services/composerKeys";
 import { streamSessionChat } from "../services/chatStream";
+import { applyProgressEvent, progressLogStart, type ProgressLog } from "../services/turnProgress";
 import {
   historyToChat,
   historyToDeliverables,
@@ -135,6 +136,8 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
   const [chatExpanded, setChatExpanded] = useState(false);
   const [contextPanelCollapsed, setContextPanelCollapsed] = useState(false);
   const [typingCard, setTypingCard] = useState<string | null>(null);
+  /** Growing process lines (规划下一步 + sealed steps); cleared when turn ends. */
+  const [turnProgressLog, setTurnProgressLog] = useState<ProgressLog | null>(null);
   const [dragX, setDragX] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [cardTransition, setCardTransition] = useState<CardTransition | null>(null);
@@ -487,6 +490,7 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
     const live = () => epoch === streamEpochRef.current && !controller.signal.aborted;
 
     setTypingCard(cardId);
+    setTurnProgressLog(progressLogStart());
     const userVisible = titleSource ?? (text.trim() || "附件");
     let turnOk = false;
     let replySummary = "";
@@ -508,6 +512,9 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
         {
           onText: (delta) => {
             if (!live()) return;
+            setTurnProgressLog((prev) =>
+              applyProgressEvent(prev ?? progressLogStart(), "content", ""),
+            );
             appendStreamingAgent(cardId, delta);
           },
           onBlob: (name, data) => {
@@ -530,6 +537,12 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
               }
               return { ...current, [cardId]: list };
             });
+          },
+          onReasoning: (delta, kind) => {
+            if (!live()) return;
+            setTurnProgressLog((prev) =>
+              applyProgressEvent(prev ?? progressLogStart(), kind, delta),
+            );
           },
         },
       );
@@ -603,6 +616,7 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
     } finally {
       if (epoch === streamEpochRef.current) {
         setTypingCard((current) => (current === cardId ? null : current));
+        setTurnProgressLog(null);
         if (abortRef.current === controller) abortRef.current = null;
       }
       void (async () => {
@@ -1126,6 +1140,8 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
               messages={unitMessages}
               typing={typingCard === unitCard.id}
               title={unitCard.title}
+              progressLog={typingCard === unitCard.id ? turnProgressLog : null}
+              workspaceRoot={workspace}
               onFeedback={(index, kind) => setMessageFeedback(unitCard.id, index, kind)}
               onRegenerate={(index) => void regenerateAgentMessage(unitCard.id, index)}
               onRetry={(index) => void retryFailedMessage(unitCard.id, index)}

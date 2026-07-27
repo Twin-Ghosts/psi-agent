@@ -46,6 +46,24 @@ describe('historyToChat', () => {
     ])
   })
 
+  it('attaches file stubs from sends for reload preview', () => {
+    expect(
+      historyToChat([
+        {
+          role: 'assistant',
+          text: '写好了',
+          sends: ['/ws/reports/out.md', '/ws/reports/out.md'],
+        },
+      ]),
+    ).toEqual([
+      {
+        role: 'agent',
+        text: '写好了',
+        files: [{ name: 'out.md', data: '', path: '/ws/reports/out.md' }],
+      },
+    ])
+  })
+
   it('drops schedule.silent and empty rows', () => {
     expect(
       historyToChat([

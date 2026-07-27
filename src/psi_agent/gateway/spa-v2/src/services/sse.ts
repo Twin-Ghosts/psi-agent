@@ -1,6 +1,6 @@
 export type SseChunk =
   | { type: 'text'; text: string }
-  | { type: 'reasoning'; text: string }
+  | { type: 'reasoning'; text: string; kind?: string }
   | { type: 'blob'; name: string; data: string }
   | { type: 'error'; error: string }
   | Record<string, unknown>
