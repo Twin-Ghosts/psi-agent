@@ -126,6 +126,7 @@ session→channel 无主动推送的底座缺口，不改内核。**两目录未
 | `feishu-mentor-feedback` | mentor 反馈写入/汇总 bitable |
 | `feishu-attendance-payroll` | 名单→考勤→按用户当次给的公式算劳务费出表 |
 | `feishu-reimbursement-archive` | 审批实例→下载单据到每笔一个文件夹→按用户当次给的清单校验→汇总表 |
+| `feishu-todo-board-sync` | 个人 ToDoList docx→按 `@人名` 拆条目→写进团队看板表格各人行的指定列（详见 §13） |
 
 ---
 
@@ -314,3 +315,67 @@ agent 误判"企业没有知识库"或让用户手动把机器人加为协作者
 | 修改 | `tools/feishu_drive.py` | `feishu_file_download` 暴露 `user_key` |
 | 修改 | `tests/test_feishu.py` | media 下载 user_key 走 UAT / 未授权 need_auth / 空 user_key 走 tenant |
 | 修改 | `TOOLS.md` | 第 10 条:读知识库 PDF/附件 = get_node→download(带 user_key)→ocr 抽文本 |
+
+---
+
+## 13. 后续增强：电子表格区域读 + 个人 ToDoList 搬进团队看板（2026-07-27）
+
+**分支**：`add-feishu-skills1`（PR #496）。场景：团队每人一篇飞书 docx 周志 / ToDoList
+（按日期倒序分段，`大目标 / 子目标 / ToDo` 层级缩进，任务行用 `@人名` 点名协作者），
+另有一张团队看板电子表格（**列 = 日期，行 = 人**，每格放该人当天一整段待办文本）；
+把前者搬进后者此前只能人工复制粘贴。
+
+**根因**：读电子表格只有 `feishu_doc_read(file_type="sheet")` 一条路——它把**整本工作簿
+一次性倒成文本**，既定位不到「某人在第几行」，也没法在写之前确认「目标格是否已被填过」。
+写侧（`feishu_sheet_write` / `append` / `format`）本就有，缺的是**区域读与工作表寻址**。
+
+### 13.1 电子表格区域读（两个新工具）
+
+- `list_sheet_tabs_impl(token, user_key)` + 工具 `feishu_sheet_tabs`：
+  `GET /open-apis/sheets/v3/spreadsheets/:spreadsheet_token/sheets/query`，列
+  `sheet_id`/`title`/`index`/行列数。**`SHEET_ID` 不在表格 URL 里**，而所有区域都寻址成
+  `"SHEET_ID!A1:B2"`，所以不写死某张表就必须先查它。兼容 `sheet_id` / `sheetId` 两种拼写。
+- `read_sheet_range_impl(token, range_, max_chars, user_key)` + 工具 `feishu_sheet_read`：
+  复用既有 `_build_sheet_values_request`（`GET .../sheets/v2/.../values/:range`），返回
+  `rows`（行数组）+ `row_count` + `truncated`；`max_chars` 按累计字符预算截断（0 = 不限）。
+- `_flatten_sheet_cell(cell)`：**飞书单元格不都是标量** —— `@某人` 是
+  `{"type":"mention","name":...}` dict，带样式文本是 run 段 list（`{"type":"text","text":...,
+  "segmentStyle":...}`），另有 bool / 数字。统一拍平成可见文字，否则人名列读出来是一坨 JSON
+  没法匹配人（拍平后是 `"@张三"`，**匹配前要去掉开头的 `@`**）。
+- **鉴权**：两者都是读类，按 §11 / §12 的口径接 `user_key` 并走 `_invoke(..., prefer="tenant")`
+  —— tenant 优先、仅在机器人被拒时回落该用户 UAT。表格归个人时不带 `user_key` 会 403。
+
+### 13.2 技能 `feishu-todo-board-sync`（编排型，结构不写死）
+
+7 步：换 token 认类型（`/wiki/` 后是 **node_token 不是文档 id**；源常是 docx、目标常是 sheet）
++ 查 `SHEET_ID` → 读源 docx 切最新日期段 → 按 `@人名` 拆归属 → 认表头行/人名列并定位每人行
+→ 组装单元格文本 → 探目标格是否已占 → 写入。三条硬规则：
+
+1. **归属按 `@人名` 拆**：条目里 @谁归谁，一条 @多人则分别进各人；没 @任何人的归**文档主人**
+   （标题「XXToDoList」里的 XX）。`大目标 / 子目标` 是**共有背景**，不拆给个人。
+2. **目标列由调用方显式给**：绝不从源文档日期推——表头是 `7.24`（点分）、源文档是 `7-27`
+   （横线分），格式本就不一致，推错就写串行。
+3. **目标单元格非空先报警**：把现有内容摆给用户、等明确确认才覆盖，多个人一次性列全。
+
+**结构每次现场探**：表头在第几行、人名在第几列、`SHEET_ID` 一律读出来；技能里的示例值
+（那两个 wiki token / `46a582` / E 列 / 第 7 行）只作说明，并有测试锁住这点。
+**@到的人不在表里则如实报告跳过，不新增行**。抽 `@人名` **禁用「@ + 2~4 汉字」贪心正则**
+（原文有 `@王浦丞的ToDo`，会截出「王浦丞的」这个不存在的人），改用表内人名清单反向匹配。
+
+### 13.3 非目标
+
+不改源 docx；不给看板新增行/列；不自动推目标列；不静默覆盖；不一次搬所有历史日期段
+（默认只搬最新一段，要别的段由调用方明说）。
+
+### 13.4 文件变更
+
+| 操作 | 文件 | 说明 |
+|---|---|---|
+| 修改 | `tools/_feishu_impl.py` | 新增 `list_sheet_tabs_impl`（sheets/v3 sheets/query）、`read_sheet_range_impl`（sheets/v2 values + `max_chars` 预算截断）、`_flatten_sheet_cell`（mention/富文本/bool/数字 → 可见文字）；两者均接 `user_key` 走 tenant 优先 |
+| 修改 | `tools/feishu_sheet.py` | 新增工具 `feishu_sheet_tabs` / `feishu_sheet_read`（含 `user_key`）；模块 docstring 从「只写」改为「区域读 + 写」 |
+| 新增 | `skills/feishu-todo-board-sync/SKILL.md` | 个人 ToDoList docx → 团队看板表格的 7 步搬运技能（三条硬规则 + 结构现场探） |
+| 修改 | `tests/test_feishu.py` | sheet_tabs 请求组装 / `sheetId` 兼容 / 缺 token；sheet_read 请求组装 / **mention 与富文本拍平** / `max_chars` 截断与 0 不限 / 缺 token·range；两读类工具转发 `user_key` 且 `prefer="tenant"`；工具面名单补两个新工具 |
+| 新增 | `tests/test_feishu_todo_board_sync.py` | 技能校验：frontmatter 合规 / 引用的 `feishu_*` 工具真实存在 / 流程必需 5 工具都点到 / 三条硬规则仍在正文 / 两种文件类型与 node_token·obj_token 区别 / 结构靠现场探不写死 |
+| 修改 | `TOOLS.md` | 补两条：`feishu_sheet_tabs`（`SHEET_ID` 不在 URL 里）、`feishu_sheet_read`（区域读、mention 拍平、用于定位人名行与写前探目标格） |
+| 修改 | `examples/haitun-workspace/AGENTS.md` | 工具表补 `feishu_sheet` 行（此前连写工具都没登记）；技能列表补 `feishu-todo-board-sync` |
+

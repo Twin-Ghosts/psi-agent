@@ -60,6 +60,9 @@ ToolRegistry 跳过，browser 那次踩过）。
   `at_user_id` 给了就加 `{"type":"person","person":{"user_id":...}}`。
 - list 工具透传 `page_size`/`page_token`，返回带 `has_more` + `page_token`，不自动全量抓取。
 - `max_chars` 保护上下文，同 fetch。
+- **`feishu_doc_read(file_type="sheet")` 是「整本工作簿一次性倒成文本」**；要读**指定区域**
+  （定位某人在第几行、写前查某格是否已填）用后续增强的 `feishu_sheet_read` /
+  `feishu_sheet_tabs`，见 [extended spec §13](2026-07-17-feishu-tools-extended-design.md)。
 
 ## 错误处理与返回结构
 

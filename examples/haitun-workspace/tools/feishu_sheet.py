@@ -27,7 +27,7 @@ if str(TOOLS_DIR) not in sys.path:
 import _feishu_impl as _f
 
 
-async def feishu_sheet_tabs(token: str) -> str:
+async def feishu_sheet_tabs(token: str, user_key: str = "") -> str:
     """List a spreadsheet's worksheets — their ``sheet_id``, title and size.
 
     Every range is addressed as ``"<SHEET_ID>!A1:B2"``, and a ``SHEET_ID`` cannot be
@@ -38,11 +38,14 @@ async def feishu_sheet_tabs(token: str) -> str:
         token: The spreadsheet_token (from the sheet URL, the part after ``/sheets/``).
             For a wiki-hosted sheet, convert the node token first with
             ``feishu_wiki_get_node`` and use its ``obj_token``.
+        user_key: The sender's open_id (from ``<feishu_context>``). Reads try the bot's
+            tenant token first and only fall back to this user's identity when the bot
+            is denied — pass it whenever the sheet may be user-owned.
     """
-    return _f.dumps_result(await _f.list_sheet_tabs_impl(token))
+    return _f.dumps_result(await _f.list_sheet_tabs_impl(token, user_key))
 
 
-async def feishu_sheet_read(token: str, range: str, max_chars: int = 20000) -> str:
+async def feishu_sheet_read(token: str, range: str, max_chars: int = 20000, user_key: str = "") -> str:
     """Read one range of a spreadsheet as rows of plain-text cells.
 
     Use this instead of ``feishu_doc_read(file_type="sheet")`` when you need a
@@ -61,8 +64,11 @@ async def feishu_sheet_read(token: str, range: str, max_chars: int = 20000) -> s
             for the sheet's used range.
         max_chars: Stop after roughly this many characters of cell text (0 = no
             limit). Guards against pulling a huge board into the conversation.
+        user_key: The sender's open_id (from ``<feishu_context>``). Reads try the bot's
+            tenant token first and only fall back to this user's identity when the bot
+            is denied — pass it whenever the sheet may be user-owned.
     """
-    return _f.dumps_result(await _f.read_sheet_range_impl(token, range, max_chars))
+    return _f.dumps_result(await _f.read_sheet_range_impl(token, range, max_chars, user_key))
 
 
 async def feishu_sheet_write(token: str, range: str, values_json: str, user_key: str = "") -> str:

@@ -247,3 +247,39 @@ token，用户知识库里的文件机器人无权限。读类工具没接 user_
 - [x] 测试：media 下载 user_key 走 UAT / 未授权 need_auth / 空 user_key 走 tenant
 - [x] TOOLS.md 第 10 条：读知识库 PDF/附件的完整流程，下载失败先确认带 user_key
 - [x] 门禁：`ruff check` + `ruff format --check`（CI 版 ruff 0.15）+ pytest（feishu 152 passed）
+
+## 十一、后续增强：电子表格区域读 + 个人 ToDoList 搬进团队看板（2026-07-27，已完成）
+
+分支 `add-feishu-skills1`（PR #496）。设计规格见 spec 第 13 节。
+
+**根因**：读电子表格只有 `feishu_doc_read(file_type="sheet")` 一条路——整本工作簿一次性
+倒成文本，既定位不到「某人在第几行」，也没法写前确认「目标格是否已填」。写侧本就有
+（`feishu_sheet_write` / `append` / `format`），缺的是**区域读 + 工作表寻址**。
+
+**Files:**
+- Modify: `examples/haitun-workspace/tools/_feishu_impl.py`
+- Modify: `examples/haitun-workspace/tools/feishu_sheet.py`
+- Add: `examples/haitun-workspace/skills/feishu-todo-board-sync/SKILL.md`
+- Modify: `examples/haitun-workspace/tests/test_feishu.py`
+- Add: `examples/haitun-workspace/tests/test_feishu_todo_board_sync.py`
+- Modify: `examples/haitun-workspace/TOOLS.md`
+- Modify: `examples/haitun-workspace/AGENTS.md`（工具表 + 技能列表）
+- Modify: `docs/superpowers/specs/2026-07-17-feishu-tools-extended-design.md`（第 7、13 节）
+
+- [x] `list_sheet_tabs_impl` + 工具 `feishu_sheet_tabs`：`sheets/v3 .../sheets/query` 列工作表，
+  兼容 `sheet_id` / `sheetId`。**`SHEET_ID` 不在表格 URL 里**，区域寻址必需
+- [x] `read_sheet_range_impl` + 工具 `feishu_sheet_read`：复用 `_build_sheet_values_request`
+  读指定区域，返回 `rows`/`row_count`/`truncated`，`max_chars` 字符预算截断（0=不限）
+- [x] `_flatten_sheet_cell`：mention dict / run 段 list / bool / 数字 → 可见文字
+  （否则人名列是一坨 JSON；拍平后 `"@张三"`，匹配前去掉开头 `@`）
+- [x] 两个读类工具按 §11/§12 口径接 `user_key`，走 `_invoke(..., prefer="tenant")`
+  —— tenant 优先、被拒才回落用户 UAT（表格归个人时不带会 403）
+- [x] 技能 `feishu-todo-board-sync`：7 步搬运；三条硬规则（按 `@人名` 拆归属 / 目标列由
+  调用方显式给 / 目标格非空先报警待确认）；表结构（表头行、人名列、`SHEET_ID`）每次现场探
+- [x] 测试：sheet_tabs 请求组装·`sheetId` 兼容·缺 token；sheet_read 请求组装·mention 与富文本
+  拍平·`max_chars` 截断与 0 不限·缺 token/range；两读类工具转发 `user_key` 且 `prefer=tenant`；
+  工具面名单补两个新工具；技能校验 6 项（frontmatter / 工具名真实存在 / 三条硬规则 / 不写死结构）
+- [x] 真实文档只读端到端演练：自动查出 `sheet_id`、认出表头第 1 行·人名 B 列·22 人、
+  「7.27」→E 列、探明目标格已占（未写入任何数据）
+- [x] 门禁：`ruff check` + `ruff format --check` + `ty check` + pytest（feishu 相关 272 passed）
+

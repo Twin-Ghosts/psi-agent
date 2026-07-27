@@ -536,6 +536,22 @@ async def test_sheet_tabs_requires_token() -> None:
     assert (await _impl.list_sheet_tabs_impl("  "))["ok"] is False
 
 
+@pytest.mark.asyncio
+async def test_sheet_reads_forward_user_key_as_tenant_first_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reads stay tenant-first but carry the user identity as a permission fallback."""
+    cap = _CapturedInvoke({"sheets": [{"sheet_id": "s1", "title": "T"}]})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    await _impl.list_sheet_tabs_impl("sht1", user_key="ou_1")
+    assert cap.user_key == "ou_1"
+    assert cap.prefer == "tenant"
+
+    cap = _CapturedInvoke({"valueRange": {"range": "S1!A1", "values": [["x"]]}})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    await _impl.read_sheet_range_impl("sht1", "S1!A1", user_key="ou_1")
+    assert cap.user_key == "ou_1"
+    assert cap.prefer == "tenant"
+
+
 # ── Sheet range read — plain-text rows, mentions flattened ────────────────────
 
 
@@ -701,7 +717,13 @@ async def test_sheet_format_rejects_non_object(monkeypatch: pytest.MonkeyPatch) 
 
 def test_sheet_tools_are_async_with_docstrings() -> None:
     mod = importlib.import_module("feishu_sheet")
-    for name in ("feishu_sheet_write", "feishu_sheet_append", "feishu_sheet_format"):
+    for name in (
+        "feishu_sheet_tabs",
+        "feishu_sheet_read",
+        "feishu_sheet_write",
+        "feishu_sheet_append",
+        "feishu_sheet_format",
+    ):
         fn = getattr(mod, name)
         assert inspect.iscoroutinefunction(fn)
         assert (inspect.getdoc(fn) or "").strip()

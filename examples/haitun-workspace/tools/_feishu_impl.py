@@ -318,7 +318,7 @@ def _sheet_values_to_text(data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-async def list_sheet_tabs_impl(token: str) -> dict[str, Any]:
+async def list_sheet_tabs_impl(token: str, user_key: str = "") -> dict[str, Any]:
     """List a spreadsheet's worksheets (sheet_id + title + size).
 
     Ranges are addressed as ``"<SHEET_ID>!A1:B2"``, and a SHEET_ID is not derivable
@@ -327,7 +327,7 @@ async def list_sheet_tabs_impl(token: str) -> dict[str, Any]:
     """
     if not token.strip():
         return _error("token (spreadsheet_token) is required.")
-    res = await _invoke(_build_sheet_meta_request(token.strip()))
+    res = await _invoke(_build_sheet_meta_request(token.strip()), user_key=user_key)
     if not res["ok"]:
         return res
     raw = res["data"].get("sheets", []) if isinstance(res["data"], dict) else []
@@ -376,7 +376,7 @@ def _flatten_sheet_cell(cell: Any) -> str:
     return str(cell)
 
 
-async def read_sheet_range_impl(token: str, range_: str, max_chars: int = 20000) -> dict[str, Any]:
+async def read_sheet_range_impl(token: str, range_: str, max_chars: int = 20000, user_key: str = "") -> dict[str, Any]:
     """Read one explicit range of a spreadsheet as a grid of plain-text cells.
 
     Complements ``read_doc_impl(file_type="sheet")``, which dumps *every* sheet
@@ -388,7 +388,7 @@ async def read_sheet_range_impl(token: str, range_: str, max_chars: int = 20000)
         return _error("token (spreadsheet_token) is required.")
     if not range_.strip():
         return _error("range is required, e.g. 'SHEET_ID!A1:H30' or just 'SHEET_ID'.")
-    res = await _invoke(_build_sheet_values_request(token.strip(), range_.strip()))
+    res = await _invoke(_build_sheet_values_request(token.strip(), range_.strip()), user_key=user_key)
     if not res["ok"]:
         return res
     value_range = res["data"].get("valueRange", {}) if isinstance(res["data"], dict) else {}

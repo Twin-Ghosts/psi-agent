@@ -198,7 +198,11 @@ feishu_sheet_write(<obj_token>, "<SHEET_ID>!E7:E7", '[["大目标：\n1. …"]]'
 
 两篇文档都要该 app 是协作者,否则 tenant token 读写都 403。
 拿不到就走 `feishu_auth_start()` 让本人授权,再带 `user_key=<sender_open_id>` 以本人身份读写。
-写操作本身默认就以用户身份走(`prefer="user"`),`user_key` 空则回落 tenant。
+
+**读类工具(`feishu_wiki_get_node` / `feishu_sheet_tabs` / `feishu_sheet_read`)也都收
+`user_key`**:它们是 tenant 优先,只在机器人被拒时才回落到该用户身份,所以**表格可能归个人时
+就一路把 `user_key` 带上**,别等 403 了才补。写操作默认就以用户身份走(`prefer="user"`),
+`user_key` 空则回落 tenant。整条链路(get_node → tabs → read → write)要用**同一个** `user_key`。
 
 ## 别做的事
 
