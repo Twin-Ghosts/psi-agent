@@ -10,6 +10,7 @@ from loguru import logger
 from psi_agent._appdata import resolve_appdata_root
 from psi_agent._logging import setup_logging
 from psi_agent.session.agent import SessionAgent
+from psi_agent.session.schedule_registry import ACTIVATE_ALL
 from psi_agent.session.server import serve_session
 
 
@@ -35,19 +36,26 @@ class Session:
     """
 
     scheduler: bool = False
-    """本 Session 是否是 *workspace* 的调度 Session (刻意为之)。
+    """本 Session 是否触发 *workspace* 下的**全部**定时任务 (等价 ``--schedules '*'``)。
 
-    ``True`` 才从 ``{workspace}/schedules`` 加载并触发定时任务; 普通用户
-    Session 一律 ``False`` -> ``ScheduleRegistry`` 为空、不起 runner。
+    便捷开关: 展开成 ``{ACTIVATE_ALL}`` 交给 ``SessionAgent``。要只触发其中几条,
+    用 ``schedules`` 逐条指定。
+    """
 
-    为什么: 调度归属 workspace, 不归属 session。飞书按 open_id 给每个用户
-    spawn 独立 Session, 若每个 Session 都触发, 一条定时任务会被在线用户数
-    乘一遍。Gateway 侧 ``SchedulerManager`` 保证每个 workspace 只有一个
-    ``scheduler=True`` 的 Session, 于是「重复触发」在构造期就不存在, 无需
-    运行时抢锁。
+    schedules: str = ""
+    """本 Session 激活的定时任务名, 逗号分隔; ``*`` 表示全部。
 
-    单进程 CLI (``psi-agent session``) 默认 ``False``; 需要跑定时任务时显式
-    ``--scheduler``。``psi-agent run`` 的 session 配置项同理。
+    **激活是 (session x schedule) 的属性, 不是 session 的 (刻意为之)**: 每个
+    Session 都加载 ``{workspace}/schedules`` 的全部条目 (可读、可 refresh), 但
+    只为激活的那些起 runner。于是同一 workspace 的不同 Session 可以各自触发不同
+    子集 —— 一个整体布尔只能表达「全触发 / 全不触发」, 表达不了「A 条归调度
+    Session、B 条归某个用户会话」。
+
+    为什么默认空 (一条都不激活): 飞书按 open_id 给每个用户 spawn 独立 Session,
+    一条 schedule 必须**恰好**被一个 Session 激活, 否则提醒会被在线会话数乘一遍。
+    Gateway 侧 ``SchedulerManager`` 为每个 workspace 维护唯一一个全量激活的调度
+    Session; 单进程 CLI 需要跑定时任务时显式 ``--scheduler`` 或
+    ``--schedules 名字1,名字2``。
     """
 
     max_tool_rounds: int = 128
@@ -62,13 +70,15 @@ class Session:
         appdata_root = self.appdata.strip()
         if not appdata_root:
             appdata_root = await resolve_appdata_root()
+        active_schedules = self._active_schedules()
 
         logger.info(f"Loading workspace from {workspace_path}")
         if agent_path != workspace_path:
             logger.info(f"Loading agent package from {agent_path}")
         logger.info(f"AppData history root: {appdata_root}")
-        if self.scheduler:
-            logger.info(f"Scheduler session — owns schedules under {workspace_path / 'schedules'}")
+        if active_schedules:
+            names = "all" if ACTIVATE_ALL in active_schedules else sorted(active_schedules)
+            logger.info(f"Active schedules under {workspace_path / 'schedules'}: {names}")
 
         agent = await SessionAgent.create(
             ai_socket=self.ai_socket,
@@ -77,9 +87,20 @@ class Session:
             appdata_root=appdata_root,
             max_tool_rounds=self.max_tool_rounds,
             session_id=self.session_id,
-            scheduler=self.scheduler,
+            active_schedules=active_schedules,
         )
 
         async with anyio.create_task_group() as task_group:
             agent.start_all(task_group)
             task_group.start_soon(partial(serve_session, channel_socket=self.channel_socket, agent=agent))
+
+    def _active_schedules(self) -> set[str]:
+        """把 ``--scheduler`` / ``--schedules`` 归一成激活名单。
+
+        ``--scheduler`` 是 ``--schedules '*'`` 的便捷写法, 两者并存时取并集。
+        """
+        names = {part.strip() for part in self.schedules.split(",")}
+        names.discard("")
+        if self.scheduler:
+            names.add(ACTIVATE_ALL)
+        return names

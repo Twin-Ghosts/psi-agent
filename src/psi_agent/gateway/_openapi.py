@@ -464,12 +464,22 @@ OPENAPI_SPEC = {
                     "workspace": {"type": "string"},
                     "agent": {"type": "string"},
                     "channel_socket": {"type": "string"},
+                    "active_schedules": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Names of the schedules under {workspace}/schedules this session "
+                            "actually fires; ['*'] means all of them. Activation is a "
+                            "(session x schedule) property, so sessions sharing a workspace can "
+                            "each fire a different subset"
+                        ),
+                    },
                     "scheduler": {
                         "type": "boolean",
                         "description": (
-                            "True only for the per-workspace scheduler session that owns "
-                            "{workspace}/schedules. Such sessions are hidden from GET /sessions, "
-                            "so this is always false in list responses"
+                            "Derived: true only for the per-workspace scheduler session that fires "
+                            "all of {workspace}/schedules (active_schedules == ['*']). Such sessions "
+                            "are hidden from GET /sessions, so this is always false in list responses"
                         ),
                     },
                 },

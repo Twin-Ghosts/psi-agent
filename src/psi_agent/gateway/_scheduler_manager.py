@@ -1,25 +1,30 @@
-"""SchedulerManager — 每个 workspace 恰好一个调度 Session。
+"""SchedulerManager — 每个 workspace 恰好一个全量激活的调度 Session。
 
 **为什么 (刻意为之)**
 
-定时任务归属 **workspace**, 不归属 session。飞书 channel 按 open_id 给每个用户
-spawn 一个独立 Session (``_feishu_manager.py``), SPA 也可能对同一 workspace 开多
-个会话; 若每个 Session 都加载并触发 ``{workspace}/schedules``, 一条定时提醒就会
-被在线会话数乘一遍。
+定时任务归属 **workspace**, 触发权归属 **(session x schedule)**。飞书 channel 按
+open_id 给每个用户 spawn 一个独立 Session (``_feishu_manager.py``), SPA 也可能对同一
+workspace 开多个会话; 每个 Session 都能读到 ``{workspace}/schedules`` 的全部条目, 但
+一条 schedule 必须**恰好被一个 Session 激活**, 否则一条定时提醒会被在线会话数乘一遍。
 
-本模块让调度**只住在专用 Session 里**: ``ensure(workspace)`` 幂等地为一个
-workspace 拿到/创建唯一的 ``scheduler=True`` Session。于是「重复触发」在构造期就
-不存在, 不需要运行时抢锁, 也没有「持有者退出后谁接管」的选主问题。
+本模块负责那个「恰好一个」: ``ensure(workspace)`` 幂等地为一个 workspace 拿到/创建
+唯一的**全量激活** (``active_schedules=("*",)``) 调度 Session, 用户会话则一律不激活
+任何条目。于是「重复触发」在构造期就不存在, 不需要运行时抢锁, 也没有「持有者退出后
+谁接管」的选主问题。
+
+粒度是逐条而非整个 Session 一个布尔: 布尔只能表达「全触发 / 全不触发」, 表达不了
+「A 条归调度 Session、B 条归某个用户会话」。Gateway 默认用 ``("*",)`` 把整个 workspace
+交给调度 Session, 但 Session 层的名单机制允许更细的划分 (见 ``session/AGENTS.md``)。
 
 **按需创建**: 只有 workspace 真的存在非空 ``schedules/`` 时才 spawn, 免得 N 个
 从不用定时任务的飞书用户各挂一个空调度 Session (每个都要付 tools 加载成本)。
 调用方在建 workspace / 路由用户 / 恢复 state 后调 ``ensure``; 用户新建第一个定时
 任务后, 下一次 ``ensure`` 会把它拉起来。
 
-**对 SPA / state 完全隐藏**: ``SessionInfo.scheduler=True`` 使其从
-``SessionManager.list_all()`` 与 ``state/latest.json`` 中排除。session id 由
-workspace 路径确定性派生 (``_workspace_key`` 归一后取 sha256 前 16 位), 因此重启后
-``ensure`` 会重建同名 Session, 无需持久化。
+**对 SPA / state 完全隐藏**: ``SessionInfo.scheduler`` (由 ``active_schedules`` 含
+``*`` 派生) 使其从 ``SessionManager.list_all()`` 与 ``state/latest.json`` 中排除。
+session id 由 workspace 路径确定性派生 (``_workspace_key`` 归一后取 sha256 前 16 位),
+因此重启后 ``ensure`` 会重建同名 Session, 无需持久化。
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ import anyio
 from loguru import logger
 
 from psi_agent.gateway._session_manager import SessionManager
+from psi_agent.session.schedule_registry import ACTIVATE_ALL
 
 
 @dataclass
@@ -111,7 +117,13 @@ class SchedulerManager:
                 return ""
 
             try:
-                await self._sm.create(ai_id=resolved_ai, id=sid, workspace=workspace, agent=agent, scheduler=True)
+                await self._sm.create(
+                    ai_id=resolved_ai,
+                    id=sid,
+                    workspace=workspace,
+                    agent=agent,
+                    active_schedules=(ACTIVATE_ALL,),
+                )
             except ValueError as e:
                 # 并发竞态: 另一路已建同名 (锁内理论不会, 防御性兜底)。
                 if "already exists" not in str(e):

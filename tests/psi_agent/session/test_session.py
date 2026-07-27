@@ -6,6 +6,7 @@ import anyio
 import pytest
 
 from psi_agent.session import Session
+from psi_agent.session.schedule_registry import ACTIVATE_ALL
 from psi_agent.session.system_prompt import SystemPrompt
 
 
@@ -83,3 +84,32 @@ async def test_rebuild_checker_loads(tmp_path: Path) -> None:
 def test_workspace_empty_string_uses_cwd(tmp_path: Path) -> None:
     session = Session(workspace="", channel_socket=str(tmp_path / "c.sock"), ai_socket=str(tmp_path / "a.sock"))
     assert session.workspace == ""
+
+
+# ── 激活名单归一 (--scheduler / --schedules) ───────────────────────────────────
+
+
+def _session(tmp_path: Path, **kwargs: object) -> Session:
+    return Session(
+        channel_socket=str(tmp_path / "c.sock"),
+        ai_socket=str(tmp_path / "a.sock"),
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
+def test_no_flags_activates_nothing(tmp_path: Path) -> None:
+    """默认一条都不激活 —— 一条 schedule 必须恰好被一个 Session 触发。"""
+    assert _session(tmp_path)._active_schedules() == set()
+
+
+def test_scheduler_flag_expands_to_wildcard(tmp_path: Path) -> None:
+    assert _session(tmp_path, scheduler=True)._active_schedules() == {ACTIVATE_ALL}
+
+
+def test_schedules_names_are_split_and_trimmed(tmp_path: Path) -> None:
+    assert _session(tmp_path, schedules=" daily , weekly ,")._active_schedules() == {"daily", "weekly"}
+
+
+def test_scheduler_and_names_union(tmp_path: Path) -> None:
+    got = _session(tmp_path, scheduler=True, schedules="daily")._active_schedules()
+    assert got == {ACTIVATE_ALL, "daily"}

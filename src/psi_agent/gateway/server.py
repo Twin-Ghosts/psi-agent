@@ -140,6 +140,10 @@ def _session_data(info: SessionInfo) -> dict[str, Any]:
     data = asdict(info)
     if data.get("backend_type") == "ai":
         data["ai_id"] = data["backend_id"]
+    # ``scheduler`` 是由 active_schedules 派生的 property, asdict 不含它 —— 显式补上,
+    # REST / SPA 契约不变。
+    data["active_schedules"] = list(info.active_schedules)
+    data["scheduler"] = info.scheduler
     return data
 
 

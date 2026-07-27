@@ -13,7 +13,7 @@ Gateway 进程
 ├── AIManager          — AI 实例注册表 + 生命周期管理
 ├── RouterManager      — Gateway 内部语义路由服务注册表 + 生命周期管理
 ├── SessionManager     — Session 实例注册表 + 生命周期管理
-├── SchedulerManager   — 每 workspace 一个调度 Session（拥有其 schedules/，对 SPA 隐藏）
+├── SchedulerManager   — 每 workspace 一个全量激活的调度 Session（触发其 schedules/，对 SPA 隐藏）
 ├── TitleManager       — 会话标题 CRUD + AI 自动生成
 ├── WorkspaceManager   — 目录浏览
 ├── ChatManager        — SSE 流式对话管理
@@ -35,8 +35,8 @@ Gateway 进程
 | `_manager.py` | 共享 helpers（_new_uuid/_noop/_socket_path/_ensure_socket_dir/_remove_socket/_wait_socket） |
 | `_ai_manager.py` | `AIManager` — AI 实例注册表 + 生命周期 + AiInfo |
 | `_router_manager.py` | `RouterManager` — Router 实例注册表、AI ID 到 socket 解析和生命周期管理 |
-| `_session_manager.py` | `SessionManager` — Session 实例注册表 + 生命周期 + SessionInfo（含 `agent`、`scheduler`） |
-| `_scheduler_manager.py` | `SchedulerManager` — 每个 workspace 恰好一个**调度 Session**（拥有其 `schedules/`），按需 spawn，对 SPA / state 隐藏 |
+| `_session_manager.py` | `SessionManager` — Session 实例注册表 + 生命周期 + SessionInfo（含 `agent`、`active_schedules`） |
+| `_scheduler_manager.py` | `SchedulerManager` — 每个 workspace 恰好一个**全量激活**（`active_schedules=("*",)`）的调度 Session，按需 spawn，对 SPA / state 隐藏 |
 | `_defaults.py` | `resolve_default_agent` / `resolve_default_workspace`；再导出 ``psi_agent._appdata`` 路径助手 — CLI / `GET /defaults` 用 |
 | `_feishu_manager.py` | `FeishuManager` — 飞书 open_id → Session 路由表（复用 SessionManager 按需 spawn）+ FeishuRoute |
 | `_title_manager.py` | 会话标题 CRUD + AI 自动生成 |
@@ -86,7 +86,7 @@ Gateway SessionManager（缺省补 --default-agent / --default-workspace；注�
     ▼
 Session（#472 / 第 4C）
     │  启动时：tools / system 从 agent_path 加载
-    │         schedules 从 workspace_path 加载（且仅 scheduler=True 的调度 Session）
+    │         schedules 从 workspace_path 加载（每个 Session 都读到，但只触发激活名单里的）
     │         history 写 `{appdata}/histories/`（legacy 双读）
     │  回合内：runtime_scope 写入 get_agent()/get_workspace() ContextVar
     ▼
@@ -131,18 +131,21 @@ schedules → `{workspace}/schedules/`（归 workspace，非 agent 包 / 非 App
 | **haitun** `sessions_create` / session 工具 | `GET /defaults` 后 `POST /sessions` 带 `agent` |
 | **state 恢复** | snapshot 的 `agent`；缺省回落到 Gateway default |
 | **OpenAPI / 其它客户端** | 同一 REST；可显式传或依赖服务端默认 |
-| **调度 Session** | 不由外部调用方创建——`SchedulerManager.ensure()` 在上述任一调用方建会话后按 workspace 去重地 spawn（见下节）。`POST /sessions` 传 `scheduler` 无效，该参数不在 REST 入参里 |
+| **调度 Session** | 不由外部调用方创建——`SchedulerManager.ensure()` 在上述任一调用方建会话后按 workspace 去重地 spawn（见下节）。`POST /sessions` 传 `active_schedules` / `scheduler` 无效，两者都不在 REST 入参里 |
 
-## SchedulerManager（定时任务归 workspace，不归 session）
+## SchedulerManager（定时任务归 workspace，触发权归 session × schedule）
 
-定时任务的正确归属是 **workspace**。Gateway 一个进程跑多个 Session，飞书更是按 open_id 给每个用户 spawn 独立 Session；若每个 Session 都加载并触发 `{workspace}/schedules`，一条提醒就会被在线会话数乘一遍。
+定时任务的正确归属是 **workspace**，而**触发权**的粒度是 **(session × schedule)**。Gateway 一个进程跑多个 Session，飞书更是按 open_id 给每个用户 spawn 独立 Session；每个 Session 都读得到 `{workspace}/schedules` 的全部条目，但一条 schedule 必须**恰好被一个 Session 激活**，否则一条提醒就会被在线会话数乘一遍。
 
-`SchedulerManager` 让调度**只住在专用 Session 里**：`ensure(workspace)` 幂等地为一个 workspace 拿到/创建唯一的 `scheduler=True` Session。**「重复触发」在构造期就不存在**——不需要运行时抢锁，也没有「持有者退出后谁接管」的选主问题。
+`SchedulerManager` 负责那个「恰好一个」：`ensure(workspace)` 幂等地为一个 workspace 拿到/创建唯一的**全量激活**（`active_schedules=("*",)`）调度 Session，用户会话则一律传空名单。**「重复触发」在构造期就不存在**——不需要运行时抢锁，也没有「持有者退出后谁接管」的选主问题。
+
+粒度是逐条而非整个 Session 一个布尔：布尔只能表达「全触发 / 全不触发」，表达不了「A 条归调度 Session、B 条归某个用户会话」。Gateway 默认用 `("*",)` 把整个 workspace 交给调度 Session，但 Session 层的名单机制允许更细的划分（见 `session/AGENTS.md`）。
 
 | | |
 |--|--|
 | **去重键** | workspace 路径，经 `normcase` + `realpath` 归一（Windows 大小写 / 斜杠差异不产出两个调度 Session） |
 | **session id** | `scheduler-<workspace sha256 前16位>`，确定性派生 → 重启后 `ensure` 重建同名，无需持久化 |
+| **激活名单** | `("*",)`（`ACTIVATE_ALL`）——整个 workspace 的定时任务都归它；用户会话为 `()` |
 | **按需 spawn** | 仅当 workspace 真有 `schedules/*/TASK.md` 时才建。否则 N 个从不用定时任务的飞书用户会各挂一个空调度 Session（每个都付 tools 加载成本）。用户建第一个定时任务后，下一次 `ensure` 把它拉起来 |
 | **之后新建的任务** | 由调度 Session 自己的 `_watch_dir` 协程每 30s `refresh()` 感知，**不**依赖再次 `ensure`（`ensure` 幂等命中缓存后直接返回，不会重载磁盘）。详见 `session/AGENTS.md`「动态重载」 |
 | **谁调 `ensure`** | `POST /sessions`（建会话后）、`POST /feishu/route`（路由用户后）、`Gateway.run` 启动恢复 state 后 |
@@ -150,7 +153,7 @@ schedules → `{workspace}/schedules/`（归 workspace，非 agent 包 / 非 App
 | **失败不扩散** | `ensure` 捕获全部异常，只记 warning 返回 `""`。调度起不来不该拖垮建会话 / 收消息的主链路 |
 | **对 SPA / state 隐藏** | 见上方 `list_all(include_scheduler=False)` |
 
-Session 侧的对应契约（`scheduler=True` 才加载 `schedules/`、display 结果不再回流用户）见 `session/AGENTS.md` 的「调度归属 workspace」。
+Session 侧的对应契约（逐条激活、未激活条目仍加载、display 结果不再回流用户）见 `session/AGENTS.md` 的「调度归属 workspace，触发权归属 (session × schedule)」。
 
 ## 系统托盘 (GatewayTray)
 
@@ -236,9 +239,11 @@ Gateway 不重复实现语义选择或 SSE 代理。状态恢复顺序固定为 
 
 每个 `_SessionEntry` 包含：
 - `scope: anyio.CancelScope` — 独立取消
-- `info: SessionInfo` — 包含 `id`、`backend_type`、`backend_id`、`workspace`、`channel_socket`、`agent`、`scheduler`
+- `info: SessionInfo` — 包含 `id`、`backend_type`、`backend_id`、`workspace`、`channel_socket`、`agent`、`active_schedules`（本会话实际触发的定时任务名，`("*",)` = 全部）
 
-**`list_all(include_scheduler=False)`**：默认**不返回**调度 Session（`scheduler=True`）。因此 `GET /sessions` 与 `state/latest.json`（快照走 `list_all()`）都自动排除它——刻意为之：调度 Session 不是用户会话，列在 SPA 里只会让人误删。内部去重 / 运维需要看到它时传 `include_scheduler=True`。
+**`SessionInfo.scheduler`** 是由 `active_schedules` 派生的 property（`"*" in active_schedules`），只用于过滤与展示；真实归属信息在 `active_schedules` 本身。
+
+**`list_all(include_scheduler=False)`**：默认**不返回**全量调度 Session。因此 `GET /sessions` 与 `state/latest.json`（快照走 `list_all()`）都自动排除它——刻意为之：调度 Session 不是用户会话，列在 SPA 里只会让人误删。只激活部分条目的会话**仍是用户会话**，照常出现在列表里。内部去重 / 运维需要看到调度 Session 时传 `include_scheduler=True`。
 
 `backend_type="ai"` 时通过 `AIManager` 解析 socket；`backend_type="router"` 时
 通过 `RouterManager` 解析 socket。旧 REST 请求中的 `ai_id` 仍兼容为直接 AI

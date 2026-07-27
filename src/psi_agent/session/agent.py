@@ -83,7 +83,7 @@ class SessionAgent:
         session_id: str | None = None,
         agent_path: Path | None = None,
         appdata_root: str = "",
-        scheduler: bool = False,
+        active_schedules: set[str] | None = None,
     ) -> SessionAgent:
         """Production entry point.
 
@@ -94,12 +94,15 @@ class SessionAgent:
         *appdata_root* holds history JSONL (Step 4C); empty → resolve via
         ``PSI_APPDATA`` / platformdirs.
 
-        *scheduler* 决定本 Session 是否拥有该 workspace 的定时任务: 只有调度
-        Session 加载 ``{workspace}/schedules``, 普通用户 Session 得到一个空
-        ``ScheduleRegistry``。刻意为之 —— 飞书按 open_id 给每个用户 spawn 独立
-        Session, 让每个 Session 都触发会把一条定时任务乘以在线用户数; 由
-        Gateway ``SchedulerManager`` 保证每 workspace 只有一个调度 Session,
-        「重复触发」在构造期即不存在。
+        *active_schedules* 逐条决定本 Session 触发 ``{workspace}/schedules`` 里
+        的哪些定时任务: ``None`` / 空 → 一条都不触发 (普通用户 Session 的默认),
+        ``{ACTIVATE_ALL}`` → 全部, 具名集合 → 仅这些 ``name``。**激活是
+        (session x schedule) 的属性** —— 同一 workspace 的不同 Session 可各激活
+        不同子集, 未激活的条目照样加载进 registry (可读、可 refresh), 只是不起
+        runner。刻意为之: 飞书按 open_id 给每个用户 spawn 独立 Session, 一条
+        schedule 必须恰好被一个 Session 激活, 否则提醒会被在线会话数乘一遍;
+        Gateway ``SchedulerManager`` 为每个 workspace 维护唯一一个全量激活
+        (``ACTIVATE_ALL``) 的调度 Session。
         """
         agent_root = agent_path if agent_path is not None else workspace_path
 
@@ -110,11 +113,10 @@ class SessionAgent:
             appdata_root=appdata_root,
         )
         tool_registry = await ToolRegistry.load(agent_root / "tools", conversation.session_id)
-        if scheduler:
-            schedule_registry = await ScheduleRegistry.load(workspace_path / "schedules")
-        else:
-            # 非调度 Session: 不加载、更不触发 —— 空 registry 让 refresh() 成为 no-op。
-            schedule_registry = ScheduleRegistry()
+        schedule_registry = await ScheduleRegistry.load(
+            workspace_path / "schedules",
+            active_names=active_schedules,
+        )
         system_prompt = await SystemPrompt.from_workspace(agent_root, conversation.session_id)
 
         return cls(
@@ -133,7 +135,8 @@ class SessionAgent:
     def start_all(self, task_group: object) -> None:
         """Start schedule runners — called by ``Session.run()``.
 
-        非调度 Session 的 registry 是空的, 这里自然是 no-op。
+        只为**本 Session 激活的** schedule 起 runner; 未激活的条目仍在 registry
+        里可读 (见 ``SessionAgent.create`` 的 *active_schedules*)。
         """
         self._schedule_registry.start_all(task_group, self)
 

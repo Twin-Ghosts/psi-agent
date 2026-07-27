@@ -45,6 +45,9 @@ FIRE_TOOL = "tool"
 # 最多等这么久生效, 而 refresh() 是 hash 增量, 空转成本只是一次目录 stat。
 _WATCH_INTERVAL_SECONDS = 30.0
 
+# 激活名单里的通配符: 本 Session 触发该 workspace 下的**全部** schedule。
+ACTIVATE_ALL = "*"
+
 
 @dataclass
 class Schedule:
@@ -92,48 +95,80 @@ class ScheduleRegistry:
     Each schedule gets a ``CancelScope`` for per-schedule cancellation
     on update or removal.
 
-    **调度归属 workspace, 不归属 session (刻意为之)**: schedules 目录取自
-    *workspace*, 且只有 ``scheduler=True`` 的 Session (每 workspace 恰好一个,
-    由 Gateway ``SchedulerManager`` 保证) 才构造出非空 registry。飞书按 open_id
-    给每个用户 spawn 独立 Session, 若按 session 触发则一条定时任务会被在线用户
-    数乘一遍; 让调度只住在专用 Session 里, 「重复触发」在构造期就不存在, 无需
-    运行时抢锁。普通用户 Session 拿到的是空 registry (``work_dir`` 为 ``None``),
-    ``start_all`` / ``refresh`` 都是 no-op。
+    **激活是 (session x schedule) 的属性, 不是 session 的 (刻意为之)**: schedules
+    目录取自 *workspace* (每个 Session 都能读到全部条目, ``schedules`` 属性、SPA
+    展示、``refresh()`` 的 add/update/remove 统计都不受激活影响), 但**是否起
+    runner** 由 ``active_names`` 逐条决定 —— 同一 workspace 的不同 Session 可以各
+    自激活不同的子集。
+
+    为什么按条而非按 Session 一个布尔: 触发权本质上是「这条任务归哪个 Session」,
+    一个整体开关只能表达「全触发 / 全不触发」, 表达不了「A 条归调度 Session、B 条
+    归某个用户会话」。飞书按 open_id 给每个用户 spawn 独立 Session, 一条 schedule
+    必须**恰好**被一个 Session 激活, 否则提醒会被在线会话数乘一遍。
+
+    ``active_names`` 语义: ``None`` / 空集 → 一条都不激活 (普通用户 Session 的默认,
+    ``start_all`` 不起任何 runner); ``{ACTIVATE_ALL}`` → 全部激活 (调度 Session 的
+    默认); 具名集合 → 仅这些 ``schedule.name`` 激活。
     """
 
-    def __init__(self, *, files: dict[str, ScheduleEntry] | None = None, work_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        files: dict[str, ScheduleEntry] | None = None,
+        work_dir: Path | None = None,
+        active_names: set[str] | None = None,
+    ) -> None:
         self._files: dict[str, ScheduleEntry] = dict(files or {})
         self._work_dir = work_dir
+        self._active_names: set[str] = set(active_names or ())
         self._agent: SessionAgent | None = None
         self._task_group: Any = None
         self._runner_scopes: dict[str, anyio.CancelScope] = {}
 
     @property
     def schedules(self) -> list[Schedule]:
-        """Flat list of all registered schedules."""
+        """Flat list of all registered schedules (激活与否都在内)。"""
         return [entry.schedule for entry in self._files.values()]
+
+    @property
+    def active_schedules(self) -> list[Schedule]:
+        """本 Session 实际触发的 schedule —— 即 ``active_names`` 命中的那些。"""
+        return [s for s in self.schedules if self.is_active(s.name)]
+
+    def is_active(self, name: str) -> bool:
+        """本 Session 是否触发名为 *name* 的 schedule。
+
+        ``ACTIVATE_ALL`` 在名单里即全部命中; 否则逐名精确匹配。
+        """
+        if ACTIVATE_ALL in self._active_names:
+            return True
+        return name in self._active_names
 
     # -- factory ----------------------------------------------------------------
 
     @classmethod
-    async def load(cls, schedules_dir: Path) -> ScheduleRegistry:
-        """Full initial load — scan *schedules_dir*."""
+    async def load(cls, schedules_dir: Path, *, active_names: set[str] | None = None) -> ScheduleRegistry:
+        """Full initial load — scan *schedules_dir*.
+
+        *active_names* 决定哪些条目由本 Session 触发 (默认一条都不, 见类文档)。
+        """
         files = await cls._load_from_dir(schedules_dir)
-        return cls(files=files, work_dir=schedules_dir)
+        return cls(files=files, work_dir=schedules_dir, active_names=active_names)
 
     # -- runner lifecycle -------------------------------------------------------
 
     def start_all(self, task_group: Any, agent: SessionAgent) -> None:
-        """Start a runner for every registered schedule in *task_group*.
+        """Start a runner for every **激活的** schedule in *task_group*.
 
-        Stores *agent* and *task_group* for use by ``refresh()``; 非空 registry
-        (即调度 Session) 额外起一个 ``_watch_dir`` 常驻协程周期性 ``refresh()``。
+        Stores *agent* and *task_group* for use by ``refresh()``; 有激活条目时额外
+        起一个 ``_watch_dir`` 常驻协程周期性 ``refresh()``。未激活的条目照旧留在
+        ``schedules`` 里 (可读、可 refresh), 只是不起 runner。
         """
         self._agent = agent
         self._task_group = task_group
         for entry in self._files.values():
             self._start_runner(entry.schedule)
-        if self._work_dir is not None:
+        if self._work_dir is not None and self._active_names:
             task_group.start_soon(self._watch_dir)
 
     async def _watch_dir(self) -> None:
@@ -222,7 +257,14 @@ class ScheduleRegistry:
     # -- runner management ------------------------------------------------------
 
     def _start_runner(self, schedule: Schedule) -> None:
-        """Start a perpetual runner coroutine for *schedule*."""
+        """Start a perpetual runner coroutine for *schedule* —— 仅当它被本 Session 激活。
+
+        未激活时是 no-op (刻意为之): 激活是 (session x schedule) 的属性, 未激活的
+        条目仍在 ``schedules`` 里可读, 但触发权归激活它的那个 Session。
+        """
+        if not self.is_active(schedule.name):
+            logger.debug(f"Schedule {schedule.name!r} not active in this session; runner not started")
+            return
         cancel_scope = anyio.CancelScope()
         self._runner_scopes[schedule.name] = cancel_scope
         self._task_group.start_soon(self._run_one, schedule, self._agent, cancel_scope, self)

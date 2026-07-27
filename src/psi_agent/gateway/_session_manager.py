@@ -20,6 +20,7 @@ from psi_agent.gateway._manager import (
 )
 from psi_agent.gateway._router_manager import RouterManager
 from psi_agent.session import Session
+from psi_agent.session.schedule_registry import ACTIVATE_ALL
 
 
 @dataclass
@@ -35,13 +36,23 @@ class SessionInfo:
     agent: str = ""
     """Agent package path (tools/system). Empty → single-root compat."""
 
-    scheduler: bool = False
-    """本 Session 是否是该 workspace 的调度 Session (拥有 ``schedules/``)。
+    active_schedules: tuple[str, ...] = ()
+    """本 Session 激活 (即实际触发) 的定时任务名; ``("*",)`` 表示全部。
 
-    调度 Session 由 ``SchedulerManager`` 按 workspace 去重地创建, 对 SPA 与
-    ``state/latest.json`` **完全隐藏** (``list_all`` 默认过滤, 持久化跳过)。
-    刻意为之: 它不是用户会话, 出现在会话列表里只会让人误删。
+    激活是 **(session x schedule)** 的属性: 同一 workspace 的多个 Session 都能
+    读到全部条目, 但各自只触发自己名单里的那些。``SchedulerManager`` 为每个
+    workspace 维护唯一一个全量激活 (``("*",)``) 的调度 Session, 该 Session 对
+    SPA 与 ``state/latest.json`` **完全隐藏** (``list_all`` 默认过滤, 持久化跳过)
+    —— 刻意为之: 它不是用户会话, 出现在会话列表里只会让人误删。
     """
+
+    @property
+    def scheduler(self) -> bool:
+        """本 Session 是否是该 workspace 的全量调度 Session。
+
+        供 ``list_all`` 过滤与 REST 展示用; 真实归属信息在 ``active_schedules``。
+        """
+        return ACTIVATE_ALL in self.active_schedules
 
     @property
     def ai_id(self) -> str:
@@ -78,7 +89,7 @@ class SessionManager:
         id: str = "",
         workspace: str = "",
         agent: str = "",
-        scheduler: bool = False,
+        active_schedules: tuple[str, ...] = (),
     ) -> SessionInfo:
         """Spawn a Session.
 
@@ -87,8 +98,9 @@ class SessionManager:
         from that directory. Tools that resolve relative paths via ContextVar
         are a later PR — this only passes the path in.
 
-        *scheduler* 标记「这是该 workspace 的调度 Session」: 只有它加载并触发
-        ``{workspace}/schedules``, 且对 SPA / state 隐藏。普通调用方不传此参数。
+        *active_schedules* 逐条指定本 Session 触发哪些定时任务 (``("*",)`` = 全部,
+        默认空 = 一条都不触发)。全量激活的 Session 由 ``SchedulerManager`` 按
+        workspace 去重地创建, 且对 SPA / state 隐藏。普通调用方不传此参数。
         """
         session_id = id or _new_uuid()
         workspace = workspace.strip() or self._default_workspace or os.getcwd()
@@ -113,7 +125,7 @@ class SessionManager:
                 channel_socket=channel_socket,
                 ai_socket=upstream_socket,
                 session_id=session_id,
-                scheduler=scheduler,
+                schedules=",".join(active_schedules),
             )
             scope = anyio.CancelScope()
 
@@ -136,7 +148,7 @@ class SessionManager:
                 workspace=workspace,
                 channel_socket=channel_socket,
                 agent=agent,
-                scheduler=scheduler,
+                active_schedules=active_schedules,
             )
             self._entries[session_id] = _SessionEntry(scope=scope, info=info)
         try:

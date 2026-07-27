@@ -14,6 +14,7 @@ from psi_agent.session.ai_client import AiClient
 from psi_agent.session.conversation import Conversation
 from psi_agent.session.protocol import AgentChunk, AgentError
 from psi_agent.session.runtime_context import get_agent, get_workspace, runtime_scope
+from psi_agent.session.schedule_registry import ACTIVATE_ALL
 from psi_agent.session.tool_registry import FileEntry, ToolFunction, ToolRegistry
 
 
@@ -821,7 +822,7 @@ async def test_conversation_dual_read_legacy_workspace_history(
 
 
 @pytest.mark.anyio
-async def test_scheduler_session_loads_schedules_from_workspace_not_agent_package(tmp_path: Path) -> None:
+async def test_schedules_load_from_workspace_not_agent_package(tmp_path: Path) -> None:
     """schedules 归 workspace (刻意为之) - 飞书多用户共用 agent 包时不能共享定时任务。"""
     workspace = tmp_path / "user-ws"
     agent_pkg = tmp_path / "agent-pkg"
@@ -840,15 +841,15 @@ async def test_scheduler_session_loads_schedules_from_workspace_not_agent_packag
         workspace_path=workspace,
         agent_path=agent_pkg,
         session_id="sched-src",
-        scheduler=True,
+        active_schedules={ACTIVATE_ALL},
     )
     names = {s.name for s in session_agent._schedule_registry.schedules}
     assert names == {"mine"}
 
 
 @pytest.mark.anyio
-async def test_non_scheduler_session_loads_no_schedules(tmp_path: Path) -> None:
-    """普通用户 Session 不拥有定时任务 —— 否则一条提醒会被在线会话数乘一遍。"""
+async def test_session_without_active_schedules_fires_none(tmp_path: Path) -> None:
+    """普通用户 Session 读得到条目但不触发 —— 否则一条提醒会被在线会话数乘一遍。"""
     workspace = tmp_path / "user-ws"
     await anyio.Path(workspace / "schedules" / "mine").mkdir(parents=True)
     await anyio.Path(workspace / "schedules" / "mine" / "TASK.md").write_text(
@@ -860,11 +861,34 @@ async def test_non_scheduler_session_loads_no_schedules(tmp_path: Path) -> None:
         workspace_path=workspace,
         session_id="plain-user",
     )
-    assert session_agent._schedule_registry.schedules == []
+    registry = session_agent._schedule_registry
+    assert {s.name for s in registry.schedules} == {"mine"}
+    assert registry.active_schedules == []
 
 
 @pytest.mark.anyio
-async def test_non_scheduler_session_start_all_starts_nothing(tmp_path: Path) -> None:
+async def test_session_activates_only_named_schedules(tmp_path: Path) -> None:
+    """激活是 (session x schedule) 的属性: 逐条指定, 不是整个 Session 一个开关。"""
+    workspace = tmp_path / "user-ws"
+    for name in ("mine", "theirs"):
+        await anyio.Path(workspace / "schedules" / name).mkdir(parents=True)
+        await anyio.Path(workspace / "schedules" / name / "TASK.md").write_text(
+            f'---\nname: {name}\ncron: "0 12 * * *"\n---\nT', encoding="utf-8"
+        )
+
+    session_agent = await SessionAgent.create(
+        ai_socket="http://x",
+        workspace_path=workspace,
+        session_id="subset-user",
+        active_schedules={"mine"},
+    )
+    registry = session_agent._schedule_registry
+    assert {s.name for s in registry.schedules} == {"mine", "theirs"}
+    assert {s.name for s in registry.active_schedules} == {"mine"}
+
+
+@pytest.mark.anyio
+async def test_session_without_active_schedules_start_all_starts_nothing(tmp_path: Path) -> None:
     workspace = tmp_path / "user-ws"
     await anyio.Path(workspace / "schedules" / "mine").mkdir(parents=True)
     await anyio.Path(workspace / "schedules" / "mine" / "TASK.md").write_text(

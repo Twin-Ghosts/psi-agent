@@ -8,6 +8,7 @@ import pytest
 from psi_agent.gateway._ai_manager import AIManager
 from psi_agent.gateway._scheduler_manager import SchedulerManager
 from psi_agent.gateway._session_manager import SessionManager
+from psi_agent.session.schedule_registry import ACTIVATE_ALL
 
 
 async def _make_managers(tg: object) -> tuple[AIManager, SessionManager]:
@@ -245,7 +246,9 @@ async def test_scheduler_session_hidden_from_list_all(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
-async def test_scheduler_flag_set_on_session_info(tmp_path: Path) -> None:
+async def test_scheduler_session_activates_all_schedules(tmp_path: Path) -> None:
+    """Gateway 把整个 workspace 交给调度 Session —— 名单是通配 ``*``, 而 ``scheduler``
+    只是由它派生出来的展示/过滤用属性。"""
     tg = anyio.create_task_group()
     await tg.__aenter__()
     try:
@@ -255,7 +258,39 @@ async def test_scheduler_flag_set_on_session_info(tmp_path: Path) -> None:
         sid = await schedm.ensure(str(tmp_path))
 
         infos = {i.id: i for i in await sm.list_all(include_scheduler=True)}
+        assert infos[sid].active_schedules == (ACTIVATE_ALL,)
         assert infos[sid].scheduler is True
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_user_session_activates_no_schedules(tmp_path: Path) -> None:
+    """用户会话默认一条都不激活 —— 一条 schedule 必须恰好被一个 Session 触发。"""
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        info = await sm.create(ai_id="ai1", workspace=str(tmp_path))
+        assert info.active_schedules == ()
+        assert info.scheduler is False
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_named_subset_session_is_not_hidden(tmp_path: Path) -> None:
+    """只激活部分条目的普通会话仍是用户会话 —— 不该从 SPA / state 里消失。"""
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        info = await sm.create(ai_id="ai1", workspace=str(tmp_path), active_schedules=("daily",))
+        assert info.active_schedules == ("daily",)
+        assert info.scheduler is False
+        assert [i.id for i in await sm.list_all()] == [info.id]
     finally:
         await _drain(sm, am)
         await tg.__aexit__(None, None, None)

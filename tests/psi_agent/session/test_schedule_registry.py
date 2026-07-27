@@ -12,7 +12,7 @@ from croniter import croniter
 from psi_agent._yaml import parse_yaml_header
 from psi_agent.session import schedule_registry as schedule_registry_module
 from psi_agent.session.conversation import Conversation
-from psi_agent.session.schedule_registry import Schedule, ScheduleEntry, ScheduleRegistry
+from psi_agent.session.schedule_registry import ACTIVATE_ALL, Schedule, ScheduleEntry, ScheduleRegistry
 from psi_agent.session.tool_registry import FileEntry, ToolFunction, ToolRegistry
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -571,7 +571,7 @@ async def test_watcher_picks_up_schedule_created_after_start(tmp_path: Path, mon
         '---\nname: first\ncron: "0 12 * * *"\n---\nT', encoding="utf-8"
     )
 
-    sr = await ScheduleRegistry.load(sched_root)
+    sr = await ScheduleRegistry.load(sched_root, active_names={ACTIVATE_ALL})
     seen_second = anyio.Event()
     real_refresh = sr.refresh
 
@@ -624,7 +624,7 @@ async def test_watcher_survives_refresh_exception(tmp_path: Path, monkeypatch: p
     调度 Session。单次刷新失败必须只记 ERROR 并在下一周期重试。"""
     monkeypatch.setattr(schedule_registry_module, "_WATCH_INTERVAL_SECONDS", 0.02)
     await anyio.Path(tmp_path / "schedules").mkdir(parents=True)
-    sr = await ScheduleRegistry.load(tmp_path / "schedules")
+    sr = await ScheduleRegistry.load(tmp_path / "schedules", active_names={ACTIVATE_ALL})
 
     calls = 0
     third_call = anyio.Event()
@@ -646,18 +646,29 @@ async def test_watcher_survives_refresh_exception(tmp_path: Path, monkeypatch: p
         tg.cancel_scope.cancel()
 
 
-# ── scheduler session ownership — 一个 workspace 只有调度 Session 触发 ────────
+# ── 激活是 (session x schedule) 的属性 — 每条各自决定归哪个 Session ───────────
+
+
+async def _load_three(tmp_path: Path, active: set[str] | None) -> ScheduleRegistry:
+    sched_root = tmp_path / "schedules"
+    for name in ("alpha", "beta", "gamma"):
+        d = sched_root / name
+        await anyio.Path(d).mkdir(parents=True)
+        await anyio.Path(d / "TASK.md").write_text(
+            f'---\nname: {name}\ncron: "0 12 * * *"\n---\nTask {name}', encoding="utf-8"
+        )
+    return await ScheduleRegistry.load(sched_root, active_names=active)
 
 
 @pytest.mark.anyio
-async def test_start_all_starts_one_runner_per_schedule(tmp_path: Path) -> None:
+async def test_start_all_starts_one_runner_per_active_schedule(tmp_path: Path) -> None:
     sched_dir = tmp_path / "schedules" / "daily"
     await anyio.Path(sched_dir).mkdir(parents=True)
     await anyio.Path(sched_dir / "TASK.md").write_text(
         '---\nname: daily\ncron: "0 12 * * *"\n---\nTask', encoding="utf-8"
     )
 
-    sr = await ScheduleRegistry.load(tmp_path / "schedules")
+    sr = await ScheduleRegistry.load(tmp_path / "schedules", active_names={ACTIVATE_ALL})
     async with anyio.create_task_group() as tg:
         sr.start_all(tg, cast(Any, _MockAgent()))
         assert len(sr._runner_scopes) == 1
@@ -665,8 +676,99 @@ async def test_start_all_starts_one_runner_per_schedule(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_named_subset_starts_only_those_runners(tmp_path: Path) -> None:
+    """核心契约: 同一 workspace 的两个 Session 可各激活不同子集。
+
+    整个 Session 一个布尔只能表达「全触发 / 全不触发」, 表达不了这种划分。
+    """
+    sr = await _load_three(tmp_path, {"alpha", "gamma"})
+    async with anyio.create_task_group() as tg:
+        sr.start_all(tg, cast(Any, _MockAgent()))
+        assert set(sr._runner_scopes) == {"alpha", "gamma"}
+        # 未激活的条目照样在 registry 里可读 —— 只是不触发。
+        assert {s.name for s in sr.schedules} == {"alpha", "beta", "gamma"}
+        assert {s.name for s in sr.active_schedules} == {"alpha", "gamma"}
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_disjoint_subsets_fire_each_schedule_exactly_once(tmp_path: Path) -> None:
+    """两个 Session 的名单不相交时, 每条 schedule 恰好被一个 Session 触发。"""
+    a = await _load_three(tmp_path, {"alpha"})
+    b = await ScheduleRegistry.load(tmp_path / "schedules", active_names={"beta", "gamma"})
+    async with anyio.create_task_group() as tg:
+        a.start_all(tg, cast(Any, _MockAgent()))
+        b.start_all(tg, cast(Any, _MockAgent()))
+        assert set(a._runner_scopes) == {"alpha"}
+        assert set(b._runner_scopes) == {"beta", "gamma"}
+        assert set(a._runner_scopes) & set(b._runner_scopes) == set()
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_no_active_names_starts_nothing_but_still_loads(tmp_path: Path) -> None:
+    """普通用户 Session: 读得到全部条目, 但一条都不触发 (刻意为之)。"""
+    sr = await _load_three(tmp_path, None)
+    async with anyio.create_task_group() as tg:
+        sr.start_all(tg, cast(Any, _MockAgent()))
+        assert sr._runner_scopes == {}
+        assert sr.active_schedules == []
+        assert len(sr.schedules) == 3
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_refresh_only_starts_runners_for_active_names(tmp_path: Path) -> None:
+    """refresh 的 add/update 统计不受激活影响, 但只为激活条目起 runner。"""
+    sr = await ScheduleRegistry.load(tmp_path / "schedules", active_names={"wanted"})
+    sched_root = tmp_path / "schedules"
+    for name in ("wanted", "unwanted"):
+        d = sched_root / name
+        await anyio.Path(d).mkdir(parents=True)
+        await anyio.Path(d / "TASK.md").write_text(f'---\nname: {name}\ncron: "0 12 * * *"\n---\nT', encoding="utf-8")
+    sr._work_dir = sched_root
+    sr._agent = cast(Any, _MockAgent())
+    async with anyio.create_task_group() as tg:
+        sr._task_group = tg
+        result = await sr.refresh()
+        # 两条都被登记 (统计与展示不受激活影响)
+        assert result == {"wanted": "added", "unwanted": "added"}
+        # 但只有激活的那条起了 runner
+        assert set(sr._runner_scopes) == {"wanted"}
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_inactive_registry_starts_no_watcher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """一条都不激活的 Session 不该周期性扫盘。"""
+    monkeypatch.setattr(schedule_registry_module, "_WATCH_INTERVAL_SECONDS", 0.05)
+    refreshed = 0
+    sr = await _load_three(tmp_path, None)
+
+    async def _counting_refresh() -> dict[str, str]:
+        nonlocal refreshed
+        refreshed += 1
+        return {}
+
+    monkeypatch.setattr(sr, "refresh", _counting_refresh)
+    async with anyio.create_task_group() as tg:
+        sr.start_all(tg, cast(Any, _MockAgent()))
+        await anyio.sleep(0.3)
+        assert refreshed == 0
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_is_active_wildcard_and_names() -> None:
+    assert ScheduleRegistry(active_names={ACTIVATE_ALL}).is_active("anything") is True
+    assert ScheduleRegistry(active_names={"a"}).is_active("a") is True
+    assert ScheduleRegistry(active_names={"a"}).is_active("b") is False
+    assert ScheduleRegistry().is_active("a") is False
+
+
+@pytest.mark.anyio
 async def test_empty_registry_start_all_is_noop(tmp_path: Path) -> None:
-    """普通用户 Session 拿到的空 registry: 不加载、不触发 (刻意为之)。"""
+    """空 registry (无 work_dir): 不加载、不触发。"""
     sr = ScheduleRegistry()
     async with anyio.create_task_group() as tg:
         sr.start_all(tg, cast(Any, _MockAgent()))
