@@ -420,8 +420,18 @@ class SessionAgent:
             logger.warning("No compact_history function in system.py, skipping compaction")
             return
 
+        async def complete_fn(messages: list[dict[str, Any]]) -> str:
+            body: dict[str, Any] = {"messages": messages, "stream": True}
+            parts: list[str] = []
+            async with aclosing(self._ai_client.stream(body)) as stream:
+                async for delta in stream:
+                    if delta.content:
+                        parts.append(delta.content)
+                    if delta.finish_reason == "error":
+                        raise AgentError(delta.content or "Compaction AI call failed")
+            return "".join(parts)
+
         try:
-            complete_fn = self._make_compaction_complete_fn()
             summary = await compaction_fn(self._conversation.messages, complete_fn)
             logger.info(f"Compaction summary generated ({len(summary)} chars)")
 
@@ -437,18 +447,3 @@ class SessionAgent:
             logger.info("Compaction completed")
         except Exception as e:
             logger.error(f"Compaction failed: {e!r}")
-
-    def _make_compaction_complete_fn(self):
-        """Build a complete_fn for use by compact_history."""
-
-        async def complete_fn(messages: list[dict[str, Any]]) -> str:
-            body: dict[str, Any] = {"messages": messages, "stream": True}
-            parts: list[str] = []
-            async for delta in self._ai_client.stream(body):
-                if delta.content:
-                    parts.append(delta.content)
-                if delta.finish_reason == "error":
-                    raise AgentError(delta.content or "Compaction AI call failed")
-            return "".join(parts)
-
-        return complete_fn

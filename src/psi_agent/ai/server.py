@@ -129,7 +129,7 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
             logger.warning("Failed to send upstream error chunk to client")
     else:
         if compaction_needed:
-            logger.info("Request completed with compaction signal")
+            logger.debug("Request completed with compaction signal")
         else:
             logger.debug("Upstream stream completed successfully")
     finally:
