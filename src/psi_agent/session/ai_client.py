@@ -72,10 +72,16 @@ class AiClient:
                 delta_data = c.get("delta")
                 if not isinstance(delta_data, dict):
                     delta_data = {}
+                compaction_signal = data.get("psi_compaction", {})
+                compaction_needed = (
+                    isinstance(compaction_signal, dict)
+                    and compaction_signal.get("needed", False)
+                )
                 yield AiDelta(
                     content=delta_data.get("content"),
                     reasoning=delta_data.get("reasoning"),
                     tool_calls=delta_data.get("tool_calls"),
                     finish_reason=c.get("finish_reason"),
+                    compaction_needed=compaction_needed,
                 )
             logger.debug("SSE stream consumed successfully")
