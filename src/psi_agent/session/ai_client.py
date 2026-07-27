@@ -73,10 +73,7 @@ class AiClient:
                 if not isinstance(delta_data, dict):
                     delta_data = {}
                 compaction_signal = data.get("psi_compaction", {})
-                compaction_needed = (
-                    isinstance(compaction_signal, dict)
-                    and compaction_signal.get("needed", False)
-                )
+                compaction_needed = isinstance(compaction_signal, dict) and compaction_signal.get("needed", False)
                 yield AiDelta(
                     content=delta_data.get("content"),
                     reasoning=delta_data.get("reasoning"),

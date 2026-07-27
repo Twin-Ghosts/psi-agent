@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import socket
-from typing import Any
 
 import anyio
 import pytest
@@ -9,6 +8,17 @@ from aiohttp import web
 
 from psi_agent.session.ai_client import AiClient
 from psi_agent.session.protocol import AiDelta
+
+_STOP_SSE = (
+    b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi"},'
+    b'"finish_reason":"stop"}],"created":0,"model":"test",'
+    b'"object":"chat.completion.chunk"}\n\n'
+)
+_COMPACTION_SSE = (
+    b'data: {"id":"compaction","choices":[{"index":0,"delta":{},'
+    b'"finish_reason":"compaction_needed"}],'
+    b'"psi_compaction":{"needed":true,"prompt_tokens":50000,"threshold":10000}}\n\n'
+)
 
 
 @pytest.mark.anyio
@@ -24,12 +34,8 @@ async def test_ai_client_parses_compaction_signal() -> None:
             },
         )
         await resp.prepare(request)
-        await resp.write(
-            b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":"stop"}],"created":0,"model":"test","object":"chat.completion.chunk"}\n\n'
-        )
-        await resp.write(
-            b'data: {"id":"compaction","choices":[{"index":0,"delta":{},"finish_reason":"compaction_needed"}],"psi_compaction":{"needed":true,"prompt_tokens":50000,"threshold":10000}}\n\n'
-        )
+        await resp.write(_STOP_SSE)
+        await resp.write(_COMPACTION_SSE)
         return resp
 
     app = web.Application()
@@ -72,9 +78,7 @@ async def test_ai_client_no_compaction_when_field_absent() -> None:
             },
         )
         await resp.prepare(request)
-        await resp.write(
-            b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":"stop"}],"created":0,"model":"test","object":"chat.completion.chunk"}\n\n'
-        )
+        await resp.write(_STOP_SSE)
         return resp
 
     app = web.Application()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import socket
 from pathlib import Path
@@ -13,7 +14,9 @@ from psi_agent.ai.server import handle_chat_completions
 
 
 class _CompactionFakeChunk:
-    def __init__(self, content: str = "", finish_reason: str | None = None, usage: dict[str, int] | None = None) -> None:
+    def __init__(
+        self, content: str = "", finish_reason: str | None = None, usage: dict[str, int] | None = None
+    ) -> None:
         self._content = content
         self._finish_reason = finish_reason
         self.usage = _FakeUsage(**usage) if usage else None
@@ -104,28 +107,20 @@ async def _read_sse(socket_path: str) -> list[dict[str, Any]]:
                 data_str = line[6:]
                 if data_str == "[DONE]":
                     continue
-                try:
+                with contextlib.suppress(json.JSONDecodeError):
                     chunks.append(json.loads(data_str))
-                except json.JSONDecodeError:
-                    pass
     return chunks
 
 
 @pytest.mark.anyio
-async def test_compaction_signal_when_usage_exceeds_threshold(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_compaction_signal_when_usage_exceeds_threshold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     stream = _CompactionTrackingStream(
         [
             _CompactionFakeChunk(content="Hello", finish_reason="stop"),
-            _CompactionFakeChunk(
-                usage={"prompt_tokens": 50000, "completion_tokens": 200, "total_tokens": 50200}
-            ),
+            _CompactionFakeChunk(usage={"prompt_tokens": 50000, "completion_tokens": 200, "total_tokens": 50200}),
         ]
     )
-    runner, socket_path = await _serve_compaction_handler(
-        tmp_path, monkeypatch, stream, max_context_tokens=10000
-    )
+    runner, socket_path = await _serve_compaction_handler(tmp_path, monkeypatch, stream, max_context_tokens=10000)
     try:
         chunks = await _read_sse(socket_path)
         assert len(chunks) >= 2
@@ -139,20 +134,14 @@ async def test_compaction_signal_when_usage_exceeds_threshold(
 
 
 @pytest.mark.anyio
-async def test_no_compaction_signal_when_under_threshold(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_no_compaction_signal_when_under_threshold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     stream = _CompactionTrackingStream(
         [
             _CompactionFakeChunk(content="Hello", finish_reason="stop"),
-            _CompactionFakeChunk(
-                usage={"prompt_tokens": 5000, "completion_tokens": 200, "total_tokens": 5200}
-            ),
+            _CompactionFakeChunk(usage={"prompt_tokens": 5000, "completion_tokens": 200, "total_tokens": 5200}),
         ]
     )
-    runner, socket_path = await _serve_compaction_handler(
-        tmp_path, monkeypatch, stream, max_context_tokens=10000
-    )
+    runner, socket_path = await _serve_compaction_handler(tmp_path, monkeypatch, stream, max_context_tokens=10000)
     try:
         chunks = await _read_sse(socket_path)
         for chunk in chunks:
@@ -162,20 +151,14 @@ async def test_no_compaction_signal_when_under_threshold(
 
 
 @pytest.mark.anyio
-async def test_no_compaction_when_max_context_tokens_zero(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_no_compaction_when_max_context_tokens_zero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     stream = _CompactionTrackingStream(
         [
             _CompactionFakeChunk(content="Hello", finish_reason="stop"),
-            _CompactionFakeChunk(
-                usage={"prompt_tokens": 50000, "completion_tokens": 200, "total_tokens": 50200}
-            ),
+            _CompactionFakeChunk(usage={"prompt_tokens": 50000, "completion_tokens": 200, "total_tokens": 50200}),
         ]
     )
-    runner, socket_path = await _serve_compaction_handler(
-        tmp_path, monkeypatch, stream, max_context_tokens=0
-    )
+    runner, socket_path = await _serve_compaction_handler(tmp_path, monkeypatch, stream, max_context_tokens=0)
     try:
         chunks = await _read_sse(socket_path)
         for chunk in chunks:
@@ -185,9 +168,7 @@ async def test_no_compaction_when_max_context_tokens_zero(
 
 
 @pytest.mark.anyio
-async def test_stream_options_include_usage_forced(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_stream_options_include_usage_forced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     received_kwargs: dict[str, Any] = {}
     stream = _CompactionTrackingStream(
         [

@@ -81,11 +81,7 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
         max_context_tokens: int = request.app.get("max_context_tokens", 0)
         compaction_usage: dict[str, int] = {}
         async for chunk in stream:
-            if (
-                max_context_tokens > 0
-                and chunk.usage
-                and chunk.usage.prompt_tokens > max_context_tokens
-            ):
+            if max_context_tokens > 0 and chunk.usage and chunk.usage.prompt_tokens > max_context_tokens:
                 compaction_needed = True
                 compaction_usage = {
                     "prompt_tokens": chunk.usage.prompt_tokens,
@@ -93,8 +89,7 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
                     "total_tokens": chunk.usage.total_tokens,
                 }
                 logger.info(
-                    f"Compaction needed: "
-                    f"prompt_tokens={chunk.usage.prompt_tokens} > threshold={max_context_tokens}"
+                    f"Compaction needed: prompt_tokens={chunk.usage.prompt_tokens} > threshold={max_context_tokens}"
                 )
             data = chunk.model_dump_json()
             logger.debug(f"SSE chunk: {data[:1000]}")
@@ -103,9 +98,7 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
             signal = json.dumps(
                 {
                     "id": "compaction",
-                    "choices": [
-                        {"index": 0, "delta": {}, "finish_reason": "compaction_needed"}
-                    ],
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "compaction_needed"}],
                     "psi_compaction": {
                         "needed": True,
                         "prompt_tokens": compaction_usage.get("prompt_tokens", 0),

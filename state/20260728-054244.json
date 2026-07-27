@@ -1,0 +1,26 @@
+{
+  "ais": [
+    {
+      "id": "a1",
+      "provider": "openai",
+      "model": "gpt-4o",
+      "api_key": "sk-abc",
+      "base_url": "https://api.oai.com"
+    }
+  ],
+  "routers": [],
+  "sessions": [
+    {
+      "id": "s1",
+      "backend_type": "ai",
+      "backend_id": "a1",
+      "workspace": "/tmp/pytest-of-hzhangxyz/pytest-33/test_gateway_state_persistence0"
+    }
+  ],
+  "titles": [
+    {
+      "id": "s1",
+      "title": "Test Chat"
+    }
+  ]
+}

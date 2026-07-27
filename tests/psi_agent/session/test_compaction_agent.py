@@ -12,6 +12,22 @@ from psi_agent.session.ai_client import AiClient
 from psi_agent.session.conversation import Conversation
 from psi_agent.session.system_prompt import SystemPrompt
 
+_STOP_SSE = (
+    b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hello!"},'
+    b'"finish_reason":"stop"}],"created":0,"model":"test",'
+    b'"object":"chat.completion.chunk"}\n\n'
+)
+_COMPACTION_SSE = (
+    b'data: {"id":"compaction","choices":[{"index":0,"delta":{},'
+    b'"finish_reason":"compaction_needed"}],'
+    b'"psi_compaction":{"needed":true,"prompt_tokens":50000,"threshold":10000}}\n\n'
+)
+_STOP_HI_SSE = (
+    b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi"},'
+    b'"finish_reason":"stop"}],"created":0,"model":"test",'
+    b'"object":"chat.completion.chunk"}\n\n'
+)
+
 
 @pytest.mark.anyio
 async def test_agent_triggers_compaction_on_signal() -> None:
@@ -37,12 +53,8 @@ async def test_agent_triggers_compaction_on_signal() -> None:
             },
         )
         await resp.prepare(request)
-        await resp.write(
-            b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hello!"},"finish_reason":"stop"}],"created":0,"model":"test","object":"chat.completion.chunk"}\n\n'
-        )
-        await resp.write(
-            b'data: {"id":"compaction","choices":[{"index":0,"delta":{},"finish_reason":"compaction_needed"}],"psi_compaction":{"needed":true,"prompt_tokens":50000,"threshold":10000}}\n\n'
-        )
+        await resp.write(_STOP_SSE)
+        await resp.write(_COMPACTION_SSE)
         return resp
 
     app = web.Application()
@@ -103,9 +115,7 @@ async def test_agent_no_compaction_without_signal() -> None:
             },
         )
         await resp.prepare(request)
-        await resp.write(
-            b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hello!"},"finish_reason":"stop"}],"created":0,"model":"test","object":"chat.completion.chunk"}\n\n'
-        )
+        await resp.write(_STOP_SSE)
         return resp
 
     app = web.Application()
@@ -163,12 +173,8 @@ async def test_agent_compaction_creates_system_if_missing() -> None:
             },
         )
         await resp.prepare(request)
-        await resp.write(
-            b'data: {"id":"test","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":"stop"}],"created":0,"model":"test","object":"chat.completion.chunk"}\n\n'
-        )
-        await resp.write(
-            b'data: {"id":"compaction","choices":[{"index":0,"delta":{},"finish_reason":"compaction_needed"}],"psi_compaction":{"needed":true,"prompt_tokens":50000,"threshold":10000}}\n\n'
-        )
+        await resp.write(_STOP_HI_SSE)
+        await resp.write(_COMPACTION_SSE)
         return resp
 
     app = web.Application()
@@ -196,7 +202,7 @@ async def test_agent_compaction_creates_system_if_missing() -> None:
             system_prompt=sp,
         )
 
-        chunks = [c async for c in agent.run({"role": "user", "content": "hi"})]
+        [c async for c in agent.run({"role": "user", "content": "hi"})]
 
         assert len(conv.messages) == 1
         assert conv.messages[0]["role"] == "system"

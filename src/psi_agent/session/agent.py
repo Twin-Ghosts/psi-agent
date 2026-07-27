@@ -425,19 +425,12 @@ class SessionAgent:
             summary = await compaction_fn(self._conversation.messages, complete_fn)
             logger.info(f"Compaction summary generated ({len(summary)} chars)")
 
-            has_system = (
-                self._conversation.messages
-                and self._conversation.messages[0].get("role") == "system"
-            )
+            has_system = self._conversation.messages and self._conversation.messages[0].get("role") == "system"
             if has_system:
                 old = self._conversation.messages[0].get("content", "")
-                self._conversation.replace_system(
-                    f"{old}\n\n[Compacted History]\n{summary}"
-                )
+                self._conversation.replace_system(f"{old}\n\n[Compacted History]\n{summary}")
             else:
-                self._conversation.replace_system(
-                    f"[Compacted History]\n{summary}"
-                )
+                self._conversation.replace_system(f"[Compacted History]\n{summary}")
 
             self._conversation.trim_after(0)
             await self._conversation.commit()
@@ -447,6 +440,7 @@ class SessionAgent:
 
     def _make_compaction_complete_fn(self):
         """Build a complete_fn for use by compact_history."""
+
         async def complete_fn(messages: list[dict[str, Any]]) -> str:
             body: dict[str, Any] = {"messages": messages, "stream": True}
             parts: list[str] = []
