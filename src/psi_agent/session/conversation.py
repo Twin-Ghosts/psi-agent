@@ -108,6 +108,12 @@ class Conversation:
         self._begin_if_needed()
         self.messages.append(msg)
 
+    def trim_after(self, index: int) -> None:
+        """Delete all messages after the given index (exclusive).
+        Auto-snapshots on first mutation."""
+        self._begin_if_needed()
+        del self.messages[index + 1 :]
+
     def replace_system(self, content: str) -> None:
         """Replace the system message (``messages[0]``) in-place,
         or add it if the conversation is empty.  Automatically
