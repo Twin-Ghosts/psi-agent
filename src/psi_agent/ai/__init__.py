@@ -23,6 +23,7 @@ async def serve_ai(
     model: str,
     api_key: str,
     base_url: str,
+    max_context_tokens: int = 0,
     handler: Handler,
 ) -> None:
     """Serve an AI backend on a Unix socket."""
@@ -42,6 +43,7 @@ async def serve_ai(
     app["model"] = model
     app["api_key"] = api_key
     app["base_url"] = base_url
+    app["max_context_tokens"] = max_context_tokens
     app.router.add_post("/chat/completions", handler)
 
     runner = web.AppRunner(app)
@@ -88,6 +90,11 @@ class Ai:
     verbose: bool = False
     """Enable DEBUG-level logging."""
 
+    max_context_tokens: int = 0
+    """Prompt token threshold for triggering compaction.
+    0 disables compaction. Falls back to PSI_MAX_CONTEXT_TOKENS env var.
+    CLI: --max-context-tokens."""
+
     async def run(self) -> None:
         """Start the server and block until cancelled."""
         setup_logging(verbose=self.verbose)
@@ -95,9 +102,16 @@ class Ai:
         model = self.model or os.environ.get("PSI_AI_MODEL", "")
         api_key = self.api_key or os.environ.get("PSI_AI_API_KEY", "")
         base_url = self.base_url or os.environ.get("PSI_AI_BASE_URL", "")
+        max_context_tokens_str = os.environ.get("PSI_MAX_CONTEXT_TOKENS", "")
+        if not self.max_context_tokens and max_context_tokens_str:
+            try:
+                self.max_context_tokens = int(max_context_tokens_str)
+            except ValueError:
+                logger.warning(f"Invalid PSI_MAX_CONTEXT_TOKENS={max_context_tokens_str!r}, ignoring")
         logger.debug(
             f"AI resolved params: provider={provider!r}, model={model!r}, "
-            f"base_url={base_url!r}, api_key={'*' * 8 if api_key else '(empty)'}"
+            f"base_url={base_url!r}, api_key={'*' * 8 if api_key else '(empty)'}, "
+            f"max_context_tokens={self.max_context_tokens}"
         )
         await serve_ai(
             socket_path=self.session_socket,
@@ -105,5 +119,6 @@ class Ai:
             model=model,
             api_key=api_key,
             base_url=base_url,
+            max_context_tokens=self.max_context_tokens,
             handler=handle_chat_completions,
         )
