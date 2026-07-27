@@ -416,8 +416,7 @@ OPENAPI_SPEC = {
                     "workspace": {
                         "type": "string",
                         "description": (
-                            "User workspace. Empty → Gateway default "
-                            "({Desktop}/haitun交付); mkdir on Session create"
+                            "User workspace. Empty → Gateway default ({Desktop}/haitun交付); mkdir on Session create"
                         ),
                     },
                     "agent": {
