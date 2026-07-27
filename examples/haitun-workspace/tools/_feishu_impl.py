@@ -35,6 +35,11 @@ def _error(message: str, **extra: Any) -> dict[str, Any]:
     return {"ok": False, "message": message, **extra}
 
 
+def error_result(message: str, **extra: Any) -> dict[str, Any]:
+    """Public alias of ``_error`` for sibling tool helpers (e.g. the chart tools)."""
+    return _error(message, **extra)
+
+
 def _config() -> tuple[str, str] | None:
     app_id = os.environ.get("PSI_FEISHU_APP_ID", "").strip()
     app_secret = os.environ.get("PSI_FEISHU_APP_SECRET", "").strip()
@@ -4261,3 +4266,144 @@ async def upload_media_impl(
         return res
     rdata = res["data"] if isinstance(res["data"], dict) else {}
     return {"ok": True, "file_token": rdata.get("file_token", ""), "file_name": name, "size": size}
+
+
+# ── Data charts as docx image blocks (block_type 27) ───────────────────────────
+# The one way to land a real data chart (pie/line/bar/…) in a Feishu doc: docx has
+# no chart block and the Sheets API can't create charts, but it does have an *image*
+# block, and drive medias/upload_all can target that block directly. The dance is
+# three calls and the order matters:
+#
+#   1. POST .../blocks/:block_id/children with an empty ``image`` block → returns the
+#      new block's block_id. The block exists but renders as a placeholder.
+#   2. POST drive/v1/medias/upload_all with parent_type="docx_image" and
+#      parent_node=<that block_id> → uploads the PNG *into* the block.
+#   3. PATCH .../blocks/:block_id with replace_image=<file_token> → binds the token so
+#      the block renders the picture.
+#
+# Step 3 is required: without it the upload is attached but the block keeps showing
+# a placeholder. An empty image block left behind by a failed step 2/3 is worse than
+# no chart, so failures try to clean it up.
+_IMAGE_BLOCK_TYPE = 27
+
+
+def _build_image_block_create_request(document_id: str, block_id: str, index: int) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.POST
+    req.uri = "/open-apis/docx/v1/documents/:document_id/blocks/:block_id/children"
+    req.paths["document_id"] = document_id
+    req.paths["block_id"] = block_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    # An image block is created empty: width/height are the display box, and the
+    # token is filled in later by the replace_image patch.
+    body: dict[str, Any] = {"children": [{"block_type": _IMAGE_BLOCK_TYPE, "image": {"token": ""}}]}
+    if index >= 0:
+        body["index"] = index
+    req.body = body
+    return req
+
+
+def _build_image_block_patch_request(document_id: str, block_id: str, file_token: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.PATCH
+    req.uri = "/open-apis/docx/v1/documents/:document_id/blocks/:block_id"
+    req.paths["document_id"] = document_id
+    req.paths["block_id"] = block_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    req.body = {"replace_image": {"token": file_token}}
+    return req
+
+
+def _build_block_delete_request(document_id: str, block_id: str, index: int) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.DELETE
+    req.uri = "/open-apis/docx/v1/documents/:document_id/blocks/:block_id/children/batch_delete"
+    req.paths["document_id"] = document_id
+    req.paths["block_id"] = block_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    req.body = {"start_index": index, "end_index": index + 1}
+    return req
+
+
+async def _upload_into_image_block(image_path: str, block_id: str, user_key: str) -> dict[str, Any]:
+    """Upload a local PNG into an existing docx image block; returns its file_token."""
+    path = anyio.Path(image_path)
+    if not await path.is_file():
+        return _error(f"chart image not found: {image_path}")
+    data = await path.read_bytes()
+    size = len(data)
+    if size > _UPLOAD_ALL_MAX_BYTES:
+        return _error(f"chart image is {size} bytes (> 20MB) — too large to upload.", size=size)
+    req = _build_media_upload_all_request(path.name, "docx_image", block_id, size, data, None)
+    res = await _invoke(req, user_key=user_key, prefer="user")
+    if not res["ok"]:
+        return res
+    rdata = res["data"] if isinstance(res["data"], dict) else {}
+    token = rdata.get("file_token", "")
+    if not token:
+        return _error("upload succeeded but returned no file_token.")
+    return {"ok": True, "file_token": token, "size": size}
+
+
+async def append_doc_image_impl(
+    document_id: str, image_path: str, caption: str = "", user_key: str = ""
+) -> dict[str, Any]:
+    """Append a local image to a docx as a real image block, with an optional caption.
+
+    Shared by every chart tool: they render a PNG, then hand it here. The caption is
+    written as a separate paragraph below the image (docx image blocks carry no
+    caption field of their own) — a chart without a "图N: what this shows" line makes
+    the reader guess at what they're looking at.
+    """
+    doc = document_id.strip()
+    if not doc:
+        return _error("document_id is required.")
+    created = await _invoke(_build_image_block_create_request(doc, doc, -1), user_key=user_key, prefer="user")
+    if not created["ok"]:
+        return created
+    cdata = created["data"] if isinstance(created["data"], dict) else {}
+    children = cdata.get("children") or []
+    block_id = children[0].get("block_id", "") if children and isinstance(children[0], dict) else ""
+    if not block_id:
+        return _error("created the image block but the response carried no block_id.")
+    # Where the placeholder landed, so a later failure can remove exactly that block.
+    index = cdata.get("index")
+
+    uploaded = await _upload_into_image_block(image_path, block_id, user_key)
+    if not uploaded["ok"]:
+        await _discard_image_block(doc, block_id, index, user_key)
+        return uploaded
+    patched = await _invoke(
+        _build_image_block_patch_request(doc, block_id, uploaded["file_token"]), user_key=user_key, prefer="user"
+    )
+    if not patched["ok"]:
+        await _discard_image_block(doc, block_id, index, user_key)
+        return patched
+    result: dict[str, Any] = {
+        "ok": True,
+        "document_id": doc,
+        "block_id": block_id,
+        "file_token": uploaded["file_token"],
+        "bytes": uploaded["size"],
+    }
+    if caption.strip():
+        # A failed caption doesn't invalidate the chart itself, so it's reported
+        # rather than treated as a failure of the whole append.
+        note = await append_doc_content_impl(doc, caption.strip(), user_key)
+        result["caption_written"] = bool(note.get("ok"))
+        if not note.get("ok"):
+            result["caption_error"] = note.get("message", "")
+    return result
+
+
+async def _discard_image_block(document_id: str, block_id: str, index: Any, user_key: str) -> None:
+    """Best-effort removal of a placeholder image block after a failed upload/patch.
+
+    Without the index the batch_delete range can't be built, so the empty block is
+    left in place — an orphan placeholder is unfortunate but not worth guessing a
+    range that might delete the user's real content.
+    """
+    if not isinstance(index, int) or index < 0:
+        return
+    with contextlib.suppress(Exception):
+        await _invoke(_build_block_delete_request(document_id, document_id, index), user_key=user_key, prefer="user")
