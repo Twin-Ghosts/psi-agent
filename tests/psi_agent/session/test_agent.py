@@ -730,27 +730,38 @@ async def test_history_not_saved_on_error(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
-async def test_histories_dir_and_gitignore_created(tmp_path: Path) -> None:
+async def test_histories_dir_and_gitignore_created(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    appdata = tmp_path / "appdata"
+    monkeypatch.setenv("PSI_APPDATA", str(appdata))
     workspace = tmp_path / "workspace"
     await anyio.Path(workspace).mkdir()
     await anyio.Path(workspace / "tools").mkdir()
     await anyio.Path(workspace / "schedules").mkdir()
 
-    histories_dir = workspace / "histories"
+    histories_dir = appdata / "histories"
 
-    agent = await SessionAgent.create(ai_socket="http://x", workspace_path=workspace, session_id="test")
+    agent = await SessionAgent.create(
+        ai_socket="http://x",
+        workspace_path=workspace,
+        session_id="test",
+        appdata_root=str(appdata),
+    )
     assert await anyio.Path(histories_dir).is_dir()
     assert await anyio.Path(histories_dir / ".gitignore").read_text(encoding="utf-8") == "*\n"
-    assert agent._conversation._path is not None
+    assert agent._conversation._path == histories_dir / "test.jsonl"
     assert agent._workspace_path == workspace
     assert agent._agent_path == workspace
+    assert not await (anyio.Path(workspace) / "histories").exists()
 
 
 @pytest.mark.anyio
-async def test_create_agent_path_loads_tools_from_agent_keeps_history_on_workspace(
+async def test_create_agent_path_loads_tools_from_agent_keeps_history_on_appdata(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """agent_path ≠ workspace_path: tools from agent; histories stay under workspace."""
+    """agent_path ≠ workspace_path: tools from agent; history under AppData."""
+    appdata = tmp_path / "appdata"
+    monkeypatch.setenv("PSI_APPDATA", str(appdata))
     workspace = tmp_path / "user-ws"
     agent_pkg = tmp_path / "agent-pkg"
     await anyio.Path(workspace).mkdir()
@@ -777,12 +788,36 @@ async def test_create_agent_path_loads_tools_from_agent_keeps_history_on_workspa
         workspace_path=workspace,
         agent_path=agent_pkg,
         session_id="split",
+        appdata_root=str(appdata),
     )
     assert session_agent._workspace_path == workspace
     assert session_agent._agent_path == agent_pkg
     assert "echo_tool" in session_agent._tool_registry.tools
-    assert session_agent._conversation._path == workspace / "histories" / "split.jsonl"
+    assert session_agent._conversation._path == appdata / "histories" / "split.jsonl"
     assert not await (anyio.Path(agent_pkg) / "histories").exists()
+    assert not await (anyio.Path(workspace) / "histories").exists()
+
+
+@pytest.mark.anyio
+async def test_conversation_dual_read_legacy_workspace_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy ``{workspace}/histories/`` still loads; writes go to AppData."""
+    appdata = tmp_path / "appdata"
+    monkeypatch.setenv("PSI_APPDATA", str(appdata))
+    workspace = tmp_path / "ws"
+    await anyio.Path(workspace).mkdir()
+    legacy = anyio.Path(workspace) / "histories"
+    await legacy.mkdir()
+    await (legacy / "old.jsonl").write_text(
+        '{"role":"user","content":"legacy-hi","kind":"chat"}\n',
+        encoding="utf-8",
+    )
+
+    conv = await Conversation.from_workspace(workspace, "old", appdata_root=str(appdata))
+    assert conv.messages[0]["content"] == "legacy-hi"
+    assert conv._path == appdata / "histories" / "old.jsonl"
 
 
 @pytest.mark.anyio

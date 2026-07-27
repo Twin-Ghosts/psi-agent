@@ -550,7 +550,7 @@ class MemoryMcpRouter:
             await self._wait_for_stop(stop, self._poll_interval_seconds)
 
     async def _sync_history_once(self, workspace: anyio.Path, session_id: str) -> dict[str, Any]:
-        history_path, checkpoint_path = history_paths(workspace, session_id)
+        history_path, checkpoint_path = await history_paths(workspace, session_id)
         batches = await completed_history_batches(history_path, session_id)
         checkpoint = await load_checkpoint(checkpoint_path)
         submitted = set(checkpoint.get("submitted_batches") or [])
@@ -584,7 +584,7 @@ class MemoryMcpRouter:
 
     @staticmethod
     async def _history_signature(workspace: anyio.Path, session_id: str) -> tuple[int, int] | None:
-        history_path, _checkpoint_path = history_paths(workspace, session_id)
+        history_path, _checkpoint_path = await history_paths(workspace, session_id)
         try:
             stat = await history_path.stat()
         except OSError:

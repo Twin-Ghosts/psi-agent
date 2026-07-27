@@ -89,8 +89,9 @@ service tools:
 | `agent_dir()` / `resolve_agent()` | 显式参数 → `get_agent()` → 回落 `workspace_dir()` | `skills/`（`skill_manage`） |
 | `resolve_user_path(path)` | 相对 → 拼到 workspace；绝对路径原样 | `read` / `write` / `edit` / `list_dir` / `find_files` |
 | AppData todos（第 4B） | `resolve_appdata_root()` → `{appdata}/todos/{session_id}.json`；读时双读 legacy `{workspace}/.psi/todos/` | `todo` tool / Gateway `GET …/todos` |
+| AppData history（第 4C） | 同上根 → `{appdata}/histories/{session_id}.jsonl`；读时双读 legacy `{workspace}/histories/` | Session JSONL / `sessions_list` / `GET …/history` |
 
-**刻意为之**：history 仍在 `{workspace}/histories/`；Gateway `state/` 仍在进程 cwd 旁。todos 已迁 AppData。
+**刻意为之**：Gateway `state/` 仍在进程 cwd 旁。todos / history 已迁 AppData（legacy 双读）。
 
 | Tool | Notes |
 |---|---|

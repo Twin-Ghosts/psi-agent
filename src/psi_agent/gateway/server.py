@@ -335,7 +335,8 @@ async def _delete_session(request: web.Request) -> web.Response:
     try:
         workspace = sm.get_workspace(session_id)
         await sm.delete(session_id)
-        await hm.delete(workspace, session_id)
+        appdata = str(request.app.get("appdata") or "")
+        await hm.delete(workspace, session_id, appdata=appdata)
         await tm.delete(session_id)
         return _json({"id": session_id, "status": "stopped"})
     except LookupError as e:
@@ -493,7 +494,7 @@ async def _get_history(request: web.Request) -> web.Response:
         workspace = sm.get_workspace(session_id)
     except LookupError:
         return _error(f"Session '{session_id}' not found", status=404)
-    messages = await hm.get(workspace, session_id)
+    messages = await hm.get(workspace, session_id, appdata=str(request.app.get("appdata") or ""))
     return _json(messages)
 
 

@@ -4,7 +4,8 @@ Session binds ``get_workspace()`` / ``get_agent()`` per turn (see
 ``psi_agent.session.runtime_context``). Prefer those ContextVars over the
 legacy ``WORKSPACE_DIR`` env and the tools-package parent fallback.
 
-**Not AppData** — history / Gateway state relocation is a later step.
+**Not AppData memory for files** — relative IO stays on workspace/agent. Todos / history
+JSONL live under AppData (Steps 4B/4C); Gateway ``state/`` relocation is later.
 """
 
 from __future__ import annotations

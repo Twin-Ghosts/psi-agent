@@ -7,6 +7,7 @@ from pathlib import Path
 import anyio
 from loguru import logger
 
+from psi_agent._appdata import resolve_appdata_root
 from psi_agent._logging import setup_logging
 from psi_agent.session.agent import SessionAgent
 from psi_agent.session.server import serve_session
@@ -27,6 +28,12 @@ class Session:
     Empty → use *workspace* (backward compatible single-root behaviour).
     """
 
+    appdata: str = ""
+    """AppData memory root for history JSONL (Step 4C).
+
+    Empty → ``PSI_APPDATA`` / ``platformdirs`` via ``resolve_appdata_root``.
+    """
+
     max_tool_rounds: int = 128
     session_id: str | None = None
     verbose: bool = False
@@ -36,15 +43,20 @@ class Session:
 
         workspace_path = Path.cwd() if self.workspace == "" else Path(str(await anyio.Path(self.workspace).resolve()))
         agent_path = workspace_path if self.agent == "" else Path(str(await anyio.Path(self.agent).resolve()))
+        appdata_root = self.appdata.strip()
+        if not appdata_root:
+            appdata_root = await resolve_appdata_root()
 
         logger.info(f"Loading workspace from {workspace_path}")
         if agent_path != workspace_path:
             logger.info(f"Loading agent package from {agent_path}")
+        logger.info(f"AppData history root: {appdata_root}")
 
         agent = await SessionAgent.create(
             ai_socket=self.ai_socket,
             workspace_path=workspace_path,
             agent_path=agent_path,
+            appdata_root=appdata_root,
             max_tool_rounds=self.max_tool_rounds,
             session_id=self.session_id,
         )

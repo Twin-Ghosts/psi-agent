@@ -16,7 +16,7 @@ Gateway 进程
 ├── TitleManager       — 会话标题 CRUD + AI 自动生成
 ├── WorkspaceManager   — 目录浏览
 ├── ChatManager        — SSE 流式对话管理
-├── HistoryManager     — JSONL 历史读取
+├── HistoryManager     — JSONL 历史读取（AppData `histories/` + legacy 双读）
 ├── TodoManager        — 会话 todo 列表只读（AppData `todos/` + legacy workspace 双读）
 ├── GatewayState       — 状态持久化到 state/latest.json
 ├── aiohttp REST Server  — OpenAPI CRUD + Web UI chat
@@ -42,7 +42,7 @@ Gateway 进程
 | `_spa_shell.py` | SPA 外壳注入 — `DEFAULT_APP_NAME`、`inject_app_name()`、`read_spa_index_template()`；`GET /spa/index.html` 替换 `__GATEWAY_APP_NAME__` |
 | `server.py` | aiohttp Application + REST handlers |
 | `_chat_manager.py` | SSE 流式对话管理（复用 ChannelCore） |
-| `_history_manager.py` | JSONL 历史读取 |
+| `_history_manager.py` | JSONL 历史读取（``{appdata}/histories/{session_id}.jsonl``，legacy ``{workspace}/histories/`` 双读；delete 两侧都清） |
 | `_todo_manager.py` | 会话 todo 列表读取（``{appdata}/todos/{session_id}.json``，legacy ``{workspace}/.psi/todos/`` 双读） |
 | `_workspace_manager.py` | 目录浏览 + 快捷路径列表 + cwd 查询 |
 | `spa/` | Vue 3 SPA v1（对话气泡），构建输出 `spa/dist/`；路径 `/spa/` |
@@ -80,15 +80,16 @@ Gateway 进程
 Gateway SessionManager（缺省补 --default-agent / --default-workspace）
     │  Session(workspace=…, agent=…)
     ▼
-Session（#472）
+Session（#472 / 第 4C）
     │  启动时：tools / schedules / system 从 agent_path 加载
-    │         history 仍在 workspace/histories/
+    │         history 写 `{appdata}/histories/`（legacy 双读）
     │  回合内：runtime_scope 写入 get_agent()/get_workspace() ContextVar
     ▼
 workspace 工具（haitun `_runtime_paths`）按 ContextVar 解析相对路径  ← ✅ 第 3 步
 AppData 记忆区根（`--appdata` / `PSI_APPDATA` / platformdirs）     ← ✅ 第 4A
 todos → `{appdata}/todos/`（双读旧 `{workspace}/.psi/todos/`）   ← ✅ 第 4B
-AppData 继续搬家（history / Gateway state）                        ← ❌ 后续小 PR
+history → `{appdata}/histories/`（双读旧 `{workspace}/histories/`） ← ✅ 第 4C
+AppData 继续搬家（Gateway state）                                  ← ❌ 后续小 PR
 ```
 
 | 已合 / 未做 | 内容 |
@@ -97,16 +98,17 @@ AppData 继续搬家（history / Gateway state）                        ← ❌
 | ✅ #482 | Gateway CLI + `GET /defaults` + `POST /sessions.agent`；调用方接线 |
 | ✅ 第 3 步 | haitun 工具读 `get_workspace()` / `get_agent()`（`_runtime_paths`） |
 | ✅ 第 4A | 解析并暴露 AppData 根：`GET /defaults.appdata`、CLI `--appdata`、env `PSI_APPDATA` |
-| ✅ **第 4B（本层）** | todos：**写** `{appdata}/todos/{session_id}.json`；**读**优先 AppData，缺则双读 legacy workspace 路径；Gateway 启动把解析后的根写入 `PSI_APPDATA` 供同进程工具共用 |
-| ❌ 后续 | history / Gateway `state/` 搬家（建议继续双读） |
+| ✅ 第 4B | todos：**写** `{appdata}/todos/{session_id}.json`；**读**优先 AppData，缺则双读 legacy |
+| ✅ **第 4C（本层）** | history：**写** `{appdata}/histories/{session_id}.jsonl`；**读**优先 AppData，缺则双读 legacy；`HistoryManager` / Session / haitun 扫描同约定 |
+| ❌ 后续 | Gateway `state/` 搬家（建议继续双读） |
 
-**可读验收（第 4B）**：`todo` 写入后文件出现在 AppData `todos/`；仅有旧 workspace `.psi/todos/` 时 `GET /sessions/{id}/todos` 仍能读到；再次写入后落在 AppData。**仍未搬家**：history JSONL、Gateway `state/latest.json`。
+**可读验收（第 4C）**：新会话 JSONL 出现在 AppData `histories/`；仅有旧 workspace `histories/` 时 `GET /sessions/{id}/history` 仍能读到；再次写入后落在 AppData；删除 Session 时 AppData + legacy 两侧文件都清掉。**仍未搬家**：Gateway `state/latest.json`。
 
 | CLI | 含义 |
 |-----|------|
 | `--default-agent` | 新建 Session 的 Agent 包目录；空且 cwd 下存在 `examples/haitun-workspace` 时软默认到该路径；仍空则 Session `agent=""`（与 workspace 同根兼容） |
 | `--default-workspace` | 新建 Session / `GET /defaults` 的用户工作区；空 → 进程 cwd |
-| `--appdata` | AppData 记忆区根（仅宣布）；空 → `PSI_APPDATA` → `platformdirs`（**禁止**手写死 `%AppData%`） |
+| `--appdata` | AppData 记忆区根；空 → `PSI_APPDATA` → `platformdirs`（**禁止**手写死 `%AppData%`） |
 
 `POST /sessions` 可显式带 `agent` / `workspace`；省略时用上述默认。`SessionInfo` 与 `state/latest.json` 持久化含 `agent`。
 
@@ -232,7 +234,7 @@ Gateway 不重复实现语义选择或 SSE 代理。状态恢复顺序固定为 
 Session 运行时 crash 时，`_run_session` 的 except 块从 `_entries` 中移除该 entry 并调用 `_persist`。
 
 REST ``DELETE /sessions/{id}`` 在 SessionManager.delete 之后还会：
-- 删除 workspace 下 ``histories/{id}.jsonl``（``HistoryManager.delete``，文件不存在则忽略）
+- 删除 AppData 与 legacy workspace 下的 ``histories/{id}.jsonl``（``HistoryManager.delete``，文件不存在则忽略）
 - 清除 ``TitleManager`` 中该会话标题
 
 ## TodoManager
@@ -298,7 +300,7 @@ REST ``DELETE /sessions/{id}`` 在 SessionManager.delete 之后还会：
 | DELETE | `/sessions/{session_id}` | 删除 Session + history JSONL + 标题（200/404） |
 | GET | `/sessions` | 列出所有 Session（含 `agent`） |
 | POST | `/sessions/{session_id}/chat` | Web UI chat（SSE） |
-| GET | `/sessions/{session_id}/history` | 获取会话历史（``is_displayable_chat_message`` 白名单 + 剥 `[SEND:]`/`[RECV:]`；assistant 行另附 ``sends`` 路径列表供交付物重水合） |
+| GET | `/sessions/{session_id}/history` | 获取会话历史（AppData ``histories/`` 优先 + legacy 双读；``is_displayable_chat_message`` 白名单 + 剥 `[SEND:]`/`[RECV:]`；assistant 行另附 ``sends``） |
 | GET | `/sessions/{session_id}/todos` | 读取 todos（AppData ``todos/{id}.json`` 优先，否则 legacy workspace ``.psi/todos``）；返回 ``{todos, summary}``，文件缺失则为空列表 |
 | POST | `/feishu/route` | 按飞书 `open_id` 幂等路由到其独立 Session（首次按需 spawn）`{open_id, ai_id?, workspace?}` → 201 `{open_id, session_id, channel_socket}`；缺 open_id / 无 ai_id → 400 |
 | GET | `/feishu/routes` | 列出所有飞书 open_id → Session 路由 `[{open_id, session_id}]` |

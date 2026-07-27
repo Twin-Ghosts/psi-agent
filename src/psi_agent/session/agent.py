@@ -75,17 +75,24 @@ class SessionAgent:
         max_tool_rounds: int = 128,
         session_id: str | None = None,
         agent_path: Path | None = None,
+        appdata_root: str = "",
     ) -> SessionAgent:
         """Production entry point.
 
-        *workspace_path* owns history (``histories/``) as before.
+        *workspace_path* is the user open-folder (relative file tools).
         *agent_path* loads tools / schedules / system; when omitted, falls
         back to *workspace_path* (single-root compatibility).
+        *appdata_root* holds history JSONL (Step 4C); empty → resolve via
+        ``PSI_APPDATA`` / platformdirs.
         """
         agent_root = agent_path if agent_path is not None else workspace_path
 
         ai_client = AiClient(ai_socket)
-        conversation = await Conversation.from_workspace(workspace_path, session_id)
+        conversation = await Conversation.from_workspace(
+            workspace_path,
+            session_id,
+            appdata_root=appdata_root,
+        )
         tool_registry = await ToolRegistry.load(agent_root / "tools", conversation.session_id)
         schedule_registry = await ScheduleRegistry.load(agent_root / "schedules")
         system_prompt = await SystemPrompt.from_workspace(agent_root, conversation.session_id)

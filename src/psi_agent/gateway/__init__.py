@@ -86,7 +86,8 @@ class Gateway:
 
     Empty → ``PSI_APPDATA`` → ``platformdirs.user_data_dir(Haitun)``.
     Step 4B: todos write under ``{appdata}/todos/`` (legacy workspace path dual-read).
-    History / Gateway ``state/`` still use old locations until later PRs.
+    Step 4C: history writes under ``{appdata}/histories/`` (legacy dual-read).
+    Gateway ``state/`` still uses the old location until a later PR.
     """
 
     verbose: bool = False
@@ -124,6 +125,7 @@ class Gateway:
                 _tg=tg,
                 _default_agent=agent_default,
                 _default_workspace=workspace_default,
+                _appdata=appdata_root,
             )
             tm = TitleManager()
 

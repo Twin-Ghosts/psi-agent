@@ -41,7 +41,7 @@
 任务卡          ↔  Gateway Session（同 workspace；可选独立 agent 包）
 新建任务        ↔  POST /sessions（可带 agent）+ POST /titles + 首条 chat SSE（文案与附件同总览对话框：`File[]` multipart）；**首条发送后立刻进入分屏聚焦**（左上下文 / 右对话），不再停在新建页本地气泡
 卡片内对话      ↔  POST /sessions/{id}/chat（multipart chunks）
-任务历史文案    ↔  GET /sessions/{id}/history
+任务历史文案    ↔  GET /sessions/{id}/history（AppData `histories/` 优先 + legacy 双读）
 任务卡中间步 N/M ↔  GET /sessions/{id}/todos（``todo`` tool → AppData `todos/{id}.json`，legacy `.psi/todos` 双读）
 路径默认        ↔  GET /defaults（agent + workspace）；打开即用 AI 仍走空池惰性 POST `/ais`
 ```

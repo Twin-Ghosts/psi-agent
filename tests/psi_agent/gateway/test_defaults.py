@@ -6,9 +6,11 @@ import anyio
 import pytest
 
 from psi_agent.gateway._defaults import (
+    appdata_history_path,
     resolve_appdata_root,
     resolve_default_agent,
     resolve_default_workspace,
+    resolve_history_read_path,
 )
 from psi_agent.gateway._session_manager import SessionInfo
 
@@ -64,10 +66,38 @@ async def test_resolve_appdata_root_platformdirs(tmp_path: Path, monkeypatch: py
     fake = tmp_path / "plat"
     await anyio.Path(fake).mkdir()
     monkeypatch.setattr(
-        "psi_agent.gateway._defaults.platformdirs.user_data_dir",
+        "psi_agent._appdata.platformdirs.user_data_dir",
         lambda **_kwargs: str(fake),
     )
     assert await resolve_appdata_root("") == str(await anyio.Path(fake).resolve())
+
+
+@pytest.mark.anyio
+async def test_resolve_history_read_path_prefers_appdata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    appdata = tmp_path / "appdata"
+    ws = tmp_path / "ws"
+    monkeypatch.setenv("PSI_APPDATA", str(appdata))
+    primary = appdata_history_path(str(appdata), "s1")
+    await primary.parent.mkdir(parents=True)
+    await primary.write_text("{}\n", encoding="utf-8")
+    legacy = anyio.Path(str(ws)) / "histories" / "s1.jsonl"
+    await legacy.parent.mkdir(parents=True)
+    await legacy.write_text("{}\n", encoding="utf-8")
+    assert await resolve_history_read_path(appdata_root=str(appdata), workspace=str(ws), session_id="s1") == primary
+
+
+@pytest.mark.anyio
+async def test_resolve_history_read_path_falls_back_to_legacy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appdata = tmp_path / "appdata"
+    ws = tmp_path / "ws"
+    monkeypatch.setenv("PSI_APPDATA", str(appdata))
+    await anyio.Path(str(appdata)).mkdir()
+    legacy = anyio.Path(str(ws)) / "histories" / "s1.jsonl"
+    await legacy.parent.mkdir(parents=True)
+    await legacy.write_text("{}\n", encoding="utf-8")
+    assert await resolve_history_read_path(appdata_root=str(appdata), workspace=str(ws), session_id="s1") == legacy
 
 
 def test_session_info_includes_agent_field() -> None:

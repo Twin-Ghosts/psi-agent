@@ -15,6 +15,8 @@ import _runtime_paths as _paths
 import _subagent_helpers as _sub
 import anyio
 
+from psi_agent._appdata import resolve_appdata_root, resolve_history_read_path
+
 try:
     from psi_agent.session.runtime_context import get_session_id as _runtime_session_id
 except ImportError:
@@ -109,8 +111,7 @@ async def _count_jsonl_messages(path: anyio.Path) -> int:
     return count
 
 
-async def _scan_history_sessions(workspace: anyio.Path) -> dict[str, dict[str, Any]]:
-    histories_dir = workspace / "histories"
+async def _scan_one_histories_dir(histories_dir: anyio.Path) -> dict[str, dict[str, Any]]:
     rows: dict[str, dict[str, Any]] = {}
     if not await histories_dir.exists():
         return rows
@@ -135,6 +136,15 @@ async def _scan_history_sessions(workspace: anyio.Path) -> dict[str, dict[str, A
             "title": "",
             "is_current": session_id == current_session_id(),
         }
+    return rows
+
+
+async def _scan_history_sessions(workspace: anyio.Path) -> dict[str, dict[str, Any]]:
+    """Scan AppData + legacy workspace histories; AppData wins for the same id."""
+    appdata_root = await resolve_appdata_root()
+    rows = await _scan_one_histories_dir(workspace / "histories")
+    appdata_rows = await _scan_one_histories_dir(anyio.Path(appdata_root) / "histories")
+    rows.update(appdata_rows)
     return rows
 
 
@@ -273,7 +283,18 @@ def resolve_session_id(session_id: str) -> str:
     return current_session_id()
 
 
+async def _resolve_history_path(workspace: anyio.Path, session_id: str) -> anyio.Path:
+    """Dual-read: AppData histories preferred, else legacy workspace histories."""
+    appdata_root = await resolve_appdata_root()
+    return await resolve_history_read_path(
+        appdata_root=appdata_root,
+        workspace=str(workspace),
+        session_id=session_id,
+    )
+
+
 def _history_path(workspace: anyio.Path, session_id: str) -> anyio.Path:
+    """Legacy sync path helper (tests). Prefer _resolve_history_path for reads."""
     return workspace / "histories" / f"{session_id}.jsonl"
 
 
@@ -418,7 +439,7 @@ async def get_session_history(
         workspace_raw=workspace_raw,
         include_gateway=include_gateway,
     )
-    path = _history_path(workspace, sid)
+    path = await _resolve_history_path(workspace, sid)
     messages: list[dict[str, Any]] = []
     history_source = ""
 
@@ -672,7 +693,7 @@ async def keyword_search_sessions(
     scope = session_id.strip()
     if scope:
         row = rows.get(scope)
-        path = _history_path(workspace, scope)
+        path = await _resolve_history_path(workspace, scope)
         if row is None and not await path.exists():
             return {
                 "ok": False,
@@ -687,7 +708,7 @@ async def keyword_search_sessions(
     else:
         hits = []
         for sid, row in rows.items():
-            path = _history_path(workspace, sid)
+            path = await _resolve_history_path(workspace, sid)
             if not await path.exists():
                 continue
             hit = await _keyword_search_file(path, query=query, session_row=row)
@@ -731,7 +752,7 @@ async def task_search_sessions(
 
     hits: list[dict[str, Any]] = []
     for sid, row in rows.items():
-        path = _history_path(workspace, sid)
+        path = await _resolve_history_path(workspace, sid)
         user_texts: list[str] = []
         if await path.exists():
             user_texts = await _recent_user_texts(path)
@@ -915,7 +936,7 @@ async def export_session(
     row = rows.get(sid, {})
     title = str(row.get("title", "")) if isinstance(row, dict) else ""
 
-    history_path = _history_path(workspace, sid)
+    history_path = await _resolve_history_path(workspace, sid)
     raw_messages = await _read_all_raw_messages(history_path)
 
     if not raw_messages and include_gateway and gateway_url:
@@ -1246,7 +1267,7 @@ async def build_handoff_context(
     snippets: list[dict[str, Any]] = []
     q = query.strip()
     if q:
-        path = _history_path(workspace, sid)
+        path = await _resolve_history_path(workspace, sid)
         if await path.exists():
             hit = await _keyword_search_file(path, query=q, session_row=row if row else {"session_id": sid})
             if hit and isinstance(hit.get("snippets"), list):

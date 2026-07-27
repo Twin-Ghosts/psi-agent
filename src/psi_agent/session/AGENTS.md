@@ -8,8 +8,9 @@ Session 层是 psi-agent 的核心——负责 workspace 解析、agent loop、t
 
 | 字段 | CLI | 用途 |
 |------|-----|------|
-| `Session.workspace` | `--workspace` | 历史 JSONL 所在根（`{workspace}/histories/`）；空 → `Path.cwd()` |
+| `Session.workspace` | `--workspace` | 用户打开目录（相对文件 IO）；空 → `Path.cwd()` |
 | `Session.agent` | `--agent` | Agent 包目录（tools / schedules / `systems/`）；**空 → 与 workspace 相同**（兼容旧单根） |
+| `Session.appdata` | `--appdata` / `PSI_APPDATA` | 记忆区根；history 写 `{appdata}/histories/`（第 4C）；空 → resolve |
 
 `SessionAgent.create(workspace_path=…, agent_path=…)`：省略 `agent_path` 时回落到 `workspace_path`。每回合经 ``runtime_scope`` 绑定 `get_session_id()` / `get_workspace()` / `get_agent()`（见下节适用范围）。
 
@@ -23,7 +24,7 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 | **`get_session_id()`** | 仅 **workspace 工具**需要「当前会话 id」时（如 `todo`、fusion memory）。框架内部用 `Conversation.session_id` / 显式参数 |
 | **`get_workspace()` / `get_agent()`** | 仅 **workspace 工具**在解析相对路径、找 agent 包根时（`write`/`bash`/`read` 等）。**框架核心**（`SessionAgent` / registries / Gateway / Channel）一律用构造时的 `workspace_path` / `agent_path` 或 REST 入参，**禁止**回读 ContextVar |
 | **禁止扩进 ContextVar 的** | AppData / 记忆区根、API key、provider、Gateway listen、任意「方便全局拿一下」的配置——这些走显式字段 / DI / CLI |
-| **本步消费现状** | ✅ haitun 工具经 ``tools/_runtime_paths.py`` 读 ``get_workspace()`` / ``get_agent()``。todos 已迁 AppData（``{appdata}/todos/``，legacy 双读）。**仍未做**：history / Gateway ``state/`` 搬家 |
+| **本步消费现状** | ✅ haitun 工具经 ``tools/_runtime_paths.py`` 读 ``get_workspace()`` / ``get_agent()``。todos / history 已迁 AppData（legacy 双读）。**仍未做**：Gateway ``state/`` 搬家 |
 
 ## Workspace 启动流程
 
@@ -32,7 +33,7 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 ```
 1. setup_logging(verbose)
 2. 解析 workspace（空 → cwd）；解析 agent（空 → 同 workspace）
-3. SessionAgent.create(workspace_path=…, agent_path=…) → session_id、AiClient、从 agent 加载 tools/schedules/system；history 仍在 workspace/histories/
+3. SessionAgent.create(workspace_path=…, agent_path=…, appdata_root=…) → session_id、AiClient、从 agent 加载 tools/schedules/system；history 在 AppData（legacy 双读）
 4. 启动 anyio.task_group：
    ├── serve_session(agent=agent)  ← 从 agent 读取 channel_socket + handle_request
    └── 每个 schedule 一个 run_one_schedule(schedule, agent) task
@@ -218,10 +219,12 @@ Gateway ``HistoryManager`` 同时投影剥掉 ``[SEND:]``/``[RECV:]`` 标记。
 
 ## History 持久化
 
-Session 支持将对话历史持久化到 `workspace/histories/{session_id}.jsonl`：
+Session 支持将对话历史持久化到 AppData `histories/{session_id}.jsonl`（第 4C）：
 
+- **写**：始终 `{appdata}/histories/{session_id}.jsonl`（`appdata` = `Session.appdata` / `PSI_APPDATA` / platformdirs）
+- **读**：优先 AppData 文件；缺则双读 legacy `{workspace}/histories/{session_id}.jsonl`
 - `Session.session_id: str | None = None` — None 时自动生成 UUID，给定字符串时可 resume
-- 加载：`SessionAgent.create()` 中从 jsonl 逐行读取，非法行跳过 + warning
+- 加载：`SessionAgent.create()` → `Conversation.from_workspace(..., appdata_root=…)` 双读
 - **Turn 级别原子性**：`SessionAgent.run()` 每次调用通过 ``async with self._conversation`` 进入上下文管理器，首次 `add()` / `replace_system()` 自动建立快照。user message 追加后立即 `commit()`（早期落盘，崩溃恢复基线），后续仅在对 AI 响应成功的检查点再次 `commit()` 更新；任何异常（AI error、连接断开、cancellation）都会通过 ``__aexit__`` 自动触发 `Conversation.rollback()` 恢复到快照，保证内存和磁盘始终同步于最近一个成功阶段。
 - 保存时机（一致性检查点）：
   - `finish_reason="stop"` — assistant 响应追加后立即 `commit()`，随后刷新 schedule registry（完整回合）
@@ -230,7 +233,7 @@ Session 支持将对话历史持久化到 `workspace/histories/{session_id}.json
   - 达到 `max_tool_rounds` — 追加 `[Max tool rounds reached]` assistant 消息后 `commit()`
 - `Conversation.save()` 使用 tempfile + `os.replace()` 实现原子写入；`commit()` 封装 save + 清除快照
 - **部分保存**的场景：`finish_reason="error"`、AI 连接断开、channel 断开、schedule runner 异常——user message 已通过早期 `commit()` 落盘，AI 响应部分通过 `rollback()` 回滚，不写入磁盘
-- 首次使用时自动创建 `histories/` 目录 + `.gitignore`（忽略全部文件）
+- 首次使用时自动创建 AppData `histories/` 目录 + `.gitignore`（忽略全部文件）
 
 ### peek_pending / clear_pending 安全机制
 

@@ -6,11 +6,18 @@ from typing import Any
 
 import anyio
 
+from psi_agent._appdata import resolve_appdata_root, resolve_history_read_path
 from psi_agent.session.history_display import KIND_CHAT, message_kind, wire_role
 
 
-def history_paths(workspace_root: anyio.Path, session_id: str) -> tuple[anyio.Path, anyio.Path]:
-    history_path = workspace_root / "histories" / f"{session_id}.jsonl"
+async def history_paths(workspace_root: anyio.Path, session_id: str) -> tuple[anyio.Path, anyio.Path]:
+    """Resolve JSONL (AppData dual-read) + Fusion Memory checkpoint under workspace."""
+    appdata_root = await resolve_appdata_root()
+    history_path = await resolve_history_read_path(
+        appdata_root=appdata_root,
+        workspace=str(workspace_root),
+        session_id=session_id,
+    )
     checkpoint_path = workspace_root / ".fusion-memory" / "haitun-history-watcher" / f"{session_id}.json"
     return history_path, checkpoint_path
 

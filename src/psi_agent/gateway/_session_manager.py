@@ -27,7 +27,7 @@ class SessionInfo:
     backend_type: str
     backend_id: str
     workspace: str
-    """User workspace (open folder). History JSONL still lives here (step 2)."""
+    """User workspace (open folder). Relative file IO / project files live here."""
 
     channel_socket: str
     # Step 2: surfaced to REST / state. Empty → Session treats agent ≡ workspace.
@@ -55,9 +55,10 @@ class SessionManager:
     _entries: dict[str, _SessionEntry] = field(default_factory=dict)
     _lock: anyio.Lock = field(default_factory=anyio.Lock)
     _persist: Callable[[], Awaitable[None]] = _noop
-    # Injected by Gateway.run from --default-agent / --default-workspace.
+    # Injected by Gateway.run from --default-agent / --default-workspace / --appdata.
     _default_agent: str = ""
     _default_workspace: str = ""
+    _appdata: str = ""
 
     async def create(
         self,
@@ -87,10 +88,11 @@ class SessionManager:
                 raise ValueError(f"Session {session_id!r} already exists")
             channel_socket = _socket_path(self._prefix, "channels", session_id)
             await _ensure_socket_dir(channel_socket)
-            # Hand paths to Session (#472). Empty agent → Session uses workspace.
+            # Hand paths to Session (#472 / #4C). Empty agent → Session uses workspace.
             sess = Session(
                 workspace=workspace,
                 agent=agent,
+                appdata=self._appdata,
                 channel_socket=channel_socket,
                 ai_socket=upstream_socket,
                 session_id=session_id,

@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import json
 
-import anyio
 from loguru import logger
 
+from psi_agent._appdata import (
+    appdata_history_path,
+    legacy_history_path,
+    resolve_appdata_root,
+    resolve_history_read_path,
+)
 from psi_agent.session.history_display import (
     extract_send_paths,
     is_displayable_chat_message,
@@ -15,8 +20,13 @@ from psi_agent.session.history_display import (
 
 
 class HistoryManager:
-    async def get(self, workspace: str, session_id: str) -> list[dict[str, object]]:
-        path = anyio.Path(workspace) / "histories" / f"{session_id}.jsonl"
+    async def get(self, workspace: str, session_id: str, *, appdata: str = "") -> list[dict[str, object]]:
+        appdata_root = appdata.strip() or await resolve_appdata_root()
+        path = await resolve_history_read_path(
+            appdata_root=appdata_root,
+            workspace=workspace,
+            session_id=session_id,
+        )
         messages: list[dict[str, object]] = []
         try:
             content = await path.read_text(encoding="utf-8")
@@ -67,13 +77,17 @@ class HistoryManager:
         logger.debug(f"History for session {session_id!r}: {len(messages)} displayable message(s)")
         return messages
 
-    async def delete(self, workspace: str, session_id: str) -> None:
-        """Remove ``histories/{session_id}.jsonl`` if present (best-effort)."""
-        path = anyio.Path(workspace) / "histories" / f"{session_id}.jsonl"
-        try:
-            await path.unlink()
-            logger.info(f"Deleted history file for session {session_id!r} at {path!r}")
-        except FileNotFoundError:
-            logger.debug(f"No history file to delete for session {session_id!r} at {path!r}")
-        except OSError as e:
-            logger.warning(f"Failed to delete history for session {session_id!r}: {e!r}")
+    async def delete(self, workspace: str, session_id: str, *, appdata: str = "") -> None:
+        """Remove AppData and legacy history files if present (best-effort)."""
+        appdata_root = appdata.strip() or await resolve_appdata_root()
+        for path in (
+            appdata_history_path(appdata_root, session_id),
+            legacy_history_path(workspace, session_id),
+        ):
+            try:
+                await path.unlink()
+                logger.info(f"Deleted history file for session {session_id!r} at {path!r}")
+            except FileNotFoundError:
+                logger.debug(f"No history file to delete for session {session_id!r} at {path!r}")
+            except OSError as e:
+                logger.warning(f"Failed to delete history for session {session_id!r}: {e!r}")
