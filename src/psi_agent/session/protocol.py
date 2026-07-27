@@ -125,3 +125,4 @@ class AiDelta:
     reasoning: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
     finish_reason: str | None = None
+    compaction_needed: bool = False
