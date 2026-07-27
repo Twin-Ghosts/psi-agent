@@ -49,6 +49,7 @@ Session ── POST /chat/completions ──► AI
 | `model` | `--model` | `PSI_AI_MODEL` | 模型名 |
 | `api_key` | `--api-key` | `PSI_AI_API_KEY` | 上游 API key |
 | `base_url` | `--base-url` | `PSI_AI_BASE_URL` | 上游 base URL |
+| `max_context_tokens` | `--max-context-tokens` | `PSI_MAX_CONTEXT_TOKENS` | Token 阈值，超过时触发 compaction（0 = 禁用） |
 
 全部参数可选，CLI 优先于环境变量。`model` 在请求处理中被启动配置覆盖（AI 层隐藏上游 model 细节）。
 
@@ -67,6 +68,17 @@ Anthropic→OpenAI 格式转换由 any-llm-sdk 自动完成，包括 `thinking_d
 - **HTTP 层**（`response.prepare()` 之前）：返回 OpenAI 格式 `{"error": {...}}` JSON + HTTP 4xx/5xx
 - **SSE 层**（`response.prepare()` 之后）：ChatCompletionChunk error chunk → `finish_reason="error"`（psi-agent 内部扩展，非 OpenAI 标准）
 - **取消/断开安全**：上游 stream 在 `finally` 中用 `anyio.CancelScope(shield=True)` 调 `stream.aclose()` 关闭（`getattr` 守卫兼容无 `aclose` 的流），确保客户端断开 / 进程关闭被 cancel 时不泄露上游连接
+
+## Context Compaction
+
+AI 层强制 `stream_options={"include_usage": True}` 获取上游 token 用量。当 `chunk.usage.prompt_tokens > max_context_tokens`（0 禁用），在上游 stream 结束后发送 **额外 SSE 事件** 通知 Session 触发 compaction：
+
+```json
+{"choices": [{"delta": {}, "finish_reason": "compaction_needed"}],
+ "psi_compaction": {"needed": true, "prompt_tokens": N, "threshold": M}}
+```
+
+`psi_compaction` 是 psi-agent 内部扩展字段，非 OpenAI 标准。仅 OpenAI / Anthropic / Gemini 及兼容 provider 支持 `usage` 返回；Groq / Mistral / Ollama 等 strip `stream_options`，compaction 不触发。
 
 ## 依赖
 

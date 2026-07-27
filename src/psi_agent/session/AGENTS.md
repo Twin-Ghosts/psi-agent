@@ -236,6 +236,31 @@ Session 支持将对话历史持久化到 AppData `histories/{session_id}.jsonl`
 - **部分保存**的场景：`finish_reason="error"`、AI 连接断开、channel 断开、schedule runner 异常——user message 已通过早期 `commit()` 落盘，AI 响应部分通过 `rollback()` 回滚，不写入磁盘
 - 首次使用时自动创建 AppData `histories/` 目录 + `.gitignore`（忽略全部文件）
 
+## Context Compaction
+
+当 AI 层返回 `psi_compaction` 信号时，Session 触发上下文压缩。流程：
+
+1. `AiClient.stream()` 解析 `psi_compaction` → `AiDelta.compaction_needed=True`
+2. Agent loop 在 `finish_reason="stop"` 后调用 `_maybe_compact()`
+3. 从 `{agent}/systems/system.py` 提取 `compact_history()` 函数
+4. 构造 `complete_fn`（使用现有 `AiClient` 做非流式调用的闭包）
+5. `summary = await compact_history(conversation.messages, complete_fn)`
+6. 合并 summary 到 system prompt（`messages[0]`）
+7. `conversation.trim_after(0)` 删除所有非 system 消息
+8. `commit()` 落盘
+
+`compact_history` 约定签名：
+
+```python
+async def compact_history(
+    history: list[dict[str, Any]],
+    complete_fn: Callable[[list[dict[str, Any]]], Awaitable[str]],
+) -> str:
+```
+
+未定义时 → 记录 warning，跳过压缩，history 持续增长。
+多次 compaction → 累积追加 `[Compacted History]` 到同一个 system prompt。
+
 ### peek_pending / clear_pending 安全机制
 
 `Conversation.peek_pending()` 返回 pending chunks 的副本但**不清空** buffer——调用方在 yield 全部成功后显式调用 `clear_pending()`。这保证 channel 断开时 pending schedule chunks 不会永久丢失，下次请求会重新 push。
