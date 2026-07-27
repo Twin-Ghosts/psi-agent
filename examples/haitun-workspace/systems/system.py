@@ -44,6 +44,15 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import anyio
+
+try:
+    from psi_agent.session.runtime_context import get_workspace as _runtime_workspace
+except ImportError:  # pragma: no cover — standalone import without editable install
+
+    def _runtime_workspace() -> str:
+        return ""
+
+
 from prompt_sections import (
     BOOTSTRAP_PENDING_SECTION,
     CONTEXT_FILE_ORDER,
@@ -863,34 +872,45 @@ async def _run_self_evolution_review(
 
 
 class System:
-    def __init__(self, workspace_dir: anyio.Path) -> None:
-        self._workspace_dir = workspace_dir
+    def __init__(
+        self,
+        agent_dir: anyio.Path,
+        *,
+        user_workspace: anyio.Path | None = None,
+    ) -> None:
+        # Agent package: skills / tools / SOUL / systems (capability root).
+        self._agent_dir = agent_dir
+        # User open-folder: relative file IO + deliverables (may differ from agent).
+        self._user_workspace = user_workspace if user_workspace is not None else agent_dir
         self._previous_summary: str | None = None
 
     async def _build_fusion_section(self) -> str:
         """Fusion Flow authoring guidance + flows index (merged from fusion-flow).
 
         Returns empty string if the fusion-flow runtime skill is not present.
+        Skill/runtime live under the **agent** package; generated ``flows/`` under
+        the **user workspace**.
         """
-        workspace_resolved = await self._workspace_dir.resolve()
-        skills_dir = workspace_resolved / "skills"
+        agent_resolved = await self._agent_dir.resolve()
+        user_resolved = await self._user_workspace.resolve()
+        skills_dir = agent_resolved / "skills"
         fusion_skill_dir = skills_dir / "fusion-flow"
         fusion_skill_md = fusion_skill_dir / "SKILL.md"
         if not await fusion_skill_md.exists():
             return ""
 
-        flows_dir = workspace_resolved / "flows"
+        flows_dir = user_resolved / "flows"
         # A workspace placed at a shallow path (e.g. ``/workspace``) may have fewer than
         # two parents; fall back to the workspace itself instead of raising IndexError,
         # which would abort the whole system prompt build and drop the agent's persona.
-        _ws_parents = Path(str(workspace_resolved)).parents
-        repo_root = _ws_parents[1] if len(_ws_parents) > 1 else Path(str(workspace_resolved))
+        _ws_parents = Path(str(agent_resolved)).parents
+        repo_root = _ws_parents[1] if len(_ws_parents) > 1 else Path(str(agent_resolved))
         default_executor_workspace = repo_root / "examples" / "hermes-style-workspace"
         flows_index = await _build_flows_index(flows_dir)
         runtime_bundle = fusion_skill_dir / "runtime" / "agent-flow-core.bundle.mjs"
         # psi engine MUST route through the session shim (the current CLI's `run` is a
         # YAML batch launcher and rejects the bundle's old-style flags with exit=2).
-        session_shim_posix = (Path(str(workspace_resolved)) / "bin" / "session_shim.py").as_posix()
+        session_shim_posix = (Path(str(agent_resolved)) / "bin" / "session_shim.py").as_posix()
 
         return f"""## Fusion Flow (workflow authoring)
 
@@ -984,7 +1004,9 @@ hand-copying the key.
 Never write API keys into this workspace, generated `.flow.ts` files, or committed `.env` files."""
 
     async def build_system_prompt(self, model: str | None = None, tool_names: list[str] | None = None) -> str:
-        ws = self._workspace_dir
+        # Capability root (skills/tools/SOUL) vs user open-folder (file IO guidance).
+        ws = self._agent_dir
+        user_ws = self._user_workspace
         tools = tool_names or await _scan_tool_names(ws)
 
         # -- Stable prefix ------------------------------------------------
@@ -1063,7 +1085,7 @@ Never write API keys into this workspace, generated `.flow.ts` files, or committ
         if fusion_section:
             stable_parts += ["", fusion_section]
 
-        workspace_abs = str(await ws.resolve())
+        workspace_abs = str(await user_ws.resolve())
         stable_parts += ["", build_workspace_section(workspace_abs)]
 
         if global_agents_md:
@@ -1233,18 +1255,26 @@ async def system_prompt_builder() -> str:
     """Module-level entry point used by the psi-agent session loader.
 
     The loader looks up an async ``system_prompt_builder`` attribute in this
-    module and calls it with no arguments.  We resolve the workspace root from
-    this file's location and delegate to the ``System`` class.
+    module and calls it with no arguments.
+
+    **Agent vs user workspace (三区)**: this file lives in the agent package, so
+    ``__file__`` resolves the capability root. The user open-folder for file IO
+    comes from Session ``get_workspace()`` (bound inside ``runtime_scope`` during
+    the turn). Falling back to the agent root preserves single-root compat.
     """
-    workspace_dir = anyio.Path(__file__).parent.parent
-    await _activate_fusion_memory(workspace_dir)
-    return await System(workspace_dir).build_system_prompt()
+    agent_dir = anyio.Path(__file__).parent.parent
+    user_workspace = agent_dir
+    raw = (_runtime_workspace() or "").strip()
+    if raw:
+        user_workspace = anyio.Path(raw)
+    await _activate_fusion_memory(agent_dir)
+    return await System(agent_dir, user_workspace=user_workspace).build_system_prompt()
 
 
 async def system_prompt_rebuild_checker() -> bool:
     """Activate Memory on the first turn after restoring an existing Session."""
-    workspace_dir = anyio.Path(__file__).parent.parent
-    await _activate_fusion_memory(workspace_dir)
+    agent_dir = anyio.Path(__file__).parent.parent
+    await _activate_fusion_memory(agent_dir)
     return False
 
 

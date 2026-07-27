@@ -443,10 +443,11 @@ External API writes: batch when safe, avoid tight loops, respect 429/Retry-After
 
 WORKSPACE_SECTION_TEMPLATE = """\
 ## Workspace
-Your working directory is: {workspace_dir}
-Treat this directory as the single global workspace for file operations unless explicitly instructed otherwise.
-All configuration for this agent lives inside this workspace - there is no global config directory.
-This scopes where you keep files and config, NOT which programs you can run: CLI tools installed anywhere on this machine are still available on PATH (see System CLI Tools).\
+Your **user workspace** (file IO / deliverables / schedules / flows) is: {workspace_dir}
+Relative paths for `read`/`write`/`edit`/`bash` cwd and `[SEND:]` absolute paths MUST resolve under this directory.
+The agent capability package (skills / tools / SOUL / systems) is a **separate** root — do **not** write user deliverables into the agent package.
+There is no global config directory under `~/`.
+This scopes where you keep files, NOT which programs you can run: CLI tools installed anywhere on this machine are still available on PATH (see System CLI Tools).\
 """
 
 # ---------------------------------------------------------------------------

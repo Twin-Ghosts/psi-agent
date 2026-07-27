@@ -88,6 +88,7 @@ service tools:
 |----------|----------|----------|
 | `workspace_dir()` / `resolve_workspace()` | 显式参数 → `get_workspace()` → `WORKSPACE_DIR` → 本包父目录 | 相对路径读写、`bash`/`powershell` cwd、`schedules/`、`flows/`、feishu UAT |
 | `agent_dir()` / `resolve_agent()` | 显式参数 → `get_agent()` → 回落 `workspace_dir()` | `skills/`（`skill_manage`） |
+| system prompt「Workspace」段 | `system_prompt_builder` 经 `get_workspace()` 注入用户打开目录（**刻意为之**：勿用 `__file__` 当文件 IO 根，否则 agent≠workspace 时模型会把产出写进能力包） | 引导模型相对路径 / `[SEND:]` 落在用户工作区 |
 | `resolve_user_path(path)` | 相对 → 拼到 workspace；绝对路径原样 | `read` / `write` / `edit` / `list_dir` / `find_files` |
 | AppData todos（第 4B） | `resolve_appdata_root()` → `{appdata}/todos/{session_id}.json`；读时双读 legacy `{workspace}/.psi/todos/` | `todo` tool / Gateway `GET …/todos` |
 | AppData history（第 4C） | 同上根 → `{appdata}/histories/{session_id}.jsonl`；读时双读 legacy `{workspace}/histories/` | Session JSONL / `sessions_list` / `GET …/history` |
