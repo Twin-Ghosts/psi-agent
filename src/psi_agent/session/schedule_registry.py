@@ -126,7 +126,7 @@ class ScheduleRegistry:
     def start_all(self, task_group: Any, agent: SessionAgent) -> None:
         """Start a runner for every registered schedule in *task_group*.
 
-        Stores *agent* and *task_group* for use by ``refresh()``。非空 registry
+        Stores *agent* and *task_group* for use by ``refresh()``; 非空 registry
         (即调度 Session) 额外起一个 ``_watch_dir`` 常驻协程周期性 ``refresh()``。
         """
         self._agent = agent
@@ -147,14 +147,22 @@ class ScheduleRegistry:
         轮询而非 inotify/watchdog: ``refresh()`` 已是 hash 增量 (未变的文件不重新
         解析), 一个目录的 stat 成本可忽略; 且零新依赖, 跨平台一致 (见根 AGENTS.md
         「最小化核心」)。
+
+        循环体内 ``except Exception`` 兜底 (对标 ``_run_one``): 本协程经
+        ``start_soon`` 挂在 Session 的 task group 上, 任何逸出的异常都会连坐整个
+        调度 Session。单次刷新失败只记 ERROR, 下一周期重试。
+        ``CancelledError`` 是 ``BaseException``, 不被这里捕获, 取消照常传播。
         """
         logger.info(f"Schedule watcher started for {self._work_dir!r} (every {_WATCH_INTERVAL_SECONDS}s)")
         try:
             while True:
-                await anyio.sleep(_WATCH_INTERVAL_SECONDS)
-                result = await self.refresh()
-                if result and set(result.values()) != {"skipped"}:
-                    logger.info(f"Schedule watcher applied changes: {result}")
+                try:
+                    await anyio.sleep(_WATCH_INTERVAL_SECONDS)
+                    result = await self.refresh()
+                    if result and set(result.values()) != {"skipped"}:
+                        logger.info(f"Schedule watcher applied changes: {result}")
+                except Exception as e:
+                    logger.error(f"Schedule watcher iteration failed for {self._work_dir!r}: {e!r}")
         finally:
             logger.info(f"Schedule watcher stopped for {self._work_dir!r}")
 

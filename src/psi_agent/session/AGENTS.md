@@ -181,6 +181,7 @@ Session 层使用两个对称的协议适配器，将 `SessionAgent.run()` 包�
   1. 每次 `run()` 入口（turn 开始），与 tool 一并刷新
   2. `finish_reason="stop"` 后（turn 结束），仅刷新 schedule——因本轮 tool 可能修改了 workspace schedules 下的文件，需立即生效，不等下次 turn
   3. **`_watch_dir` 常驻协程每 30s 刷新**（仅非空 registry，即调度 Session 才起）。**必需**：上面两个时机都在 `SessionAgent.run()` 里，而调度 Session 没有 channel 连着它、永远不会有回合；少了这个 watcher，用户经 `schedule_manage` 新建的定时任务永远不会被加载，只有 spawn 那一刻已存在的能跑。用轮询而非 inotify/watchdog——`refresh()` 已是 hash 增量（未变的文件不重新解析），一次目录 stat 成本可忽略，且零新依赖、跨平台一致
+     - **循环体内 `except Exception` 兜底（对标 `_run_one`）**：watcher 经 `start_soon` 挂在 Session 的 task group 上，任何逸出的异常都会**连坐整个调度 Session**（实测过：`refresh()` 之外抛异常会直接杀掉 Session）。单次刷新失败只记 ERROR，下一周期重试。`CancelledError` 是 `BaseException` 不被捕获，取消照常传播
 
 ## Tool 调用细节
 

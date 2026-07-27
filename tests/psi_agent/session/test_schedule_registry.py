@@ -618,6 +618,34 @@ async def test_empty_registry_starts_no_watcher(tmp_path: Path, monkeypatch: pyt
         tg.cancel_scope.cancel()
 
 
+@pytest.mark.anyio
+async def test_watcher_survives_refresh_exception(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """watcher 经 start_soon 挂在 Session 的 task group 上 —— 逸出的异常会连坐整个
+    调度 Session。单次刷新失败必须只记 ERROR 并在下一周期重试。"""
+    monkeypatch.setattr(schedule_registry_module, "_WATCH_INTERVAL_SECONDS", 0.02)
+    await anyio.Path(tmp_path / "schedules").mkdir(parents=True)
+    sr = await ScheduleRegistry.load(tmp_path / "schedules")
+
+    calls = 0
+    third_call = anyio.Event()
+
+    async def _boom() -> dict[str, str]:
+        nonlocal calls
+        calls += 1
+        if calls >= 3:
+            third_call.set()
+        raise RuntimeError("refresh 之外的意外异常")
+
+    monkeypatch.setattr(sr, "refresh", _boom)
+    async with anyio.create_task_group() as tg:
+        sr.start_all(tg, cast(Any, _MockAgent()))
+        # 连续失败 3 次仍未崩溃 → 异常没有逸出到 task group。
+        with anyio.fail_after(5):
+            await third_call.wait()
+        assert calls >= 3
+        tg.cancel_scope.cancel()
+
+
 # ── scheduler session ownership — 一个 workspace 只有调度 Session 触发 ────────
 
 
