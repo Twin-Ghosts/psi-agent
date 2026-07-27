@@ -159,11 +159,13 @@ psi-agent
 |----------|------|
 | `./ai.sock`（裸文件系统路径，相对/绝对路径均可） | Unix socket（仅 POSIX） |
 | `http://127.0.0.1:8080` | TCP |
-| `\\.\pipe\name`（Windows） | Named Pipe |
+| `\\.\pipe\name`（Windows） | Named Pipe（仅 Windows） |
 
 AI 和 Session 组件无需关心通信介质——由 `_sockets.py` 统一处理。
 
 > **Windows 注意**：Windows 上没有 Unix socket（asyncio 无 `create_unix_connection`），因此裸文件系统路径在 Windows 会被**直接拒绝并抛出清晰的 `ValueError`**，而不是退化成 Unix socket 后在 aiohttp 深处报无上下文的 `NotImplementedError`。Windows 请用命名管道地址 `\\.\pipe\name`；经 POSIX shell（如 bash 单引号）传参时反斜杠须能存活——单反斜杠 `\.\pipe\...` 匹配不上命名管道前缀会被当成裸路径，同样触发该 `ValueError`。
+
+> **POSIX 注意**：反过来，命名管道只在 Windows 可用（需要 asyncio 的 `ProactorEventLoop`，该类在非 Windows 平台根本不存在），因此在 Linux/macOS 上传 `\\.\pipe\name` 也会被**直接拒绝并抛出清晰的 `ValueError`**，而不是让 aiohttp 内部的平台检查抛无上下文的 `AttributeError`。POSIX 上请用裸文件系统路径或 TCP 地址。
 
 组件间的协议错误有两种形式：
 
