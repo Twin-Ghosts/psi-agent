@@ -10,6 +10,7 @@ import pytest
 from croniter import croniter
 
 from psi_agent._yaml import parse_yaml_header
+from psi_agent.session import schedule_registry as schedule_registry_module
 from psi_agent.session.conversation import Conversation
 from psi_agent.session.schedule_registry import Schedule, ScheduleEntry, ScheduleRegistry
 from psi_agent.session.tool_registry import FileEntry, ToolFunction, ToolRegistry
@@ -552,6 +553,69 @@ async def test_consume_run_once_deletes_task(tmp_path: Path) -> None:
     await ScheduleRegistry._consume_run_once(s, registry)
     assert not await anyio.Path(task).exists()
     assert str(task) not in registry._files
+
+
+# ── watcher — 调度 Session 感知 TASK.md 变化的唯一途径 ────────────────────────
+
+
+@pytest.mark.anyio
+async def test_watcher_picks_up_schedule_created_after_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """调度 Session 没有 channel, 回合内的两个 refresh 时机都不会发生。
+
+    少了 watcher, 用户经 ``schedule_manage`` 新建的定时任务永远不会被加载。
+    """
+    monkeypatch.setattr(schedule_registry_module, "_WATCH_INTERVAL_SECONDS", 0.05)
+    sched_root = tmp_path / "schedules"
+    await anyio.Path(sched_root / "first").mkdir(parents=True)
+    await anyio.Path(sched_root / "first" / "TASK.md").write_text(
+        '---\nname: first\ncron: "0 12 * * *"\n---\nT', encoding="utf-8"
+    )
+
+    sr = await ScheduleRegistry.load(sched_root)
+    seen_second = anyio.Event()
+    real_refresh = sr.refresh
+
+    async def _signalling_refresh() -> dict[str, str]:
+        result = await real_refresh()
+        if "second" in {s.name for s in sr.schedules}:
+            seen_second.set()
+        return result
+
+    monkeypatch.setattr(sr, "refresh", _signalling_refresh)
+    async with anyio.create_task_group() as tg:
+        sr.start_all(tg, cast(Any, _MockAgent()))
+        assert {s.name for s in sr.schedules} == {"first"}
+
+        # 启动后才出现的第二个任务 —— 只有 watcher 能发现它。
+        await anyio.Path(sched_root / "second").mkdir(parents=True)
+        await anyio.Path(sched_root / "second" / "TASK.md").write_text(
+            '---\nname: second\ncron: "5 12 * * *"\n---\nT2', encoding="utf-8"
+        )
+        with anyio.fail_after(5):
+            await seen_second.wait()
+        assert {s.name for s in sr.schedules} == {"first", "second"}
+        assert "second" in sr._runner_scopes
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_empty_registry_starts_no_watcher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """非调度 Session 不该周期性扫盘 —— 空 registry 连 watcher 都不起。"""
+    monkeypatch.setattr(schedule_registry_module, "_WATCH_INTERVAL_SECONDS", 0.05)
+    refreshed = 0
+    sr = ScheduleRegistry()
+
+    async def _counting_refresh() -> dict[str, str]:
+        nonlocal refreshed
+        refreshed += 1
+        return {}
+
+    monkeypatch.setattr(sr, "refresh", _counting_refresh)
+    async with anyio.create_task_group() as tg:
+        sr.start_all(tg, cast(Any, _MockAgent()))
+        await anyio.sleep(0.3)
+        assert refreshed == 0
+        tg.cancel_scope.cancel()
 
 
 # ── scheduler session ownership — 一个 workspace 只有调度 Session 触发 ────────

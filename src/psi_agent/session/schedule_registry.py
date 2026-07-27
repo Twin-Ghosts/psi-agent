@@ -41,6 +41,10 @@ if TYPE_CHECKING:
 FIRE_PROMPT = "prompt"
 FIRE_TOOL = "tool"
 
+# 调度 Session 重扫 schedules 目录的间隔。取 30s: 用户经 schedule_manage 建完提醒
+# 最多等这么久生效, 而 refresh() 是 hash 增量, 空转成本只是一次目录 stat。
+_WATCH_INTERVAL_SECONDS = 30.0
+
 
 @dataclass
 class Schedule:
@@ -121,11 +125,38 @@ class ScheduleRegistry:
 
     def start_all(self, task_group: Any, agent: SessionAgent) -> None:
         """Start a runner for every registered schedule in *task_group*.
-        Stores *agent* and *task_group* for use by ``refresh()``."""
+
+        Stores *agent* and *task_group* for use by ``refresh()``。非空 registry
+        (即调度 Session) 额外起一个 ``_watch_dir`` 常驻协程周期性 ``refresh()``。
+        """
         self._agent = agent
         self._task_group = task_group
         for entry in self._files.values():
             self._start_runner(entry.schedule)
+        if self._work_dir is not None:
+            task_group.start_soon(self._watch_dir)
+
+    async def _watch_dir(self) -> None:
+        """周期性 ``refresh()`` —— 调度 Session 感知 ``TASK.md`` 增删改的唯一途径。
+
+        刻意为之: 另外两个 refresh 时机都在 ``SessionAgent.run()`` 里 (回合开始 /
+        ``finish_reason=stop`` 后), 而**调度 Session 没有 channel 连着它**, 永远不会
+        有回合。少了这个 watcher, 用户经 ``schedule_manage`` 新建的定时任务就永远
+        不会被加载 —— 只有 spawn 那一刻已存在的那些能跑。
+
+        轮询而非 inotify/watchdog: ``refresh()`` 已是 hash 增量 (未变的文件不重新
+        解析), 一个目录的 stat 成本可忽略; 且零新依赖, 跨平台一致 (见根 AGENTS.md
+        「最小化核心」)。
+        """
+        logger.info(f"Schedule watcher started for {self._work_dir!r} (every {_WATCH_INTERVAL_SECONDS}s)")
+        try:
+            while True:
+                await anyio.sleep(_WATCH_INTERVAL_SECONDS)
+                result = await self.refresh()
+                if result and set(result.values()) != {"skipped"}:
+                    logger.info(f"Schedule watcher applied changes: {result}")
+        finally:
+            logger.info(f"Schedule watcher stopped for {self._work_dir!r}")
 
     async def refresh(self) -> dict[str, str]:
         """Incremental reload — adds, updates, removes schedules.

@@ -23,6 +23,7 @@ Session 层是 psi-agent 的核心——负责 workspace 解析、agent loop、t
 | **为什么** | Gateway 一个进程跑多个 Session；飞书 channel 更是**按 open_id 给每个用户 spawn 独立 Session**（`gateway/_feishu_manager.py`），多 Session 共用同一个 agent 包。旧行为「每个 Session 为自己加载到的每条 schedule 各起一个 runner」会让一条定时任务被在线会话数乘一遍 → 飞书上一条提醒推 N 次 |
 | **加载源** | `workspace_path / "schedules"`。单根模式（`agent=""` → agent≡workspace）行为不变 |
 | **谁触发** | 仅 `scheduler=True` 的 Session。`SessionAgent.create(scheduler=False)`（默认）直接构造**空** `ScheduleRegistry`，`start_all` / `refresh` 都是 no-op。去重发生在**构造期**，不是运行时抢锁，所以没有租约、没有选主、没有「持有者退出谁接管」 |
+| **怎么感知新任务** | 调度 Session 没有 channel → 永远没有回合 → 回合内的两个 refresh 时机都不发生。故 `start_all` 额外起 `_watch_dir` 协程每 30s `refresh()`。**这不是可选优化**：少了它，用户新建的定时任务永远不会被加载（见下方「动态重载」第 3 条） |
 | **谁创建** | Gateway `SchedulerManager.ensure(workspace)`（见 `gateway/AGENTS.md`），按 workspace 幂等去重（key 经 `normcase` + `realpath` 归一），每 workspace 至多一个；**按需**——workspace 无 `schedules/*/TASK.md` 时不 spawn |
 | **display 结果** | 调度 Session 没有 channel 连着它，`visibility: display` 的结果只写它自己的 JSONL，**不再回流给用户**（刻意接受的降级）。要可靠推送就用 `fire=tool` + `feishu_message_send`，那条路不依赖 pending |
 | **`fire=prompt` 的历史** | 落在 AppData 的 `histories/scheduler-<hash>.jsonl`（第 4C 起 history 归 AppData），与用户对话历史分开 |
@@ -176,9 +177,10 @@ Session 层使用两个对称的协议适配器，将 `SessionAgent.run()` 包�
 - `fresh` 标志保证 skipped 文件不被误删
 - `ScheduleRegistry` 以 per-file `ScheduleEntry` 存储（含 hash），`refresh()` 支持 add/update/remove/skip。每个 schedule 有独立 `CancelScope`，update/remove 时取消旧 runner 并启动新 runner。`refresh()` 内部已 try/except，失败时 log warning 返回 `{}`，不修改内部状态，调用方可直接 await 无需自行容错
 - 非调度 Session（`scheduler=False`，即所有用户会话）的 `ScheduleRegistry` 是空的（`work_dir=None`）：`start_all` 不起 runner，`refresh()` 直接返回 `{}` 不扫盘。「一条定时任务只触发一次」由此在构造期成立，无需运行时协调
-- Schedule 刷新的两个时机：
+- Schedule 刷新的三个时机：
   1. 每次 `run()` 入口（turn 开始），与 tool 一并刷新
   2. `finish_reason="stop"` 后（turn 结束），仅刷新 schedule——因本轮 tool 可能修改了 workspace schedules 下的文件，需立即生效，不等下次 turn
+  3. **`_watch_dir` 常驻协程每 30s 刷新**（仅非空 registry，即调度 Session 才起）。**必需**：上面两个时机都在 `SessionAgent.run()` 里，而调度 Session 没有 channel 连着它、永远不会有回合；少了这个 watcher，用户经 `schedule_manage` 新建的定时任务永远不会被加载，只有 spawn 那一刻已存在的能跑。用轮询而非 inotify/watchdog——`refresh()` 已是 hash 增量（未变的文件不重新解析），一次目录 stat 成本可忽略，且零新依赖、跨平台一致
 
 ## Tool 调用细节
 
@@ -203,7 +205,7 @@ AI 的 tool_calls 通过 SSE 流式传输——多个 chunk 中的 `delta.tool_c
 ## Schedule 机制完整流程
 
 ```
-每个 schedule 一个 run_one_schedule() coroutine：
+每个 schedule 一个 run_one_schedule() coroutine（+ 调度 Session 一个 _watch_dir()）：
   while True:
     _seconds_until_next(cron)   ← 本地墙钟下次触发（勿用 time.time() 作 croniter base；TZ 设了则按该时区）
     await anyio.sleep(wait)     ← 睡到触发

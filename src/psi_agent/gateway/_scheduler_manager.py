@@ -132,7 +132,3 @@ class SchedulerManager:
             if await task_dir.is_dir() and await (task_dir / "TASK.md").exists():
                 return True
         return False
-
-    async def session_id_for(self, workspace: str) -> str:
-        """已知的调度 session id, 未创建时返回 ``""`` (诊断 / 测试用)。"""
-        return self._routes.get(await self._workspace_key(workspace), "")
