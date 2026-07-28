@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import json
 import os
+from itertools import pairwise
+from math import ceil, radians, sin
 from typing import Any
 
 import anyio
@@ -122,8 +124,20 @@ def _apply_style() -> None:
     rcParams["savefig.dpi"] = _DPI
     rcParams["figure.facecolor"] = "white"
     rcParams["axes.facecolor"] = "white"
-    rcParams["savefig.bbox"] = "tight"
-    rcParams["savefig.pad_inches"] = 0.25
+    # NOT savefig.bbox="tight": Feishu shows an image block at the PNG's own pixel
+    # size (verified against the live API — `replace_image` overwrites any width/height
+    # we send with the file's real dimensions, and no later patch can change them). A
+    # tight bbox crops to whatever the content happens to be, so every chart came out a
+    # different size — 26 distinct sizes across 54 charts — and the narrow ones rendered
+    # as thumbnails in the doc. A fixed canvas keeps every chart one predictable size.
+    rcParams["savefig.bbox"] = "standard"
+    rcParams["savefig.pad_inches"] = 0.0
+    # Constrained layout replaces the cropping: instead of trimming the canvas to fit
+    # the text, it shrinks the axes so titles, legends and tick labels fit inside a
+    # canvas whose size never moves.
+    rcParams["figure.constrained_layout.use"] = True
+    rcParams["figure.constrained_layout.h_pad"] = 0.08
+    rcParams["figure.constrained_layout.w_pad"] = 0.08
     rcParams["font.size"] = 13
     rcParams["axes.titlesize"] = 17
     rcParams["axes.titleweight"] = "bold"
@@ -172,9 +186,221 @@ def _source_note(fig: Any, source: str) -> None:
 
     Every chart that makes a claim should say where the numbers came from; keeping it
     in one helper means the wording and placement stay identical across chart types.
+    Registered as the figure's supxlabel rather than free-floating ``fig.text`` so
+    constrained layout reserves a strip for it instead of letting the axes draw over it.
     """
     if source:
-        fig.text(0.01, 0.005, f"数据来源：{source}", fontsize=10, color=_MUTED, ha="left", va="bottom")  # noqa: RUF001
+        fig.supxlabel(f"数据来源：{source}", fontsize=10, color=_MUTED, ha="left", x=0.01)  # noqa: RUF001
+
+
+def _set_title(ax: Any, title: str, *, has_legend: bool) -> None:
+    """Place the chart title so a legend can never sit on top of it.
+
+    ``ax.set_title`` draws just above the axes — exactly where a legend anchored at
+    ``bbox_to_anchor=(0, 1.02)`` also goes, so with both present the two rendered on
+    the same line and the title came out struck through by the legend swatches (seen
+    on area, line, grouped/stacked bar, histogram, combo and gantt).
+
+    With a legend, the title is promoted to a figure-level suptitle: constrained layout
+    then stacks title row → legend row → axes and no two of them can occupy the same
+    band. Without a legend, the plain axes title is still the right thing — it stays
+    tied to the axes and needs no extra reserved space.
+    """
+    if not title:
+        return
+    if has_legend:
+        ax.figure.suptitle(title, x=0.01, ha="left", fontsize=17, fontweight="bold", color=_INK)
+    else:
+        ax.set_title(title, loc="left")
+
+
+def _legend_note(ax: Any, note: str) -> None:
+    """A right-aligned glyph key ("◇ 均值 — 中位数") under the axes.
+
+    Placed as an axes-relative annotation rather than ``fig.text(y=0.005)``: a figure
+    coordinate is fixed to the canvas, so constrained layout doesn't know to keep space
+    for it and the bottom tick labels drew straight through it. Anchoring below the axes
+    puts it in the layout's reserved margin instead.
+
+    The offset clears whatever the x tick labels actually occupy, measured after they
+    have been tilted and thinned. A fixed offset can't work for both: horizontal labels
+    end ~35px below the axes, tilted ones reach past 120px and ran through the note.
+    """
+    if not note:
+        return
+    drop = 30.0
+    fig = ax.figure
+    try:
+        renderer = fig.canvas.get_renderer()
+    except AttributeError:
+        renderer = None
+    if renderer is not None:
+        floor = ax.get_window_extent().y0
+        for text in ax.get_xticklabels():
+            if text.get_text().strip() and text.get_visible():
+                drop = max(drop, floor - text.get_window_extent(renderer=renderer).y0)
+    ax.annotate(
+        note,
+        xy=(1.0, 0),
+        xycoords="axes fraction",
+        xytext=(0, -(drop + 14.0) * 72.0 / _DPI),
+        textcoords="offset points",
+        fontsize=10,
+        color=_MUTED,
+        ha="right",
+        va="top",
+    )
+
+
+def _clip_ticks_to_view(ax: Any) -> None:
+    """Drop ticks the locator placed outside the visible range.
+
+    A locator picks round numbers, so an axis whose data stops at 80.2 still gets a tick
+    at 100. Matplotlib draws that label anyway, one full step *beyond* the axes — outside
+    the box constrained layout reserved — where it lands on top of whatever is above,
+    which is how a y label came to sit across the chart title.
+
+    Only the label is dropped, never the limits: rescaling the axis to a round number
+    would change what the chart claims about the data.
+    """
+    from matplotlib.ticker import FixedLocator  # noqa: PLC0415
+
+    for axis, low, high in ((ax.xaxis, *sorted(ax.get_xlim())), (ax.yaxis, *sorted(ax.get_ylim()))):
+        locs = [t for t in axis.get_ticklocs() if low - 1e-9 <= t <= high + 1e-9]
+        if locs and len(locs) != len(axis.get_ticklocs()):
+            axis.set_major_locator(FixedLocator(locs))
+
+
+def _tilt_crowded_x_labels(ax: Any, renderer: Any) -> None:
+    """Tilt x tick labels 30° when upright ones are wider than the gap between them.
+
+    Each chart used to make this call from a character count — ``len(label) > 4``, ``> 5``
+    or ``> 6`` depending on which function you were in — which asks the wrong question.
+    What decides whether labels collide is the label's *rendered width* against the space
+    actually available to it: a three-character CJK label like 渠道1 clears every one of
+    those thresholds and still overlaps, while a longer label on a wide axis was tilted
+    for no reason. Measuring both replaces all seven guesses.
+
+    The spacing has to come from where the ticks really land, not from axes width divided
+    by label count: ticks sit at data coordinates, so a heatmap with 6 columns over 31 rows
+    draws its labels 42px apart inside a 1319px axes. Dividing would have called that a
+    220px slot and left the labels overlapping.
+    """
+    labels = [t for t in ax.get_xticklabels() if t.get_text().strip()]
+    if len(labels) < 2 or any(t.get_rotation() for t in labels):
+        return
+    boxes = [t.get_window_extent(renderer=renderer) for t in labels]
+    centres = sorted((b.x0 + b.x1) / 2 for b in boxes)
+    pitch = min(b - a for a, b in pairwise(centres))
+    widest = max(b.width for b in boxes)
+    if widest + 6.0 <= pitch:
+        return
+    for text in labels:
+        text.set_rotation(30)
+        text.set_ha("right")
+        text.set_rotation_mode("anchor")
+
+
+def _thin_tick_labels(ax: Any) -> None:
+    """Drop every Nth tick label, on both axes, until the rest stop overlapping.
+
+    A 31-day Gantt axis or a long month series asks for more labels than the axis is
+    long enough to hold, and matplotlib happily overlaps them into an unreadable smear
+    (measured: 16 colliding pairs on a one-month plan). Horizontal charts — bar, funnel,
+    progress, heatmap rows — crowd the *vertical* axis the same way, so both are thinned:
+    an earlier x-only version left every horizontal chart broken at 31 categories.
+
+    Extents are *measured*, not estimated from character counts, so this behaves the same
+    for two-character months, ISO dates and long CJK names, and doesn't shift when the
+    CJK fallback font differs between machines.
+
+    Measuring is a loop rather than a single pass because the two quantities involved
+    depend on each other: dropping labels frees margin, constrained layout hands that
+    space back to the axes, and a longer axis then has room for labels that were just
+    removed. One pass computed its budget against the pre-layout box and left gantt and
+    heatmap still overlapping. Iterating to a fixed point settles in 2-3 rounds; the cap
+    is there so an oscillating case degrades to "slightly too sparse" instead of hanging.
+
+    Only fixed (explicitly set) tick locations are thinned. A numeric auto-scaled axis
+    picks its own non-crowding ticks, and re-spacing those would fight the locator.
+    """
+    from matplotlib.ticker import FixedLocator  # noqa: PLC0415
+
+    fig = ax.figure
+    try:
+        renderer = fig.canvas.get_renderer()
+    except AttributeError:  # a backend with no renderer to ask; leave the ticks alone
+        return
+    _tilt_crowded_x_labels(ax, renderer)
+    # Full label set per axis, so each round re-thins from the original rather than
+    # compounding earlier strides (which overshoots to a handful of labels).
+    full: dict[Any, tuple[list[float], list[str]]] = {}
+    for axis, getter in ((ax.xaxis, ax.get_xticklabels), (ax.yaxis, ax.get_yticklabels)):
+        if isinstance(axis.get_major_locator(), FixedLocator):
+            ticks, labels = list(axis.get_ticklocs()), [t.get_text() for t in getter()]
+            if len(ticks) == len(labels) >= 2:
+                full[axis] = (ticks, labels)
+    if not full:
+        return
+    setters = {ax.xaxis: ax.set_xticklabels, ax.yaxis: ax.set_yticklabels}
+    getters = {ax.xaxis: ax.get_xticklabels, ax.yaxis: ax.get_yticklabels}
+    strides = dict.fromkeys(full, 1)
+    # `set_ticklabels` builds fresh Text objects at default rotation, so the 30° tilt a
+    # chart applied to long labels would be silently dropped — the labels then measure
+    # wider than the budget just computed and collide worse than before thinning.
+    styles = {
+        axis: (texts[0].get_rotation(), texts[0].get_ha(), texts[0].get_va())
+        for axis in full
+        if (texts := getters[axis]())
+    }
+
+    def restyle(axis: Any) -> None:
+        rotation, ha, va = styles.get(axis, (0.0, "center", "center"))
+        for text in getters[axis]():
+            text.set_rotation(rotation)
+            text.set_ha(ha)
+            text.set_va(va)
+
+    for _round in range(5):
+        if fig.get_layout_engine() is not None:
+            fig.get_layout_engine().execute(fig)
+        changed = False
+        for axis, (ticks, labels) in full.items():
+            shown = [t for t in getters[axis]() if t.get_text().strip()]
+            if len(shown) < 2:
+                continue
+            boxes = [t.get_window_extent(renderer=renderer) for t in shown]
+            horizontal = axis is ax.xaxis
+            # Pitch is measured between the labels as drawn, because ticks sit at data
+            # coordinates: 6 heatmap columns over 31 rows land 42px apart inside a 1319px
+            # axes, and dividing axes length by label count would call that a 220px slot.
+            centres = sorted(((b.x0 + b.x1) / 2 if horizontal else (b.y0 + b.y1) / 2) for b in boxes)
+            pitch = min(b - a for a, b in pairwise(centres))
+            # Tilted labels are parallel strips, so what they need along the axis is not
+            # their diagonal extent but the spacing that keeps those strips apart: a strip
+            # of text height h at angle θ clears its neighbour once the tick pitch exceeds
+            # h/sin θ. That is why tilting buys room at all — at 30° a 36px-tall label
+            # needs 72px of pitch instead of its full 174px width.
+            angle = radians(shown[0].get_rotation() % 180)
+            line_h = max(box.height for box in boxes)
+            if horizontal and angle:
+                need = line_h / sin(angle)
+            elif horizontal:
+                need = max(box.width for box in boxes) + 6.0
+            else:
+                need = line_h + 6.0
+            if pitch <= 0 or need <= pitch:
+                continue
+            stride = max(1, min(len(labels) // 2, ceil(need / pitch) * strides[axis]))
+            if stride > strides[axis]:
+                strides[axis] = stride
+                keep = list(range(0, len(labels), stride))
+                axis.set_major_locator(FixedLocator([ticks[i] for i in keep]))
+                setters[axis]([labels[i] for i in keep])
+                restyle(axis)
+                changed = True
+        if not changed:
+            break
 
 
 def _finish_axes(
@@ -186,6 +412,7 @@ def _finish_axes(
     grid_axis: str = "y",
     legend: bool = False,
     legend_cols: int = 0,
+    note: str = "",
     source: str = "",
 ) -> None:
     """Apply the shared frame: title, axis labels, one-directional grid, legend, source note.
@@ -194,8 +421,6 @@ def _finish_axes(
     ink without information. The grid runs along a single axis (the one you read
     values off), sits *behind* the data, and stays light enough to not compete with it.
     """
-    if title:
-        ax.set_title(title, loc="left")
     if x_label:
         ax.set_xlabel(x_label)
     if y_label:
@@ -207,7 +432,8 @@ def _finish_axes(
     if grid_axis in ("x", "y", "both"):
         ax.grid(axis=grid_axis, linestyle="-", alpha=0.9)
         ax.set_axisbelow(True)
-    if legend:
+    drawn_legend = ax.get_legend() is not None
+    if legend and not drawn_legend:
         handles, labels = ax.get_legend_handles_labels()
         if handles:
             # Legend above the plot in one row: a right-side legend steals width from
@@ -222,6 +448,31 @@ def _finish_axes(
                 borderaxespad=0,
                 handlelength=1.6,
             )
+            drawn_legend = True
+    # After the legend, so the title knows whether it has to move out of its way.
+    _set_title(ax, title, has_legend=drawn_legend)
+    # Clip before thinning: an out-of-view tick would otherwise be counted in the
+    # label budget and could survive as the one label kept from its stride.
+    _clip_ticks_to_view(ax)
+    _thin_tick_labels(ax)
+    # After the tick work: the note is placed clear of the x labels, so it has to know
+    # their final tilt and count.
+    _legend_note(ax, note)
+    _source_note(ax.figure, source)
+
+
+def _finish_bare_axes(ax: Any, *, title: str = "", source: str = "") -> None:
+    """Closing pass for charts that build their own frame instead of using `_finish_axes`.
+
+    Funnel, heatmap and progress draw their own spines, ticks and colourbar, so they
+    can't take the shared frame — but they still need the parts that keep text apart.
+    Without this they were the only charts left overlapping at high category counts,
+    because the tick work lived solely in `_finish_axes`.
+    """
+    if title:
+        ax.set_title(title, loc="left")
+    _clip_ticks_to_view(ax)
+    _thin_tick_labels(ax)
     _source_note(ax.figure, source)
 
 
@@ -242,6 +493,58 @@ def _fmt_number(value: float, unit: str = "", decimals: int | None = None) -> st
             decimals = 2
     text = f"{value:,.{decimals}f}"
     return f"{text}{unit}" if unit else text
+
+
+def _row_label_size(ax: Any, rows: int, base: float = 11.0) -> float:
+    """Font size for one-label-per-row charts, shrunk to the row pitch when rows are many.
+
+    Funnel and progress charts write a value label inside or beside every row, so the
+    crowding limit is the *row count*, not the label text: 31 rows in an 790px axes
+    leaves 25px of pitch while an 11pt line box is 34px tall, and the labels overlap no
+    matter how short they are. Thinning is not an option here — a skipped row would look
+    like a row with no value — so the type scales down to fit instead.
+
+    Clamped at 6pt: below that the label is unreadable anyway, and the caller is better
+    off having been told the chart has too many rows.
+    """
+    height = ax.get_window_extent().height
+    if rows < 2 or height <= 0:
+        return base
+    pitch = height / rows
+    # A text line box runs ~1.35x its point size in pixels at this dpi; leave a little
+    # air between rows on top of that.
+    fits = pitch / (1.45 * (_DPI / 72.0))
+    return max(6.0, min(base, fits))
+
+
+def _fit_column_labels(ax: Any, labels: list[Any]) -> None:
+    """Shrink side-by-side value labels until each fits its own column.
+
+    These sit above vertical bars, so unlike the row case the limit is label *width*
+    against column pitch, and the text is wider than it is tall: 31 waterfall steps in a
+    1300px axes give 42px of pitch for labels like "+59" that measure ~50px, and adjacent
+    steps collided. Shrinking keeps every step labelled, which thinning would not.
+    """
+    fig = ax.figure
+    try:
+        renderer = fig.canvas.get_renderer()
+    except AttributeError:
+        return
+    shown = [t for t in labels if t.get_text().strip()]
+    if len(shown) < 2:
+        return
+    for _round in range(6):
+        if fig.get_layout_engine() is not None:
+            fig.get_layout_engine().execute(fig)
+        boxes = [t.get_window_extent(renderer=renderer) for t in shown]
+        centres = sorted((box.x0 + box.x1) / 2 for box in boxes)
+        pitch = min(b - a for a, b in pairwise(centres))
+        widest = max(box.width for box in boxes)
+        size = shown[0].get_fontsize()
+        if pitch <= 0 or widest + 4.0 <= pitch or size <= 6.0:
+            return
+        for text in shown:
+            text.set_fontsize(max(6.0, size - 1.0))
 
 
 def _label_bars(
@@ -497,13 +800,17 @@ async def render_to_png(draw: Any, out_path: str) -> str:
 def _render_sync(draw: Any, out_path: str) -> None:
     """Thread body: style, figure, draw, save, and always close the figure.
 
+    Every chart is saved at exactly ``_FIG_W x _FIG_H`` inches — see the
+    ``savefig.bbox`` note in ``_apply_style`` for why a fixed canvas matters in a Feishu
+    doc. Constrained layout does the fitting inside that canvas.
+
     The ``finally: close(fig)`` matters — a figure left open leaks its canvas, and a
     long-lived agent process rendering hundreds of charts would grow without bound.
     """
     _apply_style()
     import matplotlib.pyplot as plt  # noqa: PLC0415
 
-    fig, ax = plt.subplots(figsize=(_FIG_W, _FIG_H))
+    fig, ax = plt.subplots(figsize=(_FIG_W, _FIG_H), layout="constrained")
     try:
         draw(fig, ax)
         fig.savefig(out_path, format="png", facecolor="white")
@@ -535,6 +842,44 @@ def _fold_tail(
     out_labels = [labels[i] for i in head] + [other_name]
     out_values = [values[i] for i in head] + [sum(values[i] for i in tail)]
     return out_labels, out_values, len(tail)
+
+
+def _fit_pie_pcts(ax: Any, autotexts: list[Any]) -> None:
+    """Shrink, then drop, percentage labels that don't fit their own slice.
+
+    A slice's label has only its own arc to sit in, and that arc is set by the share:
+    six 5% slices side by side give each label ~60px of room for ~76px of text, so
+    neighbours ran into each other (seen on any pie whose tail folds into a big
+    "其他" and leaves the rest near-equal).
+
+    Text is shrunk to fit first, since a smaller percentage is still readable. Only a
+    label that can't fit even at the floor size is hidden — the wedge and its category
+    label remain, so nothing about the slice becomes unidentifiable.
+    """
+    fig = ax.figure
+    try:
+        renderer = fig.canvas.get_renderer()
+    except AttributeError:
+        return
+    shown = [t for t in autotexts if t.get_text().strip()]
+    for _round in range(6):
+        # An equal-aspect pie is squared up during the draw, not when the wedges are
+        # added: before this settles, the labels report positions from a full-width axes
+        # and sit ~65px away from where they will land.
+        if fig.get_layout_engine() is not None:
+            fig.get_layout_engine().execute(fig)
+        ax.apply_aspect()
+        boxes = [(t, t.get_window_extent(renderer=renderer)) for t in shown if t.get_visible()]
+        clashing = {id(a) for (a, box_a), (b, box_b) in pairwise(boxes) if box_a.overlaps(box_b) for a in (a, b)}
+        if not clashing:
+            return
+        for text, _box in boxes:
+            if id(text) in clashing:
+                size = text.get_fontsize()
+                if size > 8.0:
+                    text.set_fontsize(max(8.0, size - 1.0))
+                else:
+                    text.set_visible(False)
 
 
 def draw_pie(
@@ -602,6 +947,7 @@ def draw_pie(
         ax.set_aspect("equal")
         if title:
             ax.set_title(title, loc="left")
+        _fit_pie_pcts(ax, list(autotexts))
         _source_note(fig, source)
 
     return draw, folded
@@ -637,6 +983,7 @@ def draw_funnel(
         # Centre each bar on x=0 so the shape actually tapers like a funnel; a
         # left-aligned version is just a bar chart and loses the drop-off metaphor.
         ax.barh(y, widths, height=0.62, left=[-w / 2 for w in widths], color=colors, edgecolor="white", linewidth=1.5)
+        size = _row_label_size(ax, len(values))
         for idx, (value, width) in enumerate(zip(values, widths, strict=True)):
             row = len(values) - 1 - idx
             share = width * 100
@@ -645,17 +992,15 @@ def draw_funnel(
             # A narrow tail bar can't hold the label; park it to the right in muted
             # ink instead of letting white text spill over the white background.
             if width >= 0.5:
-                ax.text(0, row, text, ha="center", va="center", fontsize=11, color="white", fontweight="bold")
+                ax.text(0, row, text, ha="center", va="center", fontsize=size, color="white", fontweight="bold")
             else:
-                ax.text(width / 2 + 0.02, row, text, ha="left", va="center", fontsize=11, color=_MUTED)
+                ax.text(width / 2 + 0.02, row, text, ha="left", va="center", fontsize=size, color=_MUTED)
         ax.set_yticks(y, stages)
         ax.set_xlim(-0.56, 0.86)
         ax.set_xticks([])
         for side in ("top", "right", "bottom", "left"):
             ax.spines[side].set_visible(False)
-        if title:
-            ax.set_title(title, loc="left")
-        _source_note(fig, source)
+        _finish_bare_axes(ax, title=title, source=source)
 
     return draw
 
@@ -672,10 +1017,6 @@ def _thin_ticks(ax: Any, labels: list[str]) -> None:
     step = max(1, len(labels) // 12)
     positions = list(range(0, len(labels), step))
     ax.set_xticks(positions, [labels[i] for i in positions])
-    if max((len(labels[i]) for i in positions), default=0) > 6:
-        for tick in ax.get_xticklabels():
-            tick.set_rotation(30)
-            tick.set_ha("right")
 
 
 def _annotate_last(ax: Any, labels: list[str], values: list[float], color: str, unit: str) -> None:
@@ -904,10 +1245,6 @@ def draw_bar(
         else:
             ax.set_xticks(positions, cats)
             ax.set_ylim(bottom=0)
-            if max((len(c) for c in cats), default=0) > 5 and len(cats) > 6:
-                for tick in ax.get_xticklabels():
-                    tick.set_rotation(30)
-                    tick.set_ha("right")
         value_axis = ax.xaxis if horizontal else ax.yaxis
         if percent:
             value_axis.set_major_formatter(lambda v, _pos: f"{v:.0f}%")
@@ -959,16 +1296,19 @@ def draw_waterfall(
         colors = ["#34C724" if d >= 0 else "#F5222D" for d in deltas]
         ax.bar(positions[:-1], deltas, 0.6, bottom=bottoms, color=colors, edgecolor="white", linewidth=1)
         ax.bar([positions[-1]], [running], 0.6, color=PALETTE[0], edgecolor="white", linewidth=1)
+        step_labels = []
         for i, delta in enumerate(deltas):
             tip = bottoms[i] + delta
-            ax.text(
-                i,
-                tip + (abs(running) * 0.02 if delta >= 0 else -abs(running) * 0.02),
-                f"{'+' if delta >= 0 else ''}{_fmt_number(delta, unit)}",
-                ha="center",
-                va="bottom" if delta >= 0 else "top",
-                fontsize=11,
-                color=_MUTED,
+            step_labels.append(
+                ax.text(
+                    i,
+                    tip + (abs(running) * 0.02 if delta >= 0 else -abs(running) * 0.02),
+                    f"{'+' if delta >= 0 else ''}{_fmt_number(delta, unit)}",
+                    ha="center",
+                    va="bottom" if delta >= 0 else "top",
+                    fontsize=11,
+                    color=_MUTED,
+                )
             )
             # Connector: the running balance carried into the next step.
             if i < len(deltas) - 1:
@@ -984,14 +1324,18 @@ def draw_waterfall(
             fontweight="bold",
         )
         ax.axhline(0, color=_GRID, linewidth=1)
+        # Each bar's value is written just outside its tip, but autoscaling stops exactly
+        # at the lowest bar — so a decrease at the floor of the chart put its label below
+        # the axes, straight on top of the x tick labels. Reserve a band at both ends.
+        edges = [*bottoms, *(b + d for b, d in zip(bottoms, deltas, strict=False)), running, 0.0]
+        low, high = min(edges), max(edges)
+        span = (high - low) or abs(high) or 1.0
+        ax.set_ylim(low - span * 0.12, high + span * 0.12)
         ax.set_xticks(positions, [*labels, total_label])
-        if max((len(c) for c in labels), default=0) > 5:
-            for tick in ax.get_xticklabels():
-                tick.set_rotation(30)
-                tick.set_ha("right")
         if unit:
             ax.yaxis.set_major_formatter(lambda v, _pos: _fmt_number(v, unit))
         _finish_axes(ax, title=title, y_label=y_label, grid_axis="y", source=source)
+        _fit_column_labels(ax, step_labels)
 
     return draw
 
@@ -1108,9 +1452,7 @@ def draw_bubble(
                     zorder=4,
                 )
         note = f"气泡大小 = {size_label}" if size_label else ""
-        if note:
-            fig.text(0.99, 0.005, note, fontsize=10, color=_MUTED, ha="right", va="bottom")
-        _finish_axes(ax, title=title, x_label=x_label, y_label=y_label, grid_axis="both", source=source)
+        _finish_axes(ax, title=title, x_label=x_label, y_label=y_label, grid_axis="both", note=note, source=source)
 
     return draw
 
@@ -1202,8 +1544,15 @@ def draw_box(
             patch.set_edgecolor(color)
         if unit:
             ax.yaxis.set_major_formatter(lambda v, _pos: _fmt_number(v, unit))
-        fig.text(0.99, 0.005, "◇ 均值　— 中位数　• 离群点", fontsize=10, color=_MUTED, ha="right", va="bottom")
-        _finish_axes(ax, title=title, x_label=x_label, y_label=y_label, grid_axis="y", source=source)
+        _finish_axes(
+            ax,
+            title=title,
+            x_label=x_label,
+            y_label=y_label,
+            grid_axis="y",
+            note="◇ 均值　— 中位数　• 离群点",
+            source=source,
+        )
 
     return draw
 
@@ -1237,10 +1586,6 @@ def draw_heatmap(
         image = ax.imshow(matrix, cmap=cmap, aspect="auto", vmin=vmin, vmax=vmax)
         ax.set_xticks(range(len(col_labels)), col_labels)
         ax.set_yticks(range(len(row_labels)), row_labels)
-        if max((len(c) for c in col_labels), default=0) > 4:
-            for tick in ax.get_xticklabels():
-                tick.set_rotation(30)
-                tick.set_ha("right")
         if show_values and len(row_labels) * len(col_labels) <= 120:
             span = (vmax - vmin) or 1
             for r, row in enumerate(matrix):
@@ -1267,9 +1612,7 @@ def draw_heatmap(
         ax.tick_params(which="minor", length=0)
         for side in ("top", "right", "left", "bottom"):
             ax.spines[side].set_visible(False)
-        if title:
-            ax.set_title(title, loc="left")
-        _source_note(fig, source)
+        _finish_bare_axes(ax, title=title, source=source)
 
     return draw
 
@@ -1367,10 +1710,6 @@ def draw_pareto(
         ax.bar(positions, vals, 0.62, color=bar_colors)
         ax.set_xticks(positions, cats)
         ax.set_ylim(bottom=0)
-        if max((len(c) for c in cats), default=0) > 4:
-            for tick in ax.get_xticklabels():
-                tick.set_rotation(30)
-                tick.set_ha("right")
         if unit:
             ax.yaxis.set_major_formatter(lambda v, _pos: _fmt_number(v, unit))
         right = ax.twinx()
@@ -1378,11 +1717,16 @@ def draw_pareto(
         right.set_ylim(0, 105)
         right.yaxis.set_major_formatter(lambda v, _pos: f"{v:.0f}%")
         right.axhline(threshold, color=_MUTED, linestyle="--", linewidth=1.2)
+        # The callout normally reads left-to-right from the cut point, but a cut in the
+        # right-hand half pushes it off the axes and onto the percent tick labels. Past
+        # the midpoint, anchor it to the left of the point instead so it grows inward.
+        rightward = cut < len(cats) / 2
         right.annotate(
             f"{cats[cut]} 起累计达 {threshold:.0f}%",
             xy=(cut, cumulative[cut]),
-            xytext=(10, -18),
+            xytext=(10 if rightward else -10, -18),
             textcoords="offset points",
+            ha="left" if rightward else "right",
             fontsize=11,
             color="#FF8800",
             fontweight="bold",
@@ -1432,10 +1776,6 @@ def draw_combo(
             ax.bar([p + shift for p in positions], values, width, label=name, color=color)
         ax.set_xticks(positions, labels)
         ax.set_ylim(bottom=0)
-        if max((len(c) for c in labels), default=0) > 5 and len(labels) > 6:
-            for tick in ax.get_xticklabels():
-                tick.set_rotation(30)
-                tick.set_ha("right")
         if unit:
             ax.yaxis.set_major_formatter(lambda v, _pos: _fmt_number(v, unit))
         right = ax.twinx()
@@ -1507,6 +1847,7 @@ def draw_gantt(
     def draw(fig: Any, ax: Any) -> None:
         # Reverse so the first task sits at the top, the way a plan is read.
         rows = list(range(len(tasks) - 1, -1, -1))
+        bar_label_size = _row_label_size(ax, len(tasks))
         for row, (name, start, duration, group) in zip(rows, tasks, strict=True):
             color = group_color.get(group, PALETTE[0])
             ax.barh([row], [duration], left=[start], height=0.56, color=color, edgecolor="white", linewidth=1.2)
@@ -1516,7 +1857,7 @@ def draw_gantt(
                 name,
                 ha="center",
                 va="center",
-                fontsize=11,
+                fontsize=bar_label_size,
                 color="white",
                 fontweight="bold",
             )
@@ -1526,10 +1867,6 @@ def draw_gantt(
             step = max(1, len(tick_labels) // 12)
             spots = list(range(0, len(tick_labels), step))
             ax.set_xticks(spots, [tick_labels[i] for i in spots])
-            if max((len(tick_labels[i]) for i in spots), default=0) > 5:
-                for tick in ax.get_xticklabels():
-                    tick.set_rotation(30)
-                    tick.set_ha("right")
         if today >= 0:
             ax.axvline(today, color="#F5222D", linestyle="--", linewidth=1.8)
             ax.annotate(
@@ -1579,6 +1916,7 @@ def draw_progress(
 
     def draw(fig: Any, ax: Any) -> None:
         rows = list(range(len(items) - 1, -1, -1))
+        size = _row_label_size(ax, len(items))
         for row, (_name, value) in zip(rows, items, strict=True):
             done = value >= target
             ax.barh([row], [target], height=0.5, color="#F2F3F5")
@@ -1594,7 +1932,7 @@ def draw_progress(
                 row,
                 f"{_fmt_number(value, unit)} · {pct:.0f}%{gap}",
                 va="center",
-                fontsize=11,
+                fontsize=size,
                 color="#34C724" if done else _MUTED,
                 fontweight="bold" if done else "normal",
             )
@@ -1604,8 +1942,6 @@ def draw_progress(
         for side in ("top", "right", "bottom"):
             ax.spines[side].set_visible(False)
         ax.spines["left"].set_color(_GRID)
-        if title:
-            ax.set_title(title, loc="left")
-        _source_note(fig, source)
+        _finish_bare_axes(ax, title=title, source=source)
 
     return draw

@@ -15,8 +15,18 @@ from pathlib import Path
 from typing import Any
 
 import anyio
+import matplotlib
+import numpy as np
 import pytest
 from lark_channel.core.enum import AccessTokenType
+from PIL import Image
+
+# Before pyplot is imported: these tests render off-screen, and importing pyplot first
+# would bind whatever interactive backend the host happens to have.
+matplotlib.use("Agg", force=True)
+
+import matplotlib.pyplot as plt
+from matplotlib.text import Text
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 TOOLS_DIR = WORKSPACE_ROOT / "tools"
@@ -327,6 +337,250 @@ async def test_chart_filename_includes_type_and_title() -> None:
     assert name.startswith("pie-")
     assert "人力占比" in name
     assert name.endswith(".png")
+
+
+# ── Layout: readable at the size Feishu will show it ───────────────────────────
+#
+# Feishu displays an image block at the PNG's intrinsic pixel size — verified against
+# the live API: `replace_image` overwrites whatever width/height we send with the
+# file's real dimensions, and every follow-up patch shape is rejected with 1770001.
+# So the PNG's pixel size *is* the in-document display size, and any text that
+# overlaps in the PNG overlaps in the doc. Both are checked by measurement here.
+
+
+def _label_set(kind: str, n: int) -> list[str]:
+    """Category labels of a given shape — the axis-crowding variable that actually bites."""
+    if kind == "short":
+        return [f"{i}月" for i in range(1, n + 1)]
+    if kind == "date":
+        return [f"2026-08-{i % 28 + 1:02d}" for i in range(n)]
+    return [f"第{i}季度华东大区渠道{i}" for i in range(1, n + 1)]  # long
+
+
+def _chart_matrix() -> dict[str, Any]:
+    """Every chart type crossed with the conditions that produce layout defects.
+
+    Rather than a handful of datasets chosen by hand, this sweeps the three variables
+    the reported bugs came from — how many categories, how long their labels are, and
+    how many series compete with the title — so a chart type can't pass by happening to
+    suit the one example someone picked. Counts bracket the range the tools accept:
+    2 (degenerate), 12 (a year), 31 (a month of days).
+    """
+    cases: dict[str, Any] = {}
+    for n in (2, 12, 31):
+        for label_kind in ("short", "date", "long"):
+            labels = _label_set(label_kind, n)
+            values = [float(10 + (i * 7) % 53) for i in range(n)]
+            tag = f"{n}x{label_kind}"
+            one = [("实际", values)]
+            many = [(f"产品线{s}", [v + s * 3 for v in values]) for s in range(1, 6)]
+            cases[f"line-{tag}"] = _cr.draw_line(labels, one, title=f"趋势 {tag}", y_label="营收")
+            cases[f"line-multi-{tag}"] = _cr.draw_line(labels, many, title=f"多系列趋势 {tag}")
+            cases[f"area-{tag}"] = _cr.draw_stacked_area(labels, many, title=f"构成变化 {tag}")
+            cases[f"column-{tag}"] = _cr.draw_bar(labels, one, title=f"对比 {tag}", y_label="人数")
+            cases[f"grouped-{tag}"] = _cr.draw_bar(labels, many, title=f"分组对比 {tag}")
+            cases[f"stacked-{tag}"] = _cr.draw_bar(labels, many, title=f"堆叠构成 {tag}", stacked=True)
+            cases[f"bar-{tag}"] = _cr.draw_bar(labels, one, title=f"横向对比 {tag}", horizontal=True)
+            cases[f"combo-{tag}"] = _cr.draw_combo(
+                labels, one, [("毛利率", [40.0 + i for i in range(n)])], title=f"营收与毛利率 {tag}"
+            )
+            cases[f"pareto-{tag}"] = _cr.draw_pareto(labels, sorted(values, reverse=True), title=f"帕累托 {tag}")
+            cases[f"waterfall-{tag}"] = _cr.draw_waterfall(
+                labels, [v if i % 3 else -v for i, v in enumerate(values)], title=f"瀑布 {tag}"
+            )
+            cases[f"pie-{tag}"] = _cr.draw_pie(labels, values, title=f"占比 {tag}", unit="人")[0]
+            cases[f"donut-{tag}"] = _cr.draw_pie(labels, values, title=f"环形占比 {tag}", donut=True)[0]
+            cases[f"funnel-{tag}"] = _cr.draw_funnel(labels, sorted(values, reverse=True), title=f"漏斗 {tag}")
+            cases[f"progress-{tag}"] = _cr.draw_progress(
+                list(zip(labels, values, strict=True)), title=f"进度 {tag}", target=100.0
+            )
+            cases[f"box-{tag}"] = _cr.draw_box(
+                [(label, [v, v + 3, v + 5, v + 9]) for label, v in zip(labels, values, strict=True)],
+                title=f"分布对比 {tag}",
+            )
+            if n >= 3:  # a radar with fewer than 3 axes is refused by design
+                cases[f"radar-{tag}"] = _cr.draw_radar(
+                    labels[:8], [("张三", values[:8])], title=f"能力雷达 {tag}", max_value=70.0
+                )
+            cases[f"heatmap-{tag}"] = _cr.draw_heatmap(
+                labels,
+                [f"渠道{j}" for j in range(1, 7)],
+                [[v + j for v in values] for j in range(6)],
+                title=f"热力 {tag}",
+            )
+            cases[f"gantt-{tag}"] = _cr.draw_gantt(
+                [(label, float(i * 2), 5.0, f"组{i % 3}") for i, label in enumerate(labels)],
+                title=f"排期 {tag}",
+                tick_labels=_label_set("date", 31),
+            )
+    # Chart types whose crowding comes from point count, not category labels.
+    for n in (2, 40, 200):
+        pts = [(float(i), float((i * 13) % 67)) for i in range(n)]
+        cases[f"scatter-{n}"] = _cr.draw_scatter([("样本", [[x, y] for x, y in pts])], title=f"散点 {n}")
+        cases[f"bubble-{n}"] = _cr.draw_bubble(
+            [(x, y, 5.0 + (i % 9)) for i, (x, y) in enumerate(pts)], size_label="规模", title=f"气泡 {n}"
+        )
+        cases[f"histogram-{n}"] = _cr.draw_histogram([y for _x, y in pts], title=f"直方 {n}")
+    return cases
+
+
+_MATRIX = _chart_matrix()
+
+
+def _ink_of(fig: Any, artists: list[Any]) -> dict[int, Any]:
+    """Map each artist to the set of pixels it actually inks.
+
+    Hide all the text, rasterise once for a background, then reveal one artist at a time
+    and diff: the changed pixels are exactly that label's glyphs. One draw per artist, so
+    it is only used on pairs a cheap box test already flagged as suspicious.
+
+    Relies on the caller having frozen the layout engine: hiding text shrinks the figure's
+    tight bbox, so constrained layout would hand the freed space back to the axes and
+    *move everything* between probe frames, measuring each label in a different layout
+    than its neighbour and inventing overlaps that aren't on the canvas.
+    """
+    all_text = [t for t in fig.findobj(Text) if t.get_text().strip() and t.get_visible()]
+    for artist in all_text:
+        artist.set_visible(False)
+
+    def frame() -> Any:
+        fig.canvas.draw()
+        return np.asarray(fig.canvas.buffer_rgba())[:, :, :3].astype(np.int16)
+
+    try:
+        blank = frame()
+        ink = {}
+        for artist in artists:
+            artist.set_visible(True)
+            ink[id(artist)] = np.argwhere(np.abs(frame() - blank).sum(axis=2) > 24)
+            artist.set_visible(False)
+    finally:
+        for artist in all_text:
+            artist.set_visible(True)
+    return {key: {(int(y), int(x)) for y, x in pts} for key, pts in ink.items()}
+
+
+def _collisions(fig: Any) -> list[str]:
+    """Pairs of labels that ink the same pixels — what a reader sees as text over text.
+
+    Two stages, because each instrument is wrong on its own. Bounding boxes are cheap
+    but over-report: a rotated tick label's axis-aligned extent is far wider than its
+    glyphs, and an upright one carries font ascent/descent padding, so boxes "overlap"
+    while sharing no pixel. Pixels are exact but need a redraw per artist. So boxes
+    nominate candidates and pixels decide.
+    """
+    # Settle the layout, then freeze it: every measurement below has to describe one
+    # single arrangement of the canvas, and the layout engine reflows on every draw.
+    fig.canvas.draw()
+    fig.set_layout_engine("none")
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    boxed = []
+    for artist in fig.findobj(Text):
+        if not (artist.get_text().strip() and artist.get_visible()):
+            continue
+        bb = artist.get_window_extent(renderer=renderer)
+        if bb.width > 0 and bb.height > 0:
+            boxed.append((artist, bb))
+    candidates = [(a, b) for i, (a, box_a) in enumerate(boxed) for b, box_b in boxed[i + 1 :] if box_a.overlaps(box_b)]
+    if not candidates:
+        return []
+    suspects = list({id(art): art for pair in candidates for art in pair}.values())
+    ink = _ink_of(fig, suspects)
+    return [f"{a.get_text()[:14]}|{b.get_text()[:14]}" for a, b in candidates if ink[id(a)] & ink[id(b)]]
+
+
+@pytest.fixture
+def _figure() -> Any:
+    """A canvas the same size and shape `render_to_png` uses, torn down after."""
+    _cr._apply_style()
+    made = []
+
+    def make() -> Any:
+        fig, ax = plt.subplots(figsize=(_cr._FIG_W, _cr._FIG_H), layout="constrained")
+        made.append(fig)
+        return fig, ax
+
+    yield make
+    for fig in made:
+        plt.close(fig)
+
+
+@pytest.mark.parametrize("name", list(_MATRIX))
+def test_every_chart_renders_at_one_fixed_size(name: str, _figure: Any) -> None:
+    """Same pixel size for every chart, so none of them lands in the doc as a thumbnail.
+
+    With ``savefig.bbox="tight"`` the canvas was cropped to whatever content happened
+    to be there, which produced 26 different sizes across the chart set — and the
+    narrow ones displayed as thumbnails next to the wide ones.
+    """
+    fig, ax = _figure()
+    _MATRIX[name](fig, ax)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    buf.seek(0)
+    assert Image.open(buf).size == (int(_cr._FIG_W * _cr._DPI), int(_cr._FIG_H * _cr._DPI))
+
+
+@pytest.mark.parametrize("name", list(_MATRIX))
+def test_no_chart_draws_text_over_text(name: str, _figure: Any) -> None:
+    """No two labels may share pixels — titles under legends, ticks into ticks.
+
+    The reported cases: an area chart's title struck through by its legend, a
+    histogram title behind the 均值/中位数 legend, and a gantt whose 31 date labels
+    smeared into each other.
+    """
+    fig, ax = _figure()
+    _MATRIX[name](fig, ax)
+    assert _collisions(fig) == []
+
+
+def test_title_and_legend_take_separate_rows(_figure: Any) -> None:
+    """A legend sits above the axes, so the title has to move up rather than share.
+
+    Both used to be placed in the same band — ``ax.set_title`` and a legend anchored
+    at ``(0, 1.02)`` — which is what drew the legend through the title text.
+    """
+    fig, ax = _figure()
+    _cr.draw_stacked_area(["1月", "2月"], [("直营", [1.0, 2.0]), ("加盟", [2.0, 3.0])], title="收入构成变化")(fig, ax)
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    title = fig._suptitle
+    assert title is not None, "a chart with a legend must promote its title to the figure"
+    assert title.get_text() == "收入构成变化"
+    legend = ax.get_legend()
+    assert legend is not None
+    title_box = title.get_window_extent(renderer=renderer)
+    legend_box = legend.get_window_extent(renderer=renderer)
+    assert title_box.y0 >= legend_box.y1, "title must sit above the legend, not across it"
+
+
+def test_crowded_axis_thins_its_tick_labels(_figure: Any) -> None:
+    """More labels than fit gets thinned; an axis that fits keeps every label."""
+    fig, ax = _figure()
+    ticks = [f"2026-08-{d:02d}" for d in range(1, 32)]
+    _cr.draw_gantt(
+        [("开发", 1.0, 30.0, "研发")],
+        title="排期",
+        tick_labels=ticks,
+    )(fig, ax)
+    fig.canvas.draw()
+    shown = [t.get_text() for t in ax.get_xticklabels() if t.get_text().strip()]
+    assert 0 < len(shown) < len(ticks)
+    assert shown[0] == ticks[0]  # thinning keeps the first label, so the axis still anchors
+
+
+def test_source_note_does_not_collide_with_the_axis(_figure: Any) -> None:
+    """The data-source footnote used to be pinned under the tick labels and drawn through."""
+    fig, ax = _figure()
+    _cr.draw_line(
+        [f"2026年{m}月" for m in range(1, 13)],
+        [("A", [float(j) for j in range(12)])],
+        title="趋势",
+        source="财务系统",
+    )(fig, ax)
+    assert _collisions(fig) == []
+    assert any("财务系统" in t.get_text() for t in fig.findobj(Text))
 
 
 # ── Placing a chart into a docx as an image block ──────────────────────────────
