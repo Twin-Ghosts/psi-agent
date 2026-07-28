@@ -474,6 +474,15 @@ OPENAPI_SPEC = {
                             "each fire a different subset"
                         ),
                     },
+                    "inactive_schedules": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Names excluded from active_schedules (blacklist, wins over the "
+                            "whitelist). A wildcard whitelist plus this blacklist is how a session "
+                            "claims 'everything except these', including TASK.md files created later"
+                        ),
+                    },
                     "scheduler": {
                         "type": "boolean",
                         "description": (

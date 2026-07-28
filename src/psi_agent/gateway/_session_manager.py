@@ -46,6 +46,13 @@ class SessionInfo:
     —— 刻意为之: 它不是用户会话, 出现在会话列表里只会让人误删。
     """
 
+    inactive_schedules: tuple[str, ...] = ()
+    """从 ``active_schedules`` 中排除的定时任务名 (黑名单, 优先于白名单)。
+
+    通配符白名单 + 黑名单是「除某几条以外全归我」的唯一写法: 白名单是枚举, 覆盖
+    不到启动后新建的 ``TASK.md``; 通配符能覆盖, 再用黑名单挖掉划给别人的那几条。
+    """
+
     @property
     def scheduler(self) -> bool:
         """本 Session 是否是该 workspace 的全量调度 Session。
@@ -90,6 +97,7 @@ class SessionManager:
         workspace: str = "",
         agent: str = "",
         active_schedules: tuple[str, ...] = (),
+        inactive_schedules: tuple[str, ...] = (),
     ) -> SessionInfo:
         """Spawn a Session.
 
@@ -98,9 +106,10 @@ class SessionManager:
         from that directory. Tools that resolve relative paths via ContextVar
         are a later PR — this only passes the path in.
 
-        *active_schedules* 逐条指定本 Session 触发哪些定时任务 (``("*",)`` = 全部,
-        默认空 = 一条都不触发)。全量激活的 Session 由 ``SchedulerManager`` 按
-        workspace 去重地创建, 且对 SPA / state 隐藏。普通调用方不传此参数。
+        *active_schedules* / *inactive_schedules* 逐条指定本 Session 触发哪些定时
+        任务 (``("*",)`` = 全部, 默认空 = 一条都不触发; 黑名单优先做减法)。全量
+        激活的 Session 由 ``SchedulerManager`` 按 workspace 去重地创建, 且对 SPA /
+        state 隐藏。普通调用方不传这两个参数。
         """
         session_id = id or _new_uuid()
         workspace = workspace.strip() or self._default_workspace or os.getcwd()
@@ -125,7 +134,8 @@ class SessionManager:
                 channel_socket=channel_socket,
                 ai_socket=upstream_socket,
                 session_id=session_id,
-                schedules=",".join(active_schedules),
+                active_schedules=",".join(active_schedules),
+                inactive_schedules=",".join(inactive_schedules),
             )
             scope = anyio.CancelScope()
 
@@ -149,6 +159,7 @@ class SessionManager:
                 channel_socket=channel_socket,
                 agent=agent,
                 active_schedules=active_schedules,
+                inactive_schedules=inactive_schedules,
             )
             self._entries[session_id] = _SessionEntry(scope=scope, info=info)
         try:

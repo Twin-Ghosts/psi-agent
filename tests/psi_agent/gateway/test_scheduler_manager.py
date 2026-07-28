@@ -294,3 +294,25 @@ async def test_named_subset_session_is_not_hidden(tmp_path: Path) -> None:
     finally:
         await _drain(sm, am)
         await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_blacklist_is_recorded_and_keeps_scheduler_flag(tmp_path: Path) -> None:
+    """`("*",)` + 黑名单: 仍是该 workspace 的调度 Session, 只是让出几条。"""
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        info = await sm.create(
+            ai_id="ai1",
+            workspace=str(tmp_path),
+            active_schedules=(ACTIVATE_ALL,),
+            inactive_schedules=("daily",),
+        )
+        assert info.inactive_schedules == ("daily",)
+        assert info.scheduler is True
+        # 全量激活的调度 Session 对 SPA / state 隐藏, 让出几条也不改变这一点。
+        assert await sm.list_all() == []
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)

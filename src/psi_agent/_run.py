@@ -19,14 +19,14 @@ Config format (``run-config.yml``):
       workspace: ./examples/a-simple-bash-only-workspace  # optional, defaults to .
       channel_socket: ./channel.sock
       ai_socket: ./ai.sock
-      scheduler: true              # optional, default false. Shorthand for
-                                   # `schedules: "*"` — fire every task under
-                                   # {workspace}/schedules.
-      schedules: "daily,weekly"    # optional. 逐条指定本 session 触发哪些定时任务
-                                   # ("*" = 全部, 空 = 一条都不触发)。激活是
-                                   # (session x schedule) 的属性 — 同一 workspace 的
-                                   # 多个 session 各触发不同子集; 一条任务被两个
-                                   # session 同时激活会让提醒推两遍。
+      active_schedules: "*"        # optional, default "" (fire nothing). Names of the
+                                   # tasks under {workspace}/schedules this session
+                                   # fires; "*" = all. 激活是 (session x schedule) 的
+                                   # 属性 — 同一 workspace 的多个 session 各触发不同
+                                   # 子集; 一条任务被两个 session 同时激活会推两遍。
+      inactive_schedules: "daily"  # optional. 从上面排除掉的任务名 (黑名单, 优先)。
+                                   # "*" + 黑名单 = 除这几条外全归我, 且启动后新建的
+                                   # TASK.md 也自动触发 (纯枚举白名单覆盖不到)。
 
     - type: channel
       name: repl                    # "cli", "repl", "telegram", or "feishu"

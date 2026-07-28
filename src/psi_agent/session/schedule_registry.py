@@ -98,17 +98,24 @@ class ScheduleRegistry:
     **激活是 (session x schedule) 的属性, 不是 session 的 (刻意为之)**: schedules
     目录取自 *workspace* (每个 Session 都能读到全部条目, ``schedules`` 属性与
     ``refresh()`` 的 add/update/remove 统计都不受激活影响), 但**是否起
-    runner** 由 ``active_names`` 逐条决定 —— 同一 workspace 的不同 Session 可以各
-    自激活不同的子集。
+    runner** 由名单逐条决定 —— 同一 workspace 的不同 Session 可以各自激活不同
+    的子集。
 
     为什么按条而非按 Session 一个布尔: 触发权本质上是「这条任务归哪个 Session」,
     一个整体开关只能表达「全触发 / 全不触发」, 表达不了「A 条归调度 Session、B 条
     归某个用户会话」。飞书按 open_id 给每个用户 spawn 独立 Session, 一条 schedule
     必须**恰好**被一个 Session 激活, 否则提醒会被在线会话数乘一遍。
 
-    ``active_names`` 语义: ``None`` / 空集 → 一条都不激活 (普通用户 Session 的默认,
-    ``start_all`` 不起任何 runner); ``{ACTIVATE_ALL}`` → 全部激活 (调度 Session 的
-    默认); 具名集合 → 仅这些 ``schedule.name`` 激活。
+    为什么白名单之外还要黑名单: 白名单是**枚举**, 只覆盖启动那一刻已存在的条目 ——
+    之后 ``_watch_dir`` / ``refresh()`` 新发现的 ``TASK.md`` 不在名单里, 永远不会被
+    触发。要「除某几条以外全都归我」(调度 Session 的常态), 只能用
+    ``active_names={ACTIVATE_ALL}`` + ``inactive_names={排除的}``: 通配符让新条目自动
+    激活, 黑名单精确挖掉划给别人的那几条。
+
+    名单语义: ``inactive_names`` 优先 (含 ``ACTIVATE_ALL`` 即一条都不激活);
+    ``active_names`` 为 ``None`` / 空集 → 一条都不激活 (普通用户 Session 的默认,
+    ``start_all`` 不起任何 runner); ``{ACTIVATE_ALL}`` → 除黑名单外全部 (调度
+    Session 的默认); 具名集合 → 仅这些 ``schedule.name``。
     """
 
     def __init__(
@@ -117,10 +124,12 @@ class ScheduleRegistry:
         files: dict[str, ScheduleEntry] | None = None,
         work_dir: Path | None = None,
         active_names: set[str] | None = None,
+        inactive_names: set[str] | None = None,
     ) -> None:
         self._files: dict[str, ScheduleEntry] = dict(files or {})
         self._work_dir = work_dir
         self._active_names: set[str] = set(active_names or ())
+        self._inactive_names: set[str] = set(inactive_names or ())
         self._agent: SessionAgent | None = None
         self._task_group: Any = None
         self._runner_scopes: dict[str, anyio.CancelScope] = {}
@@ -132,14 +141,16 @@ class ScheduleRegistry:
 
     @property
     def active_schedules(self) -> list[Schedule]:
-        """本 Session 实际触发的 schedule —— 即 ``active_names`` 命中的那些。"""
+        """本 Session 实际触发的 schedule —— 即通过名单筛选的那些。"""
         return [s for s in self.schedules if self.is_active(s.name)]
 
     def is_active(self, name: str) -> bool:
         """本 Session 是否触发名为 *name* 的 schedule。
 
-        ``ACTIVATE_ALL`` 在名单里即全部命中; 否则逐名精确匹配。
+        黑名单优先于白名单; 两个名单里的 ``ACTIVATE_ALL`` 都表示「全部」。
         """
+        if ACTIVATE_ALL in self._inactive_names or name in self._inactive_names:
+            return False
         if ACTIVATE_ALL in self._active_names:
             return True
         return name in self._active_names
@@ -147,22 +158,36 @@ class ScheduleRegistry:
     # -- factory ----------------------------------------------------------------
 
     @classmethod
-    async def load(cls, schedules_dir: Path, *, active_names: set[str] | None = None) -> ScheduleRegistry:
+    async def load(
+        cls,
+        schedules_dir: Path,
+        *,
+        active_names: set[str] | None = None,
+        inactive_names: set[str] | None = None,
+    ) -> ScheduleRegistry:
         """Full initial load — scan *schedules_dir*.
 
-        *active_names* 决定哪些条目由本 Session 触发 (默认一条都不, 见类文档)。
+        *active_names* / *inactive_names* 决定哪些条目由本 Session 触发 (默认一条
+        都不, 见类文档)。
         """
         files = await cls._load_from_dir(schedules_dir)
-        return cls(files=files, work_dir=schedules_dir, active_names=active_names)
+        return cls(
+            files=files,
+            work_dir=schedules_dir,
+            active_names=active_names,
+            inactive_names=inactive_names,
+        )
 
     # -- runner lifecycle -------------------------------------------------------
 
     def start_all(self, task_group: Any, agent: SessionAgent) -> None:
         """Start a runner for every **激活的** schedule in *task_group*.
 
-        Stores *agent* and *task_group* for use by ``refresh()``; 有激活条目时额外
+        Stores *agent* and *task_group* for use by ``refresh()``; 白名单非空时额外
         起一个 ``_watch_dir`` 常驻协程周期性 ``refresh()``。未激活的条目照旧留在
         ``schedules`` 里 (可读、可 refresh), 只是不起 runner。
+
+        白名单空 → 一条都不可能激活 (黑名单只做减法), 不起 watcher, 不做无用扫盘。
         """
         self._agent = agent
         self._task_group = task_group

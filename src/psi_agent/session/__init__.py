@@ -35,28 +35,11 @@ class Session:
     Empty → ``PSI_APPDATA`` / ``platformdirs`` via ``resolve_appdata_root``.
     """
 
-    scheduler: bool = False
-    """本 Session 是否触发 *workspace* 下的**全部**定时任务 (等价 ``--schedules '*'``)。
+    active_schedules: str = ""
+    """触发哪些定时任务, 逗号分隔; ``*`` = 全部。默认一条都不触发。"""
 
-    便捷开关: 展开成 ``{ACTIVATE_ALL}`` 交给 ``SessionAgent``。要只触发其中几条,
-    用 ``schedules`` 逐条指定。
-    """
-
-    schedules: str = ""
-    """本 Session 激活的定时任务名, 逗号分隔; ``*`` 表示全部。
-
-    **激活是 (session x schedule) 的属性, 不是 session 的 (刻意为之)**: 每个
-    Session 都加载 ``{workspace}/schedules`` 的全部条目 (可读、可 refresh), 但
-    只为激活的那些起 runner。于是同一 workspace 的不同 Session 可以各自触发不同
-    子集 —— 一个整体布尔只能表达「全触发 / 全不触发」, 表达不了「A 条归调度
-    Session、B 条归某个用户会话」。
-
-    为什么默认空 (一条都不激活): 飞书按 open_id 给每个用户 spawn 独立 Session,
-    一条 schedule 必须**恰好**被一个 Session 激活, 否则提醒会被在线会话数乘一遍。
-    Gateway 侧 ``SchedulerManager`` 为每个 workspace 维护唯一一个全量激活的调度
-    Session; 单进程 CLI 需要跑定时任务时显式 ``--scheduler`` 或
-    ``--schedules 名字1,名字2``。
-    """
+    inactive_schedules: str = ""
+    """从上面排除掉的定时任务名, 逗号分隔; 优先于白名单。"""
 
     max_tool_rounds: int = 128
     session_id: str | None = None
@@ -70,15 +53,18 @@ class Session:
         appdata_root = self.appdata.strip()
         if not appdata_root:
             appdata_root = await resolve_appdata_root()
-        active_schedules = self._active_schedules()
+        active = self._name_set(self.active_schedules)
+        inactive = self._name_set(self.inactive_schedules)
 
         logger.info(f"Loading workspace from {workspace_path}")
         if agent_path != workspace_path:
             logger.info(f"Loading agent package from {agent_path}")
         logger.info(f"AppData history root: {appdata_root}")
-        if active_schedules:
-            names = "all" if ACTIVATE_ALL in active_schedules else sorted(active_schedules)
+        if active:
+            names = "all" if ACTIVATE_ALL in active else sorted(active)
             logger.info(f"Active schedules under {workspace_path / 'schedules'}: {names}")
+            if inactive:
+                logger.info(f"Excluded schedules: {sorted(inactive)}")
 
         agent = await SessionAgent.create(
             ai_socket=self.ai_socket,
@@ -87,20 +73,17 @@ class Session:
             appdata_root=appdata_root,
             max_tool_rounds=self.max_tool_rounds,
             session_id=self.session_id,
-            active_schedules=active_schedules,
+            active_schedules=active,
+            inactive_schedules=inactive,
         )
 
         async with anyio.create_task_group() as task_group:
             agent.start_all(task_group)
             task_group.start_soon(partial(serve_session, channel_socket=self.channel_socket, agent=agent))
 
-    def _active_schedules(self) -> set[str]:
-        """把 ``--scheduler`` / ``--schedules`` 归一成激活名单。
-
-        ``--scheduler`` 是 ``--schedules '*'`` 的便捷写法, 两者并存时取并集。
-        """
-        names = {part.strip() for part in self.schedules.split(",")}
+    @staticmethod
+    def _name_set(raw: str) -> set[str]:
+        """逗号分隔的名单字符串 → 名字集合 (去空、去首尾空白)。"""
+        names = {part.strip() for part in raw.split(",")}
         names.discard("")
-        if self.scheduler:
-            names.add(ACTIVATE_ALL)
         return names

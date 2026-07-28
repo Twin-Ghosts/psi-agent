@@ -649,7 +649,12 @@ async def test_watcher_survives_refresh_exception(tmp_path: Path, monkeypatch: p
 # ── 激活是 (session x schedule) 的属性 — 每条各自决定归哪个 Session ───────────
 
 
-async def _load_three(tmp_path: Path, active: set[str] | None) -> ScheduleRegistry:
+async def _load_three(
+    tmp_path: Path,
+    active: set[str] | None,
+    *,
+    inactive: set[str] | None = None,
+) -> ScheduleRegistry:
     sched_root = tmp_path / "schedules"
     for name in ("alpha", "beta", "gamma"):
         d = sched_root / name
@@ -657,7 +662,7 @@ async def _load_three(tmp_path: Path, active: set[str] | None) -> ScheduleRegist
         await anyio.Path(d / "TASK.md").write_text(
             f'---\nname: {name}\ncron: "0 12 * * *"\n---\nTask {name}', encoding="utf-8"
         )
-    return await ScheduleRegistry.load(sched_root, active_names=active)
+    return await ScheduleRegistry.load(sched_root, active_names=active, inactive_names=inactive)
 
 
 @pytest.mark.anyio
@@ -764,6 +769,52 @@ async def test_is_active_wildcard_and_names() -> None:
     assert ScheduleRegistry(active_names={"a"}).is_active("a") is True
     assert ScheduleRegistry(active_names={"a"}).is_active("b") is False
     assert ScheduleRegistry().is_active("a") is False
+
+
+@pytest.mark.anyio
+async def test_inactive_names_win_over_active() -> None:
+    """黑名单优先: 通配符白名单也要给黑名单让路。"""
+    sr = ScheduleRegistry(active_names={ACTIVATE_ALL}, inactive_names={"skip"})
+    assert sr.is_active("skip") is False
+    assert sr.is_active("other") is True
+    # 同一条同时进两个名单 → 不触发。
+    assert ScheduleRegistry(active_names={"x"}, inactive_names={"x"}).is_active("x") is False
+    # 黑名单通配符 = 一条都不触发。
+    assert ScheduleRegistry(active_names={ACTIVATE_ALL}, inactive_names={ACTIVATE_ALL}).is_active("x") is False
+
+
+@pytest.mark.anyio
+async def test_blacklist_excludes_named_entry_only(tmp_path: Path) -> None:
+    """「除 beta 以外全归我」—— 白名单枚举做不到的划分。"""
+    sr = await _load_three(tmp_path, {ACTIVATE_ALL}, inactive={"beta"})
+    async with anyio.create_task_group() as tg:
+        sr.start_all(tg, cast(Any, _MockAgent()))
+        assert set(sr._runner_scopes) == {"alpha", "gamma"}
+        assert len(sr.schedules) == 3
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_wildcard_picks_up_schedule_created_after_start(tmp_path: Path) -> None:
+    """通配符白名单会自动触发启动后新建的条目 —— 纯枚举白名单不会。
+
+    这就是黑名单存在的理由: 「除某几条以外全归我」只能写成 ``*`` + 黑名单。
+    """
+    wild = await _load_three(tmp_path, {ACTIVATE_ALL}, inactive={"beta"})
+    enumerated = await ScheduleRegistry.load(tmp_path / "schedules", active_names={"alpha", "gamma"})
+    sched_root = tmp_path / "schedules"
+    d = sched_root / "delta"
+    await anyio.Path(d).mkdir(parents=True)
+    await anyio.Path(d / "TASK.md").write_text('---\nname: delta\ncron: "0 12 * * *"\n---\nT', encoding="utf-8")
+
+    async with anyio.create_task_group() as tg:
+        for sr in (wild, enumerated):
+            sr._agent = cast(Any, _MockAgent())
+            sr._task_group = tg
+            await sr.refresh()
+        assert "delta" in wild._runner_scopes
+        assert "delta" not in enumerated._runner_scopes
+        tg.cancel_scope.cancel()
 
 
 @pytest.mark.anyio
