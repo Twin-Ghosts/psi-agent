@@ -440,9 +440,7 @@ class SessionAgent:
                 return
             logger.info(f"Compaction summary generated ({len(summary)} chars)")
 
-            self._conversation.add(
-                {"role": "compacted", "content": summary, "kind": KIND_COMPACTED}
-            )
+            self._conversation.add({"role": "compacted", "content": summary, "kind": KIND_COMPACTED})
             await self._conversation.commit()
             logger.info("Compaction completed")
         except Exception as e:

@@ -143,17 +143,9 @@ def messages_for_ai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
             system_msg = messages[system_idx]
             if isinstance(system_msg, dict):
-                projected = {
-                    k: v
-                    for k, v in system_msg.items()
-                    if k not in _DISPLAY_ONLY_KEYS
-                }
+                projected = {k: v for k, v in system_msg.items() if k not in _DISPLAY_ONLY_KEYS}
                 projected["role"] = "system"
-                projected["content"] = (
-                    projected.get("content", "")
-                    + "\n\n[Compacted History]\n"
-                    + compacted_content
-                )
+                projected["content"] = projected.get("content", "") + "\n\n[Compacted History]\n" + compacted_content
                 result.append(projected)
 
             for msg in after:
@@ -162,9 +154,7 @@ def messages_for_ai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 role = wire_role(msg.get("role"))
                 if role is None:
                     continue
-                projected = {
-                    k: v for k, v in msg.items() if k not in _DISPLAY_ONLY_KEYS
-                }
+                projected = {k: v for k, v in msg.items() if k not in _DISPLAY_ONLY_KEYS}
                 projected["role"] = role
                 result.append(projected)
             return result

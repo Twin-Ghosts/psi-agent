@@ -127,12 +127,15 @@ async def compact_history(history: list[dict[str, Any]], complete_fn) -> str:
         return recent_text
 
     summary_prompt = [
-        {"role": "system", "content": (
-            "Summarize the following conversation concisely. "
-            "Preserve all key facts, decisions, task context, file paths, "
-            "and information the user or assistant explicitly mentioned. "
-            "Do not omit anything that could be needed later."
-        )},
+        {
+            "role": "system",
+            "content": (
+                "Summarize the following conversation concisely. "
+                "Preserve all key facts, decisions, task context, file paths, "
+                "and information the user or assistant explicitly mentioned. "
+                "Do not omit anything that could be needed later."
+            ),
+        },
         {"role": "user", "content": "Summarize:\n\n" + "\n".join(parts)},
     ]
 
@@ -141,4 +144,3 @@ async def compact_history(history: list[dict[str, Any]], complete_fn) -> str:
         return summary + "\n" + recent_text
     except Exception:
         return "\n".join(parts) + "\n" + recent_text
-
