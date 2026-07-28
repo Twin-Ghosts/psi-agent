@@ -369,10 +369,12 @@ async def _list_sessions(request: web.Request) -> web.Response:
 
 
 async def _feishu_route(request: web.Request) -> web.Response:
-    """按飞书 ``open_id`` 幂等地路由到其独立 Session, 首次见到时按需 spawn。
+    """幂等地把一次飞书会话路由到其 Session, 首次见到时按需 spawn。
 
-    body: ``{open_id, ai_id?, workspace?}`` → ``201 {open_id, session_id, channel_socket}``。
-    channel 拿回 ``channel_socket`` 连接即得该用户隔离的会话。
+    body: ``{open_id, chat_id?, chat_type?, ai_id?, workspace?}`` →
+    ``201 {open_id, chat_id, session_id, channel_socket}``。群聊 (``chat_type`` 为 group/topic
+    且 ``chat_id`` 非空) 整群共用一个 Session, 其余按 ``open_id`` 一人一个。channel 拿回
+    ``channel_socket`` 连接即得对应会话。
     """
     fm: FeishuManager = request.app["fm"]
     schedm: SchedulerManager = request.app["schedm"]
@@ -380,20 +382,33 @@ async def _feishu_route(request: web.Request) -> web.Response:
         body = await request.json()
         if not isinstance(body, dict):
             return _error("Request body must be a JSON object", status=400)
+        open_id = body.get("open_id") or ""
+        chat_id = body.get("chat_id") or ""
+        chat_type = body.get("chat_type") or ""
         socket, session_id = await fm.route(
-            body["open_id"],
+            open_id,
+            chat_id=chat_id,
+            chat_type=chat_type,
             ai_id=body.get("ai_id"),
             workspace=body.get("workspace"),
         )
-        # Schedules under this user's workspace belong to its dedicated scheduler
-        # Session, not to the user session.
+        # Schedules under this session's workspace belong to its dedicated scheduler
+        # Session, not to the user/group session.
         sm: SessionManager = request.app["sm"]
         await schedm.ensure(
             sm.get_workspace(session_id),
             ai_id=sm.get_backend_id(session_id),
             agent=sm.get_agent(session_id),
         )
-        return _json({"open_id": body["open_id"], "session_id": session_id, "channel_socket": socket}, status=201)
+        return _json(
+            {
+                "open_id": open_id,
+                "chat_id": chat_id,
+                "session_id": session_id,
+                "channel_socket": socket,
+            },
+            status=201,
+        )
     except (TypeError, ValueError, KeyError) as e:
         return _error(str(e), status=400)
     except LookupError as e:

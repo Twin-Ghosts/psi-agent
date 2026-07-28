@@ -62,13 +62,14 @@ class Gateway:
     """Show a system tray icon (requires --icon)."""
 
     feishu_ai_id: str = ""
-    """飞书用户 Session 默认挂载的 AI 实例 id。飞书 channel 经 ``POST /feishu/route`` 按需为
-    每个飞书用户 spawn 独立 Session 时用它作缺省 AI (请求体也可逐次覆盖 ``ai_id``)。空 = 未配,
+    """飞书 Session 默认挂载的 AI 实例 id。飞书 channel 经 ``POST /feishu/route`` 按需为每个
+    飞书用户/群 spawn 独立 Session 时用它作缺省 AI (请求体也可逐次覆盖 ``ai_id``)。空 = 未配,
     此时若请求也不带 ``ai_id`` 则 ``/feishu/route`` 返回 400。"""
 
     feishu_workspace_root: str = ""
-    """飞书各用户独立 workspace 的父目录。每个 open_id 得到 ``<root>/<open_id>`` 子目录, 文件/历史
-    互相隔离。空 = 以 Gateway 进程 cwd 为父目录。"""
+    """飞书各会话独立 workspace 的父目录。私聊每个 open_id 得到 ``<root>/<open_id>`` 子目录,
+    群聊每个 chat_id 得到 ``<root>/chat-<chat_id>``, 文件/历史互相隔离。空 = 以 Gateway 进程
+    cwd 为父目录。"""
 
     default_agent: str = ""
     """CLI: default agent package for new Sessions / GET /defaults.
