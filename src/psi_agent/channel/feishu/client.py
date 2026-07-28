@@ -28,13 +28,11 @@ from loguru import logger
 from psi_agent.channel._core import ChannelCore
 from psi_agent.channel._types import FileChunk, InputChunk, ReasoningChunk, TextChunk
 
-from ._card_store import CardSnapshot, pop_card_snapshot
+from ._card_action import handle_card_action
 
 _EMOJI_PROCESSING = "Typing"
 _EMOJI_FAILED = "CrossMark"
 _SILENT_REPLY_TOKEN = "NO_REPLY"
-_INTERACTIVE_CARD_TAGS = {"action", "form"}
-_REMOVED_CARD_ELEMENT = object()
 
 
 def _allowed(sender_id: str | None, allowed_ids: list[str] | None) -> bool:
@@ -185,235 +183,6 @@ def _context_header(ctx: Any) -> str:
         lines.append(f"thread_id: {thread_id}")
     lines.append("</feishu_context>")
     return "\n".join(lines)
-
-
-def _card_action_context(
-    event: Any,
-    *,
-    snapshot: CardSnapshot | None = None,
-    card: dict[str, Any] | None = None,
-    snapshot_status: str = "not_found",
-) -> str:
-    """Serialize card/source/business data and deterministic dispatch as agent input."""
-    operator = getattr(event, "operator", None)
-    action = getattr(event, "action", None)
-    raw = getattr(event, "raw", None)
-    raw_event = raw.get("event") if isinstance(raw, dict) else None
-    raw_action = raw_event.get("action") if isinstance(raw_event, dict) else None
-    if not isinstance(raw_action, dict):
-        raw_action = {}
-
-    tag = getattr(action, "tag", None) or raw_action.get("tag") or ""
-    value = getattr(action, "value", None)
-    if value is None:
-        value = raw_action.get("value")
-
-    normalized_value = _normalize_card_action_value(value)
-    action_id = None
-    if isinstance(normalized_value, dict):
-        for key in ("action", "action_id"):
-            raw_action_id = normalized_value.get(key)
-            if isinstance(raw_action_id, str) and raw_action_id and raw_action_id.strip() == raw_action_id:
-                action_id = raw_action_id
-                break
-
-    action_handlers = snapshot.action_handlers if snapshot is not None else None
-    if snapshot is None:
-        handler = None
-        strategy = "snapshot_invalid" if snapshot_status == "invalid" else "snapshot_unavailable"
-    elif action_handlers:
-        handler = action_handlers.get(action_id or "")
-        strategy = "action_handlers"
-    else:
-        handler = action_id
-        strategy = "action_id"
-
-    payload = {
-        "schema_version": 2,
-        "chat_id": getattr(event, "chat_id", "") or "",
-        "message_id": getattr(event, "message_id", "") or "",
-        "operator_open_id": getattr(operator, "open_id", "") or "",
-        "source": snapshot.source if snapshot is not None else {},
-        "card": snapshot.card if snapshot is not None else card or {},
-        "business_context": snapshot.business_context if snapshot is not None else {},
-        "dispatch": {
-            "action_id": action_id,
-            "handler": handler,
-            "matched": handler is not None,
-            "strategy": strategy,
-        },
-        "action": {
-            "tag": tag,
-            "value": value,
-            "name": getattr(action, "name", None) or raw_action.get("name"),
-            "option": getattr(action, "option", None) or raw_action.get("option"),
-            "timezone": getattr(action, "timezone", None) or raw_action.get("timezone"),
-            "form_value": getattr(action, "form_value", None) or raw_action.get("form_value"),
-            "input_value": getattr(action, "input_value", None) or raw_action.get("input_value"),
-            "options": getattr(action, "options", None) or raw_action.get("options"),
-            "checked": getattr(action, "checked", None)
-            if getattr(action, "checked", None) is not None
-            else raw_action.get("checked"),
-        },
-    }
-    body = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-    return f"<feishu_card_action>\n{body}\n</feishu_card_action>"
-
-
-def _card_action_value(event: Any) -> Any:
-    action = getattr(event, "action", None)
-    value = getattr(action, "value", None)
-    if value is not None:
-        return value
-    raw = getattr(event, "raw", None)
-    raw_event = raw.get("event") if isinstance(raw, dict) else None
-    raw_action = raw_event.get("action") if isinstance(raw_event, dict) else None
-    return raw_action.get("value") if isinstance(raw_action, dict) else None
-
-
-def _parse_fetched_card(payload: Any) -> dict[str, Any] | None:
-    if not isinstance(payload, dict):
-        return None
-    data = payload.get("data")
-    items = data.get("items") if isinstance(data, dict) else None
-    if not isinstance(items, list):
-        return None
-    for item in items:
-        if not isinstance(item, dict) or item.get("msg_type") != "interactive":
-            continue
-        body = item.get("body")
-        content = body.get("content") if isinstance(body, dict) else None
-        if isinstance(content, dict):
-            return content
-        if not isinstance(content, str):
-            continue
-        try:
-            card = json.loads(content)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(card, dict):
-            return card
-    return None
-
-
-def _normalize_card_action_value(value: Any) -> Any:
-    if not isinstance(value, str):
-        return value
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        return value
-
-
-def _card_text_content(value: Any) -> str | None:
-    if isinstance(value, str):
-        return value or None
-    if not isinstance(value, dict):
-        return None
-    content = value.get("content")
-    return content if isinstance(content, str) and content else None
-
-
-def _find_card_action_label(value: Any, action_value: Any) -> str | None:
-    normalized_action_value = _normalize_card_action_value(action_value)
-    if isinstance(value, dict):
-        if "value" in value and _normalize_card_action_value(value["value"]) == normalized_action_value:
-            label = _card_text_content(value.get("text"))
-            if label:
-                return label
-        for child in value.values():
-            label = _find_card_action_label(child, action_value)
-            if label:
-                return label
-    elif isinstance(value, list):
-        for child in value:
-            label = _find_card_action_label(child, action_value)
-            if label:
-                return label
-    return None
-
-
-def _remove_card_interactions(
-    value: Any,
-    action_value: Any,
-    selected_label: str,
-    selected_replaced: bool = False,
-) -> tuple[Any, bool]:
-    if isinstance(value, dict):
-        if value.get("tag") in _INTERACTIVE_CARD_TAGS:
-            if not selected_replaced and _find_card_action_label(value, action_value):
-                return (
-                    {
-                        "tag": "note",
-                        "elements": [
-                            {
-                                "tag": "plain_text",
-                                "content": f"已选择: {selected_label}",
-                            }
-                        ],
-                    },
-                    True,
-                )
-            return _REMOVED_CARD_ELEMENT, selected_replaced
-
-        result: dict[str, Any] = {}
-        for key, child in value.items():
-            cleaned, selected_replaced = _remove_card_interactions(
-                child,
-                action_value,
-                selected_label,
-                selected_replaced,
-            )
-            if cleaned is not _REMOVED_CARD_ELEMENT:
-                result[key] = cleaned
-        return result, selected_replaced
-
-    if isinstance(value, list):
-        result: list[Any] = []
-        for child in value:
-            cleaned, selected_replaced = _remove_card_interactions(
-                child,
-                action_value,
-                selected_label,
-                selected_replaced,
-            )
-            if cleaned is not _REMOVED_CARD_ELEMENT:
-                result.append(cleaned)
-        return result, selected_replaced
-
-    return value, selected_replaced
-
-
-def _consumed_card_content(card: Any, action_value: Any) -> dict[str, Any] | None:
-    if action_value is None:
-        return None
-    if not isinstance(card, dict):
-        return None
-    selected_label = _find_card_action_label(card, action_value)
-    if not selected_label:
-        return None
-    consumed, selected_replaced = _remove_card_interactions(card, action_value, selected_label)
-    return consumed if selected_replaced and isinstance(consumed, dict) else None
-
-
-def _consumed_card(payload: Any, action_value: Any) -> dict[str, Any] | None:
-    return _consumed_card_content(_parse_fetched_card(payload), action_value)
-
-
-def _submitted_card() -> dict[str, Any]:
-    return {
-        "config": {"wide_screen_mode": True},
-        "header": {
-            "template": "green",
-            "title": {"tag": "plain_text", "content": "已提交"},
-        },
-        "elements": [
-            {
-                "tag": "markdown",
-                "content": "你的操作已提交, 请查看本会话中的处理结果。",
-            }
-        ],
-    }
 
 
 def _comment_context_header(event: Any, ctx: Any) -> str:
@@ -609,111 +378,6 @@ async def _handle_and_stream(
                 await _add_reaction(channel, ctx.message_id, _EMOJI_FAILED)
     except Exception as e:
         logger.error(f"Unhandled error in _handle_and_stream: {e!r}")
-
-
-async def _handle_card_action(
-    channel: Any,
-    resolve_core: Callable[[str | None], Awaitable[ChannelCore]],
-    allowed_ids: list[str] | None,
-    seen: _SeenEvents,
-    event: Any,
-    appdata: str = "",
-) -> None:
-    """Route a Feishu card action into the operator's agent session."""
-    chat_id = ""
-    try:
-        operator = getattr(event, "operator", None)
-        operator_open_id = getattr(operator, "open_id", None)
-        chat_id = getattr(event, "chat_id", "") or ""
-        message_id = getattr(event, "message_id", "") or ""
-
-        if not operator_open_id:
-            logger.warning("card action missing operator.open_id, skipping")
-            return
-        if not chat_id:
-            logger.warning("card action missing chat_id, skipping")
-            return
-        if not message_id:
-            logger.warning("card action missing message_id, cannot enforce single-use card")
-            return
-        if not _allowed(operator_open_id, allowed_ids):
-            logger.debug(f"card action operator {operator_open_id} blocked by whitelist")
-            return
-        if not seen.add_if_new(message_id):
-            logger.info(f"card action ignored for already-consumed message={message_id}")
-            return
-
-        action_value = _card_action_value(event)
-        snapshot = None
-        snapshot_status = "error"
-        original_card = None
-        replacement = None
-        try:
-            claim = await pop_card_snapshot(message_id, appdata)
-            if claim.status == "already_consumed":
-                logger.info(f"card action ignored for durably-consumed message={message_id}")
-                return
-            snapshot_status = claim.status
-            snapshot = claim.snapshot
-            if snapshot is not None:
-                original_card = snapshot.card
-                replacement = _consumed_card_content(snapshot.card, action_value)
-                if replacement is None:
-                    logger.warning(f"failed to consume card snapshot {message_id}, trying Feishu payload")
-        except Exception as e:
-            logger.warning(f"failed to load card snapshot {message_id}, trying Feishu payload — {e!r}")
-        if replacement is None:
-            try:
-                payload = await channel.fetch_message(message_id)
-                fetched_card = _parse_fetched_card(payload)
-                if original_card is None:
-                    original_card = fetched_card
-                replacement = _consumed_card_content(fetched_card, action_value)
-                if replacement is None:
-                    logger.warning(f"failed to preserve consumed card {message_id}, using fallback")
-            except Exception as e:
-                logger.warning(f"failed to fetch consumed card {message_id}, using fallback — {e!r}")
-        if replacement is None:
-            replacement = _submitted_card()
-        try:
-            result = await channel.update_card(message_id, replacement)
-            if not getattr(result, "success", False):
-                logger.warning(f"failed to mark card {message_id} consumed — {getattr(result, 'error', None)!r}")
-        except Exception as e:
-            logger.warning(f"failed to mark card {message_id} consumed — {e!r}")
-
-        core = await resolve_core(operator_open_id)
-        logger.debug(
-            f"card action operator={operator_open_id} chat={chat_id} "
-            f"message={message_id or None} socket={core.session_socket}"
-        )
-        chunks: list[InputChunk] = [
-            TextChunk(
-                _card_action_context(
-                    event,
-                    snapshot=snapshot,
-                    card=original_card,
-                    snapshot_status=snapshot_status,
-                )
-            )
-        ]
-        await _stream_reply(
-            channel,
-            core,
-            chat_id,
-            chunks,
-            reply_to=message_id or None,
-            suppress_silent_reply=True,
-        )
-        logger.debug("card action stream completed")
-    except Exception as e:
-        logger.error(f"Card action handling error — {e!r}")
-        if not chat_id:
-            return
-        try:
-            await channel.send(chat_id, {"text": f"Error: {e}"})
-        except Exception as notify_error:
-            logger.error(f"Card action error notification failed — {notify_error!r}")
 
 
 async def _collect_reply(core: ChannelCore, chunks: list[InputChunk]) -> str:
@@ -1109,11 +773,12 @@ async def run_feishu(
 
         async def _on_card_action(event: Any) -> None:
             portal.start_task_soon(
-                _handle_card_action,
+                handle_card_action,
                 channel,
                 resolve_core,
                 allowed_user_ids,
-                card_action_seen,
+                card_action_seen.add_if_new,
+                _stream_reply,
                 event,
                 appdata,
             )
