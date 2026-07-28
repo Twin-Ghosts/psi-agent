@@ -1,4 +1,4 @@
-import { Check, Copy, RefreshCw, ThumbsDown, ThumbsUp } from "lucide-react";
+import { Check, Copy, FolderOpen, RefreshCw, ThumbsDown, ThumbsUp } from "lucide-react";
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import type { ChatFile, ChatMessage, MessageFeedback } from "./model";
 import { BrandLogo } from "./primitives";
@@ -9,7 +9,7 @@ import { downloadMatrixXlsx, matrixToTsv, tableToMatrix } from "../services/mdTa
 import { preferResultBelowRule } from "../services/assistantDisplay";
 import type { ProgressLog } from "../services/turnProgress";
 import { FAILED_REASON_LABEL, isCompleteAgent } from "../services/messageTurn";
-import { ensureChatFileData } from "../utils/filePreviewUtils";
+import { ensureChatFileData, revealDeliverableInFolder } from "../utils/filePreviewUtils";
 import { isBlobPreviewable } from "../utils/renderBlobPreview";
 import FilePreview from "../components/FilePreview";
 
@@ -157,6 +157,7 @@ export function FocusChatThread({
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const [preview, setPreview] = useState<ChatFile | null>(null);
   const [previewBusy, setPreviewBusy] = useState<string | null>(null);
+  const [revealBusy, setRevealBusy] = useState<string | null>(null);
 
   useEffect(() => {
     const el = scrollerRef.current;
@@ -180,6 +181,20 @@ export function FocusChatThread({
       window.alert(e instanceof Error ? e.message : String(e));
     } finally {
       setPreviewBusy(null);
+    }
+  };
+
+  const revealFile = async (file: ChatFile) => {
+    const path = file.path?.trim();
+    if (!path) return;
+    const key = path || file.name;
+    setRevealBusy(key);
+    try {
+      await revealDeliverableInFolder(path, workspaceRoot);
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRevealBusy(null);
     }
   };
 
@@ -284,22 +299,39 @@ export function FocusChatThread({
               <div className="focus-chat-files">
                 {message.files!.map((f, fi) => {
                   const canPreview = isPreviewable(f.name) && Boolean(f.data.trim() || f.path?.trim());
+                  const canReveal = Boolean(f.path?.trim());
                   const busyKey = f.path || f.name;
                   const busy = previewBusy === busyKey;
+                  const revealing = revealBusy === busyKey;
                   return (
-                    <button
-                      type="button"
-                      key={`${f.name}-${fi}`}
-                      className="focus-chat-file-chip"
-                      disabled={!canPreview || busy}
-                      onClick={() => {
-                        void openPreview(f);
-                      }}
-                      title={canPreview ? `预览 ${f.name}` : f.name}
-                    >
-                      <span>{f.name}</span>
-                      {isPreviewable(f.name) ? <em>{busy ? "加载中" : "预览"}</em> : null}
-                    </button>
+                    <div className="focus-chat-file-row" key={`${f.name}-${fi}`}>
+                      <button
+                        type="button"
+                        className="focus-chat-file-chip"
+                        disabled={!canPreview || busy}
+                        onClick={() => {
+                          void openPreview(f);
+                        }}
+                        title={canPreview ? `预览 ${f.name}` : f.name}
+                      >
+                        <span>{f.name}</span>
+                        {isPreviewable(f.name) ? <em>{busy ? "加载中" : "预览"}</em> : null}
+                      </button>
+                      {canReveal ? (
+                        <button
+                          type="button"
+                          className="focus-chat-file-reveal"
+                          disabled={revealing}
+                          title={revealing ? "正在打开…" : "在文件夹中显示"}
+                          aria-label={`在文件夹中显示 ${f.name}`}
+                          onClick={() => {
+                            void revealFile(f);
+                          }}
+                        >
+                          <FolderOpen size={14} aria-hidden />
+                        </button>
+                      ) : null}
+                    </div>
                   );
                 })}
               </div>
@@ -345,7 +377,13 @@ export function FocusChatThread({
           {thinkingBubble}
         </ChatBlock>
       )}
-      {preview && <FilePreview file={preview} onClose={() => setPreview(null)} />}
+      {preview && (
+        <FilePreview
+          file={preview}
+          workspaceRoot={workspaceRoot}
+          onClose={() => setPreview(null)}
+        />
+      )}
     </div>
   );
 }

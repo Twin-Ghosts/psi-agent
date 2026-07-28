@@ -1,6 +1,6 @@
 import type { ChatFile, ChatMessage } from '../haitun-agent/model'
 import { mimeType } from '../services/renderMd'
-import { readWorkspaceFile } from '../services/api'
+import { readWorkspaceFile, revealWorkspacePath } from '../services/api'
 
 export { mimeType }
 
@@ -39,6 +39,20 @@ export function resolveDeliverablePath(path: string, workspaceRoot = ''): string
   const rel = raw.replace(/^[\\/]+/, '')
   if (!root) return rel
   return `${root}/${rel}`.replace(/\\/g, '/')
+}
+
+/**
+ * Ask Gateway to open the OS file manager at ``path`` (select file when possible).
+ */
+export async function revealDeliverableInFolder(
+  path: string,
+  workspaceRoot = '',
+): Promise<void> {
+  const full = resolveDeliverablePath(path, workspaceRoot)
+  if (!full) {
+    throw new Error('没有可打开的文件路径。')
+  }
+  await revealWorkspacePath(full)
 }
 
 /**

@@ -23,7 +23,7 @@
 | 技术栈 | Vue 3 + Pinia | React 19 + Vite |
 | base | `/spa/` | `/spa-v2/` |
 | 对话 | Gateway SSE | 同左（同一套 API） |
-| 交付物 | 气泡 blob chip | 宝箱 UI；SSE `blob` 写入 `deliverables`；抽屉内按 blob 真实渲染（对齐 spa v1：MD/HTML/图片音视频/代码/CSV/PDF/DOCX/XLSX/PPTX，重库动态 `import()`；无 blob 时明确空态）。MD 预览与聊天气泡共用 `renderMd` + `.md-table-card`。**刻意为之**：`renderMd` 超链接 `target=_blank`；附件 chip / 预览抽屉仍本页。DOCX 用 `ignoreWidth` + wrapper `align-items:stretch`——宝箱抽屉窄于 Word 页宽时，库默认居中会裁掉左侧且滚不到 |
+| 交付物 | 气泡 blob chip | 宝箱 UI；SSE `blob` 写入 `deliverables`；抽屉内按 blob 真实渲染（对齐 spa v1：MD/HTML/图片音视频/代码/CSV/PDF/DOCX/XLSX/PPTX，重库动态 `import()`；无 blob 时明确空态）。MD 预览与聊天气泡共用 `renderMd` + `.md-table-card`。**刻意为之**：`renderMd` 超链接 `target=_blank`；附件 chip / 预览抽屉仍本页。DOCX 用 `ignoreWidth` + wrapper `align-items:stretch`——宝箱抽屉窄于 Word 页宽时，库默认居中会裁掉左侧且滚不到。有 `[SEND:]` path 时，气泡 chip / 宝箱 / 预览抽屉可「在文件夹中显示」（`POST /workspace/reveal`） |
 | 账户区 | 头像菜单合一 | 头像菜单仅资料/登录；**模型池**与**设置**为侧栏独立快捷入口 |
 | 默认工作区 | 无 / 必须先选 | 启动读 ``GET /defaults``.workspace（Gateway 软默认 `{Desktop}/haitun交付`，**只宣布不建目录**；首个 Session/对话时服务端再 mkdir）；遗留 `*-workspace` / 字面量 `workspace` / `haitun-workspace` 会忽略 |
 | 工作区切换 | 侧栏打开 PathPicker | 设置「切换工作区」→ 选择页；**浏览**按钮走 `/workspace/places` + `/browse`（对齐 v1） |
@@ -91,9 +91,9 @@
 |------|------|
 | `deliverables` | **历史交付物**：当前 Session 累计全部产出（从 `/history` 的 `sends` 重水合，刷新后列表仍在） |
 | `newDeliverables` | **新交付物**：本轮未确认的；宝箱金色 / 侧栏「新交付物」只看这个；「保存到成果库」后清空 |
-| `deliverablePaths` | basename → `[SEND:]` 路径；刷新后抽屉/气泡经 `GET /workspace/file` 懒加载预览（**刻意**不传 `root`，避免绝对 SEND 路径被 workspace 门禁 403） |
+| `deliverablePaths` | basename → `[SEND:]` 路径；刷新后抽屉/气泡经 `GET /workspace/file` 懒加载预览（**刻意**不传 `root`，避免绝对 SEND 路径被 workspace 门禁 403）；「在文件夹中显示」走 `POST /workspace/reveal`（有 path 才可点） |
 
-SSE `blob` 到达时同时写入 `deliverables` + `newDeliverables`。流式追加文本时必须保留 `message.files`。
+SSE `blob` 到达时同时写入 `deliverables` + `newDeliverables`（有 `path` 则写入 `deliverablePaths`）。流式追加文本时必须保留 `message.files`。
 
 History 在剥 `[SEND:]` 前抽出路径放进消息的 `sends`；纯 SEND、无正文的 assistant 行也会返回（`text: ""` + `sends`），前端气泡跳过空文本但仍累计交付物。
 

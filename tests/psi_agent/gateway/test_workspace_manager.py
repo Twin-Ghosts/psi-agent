@@ -41,3 +41,39 @@ async def test_list_places_includes_cwd() -> None:
     assert isinstance(data["places"], list)
     assert any(r["id"] == "cwd" for r in data["places"])
     assert isinstance(data["drives"], list)
+
+
+@pytest.mark.anyio
+async def test_reveal_requires_path() -> None:
+    wm = WorkspaceManager()
+    with pytest.raises(ValueError, match="path is required"):
+        await wm.reveal("  ")
+
+
+@pytest.mark.anyio
+async def test_reveal_missing_path(tmp_path) -> None:
+    wm = WorkspaceManager()
+    with pytest.raises(FileNotFoundError):
+        await wm.reveal(str(tmp_path / "no-such-file.txt"))
+
+
+@pytest.mark.anyio
+async def test_reveal_invokes_platform_launcher(tmp_path, monkeypatch) -> None:
+    target = tmp_path / "out.md"
+    target.write_text("hi", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    async def fake_run_process(cmd: list[str] | tuple[str, ...], **_kwargs: object) -> None:
+        calls.append(list(cmd))
+
+    monkeypatch.setattr("psi_agent.gateway._workspace_manager.anyio.run_process", fake_run_process)
+    monkeypatch.setattr("psi_agent.gateway._workspace_manager.sys.platform", "win32")
+
+    wm = WorkspaceManager()
+    result = await wm.reveal(str(target))
+    assert result["ok"] is True
+    assert result["path"].replace("\\", "/").endswith("out.md")
+    assert len(calls) == 1
+    assert calls[0][0] == "explorer"
+    assert calls[0][1].startswith("/select,")
+    assert "out.md" in calls[0][1]

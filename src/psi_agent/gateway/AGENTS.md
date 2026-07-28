@@ -312,6 +312,7 @@ REST ``DELETE /sessions/{id}`` 在 SessionManager.delete 之后还会：
 | GET | `/workspace/places` | PathPicker 快捷位置（cwd / home / desktop / documents / downloads）+ 盘符 |
 | GET | `/workspace/browse` | 浏览目录 `?path=...&kind=directory|file|all&q=...`，默认 `kind=directory` |
 | GET | `/workspace/file` | 读取文件为 base64（`?path=...&root=...`）；``root`` 非空时路径须落在该目录下 |
+| POST | `/workspace/reveal` | 在本机文件管理器中显示路径（Windows `explorer /select`；macOS `open -R`；Linux `xdg-open` 父目录）。body `{path}`；路径须已存在。供 spa-v2 交付物「在文件夹中显示」 |
 | GET | `/titles` | 获取所有 session 标题 |
 | POST | `/titles` | 设置 session 标题 `{id, title}` |
 | POST | `/titles/generate` | AI 自动生成标题 `{id, user_text, assistant_text}` |
@@ -342,7 +343,7 @@ AI 和 Session 的 `id` 字段可选，不传自动生成 UUID。
 ```
 data: {"type": "reasoning", "text": "[Tool Call: read({…})]", "kind": "tool_call"}
 data: {"type": "text", "text": "Hello! "}
-data: {"type": "blob", "name": "generated.png", "data": "base64..."}
+data: {"type": "blob", "name": "generated.png", "data": "base64...", "path": "C:/Users/.../Downloads/.psi/.../generated.png"}
 data: [DONE]
 ```
 
@@ -350,13 +351,13 @@ data: [DONE]
 |--------|------|------|
 | `text` | `text` | 助手正文（`TextChunk`） |
 | `reasoning` | `text` + 可选 `kind` | 过程流（thinking / tool 进度仍走同一槽）；`kind` 为 `thinking` \| `tool_call` \| `tool_result`（Session yield 打标）。**≠** JSONL 消息 provenance 的 `kind`（`chat` / `schedule.*`） |
-| `blob` | `name` + `data` | 交付物 base64（`FileChunk`） |
+| `blob` | `name` + `data` + 可选 `path` | 交付物 base64（`FileChunk`）；`path` 为磁盘绝对路径，供 spa-v2「在文件夹中显示」 |
 
 **内部实现**：
 - 查 `SessionManager.get_socket(session_id)` 获取 channel socket
 - 复用 `channel._core.ChannelCore` 构造连接
 - 输入：`TextChunk(text)`、blob（base64 解码后由 `_save_upload()` 落至 `~/Downloads/.psi/<date>/`，持久保留，转为 `FileChunk`）；multipart 文件上传通过 blob 通道走相同路径
-- 输出：`TextChunk` → `{"type":"text"}`；`ReasoningChunk` → `{"type":"reasoning","text":…}`（有 `chunk.kind` 则附带）；`FileChunk` → 读盘 base64 → `{"type":"blob"}`
+- 输出：`TextChunk` → `{"type":"text"}`；`ReasoningChunk` → `{"type":"reasoning","text":…}`（有 `chunk.kind` 则附带）；`FileChunk` → 读盘 base64 → `{"type":"blob","name","data","path"}`
 
 ## Web Console (SPA)
 

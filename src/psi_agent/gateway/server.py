@@ -212,6 +212,7 @@ async def create_app(
     app.router.add_get("/workspace/places", _list_workspace_places)
     app.router.add_get("/workspace/browse", _browse_workspace)
     app.router.add_get("/workspace/file", _read_workspace_file)
+    app.router.add_post("/workspace/reveal", _reveal_workspace_path)
     app.router.add_get("/sessions/{session_id}/history", _get_history)
     app.router.add_get("/sessions/{session_id}/todos", _get_todos)
     app.router.add_post("/sessions/{session_id}/chat", _handle_chat)
@@ -483,6 +484,28 @@ async def _read_workspace_file(request: web.Request) -> web.Response:
     except PermissionError as e:
         return _error(str(e), status=403)
     except (OSError, IsADirectoryError) as e:
+        return _error(str(e), status=400)
+
+
+async def _reveal_workspace_path(request: web.Request) -> web.Response:
+    """POST /workspace/reveal — open OS file manager at path (select file if possible)."""
+    wm: WorkspaceManager = request.app["wm"]
+    try:
+        body = await request.json()
+    except Exception:
+        return _error("Invalid JSON body", status=400)
+    if not isinstance(body, dict):
+        return _error("Body must be a JSON object", status=400)
+    path = body.get("path")
+    if not isinstance(path, str):
+        return _error("path is required", status=400)
+    try:
+        return _json(await wm.reveal(path))
+    except ValueError as e:
+        return _error(str(e), status=400)
+    except FileNotFoundError as e:
+        return _error(str(e), status=404)
+    except OSError as e:
         return _error(str(e), status=400)
 
 

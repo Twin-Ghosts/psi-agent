@@ -146,6 +146,11 @@ export async function readWorkspaceFile(path: string, root = '') {
   return api<{ name: string; data: string; path: string }>('GET', `/workspace/file?${params.toString()}`)
 }
 
+/** Open the OS file manager and select ``path`` (Gateway local desktop). */
+export async function revealWorkspacePath(path: string) {
+  return api<{ path: string; ok: boolean }>('POST', '/workspace/reveal', { path })
+}
+
 export async function fetchCwd() {
   return api<{ cwd: string }>('GET', '/workspace/cwd')
 }

@@ -4,6 +4,7 @@ import {
   Download,
   FileArchive,
   FileText,
+  FolderOpen,
   Grid2X2,
   MessageCircle,
   Settings2,
@@ -16,6 +17,7 @@ import {
   downloadChatFile,
   ensureChatFileData,
   findDeliverableFile,
+  revealDeliverableInFolder,
 } from "../utils/filePreviewUtils";
 import { mobileHaptic, prefersReducedMotion } from "./client-feedback";
 import type { ChatFile, Task } from "./model";
@@ -71,6 +73,7 @@ export function ArtifactDrawer({
   const [loadedFiles, setLoadedFiles] = useState<ChatFile[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [revealBusy, setRevealBusy] = useState(false);
   const acceptTimer = useRef<number | null>(null);
 
   useEffect(() => {
@@ -171,6 +174,18 @@ export function ArtifactDrawer({
       });
   };
 
+  const revealPath = selectedBlob?.path?.trim() || task.deliverablePaths[selectedName] || "";
+  const handleReveal = () => {
+    if (!revealPath || revealBusy) return;
+    setRevealBusy(true);
+    setLoadError(null);
+    void revealDeliverableInFolder(revealPath, workspaceRoot)
+      .catch((e) => {
+        setLoadError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => setRevealBusy(false));
+  };
+
   const kicker = empty
     ? "交付物"
     : listMode === "new"
@@ -232,17 +247,29 @@ export function ArtifactDrawer({
 
             <div className="document-preview">
               <div className="document-toolbar">
-                <span className="document-toolbar-label" title={selectedName}>
+                <span className="document-toolbar-label" title={revealPath || selectedName}>
                   预览 · {selectedName || "未选择"}
                 </span>
-                <button
-                  type="button"
-                  disabled={!selectedBlob?.data.trim() && !selectedBlob?.path && !task.deliverablePaths[selectedName]}
-                  onClick={handleDownload}
-                  aria-label={`下载 ${selectedName}`}
-                >
-                  <Download size={16} />
-                </button>
+                <div className="document-toolbar-actions">
+                  <button
+                    type="button"
+                    disabled={!revealPath || revealBusy}
+                    onClick={handleReveal}
+                    title={revealPath ? (revealBusy ? "正在打开…" : "在文件夹中显示") : "无磁盘路径，无法定位"}
+                    aria-label={`在文件夹中显示 ${selectedName}`}
+                  >
+                    <FolderOpen size={16} />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!selectedBlob?.data.trim() && !selectedBlob?.path && !task.deliverablePaths[selectedName]}
+                    onClick={handleDownload}
+                    aria-label={`下载 ${selectedName}`}
+                    title="下载"
+                  >
+                    <Download size={16} />
+                  </button>
+                </div>
               </div>
               {selectedBlob?.data.trim() ? (
                 <ArtifactFileBody key={`${selectedBlob.name}:${selectedBlob.data.slice(0, 32)}`} file={selectedBlob} />

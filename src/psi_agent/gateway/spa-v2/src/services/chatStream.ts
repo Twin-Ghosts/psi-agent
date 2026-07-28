@@ -5,7 +5,7 @@ import type { ChatFile } from '../haitun-agent/model'
 
 export type StreamHandlers = {
   onText?: (delta: string) => void
-  onBlob?: (name: string, data: string) => void
+  onBlob?: (name: string, data: string, path?: string) => void
   /** ``kind`` is reasoning provenance: thinking | tool_call | tool_result. */
   onReasoning?: (delta: string, kind?: string) => void
   onError?: (message: string) => void
@@ -48,8 +48,9 @@ export async function streamSessionChat(
         handlers.onText?.(chunk.text)
       } else if (chunk.type === 'blob' && typeof chunk.name === 'string') {
         const data = typeof chunk.data === 'string' ? chunk.data : ''
-        blobs.push({ name: chunk.name, data })
-        handlers.onBlob?.(chunk.name, data)
+        const path = typeof chunk.path === 'string' ? chunk.path : undefined
+        blobs.push({ name: chunk.name, data, ...(path ? { path } : {}) })
+        handlers.onBlob?.(chunk.name, data, path)
       } else if (chunk.type === 'reasoning' && typeof chunk.text === 'string') {
         const kind = typeof chunk.kind === 'string' ? chunk.kind : undefined
         handlers.onReasoning?.(chunk.text, kind)

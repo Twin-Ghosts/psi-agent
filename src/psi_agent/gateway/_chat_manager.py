@@ -108,6 +108,8 @@ class ChatManager:
                 "type": "blob",
                 "name": name,
                 "data": base64.b64encode(content).decode(),
+                # Absolute path so spa-v2 can 「在文件夹中显示」 without waiting for /history.
+                "path": str(path).replace("\\", "/"),
             }
         except Exception as e:
             logger.warning(f"Failed to read file blob {path!r}: {e!r}")

@@ -384,6 +384,34 @@ OPENAPI_SPEC = {
                 },
             },
         },
+        "/workspace/reveal": {
+            "post": {
+                "summary": "Reveal a path in the OS file manager",
+                "operationId": "revealWorkspacePath",
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": ["path"],
+                                "properties": {
+                                    "path": {
+                                        "type": "string",
+                                        "description": "Absolute or resolvable filesystem path to select/open",
+                                    },
+                                },
+                            }
+                        }
+                    },
+                },
+                "responses": {
+                    "200": {"description": "File manager launched ({path, ok})"},
+                    "400": {"$ref": "#/components/responses/Error"},
+                    "404": {"$ref": "#/components/responses/Error"},
+                },
+            },
+        },
     },
     "components": {
         "schemas": {

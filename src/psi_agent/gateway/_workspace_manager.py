@@ -153,3 +153,33 @@ class WorkspaceManager:
         name = resolved.name
         logger.debug(f"Read workspace file {str(resolved)!r} ({len(data)} bytes)")
         return {"name": name, "data": base64.b64encode(data).decode(), "path": _posix(resolved)}
+
+    async def reveal(self, path: str) -> dict[str, Any]:
+        """Open the OS file manager and select ``path`` (deliverable 「在文件夹中显示」).
+
+        Local Gateway trust model — same as ``browse`` / ``read_file`` without root
+        gate: SPA already holds the ``[SEND:]`` path from this machine's Session.
+        """
+        raw = path.strip()
+        if not raw:
+            raise ValueError("path is required")
+        target = anyio.Path(raw)
+        if not await target.exists():
+            raise FileNotFoundError(f"Path not found: {raw!r}")
+        resolved = await target.resolve()
+        resolved_s = str(resolved)
+        logger.info(f"Revealing path in file manager: {resolved_s!r}")
+
+        if sys.platform == "win32":
+            # explorer exit codes are unreliable; /select,<path> is one argv.
+            await anyio.run_process(
+                ["explorer", f"/select,{resolved_s}"],
+                check=False,
+            )
+        elif sys.platform == "darwin":
+            await anyio.run_process(["open", "-R", resolved_s], check=True)
+        else:
+            folder = resolved_s if await resolved.is_dir() else str(resolved.parent)
+            await anyio.run_process(["xdg-open", folder], check=False)
+
+        return {"path": _posix(resolved), "ok": True}

@@ -517,12 +517,15 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
             );
             appendStreamingAgent(cardId, delta);
           },
-          onBlob: (name, data) => {
+          onBlob: (name, data, path) => {
             if (!live()) return;
             setTasks((current) =>
               current.map((task) =>
                 (task.id === cardId
-                  ? withDeliverables(task, [name], { streaming: true })
+                  ? withDeliverables(task, [name], {
+                      streaming: true,
+                      paths: path ? { [name]: path } : undefined,
+                    })
                   : task),
               ),
             );
@@ -532,7 +535,7 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
               if (last?.role === "agent") {
                 list[list.length - 1] = {
                   ...last,
-                  files: [...(last.files ?? []), { name, data }],
+                  files: [...(last.files ?? []), { name, data, ...(path ? { path } : {}) }],
                 };
               }
               return { ...current, [cardId]: list };
@@ -564,10 +567,16 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
         });
       }
       if (blobs.length) {
+        const paths = Object.fromEntries(
+          blobs.filter((b) => b.path?.trim()).map((b) => [b.name, b.path!.trim()]),
+        );
         setTasks((current) =>
           current.map((task) =>
             (task.id === cardId
-              ? withDeliverables(task, blobs.map((b) => b.name), { streaming: false })
+              ? withDeliverables(task, blobs.map((b) => b.name), {
+                  streaming: false,
+                  paths: Object.keys(paths).length ? paths : undefined,
+                })
               : task),
           ),
         );
