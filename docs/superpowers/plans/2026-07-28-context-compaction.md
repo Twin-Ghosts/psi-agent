@@ -1,10 +1,18 @@
 # Context Compaction Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> **Final design spec:** `docs/superpowers/specs/2026-07-28-context-compaction-design.md`
+>
+> **Note:** The implementation evolved from the original plan. Key differences:
+> - Compaction inserts an independent `compacted` message (not inline system prompt merge)
+> - `messages_for_ai()` does the system prompt merge + history trimming
+> - `_make_compaction_complete_fn` was inlined per Convention 11
+> - `compact_history` returns summary with recent turns appended (not just summary string)
 
-**Goal:** Add automatic context compaction when token count exceeds threshold — AI layer signals, Session layer compacts via system.py and merges into system prompt.
+**Goal:** Add automatic context compaction when token count exceeds threshold — AI layer signals, Session layer compacts via system.py.
 
-**Architecture:** AI layer detects usage > `max_context_tokens` via `stream_options={"include_usage": true}` and sends `psi_compaction` SSE signal post-stream. Session's AiClient parses it into `AiDelta.compaction_needed`. Agent loop (with stop handler moved outside inner for loop) calls `_maybe_compact()` which invokes `compact_history()` from system.py, merges result into system prompt, deletes all non-system messages.
+**Architecture:** AI layer detects usage > `max_context_tokens` via `stream_options={"include_usage": true}` and sends `psi_compaction` SSE signal post-stream. Session's AiClient parses it into `AiDelta.compaction_needed`. Agent loop (with stop handler moved outside inner for loop) calls `_maybe_compact()` which invokes `compact_history()` from system.py, inserts a compacted message into conversation. `messages_for_ai()` trims old messages and merges summary into system prompt when sending to AI.
 
 **Tech Stack:** aiohttp, any-llm-sdk, anyio, loguru, pytest-asyncio, ruff, ty
 
