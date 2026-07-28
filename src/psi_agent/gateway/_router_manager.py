@@ -15,6 +15,7 @@ from psi_agent.gateway._manager import _ensure_socket_dir, _new_uuid, _noop, _re
 async def _run_router_service(
     *,
     session_socket: str,
+    mode: str,
     router_socket: str,
     upstreams: tuple[tuple[str, str], ...],
     default_socket: str,
@@ -30,6 +31,7 @@ async def _run_router_service(
     router_class = module.Router
     router = router_class(
         session_socket=session_socket,
+        mode=mode,
         router_socket=router_socket,
         upstream=list(upstreams),
         default_socket=default_socket,
@@ -50,6 +52,7 @@ class RouterInfo:
     id: str
     name: str
     socket: str
+    mode: str
     router_ai_id: str
     upstreams: tuple[RouterUpstreamInfo, ...]
     default_ai_id: str
@@ -75,6 +78,7 @@ class RouterManager:
     async def create(
         self,
         name: str,
+        mode: str,
         router_ai_id: str,
         upstreams: Sequence[RouterUpstreamInfo],
         default_ai_id: str,
@@ -86,6 +90,9 @@ class RouterManager:
         router_id = id or _new_uuid()
         targets = tuple(RouterUpstreamInfo(x.ai_id.strip(), x.description.strip()) for x in upstreams)
         candidate_ids = [x.ai_id for x in targets]
+        normalized_mode = mode.strip()
+        if normalized_mode not in {"routing", "aggregation"}:
+            raise ValueError("mode must be 'routing' or 'aggregation'")
         if not name.strip() or not router_ai_id.strip():
             raise ValueError("name and router_ai_id must be non-empty")
         if not targets or any(not x.ai_id or not x.description for x in targets):
@@ -113,6 +120,7 @@ class RouterManager:
                     with scope:
                         await _run_router_service(
                             session_socket=socket,
+                            mode=normalized_mode,
                             router_socket=self._aim.get_socket(router_ai_id),
                             upstreams=tuple((self._aim.get_socket(item.ai_id), item.description) for item in targets),
                             default_socket=self._aim.get_socket(default_ai_id),
@@ -130,6 +138,7 @@ class RouterManager:
                 router_id,
                 name.strip(),
                 socket,
+                normalized_mode,
                 router_ai_id,
                 targets,
                 default_ai_id,

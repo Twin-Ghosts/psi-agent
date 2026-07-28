@@ -6,8 +6,8 @@ from typing import Any
 import anyio
 import pytest
 
+from psi_agent.router.aggregation.orchestrator import OrchestrationError, Orchestrator
 from psi_agent.router.client import UpstreamResult
-from psi_agent.router.orchestrator import OrchestrationError, Orchestrator
 from psi_agent.router.protocol import PlannedTask, RouterConfig
 
 
@@ -45,6 +45,7 @@ class FakePlanner:
 
 def config() -> RouterConfig:
     return RouterConfig(
+        mode="aggregation",
         session_socket="session",
         router_socket="router",
         default_socket="default",

@@ -27,6 +27,13 @@ class RoutingStatus(StrEnum):
     FAILED = "failed"
 
 
+class RouterMode(StrEnum):
+    """Supported router upstream orchestration modes."""
+
+    ROUTING = "routing"
+    AGGREGATION = "aggregation"
+
+
 @dataclass(frozen=True)
 class RouterConfig:
     """Validated, immutable socket-only configuration for one Router service."""
@@ -34,6 +41,7 @@ class RouterConfig:
     session_socket: str
     router_socket: str
     default_socket: str
+    mode: RouterMode | str
     upstream: tuple[tuple[str, str], ...] | list[tuple[str, str]]
     max_tool_rounds: int = 10
     router_timeout: float | None = 60.0
@@ -43,6 +51,12 @@ class RouterConfig:
     max_context_length: int = 12_000
 
     def __post_init__(self) -> None:
+        try:
+            mode = RouterMode(self.mode)
+        except ValueError as exc:
+            raise ValueError("mode must be 'routing' or 'aggregation'") from exc
+        object.__setattr__(self, "mode", mode)
+
         for name in ("session_socket", "router_socket", "default_socket"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():

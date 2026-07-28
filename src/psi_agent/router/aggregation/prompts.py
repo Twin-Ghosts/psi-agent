@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 
@@ -108,19 +109,40 @@ def build_branch_messages(
 
 
 def build_aggregation_messages(
-    *, original_messages: list[dict[str, Any]], answers: list[tuple[str, str]]
+    *, original_messages: list[dict[str, Any]], answers: Sequence[tuple[str, str] | dict[str, Any]]
 ) -> list[dict[str, Any]]:
     """Ask the routing model to synthesize completed branch answers."""
 
     result = _copy_messages(original_messages)
-    answer_text = "\n\n".join(f"Subtask ({name}) final answer:\n{answer}" for name, answer in answers)
+    answer_lines: list[str] = []
+    for answer in answers:
+        if isinstance(answer, tuple) and len(answer) == 2:
+            subtask, content = answer
+            answer_lines.append(f"Subtask ({subtask}) final answer:\n{content}")
+            continue
+        if isinstance(answer, dict):
+            subtask = answer.get("subtask")
+            content = answer.get("content")
+            tool_calls = answer.get("tool_calls")
+            if isinstance(subtask, str) and isinstance(content, str):
+                answer_lines.append(
+                    f"Subtask ({subtask}) final answer:\n{content}\n"
+                    + (
+                        f"Tool calls observed for this subtask:\n{tool_calls}"
+                        if tool_calls
+                        else "Tool calls observed for this subtask:\n(none)"
+                    )
+                )
+    answer_text = "\n\n".join(answer_lines)
     result.append(
         {
             "role": "user",
             "content": (
                 "Synthesize the following specialist results into one accurate, self-contained final answer. "
-                "Do not mention routing or the specialists. Do not output JSON, Markdown fences, thoughts, task lists, "
-                "backend sockets, or planning instructions. Return only the answer intended for the end user.\n\n"
+                "The child tool calls shown below are observations/material for this final synthesis, not calls that "
+                "the Router should execute. Do not mention routing or the specialists. Do not output JSON, Markdown "
+                "fences, thoughts, task lists, backend sockets, or planning instructions. Return only the answer "
+                "intended for the end user.\n\n"
                 f"{answer_text}"
             ),
         }

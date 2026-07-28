@@ -3,7 +3,7 @@ import { ref } from 'vue'
 
 function emptyForm() {
   return {
-    name: '', router_ai_id: '', upstreams: [], default_ai_id: '',
+    name: '', mode: 'routing', router_ai_id: '', upstreams: [], default_ai_id: '',
     router_timeout: null, max_context_length: 12000,
   }
 }

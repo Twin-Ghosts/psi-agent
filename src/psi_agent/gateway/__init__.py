@@ -105,6 +105,7 @@ class Gateway:
                 try:
                     await rm.create(
                         name=cfg.get("name", ""),
+                        mode=cfg.get("mode", ""),
                         router_ai_id=cfg.get("router_ai_id", ""),
                         upstreams=[
                             RouterUpstreamInfo(item.get("ai_id", ""), item.get("description", ""))
@@ -173,6 +174,7 @@ class Gateway:
                         {
                             "id": info.id,
                             "name": info.name,
+                            "mode": info.mode,
                             "router_ai_id": info.router_ai_id,
                             "upstreams": [
                                 {"ai_id": item.ai_id, "description": item.description} for item in info.upstreams

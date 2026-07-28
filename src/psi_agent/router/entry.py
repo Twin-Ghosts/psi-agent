@@ -6,7 +6,11 @@ import math
 from dataclasses import dataclass
 
 from psi_agent._logging import setup_logging
-from psi_agent.router.routing import Orchestrator, Planner, RouterClient, RouterConfig
+from psi_agent.router.aggregation import Orchestrator as AggregationOrchestrator
+from psi_agent.router.aggregation import Planner
+from psi_agent.router.client import RouterClient
+from psi_agent.router.protocol import RouterConfig, RouterMode
+from psi_agent.router.routing import Orchestrator as RoutingOrchestrator
 from psi_agent.router.server import serve_router
 
 
@@ -22,6 +26,9 @@ class Router:
 
     default_socket: str
     """Transport address for fallback requests after an orchestration failure."""
+
+    mode: RouterMode | str
+    """Router orchestration mode: routing or aggregation."""
 
     upstream: list[tuple[str, str]]
     """Configured (transport address, capability description) branch backends."""
@@ -55,6 +62,7 @@ class Router:
             session_socket=self.session_socket,
             router_socket=self.router_socket,
             default_socket=self.default_socket,
+            mode=self.mode,
             upstream=self.upstream,
             max_tool_rounds=self.max_tool_rounds,
             router_timeout=self.router_timeout,
@@ -73,14 +81,17 @@ class Router:
                 raise ValueError(f"{name} must be a finite positive number or None")
 
         client = RouterClient()
-        planner = Planner(
-            client=client,
-            router_socket=config.router_socket,
-            upstream=config.upstream,
-            timeout=config.router_timeout,
-        )
-        orchestrator = Orchestrator(config=config, client=client, planner=planner)
-        await serve_router(config=config, orchestrator=orchestrator)
+        if config.mode == RouterMode.AGGREGATION:
+            planner = Planner(
+                client=client,
+                router_socket=config.router_socket,
+                upstream=config.upstream,
+                timeout=config.router_timeout,
+            )
+            strategy = AggregationOrchestrator(config=config, client=client, planner=planner)
+        else:
+            strategy = RoutingOrchestrator(config=config, client=client)
+        await serve_router(config=config, strategy=strategy, client=client)
 
 
 __all__ = ["Router"]

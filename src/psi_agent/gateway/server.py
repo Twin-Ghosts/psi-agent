@@ -254,6 +254,7 @@ async def _create_router(request: web.Request) -> web.Response:
         body = await request.json()
         info = await rm.create(
             name=body["name"],
+            mode=body["mode"],
             router_ai_id=body["router_ai_id"],
             upstreams=[RouterUpstreamInfo(item["ai_id"], item["description"]) for item in body["upstreams"]],
             default_ai_id=body["default_ai_id"],
