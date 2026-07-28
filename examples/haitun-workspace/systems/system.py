@@ -11,9 +11,9 @@ This merges three ideas into one workspace:
   fully merged from the fusion-flow workspace.
 * A fixed Haitun agent persona, always stated in the system prompt.
 
-Only ``system_prompt_builder()`` (and optionally ``system_prompt_rebuild_checker``)
-is invoked by psi-agent's session loader.  ``compact_history`` / ``after_turn`` /
-the self-evolution helpers below are **intentionally kept but currently un-wired**
+``system_prompt_builder()`` and ``system_after_turn()`` are invoked by psi-agent's
+session loader. ``compact_history`` / ``System.after_turn`` / the self-evolution
+helpers below are **intentionally kept but currently un-wired**
 - they are future-extension hooks (see AGENTS.md).  Do not delete them as "dead
 code"; they exist on purpose.
 """
@@ -29,8 +29,13 @@ _THIS_DIR = _os.path.dirname(_os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
+_TOOLS_DIR = _os.path.join(_os.path.dirname(_THIS_DIR), "tools")
+if _TOOLS_DIR not in sys.path:
+    sys.path.insert(0, _TOOLS_DIR)
+
 import contextlib
 import hashlib
+import importlib
 import json
 import logging
 import os
@@ -1003,7 +1008,12 @@ hand-copying the key.
 
 Never write API keys into this workspace, generated `.flow.ts` files, or committed `.env` files."""
 
-    async def build_system_prompt(self, model: str | None = None, tool_names: list[str] | None = None) -> str:
+    async def build_system_prompt(
+        self,
+        model: str | None = None,
+        tool_names: list[str] | None = None,
+        user_text: str = "",
+    ) -> str:
         # Capability root (skills/tools/SOUL) vs user open-folder (file IO guidance).
         ws = self._agent_dir
         user_ws = self._user_workspace
@@ -1124,6 +1134,25 @@ Never write API keys into this workspace, generated `.flow.ts` files, or committ
             dynamic_parts += [dynamic_ctx, ""]
 
         dynamic_parts += [_build_datetime_section(), ""]
+
+        try:
+            profile_module = importlib.import_module("_user_profile")
+            profile = await profile_module.get_profile(str(user_ws))
+            _topic_key, topic = profile.get_topic(user_text)
+            dimensions = topic["dimensions"]
+            profile_text = (
+                "## 当前知识点学习画像\n"
+                f"- 当前知识点: {topic['label']}\n"
+                f"- 该知识点累计轮次: {topic['turns']}\n"
+                f"- 深度偏好: {dimensions['depth']:.2f} (0=框架概览, 1=系统推导)\n"
+                f"- 目标导向: {dimensions['goal']:.2f} (0=兴趣, 1=决策)\n"
+                f"- 领域熟悉度: {dimensions['familiarity']:.2f} (0=新手, 1=专家)\n"
+                f"- 教学指令: {profile.teaching_hint(topic)}\n"
+            )
+            dynamic_parts += [profile_text, ""]
+        except Exception as exc:
+            logger.warning("Failed to inject learner profile: %r", exc, exc_info=True)
+
         dynamic_parts.append(_build_runtime_info(model))
 
         while dynamic_parts and dynamic_parts[-1] == "":
@@ -1251,7 +1280,7 @@ Never write API keys into this workspace, generated `.flow.ts` files, or committ
         )
 
 
-async def system_prompt_builder() -> str:
+async def system_prompt_builder(user_message: dict[str, Any] | None = None) -> str:
     """Module-level entry point used by the psi-agent session loader.
 
     The loader looks up an async ``system_prompt_builder`` attribute in this
@@ -1268,7 +1297,9 @@ async def system_prompt_builder() -> str:
     if raw:
         user_workspace = anyio.Path(raw)
     await _activate_fusion_memory(agent_dir)
-    return await System(agent_dir, user_workspace=user_workspace).build_system_prompt()
+    content = user_message.get("content") if isinstance(user_message, dict) else ""
+    user_text = content if isinstance(content, str) else ""
+    return await System(agent_dir, user_workspace=user_workspace).build_system_prompt(user_text=user_text)
 
 
 async def compact_history(history: list[dict[str, Any]], complete_fn) -> str:
@@ -1324,11 +1355,24 @@ async def compact_history(history: list[dict[str, Any]], complete_fn) -> str:
         return "\n".join(parts) + "\n" + recent_text
 
 
-async def system_prompt_rebuild_checker() -> bool:
-    """Activate Memory on the first turn after restoring an existing Session."""
+async def system_prompt_rebuild_checker(_user_message: dict[str, Any] | None = None) -> bool:
+    """Activate Memory and rebuild so every turn receives the latest profile."""
     agent_dir = anyio.Path(__file__).parent.parent
     await _activate_fusion_memory(agent_dir)
-    return False
+    return True
+
+
+async def system_after_turn(user_message: dict[str, Any], assistant_message: dict[str, Any]) -> None:
+    """Persist aggregate topic-profile signals after a successful response."""
+    profile_module = importlib.import_module("_user_profile")
+    profile = await profile_module.get_profile(_runtime_workspace())
+    user_text = user_message.get("content")
+    assistant_text = assistant_message.get("content")
+    profile.update(
+        user_text if isinstance(user_text, str) else "",
+        assistant_text if isinstance(assistant_text, str) else "",
+    )
+    await profile.save()
 
 
 async def _activate_fusion_memory(workspace_dir: anyio.Path) -> None:
