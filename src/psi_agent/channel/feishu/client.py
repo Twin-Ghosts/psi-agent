@@ -6,7 +6,7 @@ import json
 import re
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
-from contextlib import AsyncExitStack, aclosing
+from contextlib import AsyncExitStack, aclosing, suppress
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -86,6 +86,10 @@ class _MessageTarget:
     route: _GatewayRoute | None
 
 
+class _GatewayRouteError(RuntimeError):
+    pass
+
+
 class _GatewayRouteProvider:
     """给 open_id → 幂等返回其 Gateway session 完整路由; 面向动态任意用户。
 
@@ -140,7 +144,7 @@ class _GatewayRouteProvider:
 
 
 def _safe_component(value: str, *, fallback: str) -> str:
-    """Encode an untrusted path component without losing identity."""
+    """编码不可信路径段, 保留可区分的身份信息。"""
     if not value:
         return fallback
     return quote(value, safe="-_").replace(".", "%2E")
@@ -151,37 +155,20 @@ def _safe_suffix(file_name: str) -> str:
     return suffix if re.fullmatch(r"\.[A-Za-z0-9]{1,16}", suffix) else ""
 
 
-async def _download_dir(route: _GatewayRoute, message_id: str) -> anyio.Path:
-    workspace = await anyio.Path(route.workspace).resolve(strict=True)
-    uploads = workspace / "uploads"
-    await uploads.mkdir(parents=True, exist_ok=True)
-    uploads = await uploads.resolve(strict=True)
-    if not uploads.is_relative_to(workspace):
-        raise RuntimeError("Feishu upload storage is outside the routed workspace")
-    downloads = uploads / str(date.today()) / _safe_component(message_id, fallback="message")
-    await downloads.mkdir(parents=True, exist_ok=True)
-    downloads = await downloads.resolve(strict=True)
-    if not downloads.is_relative_to(uploads):
-        raise RuntimeError("Feishu upload directory is outside the routed workspace")
-    return downloads
-
-
-async def _allowed_send_path(path: str, route: _GatewayRoute) -> str:
-    try:
-        workspace = await anyio.Path(route.workspace).resolve(strict=True)
-        candidate = anyio.Path(path)
-        if not candidate.is_absolute():
-            candidate = workspace / candidate
-        resolved = await candidate.resolve(strict=True)
-        if not resolved.is_relative_to(workspace):
-            raise RuntimeError
-    except (OSError, RuntimeError, ValueError) as e:
-        raise RuntimeError("File is not allowed for this Feishu user") from e
-    return str(resolved)
-
-
 async def _send_file(channel: Any, chat_id: str, path: str, route: _GatewayRoute | None = None) -> None:
-    source = await _allowed_send_path(path, route) if route is not None else path
+    source = path
+    if route is not None:
+        try:
+            workspace = await anyio.Path(route.workspace).resolve(strict=True)
+            candidate = anyio.Path(path)
+            if not candidate.is_absolute():
+                candidate = workspace / candidate
+            resolved = await candidate.resolve(strict=True)
+            if not resolved.is_relative_to(workspace):
+                raise RuntimeError
+        except (OSError, RuntimeError, ValueError) as e:
+            raise RuntimeError("File is not allowed for this Feishu user") from e
+        source = str(resolved)
     logger.debug(f"path={source}")
     result = await channel.send(chat_id, {"image": {"source": source}})
     if result.success:
@@ -275,29 +262,54 @@ def _comment_context_header(event: Any, ctx: Any) -> str:
 
 async def _build_chunks(channel: Any, ctx: Any, route: _GatewayRoute | None = None) -> list[InputChunk]:
     chunks: list[InputChunk] = []
+    text = ctx.content_text or ""
+    audio_matches = list(re.finditer(r'<audio\s+key="([^"]+)"', text))
+    resources = list(ctx.resources)
+    downloads_dir: anyio.Path | None = None
     if route is None:
         downloads_dir = anyio.Path(platformdirs.user_downloads_dir()) / ".psi" / str(date.today())
         await downloads_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        downloads_dir = await _download_dir(route, str(ctx.message_id))
-    downloads_dir = await downloads_dir.resolve(strict=True)
-    downloads = str(downloads_dir)
+    elif audio_matches or resources:
+        workspace = await anyio.Path(route.workspace).resolve(strict=True)
+        downloads_dir = workspace
+        for component in (
+            "uploads",
+            str(date.today()),
+            _safe_component(str(ctx.message_id), fallback="message"),
+        ):
+            candidate = downloads_dir / component
+            try:
+                resolved = await candidate.resolve(strict=True)
+            except FileNotFoundError:
+                with suppress(FileExistsError):
+                    await candidate.mkdir()
+                resolved = await candidate.resolve(strict=True)
+            if not resolved.is_relative_to(workspace):
+                raise RuntimeError("Feishu upload directory is outside the routed workspace")
+            downloads_dir = resolved
+    downloads = str(downloads_dir) if downloads_dir is not None else "(not needed)"
     logger.debug(f"downloads_dir={downloads} raw_content_type={ctx.raw_content_type}")
 
     chunks.append(TextChunk(_context_header(ctx)))
     header_only = len(chunks)
 
-    text = ctx.content_text or ""
-    for m in re.finditer(r'<audio\s+key="([^"]+)"', text):
+    for m in audio_matches:
         audio_key = m.group(1)
         logger.debug(f"audio key={audio_key}")
         try:
+            if downloads_dir is None:
+                raise RuntimeError("Feishu download directory is unavailable")
             req = (
                 GetMessageResourceRequest.builder().message_id(ctx.message_id).file_key(audio_key).type("file").build()
             )
             resp = await channel.client.im.v1.message_resource.aget(req)
-            suffix = _safe_suffix(resp.file_name or "")
-            path = str(anyio.Path(downloads) / f"{_safe_component(audio_key, fallback='audio')}{suffix}")
+            if route is None:
+                suffix = anyio.Path(resp.file_name or "").suffix
+                file_name = f"{audio_key}{suffix}"
+            else:
+                suffix = _safe_suffix(resp.file_name or "")
+                file_name = f"{_safe_component(audio_key, fallback='audio')}{suffix}"
+            path = str(downloads_dir / file_name)
             await anyio.Path(path).write_bytes(resp.file.read())
             logger.debug(f"audio saved to {path}")
             chunks.append(FileChunk(path))
@@ -308,16 +320,22 @@ async def _build_chunks(channel: Any, ctx: Any, route: _GatewayRoute | None = No
         logger.debug(f"content_text ({len(text)} chars)")
         chunks.append(TextChunk(text))
 
-    for r in ctx.resources:
+    for r in resources:
         logger.debug(f"resource type={r.type} file_key={r.file_key} file_name={r.file_name}")
         try:
+            if downloads_dir is None:
+                raise RuntimeError("Feishu download directory is unavailable")
             if r.file_name:
                 stem = anyio.Path(r.file_name).stem
-                ext = _safe_suffix(r.file_name)
-                name = (
-                    f"{_safe_component(stem, fallback='file')}-"
-                    f"{_safe_component(str(r.file_key), fallback='resource')}{ext}"
-                )
+                if route is None:
+                    ext = anyio.Path(r.file_name).suffix
+                    name = f"{stem}-{r.file_key}{ext}"
+                else:
+                    ext = _safe_suffix(r.file_name)
+                    name = (
+                        f"{_safe_component(stem, fallback='file')}-"
+                        f"{_safe_component(str(r.file_key), fallback='resource')}{ext}"
+                    )
             else:
                 name = None
             saved = await channel.download_resource_to_file(
@@ -328,11 +346,12 @@ async def _build_chunks(channel: Any, ctx: Any, route: _GatewayRoute | None = No
                 file_name=name,
             )
             saved_path = anyio.Path(saved)
-            if not saved_path.is_absolute():
-                saved_path = downloads_dir / saved_path
-            saved_path = await saved_path.resolve(strict=True)
-            if not saved_path.is_relative_to(downloads_dir):
-                raise RuntimeError("Downloaded resource is outside the message directory")
+            if route is not None:
+                if not saved_path.is_absolute():
+                    saved_path = downloads_dir / saved_path
+                saved_path = await saved_path.resolve(strict=True)
+                if not saved_path.is_relative_to(downloads_dir):
+                    raise RuntimeError("Downloaded resource is outside the message directory")
             logger.debug(f"resource downloaded to {saved_path}")
             chunks.append(FileChunk(str(saved_path)))
         except Exception as e:
@@ -362,7 +381,7 @@ async def _handle_and_stream(
     # 下载附件前拒绝, 不能回退到共享 socket。
     try:
         target = await resolve_target(ctx.sender_id)
-    except Exception as e:
+    except _GatewayRouteError as e:
         logger.warning(f"Gateway route rejected for sender={ctx.sender_id!r} — {e!r}")
         try:
             await channel.send(ctx.chat_id, {"text": "Unable to route message"})
@@ -381,7 +400,8 @@ async def _handle_and_stream(
             except Exception as e:
                 logger.error(f"_build_chunks failed — {e}")
                 failed = True
-                await channel.send(ctx.chat_id, {"text": f"Error processing message: {e}"})
+                message = "Error processing message" if target.route is not None else f"Error processing message: {e}"
+                await channel.send(ctx.chat_id, {"text": message})
                 return
 
             if not chunks:
@@ -411,7 +431,8 @@ async def _handle_and_stream(
             except Exception as e:
                 logger.error(f"Message handling error — {e!r}")
                 failed = True
-                await channel.send(ctx.chat_id, {"text": f"Error: {e}"})
+                message = "Error generating response" if target.route is not None else f"Error: {e}"
+                await channel.send(ctx.chat_id, {"text": message})
         finally:
             if reaction_id:
                 await _remove_reaction(channel, ctx.message_id, reaction_id)
@@ -443,6 +464,7 @@ async def _handle_comment(
     resolve_core: Callable[[str | None], Awaitable[ChannelCore]],
     allowed_ids: list[str] | None,
     event: Any,
+    redact_errors: bool = False,
 ) -> None:
     """处理文档评论 @机器人 事件 — 解析目标 → 取问题 → 喂 agent → 新建评论回复。
 
@@ -498,7 +520,7 @@ async def _handle_comment(
             reply_text = await _collect_reply(core, chunks)
         except Exception as e:
             logger.error(f"comment agent call failed — {e!r}")
-            reply_text = f"Error processing comment: {e}"
+            reply_text = "Error processing comment" if redact_errors else f"Error processing comment: {e}"
 
         if not reply_text:
             reply_text = "(no response)"
@@ -560,6 +582,9 @@ class _SeenEvents:
         if len(self._seen) > self._maxlen:
             self._seen.popitem(last=False)
         return True
+
+    def discard(self, key: str) -> None:
+        self._seen.pop(key, None)
 
 
 def _build_instance_get_request(instance_code: str) -> BaseRequest:
@@ -656,7 +681,8 @@ async def _handle_approval_event(
             logger.debug("approval event missing instance_code, skipping")
             return
 
-        if not seen.add_if_new(f"{instance_code}:{status}"):
+        event_key = f"{instance_code}:{status}"
+        if not seen.add_if_new(event_key):
             logger.debug(f"approval event {instance_code}:{status} already seen, skipping")
             return
 
@@ -669,7 +695,11 @@ async def _handle_approval_event(
             logger.debug(f"approval applicant {applicant} blocked by whitelist")
             return
 
-        core = await resolve_core(applicant)
+        try:
+            core = await resolve_core(applicant)
+        except Exception:
+            seen.discard(event_key)
+            raise
         approval_name = detail.get("approval_name", "")
         status = status or detail.get("status", "")
         logger.debug(f"approval push instance={instance_code} status={status} applicant={applicant}")
@@ -799,8 +829,11 @@ async def run_feishu(
             if provider is None:
                 return _MessageTarget(core=await registry.get(session_socket), route=None)
             if not open_id:
-                raise RuntimeError("Feishu Gateway routing requires sender open_id")
-            route = await provider.ensure(open_id)
+                raise _GatewayRouteError("Feishu Gateway routing requires sender open_id")
+            try:
+                route = await provider.ensure(open_id)
+            except Exception as e:
+                raise _GatewayRouteError("Unable to resolve Feishu Gateway route") from e
             return _MessageTarget(core=await registry.get(route.channel_socket), route=route)
 
         async def resolve_core(open_id: str | None) -> ChannelCore:
@@ -810,7 +843,14 @@ async def run_feishu(
             portal.start_task_soon(_handle_and_stream, channel, resolve_target, allowed_user_ids, ctx)
 
         async def _on_comment(event: Any) -> None:
-            portal.start_task_soon(_handle_comment, channel, resolve_core, allowed_user_ids, event)
+            portal.start_task_soon(
+                _handle_comment,
+                channel,
+                resolve_core,
+                allowed_user_ids,
+                event,
+                provider is not None,
+            )
 
         approval_seen = _SeenEvents()
 

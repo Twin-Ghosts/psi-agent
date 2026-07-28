@@ -218,13 +218,16 @@ async def test_gateway_feishu_route(tmp_path: str) -> None:
                 assert data["workspace"] == str(await anyio.Path(user_workspace).resolve())
                 socket1 = data["channel_socket"]
 
-            # 二次幂等: 同 socket。
+            # 二次幂等: 即使请求给出不同 workspace, 也返回已存在 Session 的实际 workspace。
+            ignored_workspace = str(anyio.Path(tmp_path) / "users" / "ignored")
             async with session.post(
                 f"{base_url}/feishu/route",
-                json={"open_id": "ou_alice", "ai_id": "ai1", "workspace": user_workspace},
+                json={"open_id": "ou_alice", "ai_id": "ai1", "workspace": ignored_workspace},
             ) as resp:
                 assert resp.status == 201
-                assert (await resp.json())["channel_socket"] == socket1
+                data = await resp.json()
+                assert data["channel_socket"] == socket1
+                assert data["workspace"] == str(await anyio.Path(user_workspace).resolve())
 
             async with session.get(f"{base_url}/feishu/routes") as resp:
                 assert resp.status == 200

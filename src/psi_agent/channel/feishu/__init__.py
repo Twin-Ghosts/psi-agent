@@ -17,17 +17,16 @@ class ChannelFeishu:
     """Feishu bot channel."""
 
     session_socket: str
-    """Session socket path (Unix/TCP/Named Pipe). 无 gateway_url 时全体共用, 有 gateway_url 时作兜底。"""
+    """Session socket path (Unix/TCP/Named Pipe)。无 gateway_url 时全体共用; Gateway 模式不作兜底。"""
 
     gateway_url: str | None = None
     """Gateway REST 基址 (如 ``http://127.0.0.1:8080``), 面向**动态任意用户**场景。
 
-    设置后, 任意飞书用户首次发消息时 channel 按其 open_id 经 Gateway ``POST /feishu/route`` 幂等地
-    拿到其独立 session 的 ``channel_socket`` 再连——路由/spawn 决策全在 Gateway (``FeishuManager``),
-    channel 只连接不 spawn、退出时也不删。每人由此获得隔离的会话/历史 (独立 workspace 子目录)。
-    Gateway 不可达或路由失败时回退共享 ``session_socket`` (用户总能得到回复, 只是不隔离)。
-    None(默认)=不启用, 行为与今天完全一致 (全体共用 ``session_socket``)。所挂 AI 及 workspace 由
-    Gateway 侧 ``--feishu-ai-id`` / ``--feishu-workspace-root`` 决定, channel 无需关心。"""
+    设置后, channel 按发送者 open_id 经 Gateway ``POST /feishu/route`` 幂等拿到独立 Session 的
+    ``channel_socket`` 和实际用户数据 ``workspace``。路由/spawn/workspace 决策全在 Gateway
+    (``FeishuManager`` / ``SessionManager``), channel 只消费并缓存完整路由。附件写入对应 workspace,
+    Agent 回传文件也只能来自该 workspace。Gateway 不可达、缺 open_id 或响应无效时拒绝消息,
+    绝不回退共享 ``session_socket``。None(默认)=不启用, 全体共用 ``session_socket`` 和旧下载目录。"""
 
     app_id: str = ""
     """Feishu app ID (CLI arg > PSI_FEISHU_APP_ID env)."""

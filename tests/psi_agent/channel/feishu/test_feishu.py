@@ -162,18 +162,74 @@ async def test_handle_failure_replaces_with_crossmark(monkeypatch, tmp_path):
     monkeypatch.setattr(client, "_build_chunks", AsyncMock(return_value=[TextChunk("hi")]))
 
     channel = _fake_channel()
-    channel.stream = AsyncMock(side_effect=RuntimeError("stream boom"))
+    channel.stream = AsyncMock(side_effect=PermissionError("/srv/private/users/ou_1/report.txt"))
     core = ChannelCore(session_socket=str(tmp_path / "x.sock"))
     ctx = SimpleNamespace(sender_id="ou_1", chat_id="oc_1", message_id="om_1")
+    route = client._GatewayRoute(
+        open_id="ou_1",
+        session_id="feishu-ou_1",
+        channel_socket=str(tmp_path / "x.sock"),
+        workspace=str(tmp_path),
+    )
 
-    await _handle_and_stream(channel, _target_resolver(core), None, ctx)
+    await _handle_and_stream(channel, _target_resolver(core, route), None, ctx)
 
     acreate = channel.client.im.v1.message_reaction.acreate
     adelete = channel.client.im.v1.message_reaction.adelete
     emojis = [c.args[0].request_body.reaction_type.emoji_type for c in acreate.call_args_list]
     assert emojis == [_EMOJI_PROCESSING, _EMOJI_FAILED]
     assert adelete.call_count == 1
-    channel.send.assert_awaited()
+    channel.send.assert_awaited_once_with(ctx.chat_id, {"text": "Error generating response"})
+
+
+@pytest.mark.anyio
+async def test_handle_build_failure_does_not_expose_host_path(monkeypatch, tmp_path):
+    host_path = "/srv/private/users/ou_1/uploads"
+    monkeypatch.setattr(client, "_build_chunks", AsyncMock(side_effect=PermissionError(host_path)))
+
+    channel = _fake_channel()
+    core = ChannelCore(session_socket=str(tmp_path / "x.sock"))
+    ctx = SimpleNamespace(sender_id="ou_1", chat_id="oc_1", message_id="om_1")
+    route = client._GatewayRoute(
+        open_id="ou_1",
+        session_id="feishu-ou_1",
+        channel_socket=str(tmp_path / "x.sock"),
+        workspace=str(tmp_path),
+    )
+
+    await _handle_and_stream(channel, _target_resolver(core, route), None, ctx)
+
+    channel.send.assert_awaited_once_with(ctx.chat_id, {"text": "Error processing message"})
+    assert host_path not in str(channel.send.await_args)
+
+
+@pytest.mark.anyio
+async def test_handle_preserves_legacy_build_error_message(monkeypatch, tmp_path):
+    host_path = "/srv/private/legacy/report.txt"
+    monkeypatch.setattr(client, "_build_chunks", AsyncMock(side_effect=PermissionError(host_path)))
+
+    channel = _fake_channel()
+    core = ChannelCore(session_socket=str(tmp_path / "x.sock"))
+    ctx = SimpleNamespace(sender_id="ou_1", chat_id="oc_1", message_id="om_1")
+
+    await _handle_and_stream(channel, _target_resolver(core), None, ctx)
+
+    channel.send.assert_awaited_once_with(ctx.chat_id, {"text": f"Error processing message: {host_path}"})
+
+
+@pytest.mark.anyio
+async def test_handle_preserves_legacy_stream_error_message(monkeypatch, tmp_path):
+    host_path = "/srv/private/legacy/report.txt"
+    monkeypatch.setattr(client, "_build_chunks", AsyncMock(return_value=[TextChunk("hi")]))
+
+    channel = _fake_channel()
+    channel.stream = AsyncMock(side_effect=PermissionError(host_path))
+    core = ChannelCore(session_socket=str(tmp_path / "x.sock"))
+    ctx = SimpleNamespace(sender_id="ou_1", chat_id="oc_1", message_id="om_1")
+
+    await _handle_and_stream(channel, _target_resolver(core), None, ctx)
+
+    channel.send.assert_awaited_once_with(ctx.chat_id, {"text": f"Error: {host_path}"})
 
 
 @pytest.mark.anyio
@@ -417,6 +473,33 @@ async def test_build_chunks_empty_returns_no_chunks(monkeypatch, tmp_path):
 
 
 @pytest.mark.anyio
+async def test_build_chunks_routed_text_does_not_create_upload_dir(tmp_path):
+    workspace = anyio.Path(tmp_path) / "users" / "ou_alice"
+    await workspace.mkdir(parents=True)
+    channel = _fake_channel()
+    ctx = SimpleNamespace(
+        content_text="hello",
+        message_id="om_1",
+        resources=[],
+        raw_content_type="text",
+        chat_id="oc_1",
+        chat_type="p2p",
+        sender_id="ou_alice",
+    )
+    route = client._GatewayRoute(
+        open_id="ou_alice",
+        session_id="feishu-ou-alice",
+        channel_socket="/tmp/alice.sock",
+        workspace=str(workspace),
+    )
+
+    chunks = await client._build_chunks(channel, ctx, route)
+
+    assert any(isinstance(chunk, TextChunk) and chunk.text == "hello" for chunk in chunks)
+    assert not await (workspace / "uploads").exists()
+
+
+@pytest.mark.anyio
 async def test_build_chunks_with_resource(monkeypatch, tmp_path):
     monkeypatch.setattr(client.platformdirs, "user_downloads_dir", lambda: str(tmp_path))
     channel = _fake_channel()
@@ -432,6 +515,43 @@ async def test_build_chunks_with_resource(monkeypatch, tmp_path):
     chunks = await client._build_chunks(channel, ctx)
     assert any(isinstance(c, FileChunk) for c in chunks)
     channel.download_resource_to_file.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_build_chunks_legacy_preserves_non_ascii_file_name(monkeypatch, tmp_path):
+    monkeypatch.setattr(client.platformdirs, "user_downloads_dir", lambda: str(tmp_path))
+    channel = _fake_channel()
+
+    async def _download(*args: Any, **kwargs: Any) -> str:
+        saved = anyio.Path(kwargs["dest_dir"]) / kwargs["file_name"]
+        await saved.write_bytes(b"file")
+        return str(saved)
+
+    channel.download_resource_to_file = AsyncMock(side_effect=_download)
+    resource = SimpleNamespace(type="file", file_key="fk_1", file_name="报告.数据")
+    ctx = SimpleNamespace(content_text="", message_id="om_1", resources=[resource], raw_content_type="file")
+
+    await client._build_chunks(channel, ctx)
+
+    call = channel.download_resource_to_file.await_args
+    assert call is not None
+    assert call.kwargs["file_name"] == "报告-fk_1.数据"
+
+
+@pytest.mark.anyio
+async def test_build_chunks_legacy_keeps_sdk_returned_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(client.platformdirs, "user_downloads_dir", lambda: str(tmp_path / "downloads"))
+    outside = anyio.Path(tmp_path) / "sdk-cache" / "file.bin"
+    await outside.parent.mkdir(parents=True)
+    await outside.write_bytes(b"file")
+    channel = _fake_channel()
+    channel.download_resource_to_file = AsyncMock(return_value=str(outside))
+    resource = SimpleNamespace(type="file", file_key="fk_1", file_name="file.bin")
+    ctx = SimpleNamespace(content_text="", message_id="om_1", resources=[resource], raw_content_type="file")
+
+    chunks = await client._build_chunks(channel, ctx)
+
+    assert any(isinstance(chunk, FileChunk) and chunk.path == str(outside) for chunk in chunks)
 
 
 @pytest.mark.anyio
@@ -476,6 +596,39 @@ async def test_build_chunks_routes_resource_to_user_upload_dir(tmp_path):
 
 
 @pytest.mark.anyio
+async def test_build_chunks_rejects_symlink_before_creating_message_dir(tmp_path):
+    workspace = anyio.Path(tmp_path) / "users" / "ou_alice"
+    uploads = workspace / "uploads"
+    outside = anyio.Path(tmp_path) / "users" / "ou_bob" / "uploads"
+    await uploads.mkdir(parents=True)
+    await outside.mkdir(parents=True)
+    await (uploads / str(client.date.today())).symlink_to(outside, target_is_directory=True)
+    channel = _fake_channel()
+    resource = SimpleNamespace(type="file", file_key="fk_1", file_name="file.bin")
+    ctx = SimpleNamespace(
+        content_text="",
+        message_id="om_1",
+        resources=[resource],
+        raw_content_type="file",
+        chat_id="oc_1",
+        chat_type="p2p",
+        sender_id="ou_alice",
+    )
+    route = client._GatewayRoute(
+        open_id="ou_alice",
+        session_id="feishu-ou-alice",
+        channel_socket="/tmp/alice.sock",
+        workspace=str(workspace),
+    )
+
+    with pytest.raises(RuntimeError, match="outside the routed workspace"):
+        await client._build_chunks(channel, ctx, route)
+
+    assert not await (outside / "om_1").exists()
+    channel.download_resource_to_file.assert_not_called()
+
+
+@pytest.mark.anyio
 async def test_build_chunks_rejects_download_outside_message_dir(tmp_path):
     workspace = anyio.Path(tmp_path) / "users" / "ou_alice"
     await workspace.mkdir(parents=True)
@@ -513,12 +666,29 @@ async def test_handle_rejects_route_failure_before_download(monkeypatch, tmp_pat
     ctx = SimpleNamespace(sender_id="ou_1", chat_id="oc_1", message_id="om_1")
 
     async def _fail(_open_id: str | None):
-        raise RuntimeError("gateway body must not reach user")
+        raise client._GatewayRouteError("gateway body must not reach user")
 
     await _handle_and_stream(channel, _fail, None, ctx)
 
     build.assert_not_awaited()
     channel.send.assert_awaited_once_with(ctx.chat_id, {"text": "Unable to route message"})
+
+
+@pytest.mark.anyio
+async def test_handle_preserves_legacy_core_resolution_failure(monkeypatch):
+    build = AsyncMock()
+    monkeypatch.setattr(client, "_build_chunks", build)
+    channel = _fake_channel()
+    ctx = SimpleNamespace(sender_id="ou_1", chat_id="oc_1", message_id="om_1")
+
+    async def _fail(_open_id: str | None):
+        raise RuntimeError("legacy core unavailable")
+
+    with pytest.raises(RuntimeError, match="legacy core unavailable"):
+        await _handle_and_stream(channel, _fail, None, ctx)
+
+    build.assert_not_awaited()
+    channel.send.assert_not_awaited()
 
 
 # --------------------------------------------------------------------------
@@ -645,6 +815,20 @@ async def test_handle_comment_replies_error_on_agent_failure(monkeypatch, tmp_pa
 
     channel.reply_comment.assert_awaited_once()
     assert "agent boom" in channel.reply_comment.call_args.args[1]
+
+
+@pytest.mark.anyio
+async def test_handle_comment_routed_error_does_not_expose_host_path(monkeypatch, tmp_path):
+    host_path = "/srv/private/users/ou_1/workspace"
+    monkeypatch.setattr(client, "_collect_reply", AsyncMock(side_effect=PermissionError(host_path)))
+    channel = _comment_channel()
+    core = ChannelCore(session_socket=str(tmp_path / "x.sock"))
+
+    await _handle_comment(channel, _resolver(core), None, _comment_event(), True)
+
+    channel.reply_comment.assert_awaited_once()
+    assert channel.reply_comment.call_args.args[1] == "Error processing comment"
+    assert host_path not in str(channel.reply_comment.call_args)
 
 
 @pytest.mark.anyio
@@ -937,6 +1121,30 @@ async def test_handle_approval_event_dedups_redelivery(monkeypatch, tmp_path):
     await _handle_approval_event(channel, _resolver(core), None, seen, _approval_event())
 
     channel.send.assert_awaited_once()  # second delivery deduped
+
+
+@pytest.mark.anyio
+async def test_handle_approval_event_retries_after_route_failure(monkeypatch, tmp_path):
+    channel = _approval_channel()
+    core = ChannelCore(session_socket=str(tmp_path / "x.sock"))
+    attempts = 0
+
+    async def _resolve(_open_id: str | None) -> ChannelCore:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("Gateway unavailable")
+        return core
+
+    monkeypatch.setattr(client, "_collect_reply", AsyncMock(return_value="审批已通过"))
+    seen = _SeenEvents()
+    event = _approval_event()
+
+    await _handle_approval_event(channel, _resolve, None, seen, event)
+    await _handle_approval_event(channel, _resolve, None, seen, event)
+
+    assert attempts == 2
+    channel.send.assert_awaited_once_with("ou_applicant", {"text": "审批已通过"}, {"receive_id_type": "open_id"})
 
 
 @pytest.mark.anyio

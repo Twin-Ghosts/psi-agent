@@ -3,8 +3,9 @@
 飞书机器人对每个飞书用户提供**独立**的沟通渠道: 按发送者 ``open_id`` 把消息路由到各自的
 Session。用户是**动态**的(事先不知道有哪些人), 故某用户首次路由时按需 spawn 一个 Session。
 
-本模块是 gateway 侧「open_id → Session」的唯一权威 —— channel 只拿 open_id 问 Gateway 要
-socket, 不再自己决定 ``ai_id``/``workspace``。Session 生命周期仍由 ``SessionManager`` 掌控。
+本模块是 gateway 侧「open_id → Session / 用户数据 workspace」的唯一权威 —— channel 只拿
+open_id 问 Gateway 要完整路由, 不再自己决定 ``ai_id``/``workspace``。Session 生命周期仍由
+``SessionManager`` 掌控。
 """
 
 from __future__ import annotations
