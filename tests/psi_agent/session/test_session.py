@@ -184,7 +184,7 @@ async def test_before_turn_hook_propagates_cancellation() -> None:
     entered = anyio.Event()
     completed: list[dict[str, Any]] = []
 
-    async def wait_forever(_user_message: dict[str, Any]) -> dict[str, Any]:
+    async def wait_forever(_user_message: dict[str, Any]) -> None:
         entered.set()
         await anyio.sleep_forever()
 

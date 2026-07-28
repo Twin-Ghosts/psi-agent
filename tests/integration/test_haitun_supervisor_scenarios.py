@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import runpy
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "examples" / "haitun-workspace" / "demo_supervisor_scenarios.py"
 
 
-def _module() -> dict[str, object]:
+def _module() -> dict[str, Any]:
     return runpy.run_path(str(RUNNER), run_name="scenario_test")
 
 
