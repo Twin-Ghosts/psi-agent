@@ -102,6 +102,14 @@ def is_learning_question(text: str) -> bool:
         "推导",
         "机制",
         "比较",
+        "对比",
+        "整理",
+        "起草",
+        "构思",
+        "审查",
+        "分析",
+        "文献库",
+        "sop",
         "what ",
         "why ",
         "how ",
@@ -466,11 +474,23 @@ class SupervisorManager:
         classification = advice["classification"]
         domain = classification["domain"] if re.fullmatch(r"[a-z0-9-]+", classification["domain"]) else "general"
         updates = advice["map_updates"]
+        topic = classification.get("topic", "")
+        topic = topic if isinstance(topic, str) and topic else f"{domain}-overview"
+        seed_node_id = re.sub(r"[^a-z0-9-]+", "-", topic.lower()).strip("-") or f"{domain}-overview"
         async with self.store.domain_lock(domain):
             domain_map = await self.store.load_map(domain)
             proposed = updates["proposed_map"]
             if domain_map is None and isinstance(proposed, dict):
                 domain_map = merge_map(None, proposed)
+            elif domain_map is None:
+                domain_map = merge_map(
+                    None,
+                    {
+                        "domain_id": domain,
+                        "nodes": [{"id": seed_node_id, "label": topic, "aliases": []}],
+                        "edges": [],
+                    },
+                )
             if domain_map is not None:
                 node_ids = {node.get("id") for node in domain_map.get("nodes", []) if isinstance(node, dict)}
                 additions_nodes: list[dict[str, Any]] = []
@@ -490,13 +510,14 @@ class SupervisorManager:
             prior_heatmap if prior_heatmap.get("domain") == domain else await self.store.load_heatmap(user_hash, domain)
         )
         state = advice["user_state"]
+        visited_nodes = updates["visited_nodes"] or [seed_node_id]
         updated = update_heatmap(
             heatmap,
-            node_ids=updates["visited_nodes"],
+            node_ids=visited_nodes,
             cognitive_level=str(state["depth"]),
             intent=advice["response_strategy"]["goal_mode"],
             surface=not advice["breakout"]["needed"],
-            branch_id=f"{domain}/{classification.get('topic', 'general')}",
+            branch_id=f"{domain}/{topic}",
             requested_depth=advice["response_strategy"]["answer_depth"],
         )
         await self.store.heatmap_path(user_hash, domain).parent.mkdir(parents=True, exist_ok=True)

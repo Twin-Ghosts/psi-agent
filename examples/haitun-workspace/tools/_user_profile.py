@@ -7,12 +7,15 @@ import logging
 import math
 import os
 import re
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any, TypedDict
+from uuid import uuid4
 
 import _background_process_registry as _bg
 import anyio
 import yaml
+from anyio import to_thread
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +64,25 @@ _STOP_WORDS = {
     "举例",
     "再说",
     "还有",
+    "explain",
+    "compare",
+    "decide",
+    "execute",
+    "plan",
+    "framework",
+    "请给出",
+    "目标是",
+    "当前阶段是",
+    "关键概念和适用",
+    "框架和适用场景",
+    "简单解释",
+    "给一个生活化例",
 }
+
+_GENERIC_KEYWORD = re.compile(
+    r"^(请给出|请简单|请深入|目标是|当前阶段|关键概念|适用场景|框架|简单解释|不要深入|"
+    r"给一个|生活化例子|原理|边界|反例|落地风险)"
+)
 
 _FOLLOWUP_RE = re.compile(
     r"^(那|那么|它|这个|继续|再说|还有|不用|简单|详细|举例|为什么|怎么|讲短|讲长|换个|"
@@ -125,8 +146,26 @@ def _ema(current: float, target: float, alpha: float) -> float:
     return _clamp(current + alpha * (target - current))
 
 
+def _extract_topic_anchor(text: str) -> str:
+    anchor_patterns = (
+        r"请给出(.{2,40}?)(?:的框架|的关键|的适用)",
+        r"请深入分析(.{2,40}?)(?:的原理|的边界|的风险)",
+        r"^(.{2,40}?)请简单解释",
+    )
+    for pattern in anchor_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match is not None:
+            anchor = match.group(1).strip(" ,.!?:;\u3002\uff01\uff0c\uff1a\uff1b\uff1f")
+            if anchor:
+                return anchor
+    return ""
+
+
 def _extract_keywords(text: str) -> list[str]:
     found: list[str] = []
+    anchor = _extract_topic_anchor(text)
+    if anchor:
+        found.append(anchor)
     # 英文技术词
     eng_tokens = re.findall(r"[A-Za-z][A-Za-z0-9_+#.-]{1,30}", text)
     for token in eng_tokens:
@@ -136,7 +175,7 @@ def _extract_keywords(text: str) -> list[str]:
     # 中文短语
     zh_tokens = re.findall(r"[\u4e00-\u9fff]{2,8}", text)
     for token in zh_tokens:
-        if token not in _STOP_WORDS and token not in found:
+        if token not in _STOP_WORDS and _GENERIC_KEYWORD.match(token) is None and token not in found:
             found.append(token)
     # 去重
     clean = []
@@ -261,9 +300,21 @@ class UserProfile:
         page = f"---\n{yaml.safe_dump(meta, allow_unicode=True, sort_keys=False)}---\n\n{body}\n"
         path = _profile_path(self.workspace, self.profile_id)
         await path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(".tmp")
-        await temporary.write_text(page, encoding="utf-8")
-        await anyio.to_thread.run_sync(os.replace, str(temporary), str(path))
+        temporary = path.with_name(f".tmp-{uuid4().hex[:12]}")
+        try:
+            await temporary.write_text(page, encoding="utf-8")
+            for attempt in range(4):
+                try:
+                    await to_thread.run_sync(os.replace, str(temporary), str(path))
+                    break
+                except PermissionError:
+                    if attempt == 3:
+                        raise
+                    await anyio.sleep(0.02 * (attempt + 1))
+        finally:
+            with anyio.CancelScope(shield=True):
+                with suppress(FileNotFoundError):
+                    await temporary.unlink()
 
     async def record_turn(self, user_msg: str, agent_msg: str) -> str:
         async with self._lock:
@@ -309,6 +360,15 @@ class UserProfile:
         keywords = _extract_keywords(user_msg)
         if self.last_topic_key and _FOLLOWUP_RE.match(user_msg.strip()):
             return self.last_topic_key
+        anchor = _extract_topic_anchor(user_msg)
+        if anchor:
+            normalized = anchor.casefold()
+            for key, topic in self.topics.items():
+                if key != GLOBAL_TOPIC_KEY and topic["keywords"] and topic["keywords"][0].casefold() == normalized:
+                    return key
+            slug = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "-", normalized).strip("-")
+            if slug and slug not in self.topics:
+                return slug
         existing = self._find_best_topic_key(keywords)
         if existing:
             return existing

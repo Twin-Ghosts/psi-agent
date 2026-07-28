@@ -460,6 +460,27 @@ def test_map_normalization_merges_aliases_and_increments_revision() -> None:
 
 
 @pytest.mark.anyio
+async def test_apply_updates_seeds_new_domain_map_when_model_omits_proposal(tmp_path: Path) -> None:
+    module = _load_supervisor_manager()
+    manager = module.SupervisorManager(anyio.Path(tmp_path))
+    advice = module.validate_advice(_valid_advice())
+    advice["classification"].update(
+        {"domain": "machine-learning", "topic": "model-evaluation", "is_learning": True}
+    )
+    advice["map_updates"] = {"proposed_map": None, "visited_nodes": [], "branch_additions": []}
+
+    await manager._apply_updates(_ALICE_HASH, advice, {})
+
+    domain_map = await manager.store.load_map("machine-learning")
+    assert domain_map is not None
+    assert domain_map["domain_id"] == "machine-learning"
+    assert domain_map["nodes"][0]["label"] == "model-evaluation"
+    heatmap = await manager.store.load_heatmap(_ALICE_HASH, "machine-learning")
+    assert heatmap["question_count"] == 1
+    assert heatmap["history"][0]["branch_id"] == "machine-learning/model-evaluation"
+
+
+@pytest.mark.anyio
 async def test_participation_state_roundtrip_and_safe_default(tmp_path: Path) -> None:
     store_module = _load_store()
     store = store_module.SupervisorStore(anyio.Path(tmp_path))
@@ -843,6 +864,10 @@ def test_supervisor_identity_and_learning_signals_are_stable() -> None:
         is True
     )
     assert supervisor.is_learning_question("谢谢") is False
+    assert supervisor.is_learning_question("整理一篇股东协议法律文献库") is True
+    assert supervisor.is_learning_question("逐条对比两份协议的风险") is True
+    assert supervisor.is_learning_question("起草一份正式股东协议") is True
+    assert supervisor.is_learning_question("构思完整的法务管理SOP") is True
     assert supervisor.resolve_identity({"user_id": "u", "profile_id": "p", "session_id": "s"}) == "u"
     assert supervisor.resolve_identity({"profile_id": "p", "session_id": "s"}) == "p"
     assert supervisor.resolve_identity({"session_id": "s"}) == "s"

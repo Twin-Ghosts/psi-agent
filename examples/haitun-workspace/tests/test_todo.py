@@ -162,3 +162,15 @@ async def test_todo_tool_write_json(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert payload["ok"] is True
     assert payload["session_id"] == "sess-tool"
     assert payload["summary"]["in_progress"] == 1
+
+
+@pytest.mark.anyio
+async def test_accepts_native_tool_call_array(tmp_path: Path) -> None:
+    todos = [{"id": "1", "content": "审查协议", "status": "in_progress"}]
+
+    raw = await todo_tool.todo(todos=todos, workspace=str(tmp_path))
+    result = json.loads(raw)
+
+    assert result["ok"] is True
+    assert result["todos"] == todos
+

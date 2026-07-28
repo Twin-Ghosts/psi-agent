@@ -109,6 +109,30 @@ def test_signed_double_speed_ema_and_global_warm_start(tmp_path: Path, monkeypat
     assert low.topics[low_key]["short_term"]["depth"] == pytest.approx(0.26)
 
 
+def test_generic_request_words_do_not_merge_cross_domain_profiles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_profile_module(monkeypatch)
+    profile = module.UserProfile(anyio.Path(tmp_path), profile_id="cross-domain")
+    domains = [
+        "股东协议公司治理",
+        "CI/CD软件交付",
+        "Agent工具调用",
+        "科技公司投融资",
+        "机器学习模型评估",
+        "产品路线图决策",
+        "网络安全数据合规",
+        "技术史宏观经济",
+    ]
+    for domain in domains:
+        for intent in ("explain", "compare", "decide", "execute", "plan"):
+            profile.update(f"请给出{domain}的框架和适用场景, 目标是{intent}", "answer")
+    profile._auto_merge_topics()
+
+    real_topics = [key for key in profile.topics if key != module.GLOBAL_TOPIC_KEY]
+    assert len(real_topics) >= len(domains)
+
+
 @pytest.mark.anyio
 async def test_reload_followup_uses_last_real_topic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_profile_module(monkeypatch)
@@ -190,6 +214,31 @@ async def test_concurrent_record_turn_is_atomic(tmp_path: Path, monkeypatch: pyt
     assert sum(topic["turns"] for topic in real_topics) == 20
     saved = await anyio.Path(tmp_path / "wiki" / "profiles" / f"{profile.profile_id}.md").read_text(encoding="utf-8")
     assert "raw answer" not in saved
+
+
+@pytest.mark.anyio
+async def test_profile_save_retries_transient_windows_replace_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_profile_module(monkeypatch)
+    profile = module.UserProfile(anyio.Path(tmp_path), profile_id="retry")
+    profile.update("请深入解释 Python 原理", "answer")
+    real_replace = module.os.replace
+    calls = 0
+
+    def flaky_replace(source: str, target: str) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise PermissionError(5, "transient file lock")
+        real_replace(source, target)
+
+    monkeypatch.setattr(module.os, "replace", flaky_replace)
+
+    await profile.save()
+
+    assert calls == 2
+    assert await anyio.Path(tmp_path / "wiki" / "profiles" / "retry.md").exists()
 
 
 def test_policy_uses_current_turn_and_single_injection(monkeypatch: pytest.MonkeyPatch) -> None:

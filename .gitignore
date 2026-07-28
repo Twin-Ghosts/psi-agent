@@ -10,3 +10,45 @@ dist/
 .coverage
 /result
 .worktrees/
+
+# Runtime and per-user data: never commit profiles, histories, heatmaps, logs,
+# API configuration, or generated workspace state.
+/state/
+/wiki/
+examples/*-workspace/state/
+examples/*-workspace/wiki/
+examples/*-workspace/histories/
+examples/*-workspace/.psi/
+
+# Local evaluation outputs. Selected anonymized reports may be added explicitly
+# with `git add -f <path>` when publication is intentional.
+/artifacts/
+/blocks_temp.json
+
+# uv/pytest/long-run scratch directories.
+/.uv-cache/
+/uv-*.lock
+/.fast-*/
+/.green-*/
+/.red-*/
+/.warm-*/
+/.quality-*/
+/.review-*/
+/.review-tmp/
+/.scenario-*/
+/.runner-*/
+/.profile-*/
+/.map-*/
+/.long-*/
+/.final-*/
+/.verify-*/
+/.pytest-tmp-*/
+/.tmp-review-*/
+/.t/
+/.t-*/
+/.t[0-9]*/
+/.t7v/
+/.t6*/
+/.task*-tmp/
+/.task*-exclusive-*/
+/.test-tmp/

@@ -24,7 +24,7 @@ user question
   -> after first answer: supervisor warmup starts from user question only
   -> later eligible turn: supervisor is required
        -> matching warmup/cache Advice, or
-       -> live Advice within 20 seconds, or
+       -> live Advice within 30 seconds, or
        -> explicit unavailable fallback
   -> Advice is validated and rendered into the main system prompt
   -> main Agent answers the immediate question and integrates useful breakout directions
@@ -128,7 +128,7 @@ Cache reuse is intentionally strict. It requires the same hashed user, `profile_
 
 ## Failure behavior
 
-The synchronous supervisor budget is 20 seconds. Ordinary failures return `unavailable` or an eligible cache; they do not reject the user's turn. Cancellation propagates. Persistence uses atomic replacement and keyed locks.
+The synchronous supervisor budget is 30 seconds. Real legal runs placed successful Supervisor responses near 19-21 seconds, so 30 seconds provides headroom for normal variance. Ordinary failures return `unavailable` or an eligible cache; they do not reject the user's turn. Cancellation propagates. Persistence uses atomic replacement and keyed locks.
 
 External failures that cannot be solved by this Workspace include provider downtime, invalid credentials, DNS/network failure, provider rate limits, and a model that never returns valid JSON. These cases are recorded rather than hidden.
 

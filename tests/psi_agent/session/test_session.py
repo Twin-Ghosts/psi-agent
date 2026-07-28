@@ -156,9 +156,9 @@ async def test_before_turn_hook_timeout_returns_empty_dict() -> None:
     assert await sp.run_before_turn({"content": "learn"}) == {}
 
 
-async def test_before_turn_default_timeout_is_short() -> None:
+async def test_before_turn_default_timeout_allows_real_supervisor_completion() -> None:
     sp = SystemPrompt()
-    assert sp._before_turn_timeout_seconds == 20.0
+    assert sp._before_turn_timeout_seconds == 30.0
 
 
 @pytest.mark.anyio
