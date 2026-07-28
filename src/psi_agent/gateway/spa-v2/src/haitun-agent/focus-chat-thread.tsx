@@ -10,6 +10,7 @@ import { preferResultBelowRule } from "../services/assistantDisplay";
 import type { ProgressLog } from "../services/turnProgress";
 import { FAILED_REASON_LABEL, isCompleteAgent } from "../services/messageTurn";
 import { ensureChatFileData } from "../utils/filePreviewUtils";
+import { isBlobPreviewable } from "../utils/renderBlobPreview";
 import FilePreview from "../components/FilePreview";
 
 function ChatAvatar({ role }: { role: "agent" | "user" }) {
@@ -65,8 +66,7 @@ function ChatBlock({
 }
 
 function isPreviewable(name: string) {
-  const ext = (name.split(".").pop() || "").toLowerCase();
-  return ext === "md" || ext === "markdown" || ext === "html" || ext === "htm";
+  return isBlobPreviewable(name);
 }
 
 async function copyText(text: string) {

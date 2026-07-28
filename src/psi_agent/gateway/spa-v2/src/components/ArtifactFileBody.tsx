@@ -1,91 +1,47 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { useEffect, useRef, useState, type MouseEvent } from 'react'
 import { downloadMatrixXlsx, matrixToTsv, tableToMatrix } from '../services/mdTable'
-import { renderMd } from '../services/renderMd'
 import type { ChatFile } from '../haitun-agent/model'
-import {
-  dataUrlForChatFile,
-  decodeBase64Utf8,
-} from '../utils/filePreviewUtils'
-
-function extOf(name: string) {
-  return (name.split('.').pop() || '').toLowerCase()
-}
+import { renderBlobPreview } from '../utils/renderBlobPreview'
 
 /**
- * Render a chat blob into a host element (MD / HTML / image / plain text).
- * Shared by chat FilePreview and ArtifactDrawer.
+ * Render a chat/deliverable blob into a host element.
+ * Formats align with spa v1 FilePreview (MD/HTML/image/office/pdf/… via lazy import).
+ * Shared by chat FilePreview drawer and ArtifactDrawer (宝箱).
  */
 export function ArtifactFileBody({ file }: { file: ChatFile }) {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const [error, setError] = useState('')
-  const ext = extOf(file.name)
-  const isMd = ext === 'md' || ext === 'markdown'
-  const isHtml = ext === 'html' || ext === 'htm'
-  const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)
-  const isText = ['txt', 'csv', 'log', 'json', 'css', 'js', 'ts', 'tsx', 'py'].includes(ext)
-
-  const decoded = useMemo(() => {
-    if (isImage) return ''
-    try {
-      return decodeBase64Utf8(file.data)
-    } catch {
-      return ''
-    }
-  }, [file.data, isImage])
+  const [notice, setNotice] = useState('')
+  const [loading, setLoading] = useState(false)
 
   useEffect(() => {
     const host = hostRef.current
     if (!host) return
-    host.replaceChildren()
+    let cancelled = false
+    let cleanup = () => {}
+
+    setLoading(true)
     setError('')
+    setNotice('')
+    host.replaceChildren()
 
-    if (isImage) {
-      try {
-        const img = document.createElement('img')
-        img.className = 'artifact-preview-image'
-        img.alt = file.name
-        img.src = dataUrlForChatFile(file)
-        host.appendChild(img)
-      } catch {
-        setError('无法解码图片')
+    void (async () => {
+      const handle = await renderBlobPreview(host, { name: file.name, data: file.data })
+      if (cancelled) {
+        handle.cleanup()
+        return
       }
-      return
-    }
+      cleanup = handle.cleanup
+      if (handle.error) setError(handle.error)
+      if (handle.notice) setNotice(handle.notice)
+      setLoading(false)
+    })()
 
-    if (!decoded) {
-      setError('无法解码文件内容')
-      return
+    return () => {
+      cancelled = true
+      cleanup()
     }
-
-    if (isMd) {
-      const article = document.createElement('article')
-      article.className = 'file-preview-md'
-      article.innerHTML = renderMd(decoded)
-      host.appendChild(article)
-      return
-    }
-
-    if (isHtml) {
-      const iframe = document.createElement('iframe')
-      iframe.className = 'file-preview-html'
-      iframe.title = file.name
-      iframe.sandbox = ''
-      const blob = new Blob([decoded], { type: 'text/html' })
-      iframe.src = URL.createObjectURL(blob)
-      host.appendChild(iframe)
-      return () => URL.revokeObjectURL(iframe.src)
-    }
-
-    if (isText) {
-      const pre = document.createElement('pre')
-      pre.className = 'artifact-preview-text'
-      pre.textContent = decoded
-      host.appendChild(pre)
-      return
-    }
-
-    setError('此格式暂不支持页内预览，请下载后查看')
-  }, [decoded, file, isHtml, isImage, isMd, isText])
+  }, [file.data, file.name])
 
   const onPreviewClick = async (e: MouseEvent) => {
     const btn = (e.target as HTMLElement).closest?.('[data-table-action]') as HTMLElement | null
@@ -125,6 +81,8 @@ export function ArtifactFileBody({ file }: { file: ChatFile }) {
 
   return (
     <div className="artifact-preview-scroll" onClick={(e) => void onPreviewClick(e)}>
+      {loading ? <div className="artifact-preview-state">正在生成预览…</div> : null}
+      {notice && !error ? <div className="artifact-preview-notice">{notice}</div> : null}
       {error ? <div className="artifact-preview-state">{error}</div> : null}
       <div ref={hostRef} className="artifact-preview-host" />
     </div>

@@ -2321,6 +2321,216 @@ textarea:focus-visible {
   background: #e6ebe9;
 }
 
+.artifact-preview-notice {
+  margin: 8px 12px 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  color: #6a5a20;
+  background: #fff7df;
+  font-size: 13px;
+}
+
+.artifact-preview-host .preview-image-frame,
+.preview-host .preview-image-frame {
+  display: flex;
+  justify-content: center;
+  padding: 8px;
+}
+
+.artifact-preview-host .preview-image,
+.preview-host .preview-image {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+
+.artifact-preview-host .preview-svg-frame,
+.preview-host .preview-svg-frame {
+  display: flex;
+  justify-content: center;
+  padding: 12px;
+  overflow: auto;
+}
+
+.artifact-preview-host .preview-svg,
+.preview-host .preview-svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.artifact-preview-host .preview-svg-object,
+.preview-host .preview-svg-object {
+  width: 100%;
+  min-height: 240px;
+}
+
+.artifact-preview-host .preview-audio,
+.artifact-preview-host .preview-video,
+.preview-host .preview-audio,
+.preview-host .preview-video {
+  display: block;
+  width: 100%;
+  max-width: 720px;
+  margin: 12px auto;
+}
+
+.artifact-preview-host .preview-table-wrap,
+.preview-host .preview-table-wrap {
+  overflow: auto;
+  margin: 8px 0 16px;
+  border: 1px solid #d5dde6;
+  border-radius: 10px;
+}
+
+.artifact-preview-host .preview-table,
+.preview-host .preview-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.artifact-preview-host .preview-table th,
+.artifact-preview-host .preview-table td,
+.preview-host .preview-table th,
+.preview-host .preview-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #e6ebf0;
+  text-align: left;
+  vertical-align: top;
+  word-break: break-word;
+}
+
+.artifact-preview-host .preview-table th,
+.preview-host .preview-table th {
+  background: #f3f6f9;
+  font-weight: 600;
+}
+
+.artifact-preview-host .sheet-preview + .sheet-preview,
+.preview-host .sheet-preview + .sheet-preview {
+  margin-top: 20px;
+}
+
+.artifact-preview-host .sheet-title,
+.preview-host .sheet-title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.artifact-preview-host .pdf-pages,
+.preview-host .pdf-pages {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 8px 0;
+  align-items: center;
+}
+
+.artifact-preview-host .pdf-page,
+.preview-host .pdf-page {
+  max-width: 100%;
+  height: auto;
+  background: #fff;
+  box-shadow: 0 4px 16px rgba(23, 37, 46, 0.12);
+}
+
+.artifact-preview-host .office-preview-scroll,
+.preview-host .office-preview-scroll {
+  overflow: auto;
+  max-height: min(70vh, 900px);
+  padding: 8px;
+  background: #eef2f6;
+  border-radius: 8px;
+}
+
+.artifact-preview-host .office-preview-stage,
+.preview-host .office-preview-stage {
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  background: #fff;
+}
+
+.artifact-preview-host .docx-preview-host,
+.preview-host .docx-preview-host {
+  padding: 0;
+  color: #172432;
+}
+
+/* docx-preview 默认 align-items:center：超宽页居中时左侧裁切且不可滚。 */
+.artifact-preview-host .docx-preview-host .docx-wrapper,
+.preview-host .docx-preview-host .docx-wrapper {
+  align-items: stretch !important;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 12px !important;
+  background: transparent;
+}
+
+.artifact-preview-host .docx-preview-host .docx,
+.preview-host .docx-preview-host .docx {
+  width: 100% !important;
+  max-width: 100%;
+  box-sizing: border-box;
+  background: #fff;
+  box-shadow: 0 4px 16px rgba(23, 37, 46, 0.1);
+}
+
+.artifact-preview-host .docx-preview-host img,
+.preview-host .docx-preview-host img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* 宝箱内嵌：去掉双重白卡片，把滚动交给外层 artifact-preview-scroll。 */
+.document-preview .artifact-preview-host {
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+  border-radius: 0;
+}
+
+.document-preview .artifact-preview-host .office-preview-scroll {
+  max-height: none;
+  padding: 10px;
+}
+
+.artifact-preview-host .pptx-preview-scroll,
+.preview-host .pptx-preview-scroll {
+  display: flex;
+  align-items: flex-start;
+}
+
+.artifact-preview-host .pptx-preview-host,
+.preview-host .pptx-preview-host {
+  min-width: min(960px, 100%);
+  min-height: 540px;
+  overflow: visible;
+}
+
+.artifact-preview-host .pptx-preview-host img,
+.artifact-preview-host .pptx-preview-host svg,
+.artifact-preview-host .pptx-preview-host canvas,
+.preview-host .pptx-preview-host img,
+.preview-host .pptx-preview-host svg,
+.preview-host .pptx-preview-host canvas {
+  max-width: none;
+}
+
+.preview-drawer-body .artifact-preview-scroll {
+  padding: 0;
+  max-height: calc(100vh - 96px);
+}
+
+.preview-drawer-body .artifact-preview-host {
+  min-height: 280px;
+  box-shadow: none;
+  border-radius: 0;
+}
+
 .drawer-footer {
   display: grid;
   grid-template-columns: 1fr 1.15fr;

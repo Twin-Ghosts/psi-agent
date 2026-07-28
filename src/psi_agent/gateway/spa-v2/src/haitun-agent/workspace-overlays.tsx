@@ -24,7 +24,14 @@ import { TreasureVisual } from "./primitives";
 function fileIcon(name: string) {
   const n = name.toLowerCase();
   if (n.endsWith(".xlsx") || n.endsWith(".xls") || n.endsWith(".csv")) return <Grid2X2 size={17} />;
-  if (n.endsWith(".pdf") || n.endsWith(".md") || n.endsWith(".markdown") || n.endsWith(".txt")) {
+  if (
+    n.endsWith(".pdf")
+    || n.endsWith(".md")
+    || n.endsWith(".markdown")
+    || n.endsWith(".txt")
+    || n.endsWith(".docx")
+    || n.endsWith(".doc")
+  ) {
     return <FileText size={17} />;
   }
   return <FileArchive size={17} />;
