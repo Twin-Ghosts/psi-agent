@@ -191,9 +191,11 @@ message_id / sender_open_id）。需要群里之前的上下文时：
 15. **发交互式卡片（按钮/表单/选择器，比纯文本强太多）**：要让对方**动手操作**（同意/驳回、
     选项、提交表单值）而不只是读消息时，用 `feishu_message_send_card(receive_id=<对方>, card_json=<卡片JSON>)`
     发一张飞书消息卡片。卡片能带可点按钮、表单（输入框/下拉/日期选择器）、彩色标题、多列布局、图片、
-    分割线等。`card_json` 是你自己拼的**完整卡片 JSON 字符串**，推荐 card 2.0 格式
-    （`{"schema":"2.0","header":{...},"body":{"elements":[...]}}`），旧版 `{"config":...,"elements":[...]}`
-    也接受，工具原样透传。按钮放进 `action` 元素；选择器/日期输入若要可靠触发 agent，须放进 `form` 并由
+    分割线等。`card_json` 是你自己拼的**完整卡片 JSON 字符串**。按钮组和表单优先使用旧版
+    `{"config":...,"header":...,"elements":[...]}`：按钮放进 `action` 元素。Card 2.0
+    `{"schema":"2.0","header":...,"body":{"elements":[...]}}` 也接受，但 **Card 2.0 不支持旧版
+    `action` 标签**；使用 2.0 时只能把其支持的交互组件直接放进 `body.elements`，不要套旧版 `action` 容器。
+    选择器/日期输入若要可靠触发 agent，须放进 `form` 并由
     提交按钮一次提交，让所选值进入回调的 `form_value`。不要依赖 `standalone` 的 `select_static`/`date_picker`
     连续变更回调：SDK 1.2.0 的去重 key 不区分所有选项变化。典型：审批卡（同意/驳回按钮）、让人从下拉里选值、
     收集一小段表单。
@@ -202,8 +204,9 @@ message_id / sender_open_id）。需要群里之前的上下文时：
     `value` 必须同时带明确动作名和稳定业务 ID，且不同按钮使用不同值，例如
     `{"action":"approve","request_id":"req_1"}`。
     收到回调后把它视为用户提交的操作，但执行审批、写数据等有后果的动作前仍须复核操作者权限与当前业务状态；
-    底层操作必须保持 **idempotent**，因为 Channel 的重复点击去重只在当前进程内有效。纯粹只是发一段文字仍用
-    `feishu_message_send`。
+    每张卡片只接受**第一个**有效按钮/表单操作：首次回调后 Channel 会把原卡片替换成“已提交”状态，同一
+    `message_id` 的后续操作直接忽略；需要用户再次选择时必须发送一张新卡片。底层操作仍须保持
+    **idempotent**，以防飞书重投、卡片更新失败或多实例并发。纯粹只是发一段文字仍用 `feishu_message_send`。
 16. **建新群拉人（没有现成群可发时）**：`feishu_message_send` 只能往**已存在**的群发消息；要**从零建一个
     新群并把人拉进来**时，用 `feishu_chat_create(name, user_ids=[...], description=..., owner_id=...)`。
     机器人用自己 tenant 身份建群，**群主默认设成提需求的那个人**——把 `<feishu_context>` 的 `sender_open_id`

@@ -89,21 +89,22 @@ async def feishu_message_send_card(
     rather than just read.
 
     You build the card yourself and pass it as a JSON string in ``card_json``. Both
-    Feishu card formats are accepted and sent verbatim:
+    Feishu card formats are accepted and sent verbatim. For interactive button
+    groups and forms, the legacy format is the safest default::
 
-    - Card 2.0 (recommended)::
-
-        {"schema": "2.0",
+        {"config": {"wide_screen_mode": true},
          "header": {"title": {"tag": "plain_text", "content": "请假审批"}, "template": "blue"},
-         "body": {"elements": [
+         "elements": [
            {"tag": "markdown", "content": "**张三** 申请年假 2 天"},
            {"tag": "action", "actions": [
              {"tag": "button", "text": {"tag": "plain_text", "content": "同意"},
               "type": "primary", "value": {"action": "approve", "id": "req_1"}},
              {"tag": "button", "text": {"tag": "plain_text", "content": "驳回"},
-              "type": "danger", "value": {"action": "reject", "id": "req_1"}}]}]}}
+              "type": "danger", "value": {"action": "reject", "id": "req_1"}}]}]}
 
-    - Legacy ``{"config": {...}, "header": {...}, "elements": [...]}`` is also accepted.
+    Card 2.0 (``{"schema": "2.0", ...}``) is also accepted, but it does **not**
+    support the legacy ``{"tag": "action"}`` container. Put Card 2.0-supported
+    controls directly under ``body.elements`` instead of copying the legacy layout.
 
     Selectors / date pickers go inside an ``action`` element (``select_static`` with
     ``options``, ``date_picker``, ``picker_time``, …). When their selected value must reach
@@ -117,7 +118,9 @@ async def feishu_message_send_card(
     ``value`` must include an explicit action name and a stable business identifier such as
     ``request_id``; different buttons need different values. Before a consequential operation,
     re-check authorization and current business state; keep the underlying operation idempotent
-    because channel deduplication is process-local.
+    because delivery is at-least-once. A card is single-use: the first accepted button/form action
+    replaces it with an ``已提交`` state, and later actions from the same card are ignored. Send a
+    new card when the user must submit another response.
 
     Args:
         receive_id: Target id — a chat_id (oc_...), open_id (ou_...), user_id, union_id, or email.

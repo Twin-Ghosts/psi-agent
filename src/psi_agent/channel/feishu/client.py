@@ -382,6 +382,7 @@ async def _handle_card_action(
     channel: Any,
     resolve_core: Callable[[str | None], Awaitable[ChannelCore]],
     allowed_ids: list[str] | None,
+    seen: _SeenEvents,
     event: Any,
 ) -> None:
     """Route a Feishu card action into the operator's agent session."""
@@ -398,9 +399,35 @@ async def _handle_card_action(
         if not chat_id:
             logger.warning("card action missing chat_id, skipping")
             return
+        if not message_id:
+            logger.warning("card action missing message_id, cannot enforce single-use card")
+            return
         if not _allowed(operator_open_id, allowed_ids):
             logger.debug(f"card action operator {operator_open_id} blocked by whitelist")
             return
+        if not seen.add_if_new(message_id):
+            logger.info(f"card action ignored for already-consumed message={message_id}")
+            return
+
+        replacement = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "green",
+                "title": {"tag": "plain_text", "content": "已提交"},
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": "你的操作已提交, 请查看本会话中的处理结果。",
+                }
+            ],
+        }
+        try:
+            result = await channel.update_card(message_id, replacement)
+            if not getattr(result, "success", False):
+                logger.warning(f"failed to mark card {message_id} consumed — {getattr(result, 'error', None)!r}")
+        except Exception as e:
+            logger.warning(f"failed to mark card {message_id} consumed — {e!r}")
 
         core = await resolve_core(operator_open_id)
         logger.debug(
@@ -542,7 +569,7 @@ _APPROVAL_STATUS_LABELS = {
 
 
 class _SeenEvents:
-    """有界去重集 — 飞书会重推同一事件, 用 (instance_code, status) 键去重。
+    """有界去重集 — 卡片按 message_id、审批按 (instance_code, status) 去重。
 
     ``OrderedDict`` 当 FIFO: 超过 ``maxlen`` 淘汰最旧键, 内存有界。非线程安全,
     只在 portal 的事件循环里单线程访问, 无需加锁。"""
@@ -811,11 +838,19 @@ async def run_feishu(
             portal.start_task_soon(_handle_and_stream, channel, resolve_core, allowed_user_ids, ctx)
 
         async def _on_card_action(event: Any) -> None:
-            portal.start_task_soon(_handle_card_action, channel, resolve_core, allowed_user_ids, event)
+            portal.start_task_soon(
+                _handle_card_action,
+                channel,
+                resolve_core,
+                allowed_user_ids,
+                card_action_seen,
+                event,
+            )
 
         async def _on_comment(event: Any) -> None:
             portal.start_task_soon(_handle_comment, channel, resolve_core, allowed_user_ids, event)
 
+        card_action_seen = _SeenEvents(maxlen=10_000)
         approval_seen = _SeenEvents()
 
         def _on_approval(event: Any) -> None:
