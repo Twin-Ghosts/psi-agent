@@ -401,6 +401,7 @@ data: [DONE]
 - 查 `SessionManager.get_socket(session_id)` 获取 channel socket
 - 复用 `channel._core.ChannelCore` 构造连接
 - 输入：`TextChunk(text)`、blob（base64 解码后由 `_save_upload()` 落至 `~/Downloads/.psi/<date>/`，持久保留，转为 `FileChunk`）；multipart 文件上传通过 blob 通道走相同路径
+- **落盘到用户真实家目录是刻意的**（交付物要持久保留、用户能在文件管理器里找到），**因此凡碰 `_save_upload` / blob 入站的测试都必须先重定向家目录**，否则会往开发者真实的 `~/Downloads/.psi/` 里堆测试垃圾。`_downloads_path` 走 `Path.home()`，而它在 Windows 上读 `USERPROFILE`、在 POSIX 上才读 `HOME`——`monkeypatch.setenv("HOME", ...)` 在 Windows 上**完全不生效**。正确做法是 patch 函数本身：`monkeypatch.setattr(Path, "home", lambda: tmp_path)`，见 `tests/psi_agent/gateway/test_chat_manager.py` 的 `fake_home` fixture 与 `tests/integration/test_gateway.py::test_gateway_blob_send`
 - 输出：`TextChunk` → `{"type":"text"}`；`ReasoningChunk` → `{"type":"reasoning","text":…}`（有 `chunk.kind` 则附带）；`FileChunk` → 读盘 base64 → `{"type":"blob","name","data","path"}`
 
 ## Web Console (SPA)

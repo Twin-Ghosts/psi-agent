@@ -215,6 +215,8 @@ SSE 流中的特殊字段：
 
 20. **测试断言跨平台路径不能写死后缀**：`_socket_path()` 在 POSIX 上给 `/tmp/.../{id}.sock`、在 Windows 上给 `\\.\pipe\...`（无后缀）。断言 `.endswith(".sock")` 在 `ubuntu-latest` 的 CI 里永远通过，却在每台 Windows 开发机上必然失败——叠加上一条就是挂死。用平台判定函数（`test_manager.py` 的 `_is_socket_path`）。
 
+21. **重定向家目录必须 patch `Path.home()` 本身，不能只 `setenv("HOME")`**：`Path.home()` 在 Windows 上读 `USERPROFILE`、在 POSIX 上才读 `HOME`，所以 `monkeypatch.setenv("HOME", str(tmp_path))` 在 Windows 上**完全不生效**。后果是双重的：断言落点的用例直接失败，而**没有**断言落点的用例会「安静地通过」并往开发者真实目录里写文件（`~/Downloads/.psi/` 曾被测试污染）。CI 三个 job 全是 `ubuntu-latest`，这类差异永远照不出来。正确写法 `monkeypatch.setattr(Path, "home", lambda: tmp_path)`，见 `tests/psi_agent/gateway/test_chat_manager.py` 的 `fake_home` fixture。凡测试碰到会往家目录写盘的代码（目前是 `_chat_manager._downloads_path`），都要先重定向，且**顺手补一条落点断言**——没有断言就等于没有防线。
+
 ## 测试约定
 
 - **框架**: `pytest` + `pytest-asyncio`（`asyncio_mode = "auto"`，anyio backend）
