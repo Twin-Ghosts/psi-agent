@@ -186,19 +186,33 @@ def _card_action_context(event: Any) -> str:
     """Serialize a Feishu card action as structured agent input."""
     operator = getattr(event, "operator", None)
     action = getattr(event, "action", None)
+    raw = getattr(event, "raw", None)
+    raw_event = raw.get("event") if isinstance(raw, dict) else None
+    raw_action = raw_event.get("action") if isinstance(raw_event, dict) else None
+    if not isinstance(raw_action, dict):
+        raw_action = {}
+
+    tag = getattr(action, "tag", None) or raw_action.get("tag") or ""
+    value = getattr(action, "value", None)
+    if value is None:
+        value = raw_action.get("value")
+
     payload = {
         "chat_id": getattr(event, "chat_id", "") or "",
         "message_id": getattr(event, "message_id", "") or "",
         "operator_open_id": getattr(operator, "open_id", "") or "",
         "action": {
-            "tag": getattr(action, "tag", "") or "",
-            "value": getattr(action, "value", None),
-            "name": getattr(action, "name", None),
-            "option": getattr(action, "option", None),
-            "form_value": getattr(action, "form_value", None),
-            "input_value": getattr(action, "input_value", None),
-            "options": getattr(action, "options", None),
-            "checked": getattr(action, "checked", None),
+            "tag": tag,
+            "value": value,
+            "name": getattr(action, "name", None) or raw_action.get("name"),
+            "option": getattr(action, "option", None) or raw_action.get("option"),
+            "timezone": getattr(action, "timezone", None) or raw_action.get("timezone"),
+            "form_value": getattr(action, "form_value", None) or raw_action.get("form_value"),
+            "input_value": getattr(action, "input_value", None) or raw_action.get("input_value"),
+            "options": getattr(action, "options", None) or raw_action.get("options"),
+            "checked": getattr(action, "checked", None)
+            if getattr(action, "checked", None) is not None
+            else raw_action.get("checked"),
         },
     }
     body = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)

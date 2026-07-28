@@ -106,16 +106,18 @@ async def feishu_message_send_card(
     - Legacy ``{"config": {...}, "header": {...}, "elements": [...]}`` is also accepted.
 
     Selectors / date pickers go inside an ``action`` element (``select_static`` with
-    ``options``, ``date_picker``, ``picker_time``, …); grouped inputs that submit together
-    go inside a ``form`` element. Anything the Feishu 消息卡片 spec supports works — the
-    card is validated only to be a JSON object, then posted as-is.
+    ``options``, ``date_picker``, ``picker_time``, …). When their selected value must reach
+    the agent reliably, put them inside a ``form`` and use a submit action so Feishu returns
+    the result in ``form_value``. The SDK's standalone selector/date callback deduplication
+    does not distinguish every changed selection. Anything the Feishu 消息卡片 spec supports
+    is still sent as-is.
 
     Button/form actions are delivered back to the operator's agent session as the next
     user turn, encoded as JSON inside ``<feishu_card_action>``. Every actionable element's
     ``value`` must include an explicit action name and a stable business identifier such as
-    ``request_id``. Before a consequential operation, re-check authorization and current
-    business state; keep the underlying operation idempotent because channel deduplication
-    is process-local.
+    ``request_id``; different buttons need different values. Before a consequential operation,
+    re-check authorization and current business state; keep the underlying operation idempotent
+    because channel deduplication is process-local.
 
     Args:
         receive_id: Target id — a chat_id (oc_...), open_id (ou_...), user_id, union_id, or email.

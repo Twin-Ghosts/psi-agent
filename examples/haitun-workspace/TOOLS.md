@@ -193,11 +193,14 @@ message_id / sender_open_id）。需要群里之前的上下文时：
     发一张飞书消息卡片。卡片能带可点按钮、表单（输入框/下拉/日期选择器）、彩色标题、多列布局、图片、
     分割线等。`card_json` 是你自己拼的**完整卡片 JSON 字符串**，推荐 card 2.0 格式
     （`{"schema":"2.0","header":{...},"body":{"elements":[...]}}`），旧版 `{"config":...,"elements":[...]}`
-    也接受，工具原样透传。按钮/选择器放进 `action` 元素（`button`/`select_static`/`date_picker`），
-    成组提交的输入放进 `form` 元素。典型：审批卡（同意/驳回按钮）、让人从下拉里选值、收集一小段表单。
+    也接受，工具原样透传。按钮放进 `action` 元素；选择器/日期输入若要可靠触发 agent，须放进 `form` 并由
+    提交按钮一次提交，让所选值进入回调的 `form_value`。不要依赖 `standalone` 的 `select_static`/`date_picker`
+    连续变更回调：SDK 1.2.0 的去重 key 不区分所有选项变化。典型：审批卡（同意/驳回按钮）、让人从下拉里选值、
+    收集一小段表单。
     按钮/表单操作会由 Feishu Channel 接回**操作者自己的 agent 会话**，作为下一条用户消息，格式为
-    `<feishu_card_action>` 包裹的 JSON；agent 处理后会在原卡片所在聊天中流式回复。每个可操作元素的
-    `value` 必须同时带明确动作名和稳定业务 ID，例如 `{"action":"approve","request_id":"req_1"}`。
+    `<feishu_card_action>` 包裹的 JSON；agent 处理后会在原卡片所在聊天中流式回复。每个按钮的
+    `value` 必须同时带明确动作名和稳定业务 ID，且不同按钮使用不同值，例如
+    `{"action":"approve","request_id":"req_1"}`。
     收到回调后把它视为用户提交的操作，但执行审批、写数据等有后果的动作前仍须复核操作者权限与当前业务状态；
     底层操作必须保持 **idempotent**，因为 Channel 的重复点击去重只在当前进程内有效。纯粹只是发一段文字仍用
     `feishu_message_send`。
