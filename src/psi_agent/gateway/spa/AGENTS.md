@@ -76,7 +76,7 @@ payload 构造位于 `routerConfig.js`，AI/Router backend 显示逻辑位于
 
 ## 打开即用（远程默认 AI）
 
-空 AI 池时 **不要**在启动时 POST 默认模型——必须先打开 Hub 模型池，让用户选择「连接自有 API」或「使用免费模型」。「使用免费模型」= `clearAiPool()` 清空本地 AI 配置（池保持为空）；真正需要对话/新建会话时，再由 `ensureDefaultAi()` 惰性 `POST /ais` 挂上远程默认（公司域名 `https://misakamikoto.genuineknowledge.cn` / `deepseek-v4-flash-free`；占位 key `haitun-default`）。Gateway AI 把该 `base_url` 原样交给 any-llm（`api_base`），请求上游 `{base_url}/chat/completions`。真正的 upstream（当前为 OpenCode Zen）与 API key **只在公司域名所在 VM 的 Nginx 注入**，不进 SPA / 安装包。Gateway **不**提供 `/ais/bootstrap` 或内置默认 AI。
+空 AI 池时 **不要**在启动时 POST 默认模型——必须先打开 Hub 模型池，让用户选择「连接自有 API」或「使用免费模型」。「使用免费模型」= `clearAiPool()` 清空本地 AI 配置（池保持为空）；真正需要对话/新建会话时，再由 `ensureDefaultAi()` 惰性 `POST /ais` 挂上远程默认（公司域名 `https://misakamikoto.genuineknowledge.cn` / `deepseek-v4-flash`，与 Hub DeepSeek 预设一致；占位 key `haitun-default`）。Gateway AI 把该 `base_url` 原样交给 any-llm（`api_base`），请求上游 `{base_url}/chat/completions`。真正的 upstream（当前为 OpenCode Zen）与 API key **只在公司域名所在 VM 的 Nginx 注入**，不进 SPA / 安装包。Gateway **不**提供 `/ais/bootstrap` 或内置默认 AI。
 
 ## 目录结构
 

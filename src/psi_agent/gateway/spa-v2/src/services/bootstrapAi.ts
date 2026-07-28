@@ -7,9 +7,10 @@ import { createAi, deleteAi, listAis, type AiInfo } from './api'
  * Do NOT POST this on boot — empty pool must open the models panel first.
  * Create only when the user chose free mode and a session actually needs an AI.
  */
+/** Aligns with Hub model pool DeepSeek preset (`deepseek-v4-flash`); key injected on VPS. */
 export const DEFAULT_REMOTE_AI = {
   provider: 'openai',
-  model: 'deepseek-v4-flash-free',
+  model: 'deepseek-v4-flash',
   base_url: 'https://misakamikoto.genuineknowledge.cn',
   api_key: 'haitun-default',
 }
