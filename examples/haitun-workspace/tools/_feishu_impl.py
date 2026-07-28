@@ -11,6 +11,7 @@ the SDK's own ``api/drive/comment.py`` does it.
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import os
 import pathlib
@@ -82,7 +83,11 @@ _AUTH_PROMPT = (
 # Feishu permission-denied codes: the 999916xx family (drive/docs "no permission"),
 # 1254xxx (bitable), 131006 (wiki node no permission). Combined with a msg-substring
 # check so we still catch permission failures whose exact code we don't enumerate.
-_PERMISSION_CODES = {99991672, 99991663, 99991661, 131006, 1254302, 1254045, 1254043}
+# Feishu permission-denied codes: the 999916xx family (drive/docs "no permission"),
+# 1254xxx (bitable), 131006 (wiki node no permission), 1770032 (docx block edit denied
+# for this identity). Combined with a msg-substring check so we still catch permission
+# failures whose exact code we don't enumerate.
+_PERMISSION_CODES = {99991672, 99991663, 99991661, 131006, 1254302, 1254045, 1254043, 1770032}
 _PERMISSION_MSG_HINTS = ("permission", "forbidden", "无权限", "没有权限", "access denied", "not authorized")
 
 
@@ -98,22 +103,70 @@ def _is_permission_error(res: dict[str, Any]) -> bool:
     return any(h in msg for h in _PERMISSION_MSG_HINTS)
 
 
+def _fresh(request: Any) -> Any:
+    """The request to hand the SDK for one send attempt.
+
+    ``Client.arequest`` mutates what it is given: ``verify()`` narrows ``token_types``
+    to the single type it used, and ``Files.extract_files()`` *removes* the file entry
+    from the body. Re-sending the same object therefore uploads nothing, under a token
+    type the caller never chose — the second attempt raises
+    ``NoAuthorizationException: user_access_token not found`` instead of falling back.
+
+    Callers that must survive a retry pass a zero-arg factory and get a clean request
+    each time. A plain ``BaseRequest`` is still accepted and made retry-safe by
+    ``_restorable`` below.
+    """
+    return request() if callable(request) else request
+
+
+def _restorable(request: Any) -> Any:
+    """Turn a plain ``BaseRequest`` into a factory that rewinds the SDK's mutations.
+
+    Not every call site can rebuild its request, but every call site can be retried
+    under a second identity. Snapshot the two fields the SDK edits in place and restore
+    them before handing the object over again. Streams in the body are rewound rather
+    than copied, so an upload retry re-sends the same bytes.
+
+    Objects that don't accept attribute assignment (test doubles, bare sentinels) are
+    passed through untouched — rewinding is an optimization for retries, never a
+    precondition for sending.
+    """
+    if callable(request):
+        return request
+    token_types = set(getattr(request, "token_types", set()) or set())
+    body = getattr(request, "body", None)
+    snapshot = dict(body) if isinstance(body, dict) else None
+
+    def rewind() -> Any:
+        with contextlib.suppress(AttributeError, TypeError):
+            request.token_types = set(token_types)
+            if snapshot is not None:
+                request.body = dict(snapshot)
+                for value in request.body.values():
+                    if isinstance(value, io.IOBase) and value.seekable():
+                        value.seek(0)
+            request.files = None
+        return request
+
+    return rewind
+
+
 async def _send_as_tenant(request: Any) -> dict[str, Any]:
-    """Send a BaseRequest with the bot's tenant token."""
+    """Send a BaseRequest (or a request factory) with the bot's tenant token."""
     client = _get_client()
     if client is None:
         return _error("Feishu app not configured. Set PSI_FEISHU_APP_ID / PSI_FEISHU_APP_SECRET.")
     try:
-        resp = await client.arequest(request)
+        resp = await client.arequest(_fresh(request))
     except Exception as exc:  # SDK/transport failure
         return _error(f"Feishu request failed: {type(exc).__name__}: {exc}")
     return _resp_to_result(resp)
 
 
 async def _send_as_user(request: Any, user_key: str) -> dict[str, Any] | None:
-    """Send a BaseRequest with the user's UAT. Returns None (no send attempted) when
-    the app isn't configured or the user has no cached/valid UAT — callers decide
-    whether that means need_auth or a tenant fallback."""
+    """Send a BaseRequest (or a request factory) with the user's UAT. Returns None (no
+    send attempted) when the app isn't configured or the user has no cached/valid UAT —
+    callers decide whether that means need_auth or a tenant fallback."""
     client = _get_uat_client()
     if client is None:
         return None
@@ -124,7 +177,7 @@ async def _send_as_user(request: Any, user_key: str) -> dict[str, Any] | None:
 
     option = RequestOption.builder().user_access_token(uat.access_token).build()
     try:
-        resp = await client.arequest(request, option)
+        resp = await client.arequest(_fresh(request), option)
     except Exception as exc:  # SDK/transport failure
         return _error(f"Feishu request failed: {type(exc).__name__}: {exc}")
     return _resp_to_result(resp)
@@ -133,6 +186,10 @@ async def _send_as_user(request: Any, user_key: str) -> dict[str, Any] | None:
 async def _invoke(request: Any, user_key: str | None = None, prefer: str = "tenant") -> dict[str, Any]:
     """Send a BaseRequest, preferring the bot's tenant token and only using the
     user's ``user_access_token`` (UAT) when necessary.
+
+    ``request`` may be a ``BaseRequest`` or a zero-arg factory returning one. Pass a
+    factory whenever the request could be sent twice (see ``_fresh``) — notably for
+    uploads, whose file entry the SDK strips from the body on the first send.
 
     ``prefer`` controls the strategy (``user_key`` is the sender's open_id, used to
     resolve that user's cached UAT):
@@ -143,21 +200,31 @@ async def _invoke(request: Any, user_key: str | None = None, prefer: str = "tena
       exists. Passing ``user_key`` here is harmless — it's just a fallback identity.
     - ``"user"`` (write/create-oriented): if the user has a cached UAT, act as that
       user so the created content is owned by them; otherwise fall back to the
-      tenant token so the bot can still do it without forcing authorization. Only
-      when BOTH the tenant attempt is permission-denied is ``need_auth`` returned.
+      tenant token so the bot can still do it without forcing authorization. A UAT
+      that is *permission-denied* also falls back to tenant — the user having
+      authorized the app says nothing about whether they can edit this particular
+      document, and the bot often can. ``need_auth`` is returned only when neither
+      identity is allowed.
 
     ``user_key`` empty/None means "no user identity available" — tenant only.
     """
     key = user_key.strip() if user_key else ""
+    # Both branches below can send twice; make the request survive the first send.
+    request = _restorable(request)
 
     if prefer == "user":
-        if key:
-            user_res = await _send_as_user(request, key)
+        user_res = await _send_as_user(request, key) if key else None
+        if user_res is not None and not _is_permission_error(user_res):
+            return user_res
+        # Either no usable UAT, or the UAT is not allowed here — let the bot try.
+        tenant_res = await _send_as_tenant(request)
+        if tenant_res.get("ok"):
+            return tenant_res
+        if key and _is_permission_error(tenant_res):
+            # Neither identity may write here: re-authorizing wouldn't help, so report
+            # the denial itself rather than sending the user through the auth flow.
             if user_res is not None:
                 return user_res
-        # No usable UAT — fall back to tenant so the bot can still act.
-        tenant_res = await _send_as_tenant(request)
-        if key and _is_permission_error(tenant_res):
             return _error(_AUTH_PROMPT, need_auth=True)
         return tenant_res
 
@@ -180,6 +247,7 @@ async def _invoke_wiki_read(request: Any, user_key: str | None, is_empty: Any) -
     permission error. Detect that (via ``is_empty(res)``) and transparently retry as
     the user, so we don't wrongly report "no knowledge bases". No re-auth prompt on
     the empty case — if the user simply has none, the empty tenant result stands."""
+    request = _restorable(request)
     res = await _invoke(request, user_key=user_key, prefer="tenant")
     key = user_key.strip() if user_key else ""
     if res.get("ok") and key and is_empty(res):
@@ -4308,6 +4376,20 @@ async def list_course_registrations_impl(
 _UPLOAD_ALL_MAX_BYTES = 20 * 1024 * 1024
 
 
+class _NamedBytes(io.BytesIO):
+    """An in-memory file that carries a filename.
+
+    The SDK decides "this is multipart" by finding ``io.IOBase`` values in the request
+    *body* — plain ``bytes`` is not enough — and httpx reads ``.name`` to fill in the
+    multipart ``filename=``. A bare ``BytesIO`` would upload as "upload" with no
+    extension, which Feishu rejects for images.
+    """
+
+    def __init__(self, data: bytes, name: str) -> None:
+        super().__init__(data)
+        self.name = name
+
+
 def _build_media_upload_all_request(
     file_name: str, parent_type: str, parent_node: str, size: int, data: bytes, extra: dict[str, Any] | None
 ) -> BaseRequest:
@@ -4323,8 +4405,12 @@ def _build_media_upload_all_request(
     }
     if extra:
         body["extra"] = json.dumps(extra, ensure_ascii=False)
+    # The binary goes in the BODY, not in req.files: Client.arequest overwrites
+    # req.files with Files.extract_files(req.body) right before sending, so anything
+    # assigned here is discarded — the request then goes out as application/json and
+    # Feishu answers "boundary not found".
+    body["file"] = _NamedBytes(data, file_name)
     req.body = body
-    req.files = {"file": (file_name, data)}
     return req
 
 
@@ -4357,8 +4443,13 @@ async def upload_media_impl(
             "use the chunked upload flow for larger files.",
             size=size,
         )
-    req = _build_media_upload_all_request(name, parent_type, parent_node.strip(), size, data, extra)
-    res = await _invoke(req, user_key=user_key, prefer="user")
+    # A factory, not a request: an upload may be attempted under both identities and
+    # the SDK consumes the file entry on the first send.
+    res = await _invoke(
+        lambda: _build_media_upload_all_request(name, parent_type, parent_node.strip(), size, data, extra),
+        user_key=user_key,
+        prefer="user",
+    )
     if not res["ok"]:
         return res
     rdata = res["data"] if isinstance(res["data"], dict) else {}
@@ -4431,8 +4522,11 @@ async def _upload_into_image_block(image_path: str, block_id: str, user_key: str
     size = len(data)
     if size > _UPLOAD_ALL_MAX_BYTES:
         return _error(f"chart image is {size} bytes (> 20MB) — too large to upload.", size=size)
-    req = _build_media_upload_all_request(path.name, "docx_image", block_id, size, data, None)
-    res = await _invoke(req, user_key=user_key, prefer="user")
+    res = await _invoke(
+        lambda: _build_media_upload_all_request(path.name, "docx_image", block_id, size, data, None),
+        user_key=user_key,
+        prefer="user",
+    )
     if not res["ok"]:
         return res
     rdata = res["data"] if isinstance(res["data"], dict) else {}
@@ -4455,7 +4549,7 @@ async def append_doc_image_impl(
     doc = document_id.strip()
     if not doc:
         return _error("document_id is required.")
-    created = await _invoke(_build_image_block_create_request(doc, doc, -1), user_key=user_key, prefer="user")
+    created = await _invoke(lambda: _build_image_block_create_request(doc, doc, -1), user_key=user_key, prefer="user")
     if not created["ok"]:
         return created
     cdata = created["data"] if isinstance(created["data"], dict) else {}
@@ -4471,7 +4565,9 @@ async def append_doc_image_impl(
         await _discard_image_block(doc, block_id, index, user_key)
         return uploaded
     patched = await _invoke(
-        _build_image_block_patch_request(doc, block_id, uploaded["file_token"]), user_key=user_key, prefer="user"
+        lambda: _build_image_block_patch_request(doc, block_id, uploaded["file_token"]),
+        user_key=user_key,
+        prefer="user",
     )
     if not patched["ok"]:
         await _discard_image_block(doc, block_id, index, user_key)
@@ -4493,14 +4589,50 @@ async def append_doc_image_impl(
     return result
 
 
+def _build_block_children_list_request(document_id: str, block_id: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.GET
+    req.uri = "/open-apis/docx/v1/documents/:document_id/blocks/:block_id/children"
+    req.paths["document_id"] = document_id
+    req.paths["block_id"] = block_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    req.add_query("page_size", 500)
+    return req
+
+
 async def _discard_image_block(document_id: str, block_id: str, index: Any, user_key: str) -> None:
     """Best-effort removal of a placeholder image block after a failed upload/patch.
 
-    Without the index the batch_delete range can't be built, so the empty block is
-    left in place — an orphan placeholder is unfortunate but not worth guessing a
-    range that might delete the user's real content.
+    The create response carries no ``index``, so the delete range is found by locating
+    ``block_id`` among the document's children — deleting by a guessed range could take
+    the user's real content with it. If the block can't be located the empty placeholder
+    is left in place: an orphan is unfortunate, deleting the wrong block is not
+    recoverable.
     """
+    if not isinstance(index, int) or index < 0:
+        index = await _locate_child_index(document_id, block_id, user_key)
     if not isinstance(index, int) or index < 0:
         return
     with contextlib.suppress(Exception):
-        await _invoke(_build_block_delete_request(document_id, document_id, index), user_key=user_key, prefer="user")
+        await _invoke(
+            lambda: _build_block_delete_request(document_id, document_id, index),
+            user_key=user_key,
+            prefer="user",
+        )
+
+
+async def _locate_child_index(document_id: str, block_id: str, user_key: str) -> int:
+    """Position of ``block_id`` among the doc root's children, or -1 if not found."""
+    with contextlib.suppress(Exception):
+        res = await _invoke(
+            lambda: _build_block_children_list_request(document_id, document_id),
+            user_key=user_key,
+            prefer="user",
+        )
+        if res.get("ok"):
+            data = res.get("data")
+            items = data.get("items") or [] if isinstance(data, dict) else []
+            for position, item in enumerate(items):
+                if isinstance(item, dict) and item.get("block_id") == block_id:
+                    return position
+    return -1

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import io
 import json
 import sys
 from pathlib import Path
@@ -101,7 +102,9 @@ class _CapturedInvoke:
         self._data = data or {}
 
     async def __call__(self, request: Any, user_key: str | None = None, prefer: str = "tenant") -> dict[str, Any]:
-        self.request = request
+        # Retryable call sites pass a request factory (see _feishu_impl._fresh); resolve
+        # it like the real _invoke so assertions see the request that would be sent.
+        self.request = request() if callable(request) else request
         self.user_key = user_key
         self.prefer = prefer
         return {"ok": True, "code": 0, "msg": "", "data": self._data}
@@ -3527,8 +3530,13 @@ async def test_upload_media_builds_multipart(monkeypatch: pytest.MonkeyPatch, tm
     req = cap.request
     assert req.http_method.name == "POST"
     assert req.uri.endswith("/drive/v1/medias/upload_all")
-    assert req.files is not None and "file" in req.files
-    assert req.files["file"][0] == "proof.mp4"
+    # The binary must be an io.IOBase in the BODY. Asserting on req.files instead would
+    # pass while the request goes out as application/json: the SDK overwrites req.files
+    # with whatever it can extract from the body, and ignores what we put there.
+    sent = req.body["file"]
+    assert isinstance(sent, io.IOBase)
+    assert sent.name == "proof.mp4"
+    assert sent.read() == b"video-bytes"
     assert req.body["parent_node"] == "fldrtok"
     assert req.body["size"] == str(len(b"video-bytes"))
 
