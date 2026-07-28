@@ -25,6 +25,9 @@ from lark_channel.api.drive import comment as _comment
 from lark_channel.api.wiki import node as _wiki_node
 from lark_channel.core.enum import AccessTokenType, HttpMethod
 from lark_channel.core.model import BaseRequest
+from loguru import logger
+
+from psi_agent.channel.feishu._card_store import save_card_snapshot
 
 _client: Any = None
 
@@ -983,9 +986,15 @@ async def send_card_impl(
     if not res["ok"]:
         return res
     data = res["data"] if isinstance(res["data"], dict) else {}
+    message_id = data.get("message_id", "")
+    if isinstance(message_id, str) and message_id:
+        try:
+            await save_card_snapshot(message_id, card)
+        except Exception as exc:
+            logger.warning(f"failed to save Feishu card snapshot for {message_id} — {exc!r}")
     return {
         "ok": True,
-        "message_id": data.get("message_id", ""),
+        "message_id": message_id,
         "thread_id": data.get("thread_id", ""),
         "chat_id": data.get("chat_id", ""),
     }

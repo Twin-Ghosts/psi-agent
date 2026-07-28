@@ -53,6 +53,9 @@ class ChannelFeishu:
     verbose: bool = False
     """Enable DEBUG-level logging."""
 
+    appdata: str = ""
+    """AppData root shared with Feishu card-sending workspace tools."""
+
     async def run(self) -> None:
         setup_logging(verbose=self.verbose)
         app_id = self.app_id or os.environ.get("PSI_FEISHU_APP_ID", "")
@@ -73,4 +76,5 @@ class ChannelFeishu:
             respond_to_mention_all=self.respond_to_mention_all,
             respond_to_comments=self.respond_to_comments,
             gateway_url=self.gateway_url,
+            appdata=self.appdata,
         )

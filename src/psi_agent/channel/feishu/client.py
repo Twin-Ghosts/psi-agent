@@ -28,6 +28,8 @@ from loguru import logger
 from psi_agent.channel._core import ChannelCore
 from psi_agent.channel._types import FileChunk, InputChunk, TextChunk
 
+from ._card_store import pop_card_snapshot
+
 _EMOJI_PROCESSING = "Typing"
 _EMOJI_FAILED = "CrossMark"
 _INTERACTIVE_CARD_TAGS = {"action", "form"}
@@ -345,17 +347,20 @@ def _remove_card_interactions(
     return value, selected_replaced
 
 
-def _consumed_card(payload: Any, action_value: Any) -> dict[str, Any] | None:
+def _consumed_card_content(card: Any, action_value: Any) -> dict[str, Any] | None:
     if action_value is None:
         return None
-    card = _parse_fetched_card(payload)
-    if card is None:
+    if not isinstance(card, dict):
         return None
     selected_label = _find_card_action_label(card, action_value)
     if not selected_label:
         return None
     consumed, selected_replaced = _remove_card_interactions(card, action_value, selected_label)
     return consumed if selected_replaced and isinstance(consumed, dict) else None
+
+
+def _consumed_card(payload: Any, action_value: Any) -> dict[str, Any] | None:
+    return _consumed_card_content(_parse_fetched_card(payload), action_value)
 
 
 def _submitted_card() -> dict[str, Any]:
@@ -539,6 +544,7 @@ async def _handle_card_action(
     allowed_ids: list[str] | None,
     seen: _SeenEvents,
     event: Any,
+    appdata: str = "",
 ) -> None:
     """Route a Feishu card action into the operator's agent session."""
     chat_id = ""
@@ -564,14 +570,24 @@ async def _handle_card_action(
             logger.info(f"card action ignored for already-consumed message={message_id}")
             return
 
+        action_value = _card_action_value(event)
         replacement = None
         try:
-            payload = await channel.fetch_message(message_id)
-            replacement = _consumed_card(payload, _card_action_value(event))
-            if replacement is None:
-                logger.warning(f"failed to preserve consumed card {message_id}, using fallback")
+            card = await pop_card_snapshot(message_id, appdata)
+            if card is not None:
+                replacement = _consumed_card_content(card, action_value)
+                if replacement is None:
+                    logger.warning(f"failed to consume card snapshot {message_id}, trying Feishu payload")
         except Exception as e:
-            logger.warning(f"failed to fetch consumed card {message_id}, using fallback — {e!r}")
+            logger.warning(f"failed to load card snapshot {message_id}, trying Feishu payload — {e!r}")
+        if replacement is None:
+            try:
+                payload = await channel.fetch_message(message_id)
+                replacement = _consumed_card(payload, action_value)
+                if replacement is None:
+                    logger.warning(f"failed to preserve consumed card {message_id}, using fallback")
+            except Exception as e:
+                logger.warning(f"failed to fetch consumed card {message_id}, using fallback — {e!r}")
         if replacement is None:
             replacement = _submitted_card()
         try:
@@ -951,6 +967,7 @@ async def run_feishu(
     respond_to_mention_all: bool = False,
     respond_to_comments: bool = True,
     gateway_url: str | None = None,
+    appdata: str = "",
 ) -> None:
     policy = PolicyConfig(
         require_mention=require_mention,
@@ -997,6 +1014,7 @@ async def run_feishu(
                 allowed_user_ids,
                 card_action_seen,
                 event,
+                appdata,
             )
 
         async def _on_comment(event: Any) -> None:
