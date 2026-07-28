@@ -110,10 +110,12 @@ async def feishu_message_send_card(
     go inside a ``form`` element. Anything the Feishu 消息卡片 spec supports works — the
     card is validated only to be a JSON object, then posted as-is.
 
-    Note: button/form **clicks fire a card action callback** to the app. Delivering that
-    callback back into the conversation is a channel-side concern and may not yet be wired;
-    the card renders and is interactive regardless. Prefer buttons whose ``value`` also
-    encodes the choice, and/or a URL button, so intent is captured even without the callback.
+    Button/form actions are delivered back to the operator's agent session as the next
+    user turn, encoded as JSON inside ``<feishu_card_action>``. Every actionable element's
+    ``value`` must include an explicit action name and a stable business identifier such as
+    ``request_id``. Before a consequential operation, re-check authorization and current
+    business state; keep the underlying operation idempotent because channel deduplication
+    is process-local.
 
     Args:
         receive_id: Target id — a chat_id (oc_...), open_id (ou_...), user_id, union_id, or email.

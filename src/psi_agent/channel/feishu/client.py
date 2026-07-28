@@ -182,6 +182,29 @@ def _context_header(ctx: Any) -> str:
     return "\n".join(lines)
 
 
+def _card_action_context(event: Any) -> str:
+    """Serialize a Feishu card action as structured agent input."""
+    operator = getattr(event, "operator", None)
+    action = getattr(event, "action", None)
+    payload = {
+        "chat_id": getattr(event, "chat_id", "") or "",
+        "message_id": getattr(event, "message_id", "") or "",
+        "operator_open_id": getattr(operator, "open_id", "") or "",
+        "action": {
+            "tag": getattr(action, "tag", "") or "",
+            "value": getattr(action, "value", None),
+            "name": getattr(action, "name", None),
+            "option": getattr(action, "option", None),
+            "form_value": getattr(action, "form_value", None),
+            "input_value": getattr(action, "input_value", None),
+            "options": getattr(action, "options", None),
+            "checked": getattr(action, "checked", None),
+        },
+    }
+    body = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return f"<feishu_card_action>\n{body}\n</feishu_card_action>"
+
+
 def _comment_context_header(event: Any, ctx: Any) -> str:
     """构造文档评论的元数据前缀, 注入到发给 agent 的问题文本最前面。
 
@@ -267,6 +290,30 @@ async def _build_chunks(channel: Any, ctx: Any) -> list[InputChunk]:
     return chunks
 
 
+async def _stream_reply(
+    channel: Any,
+    core: ChannelCore,
+    chat_id: str,
+    chunks: list[InputChunk],
+    *,
+    reply_to: str | None,
+) -> None:
+    """Stream agent text and files into one Feishu chat."""
+
+    async def _produce(stream: Any) -> None:
+        async with aclosing(core.post(chunks)) as gen:
+            async for chunk in gen:
+                if isinstance(chunk, TextChunk):
+                    await stream.append(chunk.text)
+                    logger.debug(f"stream.append ({len(chunk.text)} chars)")
+                elif isinstance(chunk, FileChunk):
+                    logger.debug(f"received FileChunk ({chunk.path})")
+                    await _send_file(channel, chat_id, chunk.path)
+
+    options = {"reply_to": reply_to} if reply_to else {}
+    await channel.stream(chat_id, {"markdown": _produce}, options)
+
+
 async def _handle_and_stream(
     channel: Any,
     resolve_core: Callable[[str | None], Awaitable[ChannelCore]],
@@ -301,22 +348,8 @@ async def _handle_and_stream(
 
             logger.debug(f"posting {len(chunks)} chunk(s) to ChannelCore")
 
-            async def _produce(stream: Any) -> None:
-                async with aclosing(core.post(chunks)) as gen:
-                    async for chunk in gen:
-                        if isinstance(chunk, TextChunk):
-                            await stream.append(chunk.text)
-                            logger.debug(f"stream.append ({len(chunk.text)} chars)")
-                        elif isinstance(chunk, FileChunk):
-                            logger.debug(f"received FileChunk ({chunk.path})")
-                            await _send_file(channel, ctx.chat_id, chunk.path)
-
             try:
-                await channel.stream(
-                    ctx.chat_id,
-                    {"markdown": _produce},
-                    {"reply_to": ctx.message_id},
-                )
+                await _stream_reply(channel, core, ctx.chat_id, chunks, reply_to=ctx.message_id)
                 logger.debug("stream completed")
             except Exception as e:
                 logger.error(f"Message handling error — {e!r}")
@@ -329,6 +362,48 @@ async def _handle_and_stream(
                 await _add_reaction(channel, ctx.message_id, _EMOJI_FAILED)
     except Exception as e:
         logger.error(f"Unhandled error in _handle_and_stream: {e!r}")
+
+
+async def _handle_card_action(
+    channel: Any,
+    resolve_core: Callable[[str | None], Awaitable[ChannelCore]],
+    allowed_ids: list[str] | None,
+    event: Any,
+) -> None:
+    """Route a Feishu card action into the operator's agent session."""
+    chat_id = ""
+    try:
+        operator = getattr(event, "operator", None)
+        operator_open_id = getattr(operator, "open_id", None)
+        chat_id = getattr(event, "chat_id", "") or ""
+        message_id = getattr(event, "message_id", "") or ""
+
+        if not operator_open_id:
+            logger.warning("card action missing operator.open_id, skipping")
+            return
+        if not chat_id:
+            logger.warning("card action missing chat_id, skipping")
+            return
+        if not _allowed(operator_open_id, allowed_ids):
+            logger.debug(f"card action operator {operator_open_id} blocked by whitelist")
+            return
+
+        core = await resolve_core(operator_open_id)
+        logger.debug(
+            f"card action operator={operator_open_id} chat={chat_id} "
+            f"message={message_id or None} socket={core.session_socket}"
+        )
+        chunks: list[InputChunk] = [TextChunk(_card_action_context(event))]
+        await _stream_reply(channel, core, chat_id, chunks, reply_to=message_id or None)
+        logger.debug("card action stream completed")
+    except Exception as e:
+        logger.error(f"Card action handling error — {e!r}")
+        if not chat_id:
+            return
+        try:
+            await channel.send(chat_id, {"text": f"Error: {e}"})
+        except Exception as notify_error:
+            logger.error(f"Card action error notification failed — {notify_error!r}")
 
 
 async def _collect_reply(core: ChannelCore, chunks: list[InputChunk]) -> str:
@@ -721,6 +796,9 @@ async def run_feishu(
         async def _on_message(ctx: Any) -> None:
             portal.start_task_soon(_handle_and_stream, channel, resolve_core, allowed_user_ids, ctx)
 
+        async def _on_card_action(event: Any) -> None:
+            portal.start_task_soon(_handle_card_action, channel, resolve_core, allowed_user_ids, event)
+
         async def _on_comment(event: Any) -> None:
             portal.start_task_soon(_handle_comment, channel, resolve_core, allowed_user_ids, event)
 
@@ -736,6 +814,7 @@ async def run_feishu(
                 logger.warning(f"approval event schedule failed — {e!r}")
 
         channel.on("message", _on_message)
+        channel.on("cardAction", _on_card_action)
         channel.on("reject", _log_reject)
         if respond_to_comments:
             channel.on("comment", _on_comment)
