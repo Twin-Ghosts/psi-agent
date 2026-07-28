@@ -26,12 +26,13 @@ from lark_channel.event.custom import CustomizedEventProcessor
 from loguru import logger
 
 from psi_agent.channel._core import ChannelCore
-from psi_agent.channel._types import FileChunk, InputChunk, TextChunk
+from psi_agent.channel._types import FileChunk, InputChunk, ReasoningChunk, TextChunk
 
 from ._card_store import CardSnapshot, pop_card_snapshot
 
 _EMOJI_PROCESSING = "Typing"
 _EMOJI_FAILED = "CrossMark"
+_SILENT_REPLY_TOKEN = "NO_REPLY"
 _INTERACTIVE_CARD_TAGS = {"action", "form"}
 _REMOVED_CARD_ELEMENT = object()
 
@@ -507,18 +508,54 @@ async def _stream_reply(
     chunks: list[InputChunk],
     *,
     reply_to: str | None,
+    suppress_silent_reply: bool = False,
 ) -> None:
     """Stream agent text and files into one Feishu chat."""
 
     async def _produce(stream: Any) -> None:
-        async with aclosing(core.post(chunks)) as gen:
-            async for chunk in gen:
-                if isinstance(chunk, TextChunk):
-                    await stream.append(chunk.text)
-                    logger.debug(f"stream.append ({len(chunk.text)} chars)")
-                elif isinstance(chunk, FileChunk):
-                    logger.debug(f"received FileChunk ({chunk.path})")
-                    await _send_file(channel, chat_id, chunk.path)
+        silent_candidate = ""
+        checking_silent_reply = suppress_silent_reply
+
+        async def flush_silent_candidate() -> None:
+            nonlocal silent_candidate
+            if not silent_candidate:
+                return
+            candidate = silent_candidate
+            silent_candidate = ""
+            normalized = candidate.strip()
+            if not normalized:
+                logger.debug("suppressed whitespace-only Feishu card action reply")
+            elif normalized == _SILENT_REPLY_TOKEN:
+                logger.debug("suppressed standalone NO_REPLY from Feishu card action")
+            else:
+                await stream.append(candidate)
+                logger.debug(f"stream.append ({len(candidate)} chars)")
+
+        try:
+            async with aclosing(core.post(chunks)) as gen:
+                async for chunk in gen:
+                    if isinstance(chunk, TextChunk):
+                        if checking_silent_reply:
+                            silent_candidate += chunk.text
+                            normalized = silent_candidate.strip()
+                            if not normalized or _SILENT_REPLY_TOKEN.startswith(normalized):
+                                continue
+                            await flush_silent_candidate()
+                            checking_silent_reply = False
+                        else:
+                            await stream.append(chunk.text)
+                            logger.debug(f"stream.append ({len(chunk.text)} chars)")
+                    elif isinstance(chunk, ReasoningChunk):
+                        if suppress_silent_reply and chunk.kind == "tool_result":
+                            await flush_silent_candidate()
+                            checking_silent_reply = True
+                    elif isinstance(chunk, FileChunk):
+                        logger.debug(f"received FileChunk ({chunk.path})")
+                        await _send_file(channel, chat_id, chunk.path)
+        except Exception:
+            await flush_silent_candidate()
+            raise
+        await flush_silent_candidate()
 
     options = {"reply_to": reply_to} if reply_to else {}
     await channel.stream(chat_id, {"markdown": _produce}, options)
@@ -660,7 +697,14 @@ async def _handle_card_action(
                 )
             )
         ]
-        await _stream_reply(channel, core, chat_id, chunks, reply_to=message_id or None)
+        await _stream_reply(
+            channel,
+            core,
+            chat_id,
+            chunks,
+            reply_to=message_id or None,
+            suppress_silent_reply=True,
+        )
         logger.debug("card action stream completed")
     except Exception as e:
         logger.error(f"Card action handling error — {e!r}")

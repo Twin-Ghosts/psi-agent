@@ -132,6 +132,13 @@ async def feishu_message_send_card(
     compatibility. Missing or invalid snapshots fail closed. The first callback leaves a durable
     consumed tombstone, so later callbacks are ignored across Channel processes and restarts.
 
+    When handling the resulting ``<feishu_card_action>``, the updated original card already
+    acknowledges the selected option. Do not narrate the click or announce a planned action before
+    calling the matched handler. After the handler succeeds, finish with zero assistant content:
+    do not emit ``NO_REPLY`` or a success confirmation. Reply only when the operator still needs a
+    warning, partial-failure detail, permission problem, or required next step. An unmatched or
+    failed handler must never be reported as successful.
+
     Every actionable element's ``value`` must include an explicit action name and a stable
     business identifier such as ``request_id``; different buttons need different values.
     Before a consequential operation, re-check authorization and current business state;

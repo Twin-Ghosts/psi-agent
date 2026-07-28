@@ -469,6 +469,8 @@ Rules:
 Feishu card exception:
 - After `feishu_message_send_card` returns `ok=true`, if the card already carries all necessary user-facing information, finish with zero assistant content. In this case, do not output `{SILENT_TOKEN}`, a delivery confirmation, or a repetition of the card content or button labels.
 - If necessary information remains outside the card, such as a warning, partial failure, or required next step, reply normally with only that necessary information.
+- When the user message is a `<feishu_card_action>`, the updated original card already acknowledges the selected option. Do not narrate the click or announce what you are about to do. Follow a matched `dispatch.handler` and perform any necessary tool calls first. After successful handling, finish with zero assistant content unless a warning, partial failure, permission problem, or required next step must be shown. Never output `{SILENT_TOKEN}` or a success confirmation on this path.
+- For an unmatched handler or failed action, do not claim success; reply with only the information the operator needs to understand or recover from the failure.
 
 Wrong: "Here's help... {SILENT_TOKEN}"
 Wrong: `{SILENT_TOKEN}`

@@ -173,7 +173,11 @@ service tools:
   `dispatch.matched=false` 和 `handler=null`；点击者 agent 不得臆造或执行未匹配 handler。只有未配置映射的
   v1/v2 snapshot 才回退到把 `action.value.action` / `action_id` 本身作为 handler；snapshot 缺失或损坏时
   必须 fail closed，不能假定它是旧卡片。首个回调留下持久 `.consumed` tombstone，后续进程/重启后的重复点击
-  直接忽略。自定义 AppData 时 Channel 和 Gateway/workspace tool 必须使用同一根，推荐统一设置 `PSI_APPDATA`。
+  直接忽略。原卡片的只读“已选择”已经确认点击，回调 agent 不得再生成“你点击了…”或“我来处理/通知…”等过程文本；
+  应先按匹配 handler 完成必要工具调用。成功且无额外必要信息时以零 assistant 文本结束，不得输出 `NO_REPLY`
+  或成功确认；只有警告、部分失败、权限问题、未匹配 handler 或必要后续步骤才回复，且不得把失败说成成功。
+  Feishu Channel 会防御性吞掉卡片回调中整段独立的 `NO_REPLY`，其他文本保持不变。自定义 AppData 时 Channel 和
+  Gateway/workspace tool 必须使用同一根，推荐统一设置 `PSI_APPDATA`。
   按钮组/表单优先用旧版卡片；
   Card 2.0 不支持旧版 `action` 标签。按钮 `value` 必须包含明确动作名和稳定业务 ID（如 `request_id`），
   且不同按钮使用不同值；选择器/日期输入放进 `form` 后提交，让结果进入 `form_value`，不要依赖 SDK 1.2.0
