@@ -264,6 +264,7 @@ cron: "0 12 * * *"
 - 每个 schedule 有独立 CancelScope，支持热重载
 - 每个 schedule 独立加载——IO 错误、YAML 解析问题、cron 验证失败只跳过该 schedule
 - Schedule 触发时自动获取 session lock，串行处理
+- **定时任务归 workspace，触发权归 (session × schedule)**：`schedules/` 始终从 workspace 加载（分离根部署时不从 `--agent` 包加载）；每个 Session 都读到全部条目，但**逐条**决定是否触发——`--active-schedules a,b` 只触发这两条，`--active-schedules '*'` 触发全部（含启动后新建的），`--deactive-schedules x` 从中排除（黑名单优先）。默认一条都不触发。「除某几条以外全归我」要写成 `'*'` + 黑名单：纯枚举白名单覆盖不到之后新建的 `TASK.md`。一条 schedule 必须恰好被一个 Session 激活，否则一条提醒会被在线会话数乘一遍（飞书为每个用户各开一个 Session）；Gateway 下由 `SchedulerManager` 为每个 workspace 维护唯一一个全量激活的调度 Session（挂哪个 AI 由 `psi-agent gateway --scheduler-ai-id` 决定，空则回落 `--feishu-ai-id`，两者都空就不起调度 Session）
 
 ### Skills
 

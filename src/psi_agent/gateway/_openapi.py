@@ -464,6 +464,33 @@ OPENAPI_SPEC = {
                     "workspace": {"type": "string"},
                     "agent": {"type": "string"},
                     "channel_socket": {"type": "string"},
+                    "active_schedules": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Names of the schedules under {workspace}/schedules this session "
+                            "actually fires; ['*'] means all of them. Activation is a "
+                            "(session x schedule) property, so sessions sharing a workspace can "
+                            "each fire a different subset"
+                        ),
+                    },
+                    "deactive_schedules": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Names excluded from active_schedules (blacklist, wins over the "
+                            "whitelist). A wildcard whitelist plus this blacklist is how a session "
+                            "claims 'everything except these', including TASK.md files created later"
+                        ),
+                    },
+                    "scheduler": {
+                        "type": "boolean",
+                        "description": (
+                            "Derived: true only for the per-workspace scheduler session that fires "
+                            "all of {workspace}/schedules (active_schedules == ['*']). Such sessions "
+                            "are hidden from GET /sessions, so this is always false in list responses"
+                        ),
+                    },
                 },
             },
             "GatewayDefaults": {

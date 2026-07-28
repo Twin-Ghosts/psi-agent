@@ -10,8 +10,9 @@ import pytest
 from croniter import croniter
 
 from psi_agent._yaml import parse_yaml_header
+from psi_agent.session import schedule_registry as schedule_registry_module
 from psi_agent.session.conversation import Conversation
-from psi_agent.session.schedule_registry import Schedule, ScheduleEntry, ScheduleRegistry
+from psi_agent.session.schedule_registry import ACTIVATE_ALL, Schedule, ScheduleEntry, ScheduleRegistry
 from psi_agent.session.tool_registry import FileEntry, ToolFunction, ToolRegistry
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -552,6 +553,323 @@ async def test_consume_run_once_deletes_task(tmp_path: Path) -> None:
     await ScheduleRegistry._consume_run_once(s, registry)
     assert not await anyio.Path(task).exists()
     assert str(task) not in registry._files
+
+
+# ── watcher — the only way a scheduler Session sees TASK.md changes ───────────
+
+
+@pytest.mark.anyio
+async def test_watcher_picks_up_schedule_created_after_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A scheduler Session has no channel, so neither in-turn refresh ever happens.
+
+    Without the watcher, a schedule created through ``schedule_manage`` would
+    never be loaded.
+    """
+    monkeypatch.setattr(schedule_registry_module, "_WATCH_INTERVAL_SECONDS", 0.05)
+    sched_root = tmp_path / "schedules"
+    await anyio.Path(sched_root / "first").mkdir(parents=True)
+    await anyio.Path(sched_root / "first" / "TASK.md").write_text(
+        '---\nname: first\ncron: "0 12 * * *"\n---\nT', encoding="utf-8"
+    )
+
+    sr = await ScheduleRegistry.load(sched_root, active_names={ACTIVATE_ALL})
+    seen_second = anyio.Event()
+    real_refresh = sr.refresh
+
+    async def _signalling_refresh() -> dict[str, str]:
+        result = await real_refresh()
+        if "second" in {s.name for s in sr.schedules}:
+            seen_second.set()
+        return result
+
+    monkeypatch.setattr(sr, "refresh", _signalling_refresh)
+    async with anyio.create_task_group() as tg:
+        sr.start_all(tg, cast(Any, _MockAgent()))
+        assert {s.name for s in sr.schedules} == {"first"}
+
+        # A second task appearing only after start — only the watcher finds it.
+        await anyio.Path(sched_root / "second").mkdir(parents=True)
+        await anyio.Path(sched_root / "second" / "TASK.md").write_text(
+            '---\nname: second\ncron: "5 12 * * *"\n---\nT2', encoding="utf-8"
+        )
+        with anyio.fail_after(5):
+            await seen_second.wait()
+        assert {s.name for s in sr.schedules} == {"first", "second"}
+        assert "second" in sr._runner_scopes
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_empty_registry_starts_no_watcher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-scheduler Session must not poll the disk - an empty registry starts no watcher."""
+    monkeypatch.setattr(schedule_registry_module, "_WATCH_INTERVAL_SECONDS", 0.05)
+    refreshed = 0
+    sr = ScheduleRegistry()
+
+    async def _counting_refresh() -> dict[str, str]:
+        nonlocal refreshed
+        refreshed += 1
+        return {}
+
+    monkeypatch.setattr(sr, "refresh", _counting_refresh)
+    async with anyio.create_task_group() as tg:
+        sr.start_all(tg, cast(Any, _MockAgent()))
+        await anyio.sleep(0.3)
+        assert refreshed == 0
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_watcher_survives_refresh_exception(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The watcher hangs off the Session's task group via start_soon, so an escaping
+    exception would take the whole scheduler Session down. A single failed refresh
+    must only log ERROR and retry next cycle."""
+    monkeypatch.setattr(schedule_registry_module, "_WATCH_INTERVAL_SECONDS", 0.02)
+    await anyio.Path(tmp_path / "schedules").mkdir(parents=True)
+    sr = await ScheduleRegistry.load(tmp_path / "schedules", active_names={ACTIVATE_ALL})
+
+    calls = 0
+    third_call = anyio.Event()
+
+    async def _boom() -> dict[str, str]:
+        nonlocal calls
+        calls += 1
+        if calls >= 3:
+            third_call.set()
+        raise RuntimeError("unexpected error outside refresh")
+
+    monkeypatch.setattr(sr, "refresh", _boom)
+    async with anyio.create_task_group() as tg:
+        sr.start_all(tg, cast(Any, _MockAgent()))
+        # Still alive after 3 consecutive failures -> nothing escaped to the task group.
+        with anyio.fail_after(5):
+            await third_call.wait()
+        assert calls >= 3
+        tg.cancel_scope.cancel()
+
+
+# ── activation is (session x schedule) — each entry picks its own Session ──────
+
+
+async def _load_three(
+    tmp_path: Path,
+    active: set[str] | None,
+    *,
+    deactive: set[str] | None = None,
+) -> ScheduleRegistry:
+    sched_root = tmp_path / "schedules"
+    for name in ("alpha", "beta", "gamma"):
+        d = sched_root / name
+        await anyio.Path(d).mkdir(parents=True)
+        await anyio.Path(d / "TASK.md").write_text(
+            f'---\nname: {name}\ncron: "0 12 * * *"\n---\nTask {name}', encoding="utf-8"
+        )
+    return await ScheduleRegistry.load(sched_root, active_names=active, deactive_names=deactive)
+
+
+@pytest.mark.anyio
+async def test_start_all_starts_one_runner_per_active_schedule(tmp_path: Path) -> None:
+    sched_dir = tmp_path / "schedules" / "daily"
+    await anyio.Path(sched_dir).mkdir(parents=True)
+    await anyio.Path(sched_dir / "TASK.md").write_text(
+        '---\nname: daily\ncron: "0 12 * * *"\n---\nTask', encoding="utf-8"
+    )
+
+    sr = await ScheduleRegistry.load(tmp_path / "schedules", active_names={ACTIVATE_ALL})
+    async with anyio.create_task_group() as tg:
+        sr.start_all(tg, cast(Any, _MockAgent()))
+        assert len(sr._runner_scopes) == 1
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_named_subset_starts_only_those_runners(tmp_path: Path) -> None:
+    """Core contract: two Sessions on one workspace may activate disjoint subsets.
+
+    One boolean per Session could only say "fire all / fire none" and cannot
+    express this split.
+    """
+    sr = await _load_three(tmp_path, {"alpha", "gamma"})
+    async with anyio.create_task_group() as tg:
+        sr.start_all(tg, cast(Any, _MockAgent()))
+        assert set(sr._runner_scopes) == {"alpha", "gamma"}
+        # Non-activated entries stay readable in the registry — they just don't fire.
+        assert {s.name for s in sr.schedules} == {"alpha", "beta", "gamma"}
+        assert {s.name for s in sr.active_schedules} == {"alpha", "gamma"}
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_disjoint_subsets_fire_each_schedule_exactly_once(tmp_path: Path) -> None:
+    """With disjoint lists, each schedule is fired by exactly one of the two Sessions."""
+    a = await _load_three(tmp_path, {"alpha"})
+    b = await ScheduleRegistry.load(tmp_path / "schedules", active_names={"beta", "gamma"})
+    async with anyio.create_task_group() as tg:
+        a.start_all(tg, cast(Any, _MockAgent()))
+        b.start_all(tg, cast(Any, _MockAgent()))
+        assert set(a._runner_scopes) == {"alpha"}
+        assert set(b._runner_scopes) == {"beta", "gamma"}
+        assert set(a._runner_scopes) & set(b._runner_scopes) == set()
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_no_active_names_starts_nothing_but_still_loads(tmp_path: Path) -> None:
+    """An ordinary user Session reads every entry but fires none (刻意为之)."""
+    sr = await _load_three(tmp_path, None)
+    async with anyio.create_task_group() as tg:
+        sr.start_all(tg, cast(Any, _MockAgent()))
+        assert sr._runner_scopes == {}
+        assert sr.active_schedules == []
+        assert len(sr.schedules) == 3
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_refresh_only_starts_runners_for_active_names(tmp_path: Path) -> None:
+    """refresh's add/update counts ignore activation, but only activated entries get a runner."""
+    sr = await ScheduleRegistry.load(tmp_path / "schedules", active_names={"wanted"})
+    sched_root = tmp_path / "schedules"
+    for name in ("wanted", "unwanted"):
+        d = sched_root / name
+        await anyio.Path(d).mkdir(parents=True)
+        await anyio.Path(d / "TASK.md").write_text(f'---\nname: {name}\ncron: "0 12 * * *"\n---\nT', encoding="utf-8")
+    sr._work_dir = sched_root
+    sr._agent = cast(Any, _MockAgent())
+    async with anyio.create_task_group() as tg:
+        sr._task_group = tg
+        result = await sr.refresh()
+        # Both are registered (counts and listing ignore activation)
+        assert result == {"wanted": "added", "unwanted": "added"}
+        # but only the activated one got a runner
+        assert set(sr._runner_scopes) == {"wanted"}
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_empty_whitelist_starts_no_watcher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Session that activates nothing must not poll the disk."""
+    monkeypatch.setattr(schedule_registry_module, "_WATCH_INTERVAL_SECONDS", 0.05)
+    refreshed = 0
+    sr = await _load_three(tmp_path, None)
+
+    async def _counting_refresh() -> dict[str, str]:
+        nonlocal refreshed
+        refreshed += 1
+        return {}
+
+    monkeypatch.setattr(sr, "refresh", _counting_refresh)
+    async with anyio.create_task_group() as tg:
+        sr.start_all(tg, cast(Any, _MockAgent()))
+        await anyio.sleep(0.3)
+        assert refreshed == 0
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_is_active_wildcard_and_names() -> None:
+    assert ScheduleRegistry(active_names={ACTIVATE_ALL}).is_active("anything") is True
+    assert ScheduleRegistry(active_names={"a"}).is_active("a") is True
+    assert ScheduleRegistry(active_names={"a"}).is_active("b") is False
+    assert ScheduleRegistry().is_active("a") is False
+
+
+@pytest.mark.anyio
+async def test_deactive_names_win_over_active() -> None:
+    """The blacklist wins: even a wildcard whitelist yields to it."""
+    sr = ScheduleRegistry(active_names={ACTIVATE_ALL}, deactive_names={"skip"})
+    assert sr.is_active("skip") is False
+    assert sr.is_active("other") is True
+    # One name in both lists -> does not fire.
+    assert ScheduleRegistry(active_names={"x"}, deactive_names={"x"}).is_active("x") is False
+    # Wildcard blacklist = fire nothing.
+    assert ScheduleRegistry(active_names={ACTIVATE_ALL}, deactive_names={ACTIVATE_ALL}).is_active("x") is False
+
+
+@pytest.mark.anyio
+async def test_blacklist_excludes_named_entry_only(tmp_path: Path) -> None:
+    """Everything-except-beta is mine - a split an enumerated whitelist cannot express."""
+    sr = await _load_three(tmp_path, {ACTIVATE_ALL}, deactive={"beta"})
+    async with anyio.create_task_group() as tg:
+        sr.start_all(tg, cast(Any, _MockAgent()))
+        assert set(sr._runner_scopes) == {"alpha", "gamma"}
+        assert len(sr.schedules) == 3
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_wildcard_picks_up_schedule_created_after_start(tmp_path: Path) -> None:
+    """A wildcard whitelist fires entries created after start - an enumerated one does not.
+
+    This is why the blacklist exists: "everything except these few" can only be
+    written as ``*`` plus a blacklist.
+    """
+    wild = await _load_three(tmp_path, {ACTIVATE_ALL}, deactive={"beta"})
+    enumerated = await ScheduleRegistry.load(tmp_path / "schedules", active_names={"alpha", "gamma"})
+    sched_root = tmp_path / "schedules"
+    d = sched_root / "delta"
+    await anyio.Path(d).mkdir(parents=True)
+    await anyio.Path(d / "TASK.md").write_text('---\nname: delta\ncron: "0 12 * * *"\n---\nT', encoding="utf-8")
+
+    async with anyio.create_task_group() as tg:
+        for sr in (wild, enumerated):
+            sr._agent = cast(Any, _MockAgent())
+            sr._task_group = tg
+            await sr.refresh()
+        assert "delta" in wild._runner_scopes
+        assert "delta" not in enumerated._runner_scopes
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_named_whitelist_with_no_match_still_starts_watcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-empty whitelist matching nothing yet must still start the watcher (刻意为之).
+
+    The gate is "whitelist is non-empty", not "there are activated entries": the
+    named ``TASK.md`` may be created later, and without the watcher it would never
+    be discovered.
+    """
+    monkeypatch.setattr(schedule_registry_module, "_WATCH_INTERVAL_SECONDS", 0.05)
+    refreshed = anyio.Event()
+    sr = await _load_three(tmp_path, {"not-on-disk-yet"})
+    assert sr.active_schedules == []
+
+    async def _signal_refresh() -> dict[str, str]:
+        refreshed.set()
+        return {}
+
+    monkeypatch.setattr(sr, "refresh", _signal_refresh)
+    async with anyio.create_task_group() as tg:
+        sr.start_all(tg, cast(Any, _MockAgent()))
+        assert sr._runner_scopes == {}
+        with anyio.fail_after(2):
+            await refreshed.wait()
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_empty_registry_start_all_is_noop(tmp_path: Path) -> None:
+    """Empty registry (no work_dir): loads nothing, fires nothing."""
+    sr = ScheduleRegistry()
+    async with anyio.create_task_group() as tg:
+        sr.start_all(tg, cast(Any, _MockAgent()))
+        assert sr.schedules == []
+        assert sr._runner_scopes == {}
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_empty_registry_refresh_is_noop() -> None:
+    """An empty registry's refresh does not scan the disk - non-scheduler Sessions call it every turn."""
+    sr = ScheduleRegistry()
+    sr._agent = cast(Any, _MockAgent())
+    async with anyio.create_task_group() as tg:
+        sr._task_group = tg
+        assert await sr.refresh() == {}
+        assert sr.schedules == []
+        tg.cancel_scope.cancel()
 
 
 # ── YAML parse helper ─────────────────────────────────────────────────────────

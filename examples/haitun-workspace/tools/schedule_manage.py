@@ -18,7 +18,10 @@ from croniter import croniter
 
 
 def _schedules_dir() -> anyio.Path:
-    # Schedules are session/user data under the workspace.
+    # Schedules are session/user data under the workspace (刻意为之: they belong to
+    # the user workspace, not the agent pack — the Gateway runs many Sessions in
+    # one process and Feishu gives each open_id its own, so putting them in the
+    # agent pack would make everyone share one set of scheduled tasks).
     return _paths.resolve_workspace() / "schedules"
 
 
