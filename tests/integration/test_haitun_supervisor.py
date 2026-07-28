@@ -464,9 +464,7 @@ async def test_apply_updates_seeds_new_domain_map_when_model_omits_proposal(tmp_
     module = _load_supervisor_manager()
     manager = module.SupervisorManager(anyio.Path(tmp_path))
     advice = module.validate_advice(_valid_advice())
-    advice["classification"].update(
-        {"domain": "machine-learning", "topic": "model-evaluation", "is_learning": True}
-    )
+    advice["classification"].update({"domain": "machine-learning", "topic": "model-evaluation", "is_learning": True})
     advice["map_updates"] = {"proposed_map": None, "visited_nodes": [], "branch_additions": []}
 
     await manager._apply_updates(_ALICE_HASH, advice, {})

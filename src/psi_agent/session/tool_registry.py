@@ -115,9 +115,7 @@ class ToolFunction:
                             "type": "array",
                             "items": {
                                 "type": "object",
-                                "additionalProperties": (
-                                    {} if value_type is Any else {"type": _type_map[value_type]}
-                                ),
+                                "additionalProperties": ({} if value_type is Any else {"type": _type_map[value_type]}),
                             },
                         }
                     elif item_origin is not None or item not in _type_map:

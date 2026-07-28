@@ -425,9 +425,7 @@ async def wiki_links_impl(title_or_slug: str, *, workspace_raw: str = "") -> dic
     pages = await _iter_pages(workspace)
     known = {slug for slug, _, _ in pages}
     if target not in known:
-        return _error(
-            f"No wiki page named {target!r}.", slug=target, hint="检查拼写,或使用 `wiki_list` 查看所有页面。"
-        )
+        return _error(f"No wiki page named {target!r}.", slug=target, hint="检查拼写,或使用 `wiki_list` 查看所有页面。")
 
     outgoing: list[str] = []
     backlinks: list[str] = []

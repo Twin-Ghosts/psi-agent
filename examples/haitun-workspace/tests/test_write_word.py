@@ -85,7 +85,7 @@ async def test_renders_blocks_and_table(tmp_path: Path) -> None:
 
 async def test_accepts_structured_blocks_without_json_escaping(tmp_path: Path) -> None:
     out = tmp_path / "structured.docx"
-    blocks = [{"type": "paragraph", "text": '含有“引号”和换行\n的合同条款'}]
+    blocks = [{"type": "paragraph", "text": "含有“引号”和换行\n的合同条款"}]
 
     result = await tool.write_word(str(out), blocks)
 

@@ -173,4 +173,3 @@ async def test_accepts_native_tool_call_array(tmp_path: Path) -> None:
 
     assert result["ok"] is True
     assert result["todos"] == todos
-

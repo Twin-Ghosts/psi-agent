@@ -76,8 +76,7 @@ def registration_profile() -> dict[str, object]:
 def _question(topic: str, phase: int, depth: str, intent: str) -> str:
     if depth == "simple":
         return (
-            topic
-            + "\u8bf7\u7b80\u5355\u89e3\u91ca, \u4e0d\u8981\u6df1\u5165; "
+            topic + "\u8bf7\u7b80\u5355\u89e3\u91ca, \u4e0d\u8981\u6df1\u5165; "
             "\u7ed9\u4e00\u4e2a\u751f\u6d3b\u5316\u4f8b\u5b50."
         )
     if depth == "deep":
