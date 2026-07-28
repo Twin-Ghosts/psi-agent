@@ -212,7 +212,7 @@ def _socket_path(prefix: str, kind: str, entity_id: str) -> str:
 4. `_ensure_socket_dir(socket)` 创建父目录（anyio 异步）
 5. 构造 `Ai(...)`（传入 api_key + base_url），创建 `CancelScope`，`task_group.start_soon`
 6. 存入 `_entries`
-7. `_wait_socket(socket)` 轮询等待 socket 出现
+7. `_wait_socket(socket)` 轮询等待 socket 出现（默认 120s 上限，超时抛 `TimeoutError` 走 rollback）
 8. 成功后调用 `_persist`，返回 `AiInfo`
    失败则 rollback：pop entry + cancel scope + remove socket + 调用 `_persist`
 
@@ -259,7 +259,7 @@ Gateway 不重复实现语义选择或 SSE 代理。状态恢复顺序固定为 
 5. `_ensure_socket_dir(socket)` 创建父目录
 6. 构造 `Session(...)`，创建 `CancelScope`，`task_group.start_soon`
 7. 存入 `_entries`
-8. `_wait_socket()` 轮询等待 channel socket 就绪
+8. `_wait_socket()` 轮询等待 channel socket 就绪（默认 120s 上限，超时抛 `TimeoutError` 走 rollback）
 9. 成功后调用 `_persist`，返回 `SessionInfo`
    失败则 rollback：pop entry + cancel scope + remove socket + 调用 `_persist`
 
