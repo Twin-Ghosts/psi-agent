@@ -6,6 +6,7 @@ import os
 import socket
 import tempfile
 import textwrap
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import anyio
@@ -337,7 +338,10 @@ async def test_gateway_chat_sse(tmp_path: str, mock_ai_server: MockAIServer) -> 
 
 
 @pytest.mark.anyio
-async def test_gateway_blob_send(tmp_path: str, mock_ai_server: MockAIServer) -> None:
+async def test_gateway_blob_send(tmp_path: str, mock_ai_server: MockAIServer, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Inbound blobs land in ~/Downloads/.psi/, so redirect Path.home() to keep
+    # the run from littering the developer's real Downloads folder.
+    monkeypatch.setattr(Path, "home", lambda: Path(str(tmp_path)))
     data_dir = tempfile.mkdtemp(dir="/tmp", prefix="gwb")
     test_file = data_dir + "/test-out.txt"
     await anyio.Path(test_file).write_text("blob response content", encoding="utf-8")
