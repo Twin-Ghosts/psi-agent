@@ -91,15 +91,14 @@ async def test_agent_triggers_compaction_on_signal() -> None:
 
         await anyio.sleep(0.02)
 
-        assert len(conv.messages) > 1
+        assert len(conv.messages) >= 4
         assert conv.messages[0]["role"] == "system"
-        system_text = conv.messages[0]["content"]
-        assert "You are helpful." in system_text
-        assert "[Compacted History]" in system_text
-        assert "Mocked summary" in system_text
+        assert conv.messages[0]["content"] == "You are helpful."
+        compacted_msg = conv.messages[-1]
+        assert compacted_msg["role"] == "compacted"
+        assert compacted_msg["kind"] == "compacted"
+        assert "Mocked summary" in compacted_msg["content"]
         assert len(recorded_messages) == 1
-        for msg in conv.messages[1:]:
-            assert msg.get("kind") == "compacted"
     finally:
         await runner.cleanup()
 
@@ -206,11 +205,10 @@ async def test_agent_compaction_creates_system_if_missing() -> None:
 
         [c async for c in agent.run({"role": "user", "content": "hi"})]
 
-        assert len(conv.messages) > 1
-        assert conv.messages[0]["role"] == "system"
-        assert "[Compacted History]" in conv.messages[0]["content"]
-        assert "Compacted summary." in conv.messages[0]["content"]
-        for msg in conv.messages[1:]:
-            assert msg.get("kind") == "compacted"
+        assert len(conv.messages) >= 3
+        compacted_msg = conv.messages[-1]
+        assert compacted_msg["role"] == "compacted"
+        assert compacted_msg["kind"] == "compacted"
+        assert "Compacted summary." in compacted_msg["content"]
     finally:
         await runner.cleanup()

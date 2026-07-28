@@ -110,13 +110,68 @@ def with_chat_type(msg: dict[str, Any], chat_type: str) -> dict[str, Any]:
 
 
 def messages_for_ai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Project history for the AI backend: skip compacted messages,
-    drop display-only keys, fix legacy roles."""
+    """Project history for the AI backend.
+
+    - Strips display-only keys (``kind``, ``chat_type``) and fixes legacy roles.
+    - If a ``compacted`` message exists: deletes all messages between
+      the first ``system`` (index 0) and the last ``compacted`` (exclusive),
+      merges the compaction summary into the system message, and drops the
+      ``compacted`` message itself.
+    """
+    if not messages:
+        return []
+
+    compacted_idx: int | None = None
+    compacted_content: str = ""
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if isinstance(msg, dict) and msg.get("role") == "compacted":
+            compacted_idx = i
+            compacted_content = msg.get("content", "")
+            break
+
+    if compacted_idx is not None:
+        system_idx: int | None = None
+        for i, msg in enumerate(messages):
+            if isinstance(msg, dict) and msg.get("role") == "system":
+                system_idx = i
+                break
+
+        if system_idx is not None and system_idx < compacted_idx:
+            after = messages[compacted_idx + 1 :]
+            result: list[dict[str, Any]] = []
+
+            system_msg = messages[system_idx]
+            if isinstance(system_msg, dict):
+                projected = {
+                    k: v
+                    for k, v in system_msg.items()
+                    if k not in _DISPLAY_ONLY_KEYS
+                }
+                projected["role"] = "system"
+                projected["content"] = (
+                    projected.get("content", "")
+                    + "\n\n[Compacted History]\n"
+                    + compacted_content
+                )
+                result.append(projected)
+
+            for msg in after:
+                if not isinstance(msg, dict):
+                    continue
+                role = wire_role(msg.get("role"))
+                if role is None:
+                    continue
+                projected = {
+                    k: v for k, v in msg.items() if k not in _DISPLAY_ONLY_KEYS
+                }
+                projected["role"] = role
+                result.append(projected)
+            return result
+
     out: list[dict[str, Any]] = []
     for msg in messages:
         if not isinstance(msg, dict):
-            continue
-        if message_kind(msg) == KIND_COMPACTED:
             continue
         role = wire_role(msg.get("role"))
         if role is None:

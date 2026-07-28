@@ -414,8 +414,9 @@ class SessionAgent:
                     yield AgentChunk(content="[Max tool rounds reached]")
 
     async def _maybe_compact(self) -> None:
-        """Invoke compact_history from system.py, merge result into system
-        prompt, mark old messages as compacted."""
+        """Invoke compact_history from system.py, insert compaction message
+        into conversation.  system prompt merge + old-message trimming is
+        deferred to ``messages_for_ai()``."""
         compaction_fn = self._system_prompt.compaction_fn
         if compaction_fn is None:
             logger.warning("No compact_history function in system.py, skipping compaction")
@@ -436,16 +437,9 @@ class SessionAgent:
             summary = await compaction_fn(self._conversation.messages, complete_fn)
             logger.info(f"Compaction summary generated ({len(summary)} chars)")
 
-            has_system = self._conversation.messages and self._conversation.messages[0].get("role") == "system"
-            if has_system:
-                old = self._conversation.messages[0].get("content", "")
-                self._conversation.replace_system(f"{old}\n\n[Compacted History]\n{summary}")
-            else:
-                self._conversation.replace_system(f"[Compacted History]\n{summary}")
-
-            for msg in self._conversation.messages[1:]:
-                msg["kind"] = KIND_COMPACTED
-
+            self._conversation.add(
+                {"role": "compacted", "content": summary, "kind": KIND_COMPACTED}
+            )
             await self._conversation.commit()
             logger.info("Compaction completed")
         except Exception as e:
