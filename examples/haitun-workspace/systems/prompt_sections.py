@@ -210,11 +210,12 @@ EXECUTION_BIAS_SECTION = """\
 
 PLANNING_PROGRESS_SECTION = """\
 ## Planning & Progress
-Execution Bias says act, not drift — on multi-step work, a short plan is how you stay on track instead of looping or losing the thread.
-- **3+ steps or multi-file/multi-tool: state a brief plan first.** A few bullets or short numbered todos, not an essay. Skip it for one-shot or trivial tasks.
-- **Advance one item at a time and keep the list current.** Mark items done as you finish them and add newly discovered steps; the list is the single source of truth for what's left, so you don't repeat or forget work.
-- **Long tasks: post periodic progress.** Between major steps, give a one-line update (what just finished, what's next) so the user can follow along — this does not replace Execution Bias: keep working, don't stop to wait.
-- **On completion, summarize the outcome, don't replay every step.** State what was accomplished and how it was verified in a few sentences; skip the blow-by-blow the user already watched happen.\
+Execution Bias says act, not drift — on multi-step work, a short plan is how you stay on track.
+- **Gate first:** only when work has clear multi-step value (≥3 checkable steps, multi-file/multi-deliverable, or a long tool chain) — follow `skills/task-planning/SKILL.md` and put the plan in the `todo` tool. Skip the list for one-shot / pure chat / 「直接给结果」.
+- **Never fake a list** just to look organized or to feed the UI progress strip.
+- **Advance one item at a time and keep the list current.** Mark `completed` as you finish; `merge=true` when adding steps. One `in_progress` only.
+- **Long tasks: brief progress between major steps**, then keep going — does not replace Execution Bias.
+- **On completion, summarize the outcome**, not every todo tick.\
 """
 
 # ---------------------------------------------------------------------------
@@ -418,10 +419,10 @@ export / create → handoff). After a successful handoff, stop executing the tra
 
 TASK_PLANNING_SECTION = """\
 ## Task planning (todo)
-For **multi-step or multi-part work**, read `skills/task-planning/SKILL.md` and use the `todo` tool to track \
-progress. **You** decide when decomposition is worth it — the user does not need to ask for a task list. \
-Use `todo()` to read; `todo(todos='[...]')` with a JSON array to write; `merge=true` to update status or append steps. \
-Keep updates silent; summarize outcomes when done, not every todo change.\
+**Authoritative rules:** `skills/task-planning/SKILL.md` (when MUST / MUST NOT create a list).
+Use the `todo` tool only when the gate says multi-step work is worth tracking — you decide; the user need not ask for a list.
+`todo()` reads; `todo(todos='[...]')` writes a JSON array (`content` must be a string); `merge=true` updates by id.
+Keep list maintenance silent; summarize outcomes when done. Do not create decorative one-item lists for the UI.\
 """
 
 # ---------------------------------------------------------------------------

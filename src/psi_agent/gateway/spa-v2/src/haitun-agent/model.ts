@@ -25,7 +25,14 @@ export type Task = {
   shortTitle: string;
   category: string;
   summary: string;
+  /** 0–100 from todo completed/total, or 100 when done; ignore when ``progressIndeterminate``. */
   progress: number;
+  /** No todo list + in-flight — pulse UI, do not show a fake %. */
+  progressIndeterminate?: boolean;
+  /** Corner text when ``hasTodoTrack`` (e.g. ``2/5``). */
+  progressLabel?: string;
+  /** Session has an active todo list — sidebar shows real steps / N/M. */
+  hasTodoTrack?: boolean;
   status: TaskStatus;
   statusLabel: string;
   eta: string;

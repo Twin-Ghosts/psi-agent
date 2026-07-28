@@ -842,7 +842,7 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
       ...sessionToTask(session, title, {
         summary: `Agent 已收到任务描述：“${summarySeed.slice(0, 58)}${summarySeed.length > 58 ? "…" : ""}”`,
         status: "working",
-        progress: 8,
+        progress: 0,
       }),
       category: category || "自由任务",
     };

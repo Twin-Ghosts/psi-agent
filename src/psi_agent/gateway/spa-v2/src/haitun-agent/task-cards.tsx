@@ -1,11 +1,18 @@
 import {
   AlertCircle,
   Check,
+  ChevronLeft,
+  ChevronRight,
   Trash2,
 } from "lucide-react";
 import { type CSSProperties, useEffect, useState } from "react";
-import { DELIVERY_LABEL, OVERVIEW_LABEL, PENDING_LABEL, type Task } from "./model";
+import { DELIVERY_LABEL, OVERVIEW_LABEL, PENDING_LABEL, type Task, type TaskStep } from "./model";
 import { ProgressRing, TreasureButton, TreasureVisual } from "./primitives";
+
+/** 3 columns × 2 rows — middle step viewport stays fixed; overflow pages. */
+const STEPS_COLS = 3;
+const STEPS_ROWS = 2;
+const STEPS_PER_PAGE = STEPS_COLS * STEPS_ROWS;
 
 /** Local calendar day as ``M 月 D 日`` (zh-CN overview eyebrow). */
 export function formatOverviewDay(date: Date = new Date()): string {
@@ -60,7 +67,13 @@ export function TaskRow({
       <button type="button" className="task-row-select" onClick={onSelect} aria-label={`打开任务：${task.title}`}>
         <span className="task-row-main">
           <span className="task-row-progress-line">
-            <ProgressRing value={task.progress} continuous={task.status === "continuous"} size="sm" />
+            <ProgressRing
+              value={task.progress}
+              continuous={task.status === "continuous" || !!task.progressIndeterminate}
+              size="sm"
+              showValue={task.hasTodoTrack || task.phase === "done"}
+              label={task.hasTodoTrack ? task.progressLabel : undefined}
+            />
             {task.status === "attention" ? (
               <span className="mini-alert" title="需要处理">
                 <AlertCircle size={13} />
@@ -94,7 +107,10 @@ export function TaskRow({
 export function OverviewCard({ tasks }: { tasks: Task[] }) {
   const dayLabel = useLiveOverviewDay();
   const finiteTasks = tasks.filter((task) => task.status !== "continuous");
-  const overall = Math.round(finiteTasks.reduce((sum, task) => sum + task.progress, 0) / Math.max(finiteTasks.length, 1));
+  const tracked = finiteTasks.filter((task) => task.hasTodoTrack);
+  const overall = tracked.length
+    ? Math.round(tracked.reduce((sum, task) => sum + task.progress, 0) / tracked.length)
+    : Math.round((finiteTasks.filter((task) => task.phase === "done" || task.status === "completed").length / Math.max(finiteTasks.length, 1)) * 100);
   const working = tasks.filter((task) => ["working", "continuous"].includes(task.status)).length;
   const attention = tasks.filter((task) => task.status === "attention").length;
   const completed = tasks.filter((task) => task.status === "completed").length;
@@ -140,6 +156,121 @@ export function OverviewCard({ tasks }: { tasks: Task[] }) {
   );
 }
 
+function StepChip({ step, showBusyHint }: { step: TaskStep; showBusyHint: boolean }) {
+  return (
+    <div className={`task-step ${step.state}`}>
+      <span className="step-marker">
+        {step.state === "done" ? <Check size={16} /> : step.state === "working" ? <span /> : null}
+      </span>
+      <span className="task-step-label">
+        {step.label}
+        {step.state === "working" && <em>{step.detail?.trim() || (showBusyHint ? "进行中" : "")}</em>}
+        {step.state === "waiting" && step.detail?.trim() ? <em>{step.detail.trim()}</em> : null}
+        {step.state === "done" && step.detail?.trim() ? <em>{step.detail.trim()}</em> : null}
+      </span>
+    </div>
+  );
+}
+
+function TaskStepsPanel({ task }: { task: Task }) {
+  const steps = task.steps;
+  const pageCount = Math.max(1, Math.ceil(steps.length / STEPS_PER_PAGE));
+  const [page, setPage] = useState(0);
+
+  useEffect(() => {
+    setPage(0);
+  }, [task.id]);
+
+  useEffect(() => {
+    setPage((p) => Math.min(p, pageCount - 1));
+  }, [pageCount]);
+
+  const safePage = Math.min(page, pageCount - 1);
+  const start = safePage * STEPS_PER_PAGE;
+  const visible = steps.slice(start, start + STEPS_PER_PAGE);
+  const showPager = steps.length > STEPS_PER_PAGE;
+  const isActivity = !task.hasTodoTrack;
+
+  return (
+    <div className={`task-steps-panel ${isActivity ? "is-activity" : ""}`}>
+      <div className="task-steps-toolbar">
+        <span className="task-steps-caption">
+          {isActivity ? "活动状态" : "执行步骤"}
+          {!isActivity && task.progressLabel ? <em>{task.progressLabel}</em> : null}
+        </span>
+        {showPager ? (
+          <div className="task-steps-pager" role="group" aria-label="步骤翻页">
+            <button
+              type="button"
+              className="task-steps-page-btn"
+              disabled={safePage <= 0}
+              aria-label="上一页步骤"
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+            >
+              <ChevronLeft size={16} />
+            </button>
+            <span aria-live="polite">{safePage + 1}/{pageCount}</span>
+            <button
+              type="button"
+              className="task-steps-page-btn"
+              disabled={safePage >= pageCount - 1}
+              aria-label="下一页步骤"
+              onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+            >
+              <ChevronRight size={16} />
+            </button>
+          </div>
+        ) : null}
+      </div>
+      <div className="task-steps-viewport">
+        <div className={`task-steps ${isActivity ? "task-steps-activity" : ""}`}>
+          {visible.map((step, index) => (
+            <StepChip
+              key={`${safePage}-${start + index}-${step.label}`}
+              step={step}
+              showBusyHint={!!task.hasTodoTrack}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TaskLinearProgress({ task }: { task: Task }) {
+  const busy = !!task.progressIndeterminate;
+  const label = task.hasTodoTrack
+    ? "步骤进度"
+    : busy
+      ? "处理中"
+      : task.phase === "done"
+        ? "本轮进度"
+        : "活动";
+  const valueText = task.hasTodoTrack
+    ? (task.progressLabel || `${task.progress}%`)
+    : busy
+      ? "…"
+      : task.phase === "done"
+        ? "完成"
+        : "待续";
+  const width = busy && !task.hasTodoTrack ? 42 : Math.max(0, Math.min(100, task.progress));
+
+  return (
+    <div
+      className={`task-linear-progress ${busy ? "indeterminate" : ""} ${task.phase === "done" ? "done" : ""}`}
+      aria-label={`${label} ${valueText}`}
+    >
+      <div className="task-linear-progress-meta">
+        <span>{label}</span>
+        <strong>{valueText}</strong>
+      </div>
+      <div className="task-linear-track">
+        <span style={busy && !task.hasTodoTrack ? undefined : { width: `${width}%` }} />
+      </div>
+    </div>
+  );
+}
+
 export function TaskCard({
   task,
   onOpenArtifact,
@@ -152,15 +283,10 @@ export function TaskCard({
   return (
     <article className="focus-card task-card" style={{ "--task-accent": task.accent } as CSSProperties}>
       <div className="task-accent-line" />
-      <div
-        className={`task-corner-progress ${task.status === "continuous" ? "continuous" : ""}`}
-        style={{ "--progress": `${task.progress * 3.6}deg` } as CSSProperties}
-        aria-label={`${task.status === "continuous" ? "本轮巡检进度" : "任务进度"} ${task.progress}%`}
-      >
-        <div>
-          <strong>{task.progress}%</strong>
-          <span>{task.status === "continuous" ? "巡检" : "进度"}</span>
-        </div>
+
+      <div className="task-corner-treasure">
+        <span className="task-corner-treasure-label">交付物</span>
+        <TreasureButton task={task} onOpen={onOpenArtifact} />
       </div>
 
       <div className="task-title-block">
@@ -181,26 +307,10 @@ export function TaskCard({
         <p>{task.summary}</p>
       </div>
 
-      <div className="task-steps">
-        {task.steps.map((step, index) => (
-          <div className={`task-step ${step.state}`} key={`${index}-${step.label}`}>
-            <span className="step-marker">
-              {step.state === "done" ? <Check size={16} /> : step.state === "working" ? <span /> : null}
-            </span>
-            <span className="task-step-label">
-              {step.label}
-              {step.state === "working" && <em>{step.detail?.trim() || "进行中"}</em>}
-              {step.state === "done" && step.detail?.trim() ? <em>{step.detail.trim()}</em> : null}
-            </span>
-          </div>
-        ))}
-      </div>
+      <TaskStepsPanel task={task} />
 
       <footer className="task-card-footer">
-        <div className="task-delivery-slot">
-          <span className="task-delivery-label">交付物</span>
-          <TreasureButton task={task} onOpen={onOpenArtifact} />
-        </div>
+        <TaskLinearProgress task={task} />
       </footer>
     </article>
   );

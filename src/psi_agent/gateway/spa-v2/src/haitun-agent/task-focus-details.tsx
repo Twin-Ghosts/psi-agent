@@ -19,7 +19,7 @@ function FocusHistoryIcon({ item, task }: { item: FocusHistoryItem; task: Task |
   if (item.kind === "conversation") return <MessageCircle size={15} />;
   if (item.kind === "update") return <History size={15} />;
   if (task?.status === "completed") return <CheckCircle2 size={15} />;
-  return <ProgressRing value={task?.progress ?? 68} continuous={task?.status === "continuous"} size="sm" showValue={false} />;
+  return <ProgressRing value={task?.progress ?? 0} continuous={task?.status === "continuous" || !!task?.progressIndeterminate} size="sm" showValue={false} label={task?.hasTodoTrack ? task.progressLabel : undefined} />;
 }
 
 function deliveryFileDescription(fileName: string) {
@@ -44,23 +44,27 @@ export function TaskFocusDetails({
 }) {
   const workingStep = task?.steps.find((step) => step.state === "working");
   const activeStep = task?.phase === "done"
-    ? "全部执行步骤已完成"
+    ? (task.hasTodoTrack ? "全部执行步骤已完成" : "本轮已完成")
     : task?.phase === "deliver"
-      ? "产出与确认"
+      ? "正在整理交付"
       : task?.phase === "advance"
-        ? (workingStep?.detail?.trim()
-          ? `${workingStep.label} · ${workingStep.detail.trim()}`
-          : (workingStep?.label || "推进中"))
+        ? (task.hasTodoTrack
+          ? (workingStep?.detail?.trim()
+            ? `${task.progressLabel ?? workingStep.label} · ${workingStep.detail.trim()}`
+            : (workingStep?.label || task.progressLabel || "推进中"))
+          : (workingStep?.label || "待继续"))
         : workingStep
-          ? (workingStep.detail?.trim()
-            ? `${workingStep.label} · ${workingStep.detail.trim()}`
-            : workingStep.label)
+          ? workingStep.label
           : (task?.status === "completed" ? "全部执行步骤已完成" : "等待下一步");
   const historyItems: FocusHistoryItem[] = [
     ...(task ? [{
       id: `status-${task.id}`,
       kind: "status" as const,
-      title: `${task.statusLabel} · ${task.progress}%`,
+      title: task.hasTodoTrack
+        ? `${task.statusLabel} · ${task.progressLabel || `${task.progress}%`}`
+        : (task.progressIndeterminate
+          ? `${task.statusLabel} · 处理中`
+          : `${task.statusLabel}${task.phase === "done" ? " · 已完成" : ""}`),
       detail: task.summary,
       time: task.updated,
     }] : tasks.slice(0, 3).map((item) => ({
@@ -73,7 +77,10 @@ export function TaskFocusDetails({
   ].slice(0, 8);
 
   const finiteTasks = tasks.filter((item) => item.status !== "continuous");
-  const overall = Math.round(finiteTasks.reduce((sum, item) => sum + item.progress, 0) / Math.max(finiteTasks.length, 1));
+  const tracked = finiteTasks.filter((item) => item.hasTodoTrack);
+  const overall = tracked.length
+    ? Math.round(tracked.reduce((sum, item) => sum + item.progress, 0) / tracked.length)
+    : Math.round((finiteTasks.filter((item) => item.phase === "done" || item.status === "completed").length / Math.max(finiteTasks.length, 1)) * 100);
   // Historical = all session deliverables (not only "new"/ready).
   const historicalDeliveryTasks = task
     ? (task.deliverables.length ? [task] : [])
@@ -100,14 +107,33 @@ export function TaskFocusDetails({
         </div>
         <div className="focus-state-grid">
           <span><em>状态</em><strong>{task?.statusLabel ?? `${tasks.length} 个任务`}</strong></span>
-          <span><em>{task?.status === "continuous" ? "本轮进度" : "进度"}</em><strong>{task ? `${task.progress}%` : `${overall}%`}</strong></span>
+          <span>
+            <em>{task?.hasTodoTrack ? "步骤" : task?.status === "continuous" ? "本轮" : "活动"}</em>
+            <strong>
+              {task
+                ? (task.hasTodoTrack
+                  ? (task.progressLabel || "—")
+                  : task.progressIndeterminate
+                    ? "处理中"
+                    : task.phase === "done"
+                      ? "已完成"
+                      : "待继续")
+                : `${overall}%`}
+            </strong>
+          </span>
           <span><em>当前阶段</em><strong>{task ? activeStep : `${tasks.filter((item) => item.status === "attention").length} 项待您处理`}</strong></span>
           <span><em>最近更新</em><strong>{task?.updated ?? "刚刚同步"}</strong></span>
         </div>
       </section>
 
       <section className="focus-execution-path" aria-label={task ? "任务执行路径" : "任务状态列表"}>
-        <header><span><Zap size={13} />{task ? "执行路径" : "任务运行状态"}</span><em>新要求会追加到当前上下文，不覆盖既有结果</em></header>
+        <header>
+          <span>
+            <Zap size={13} />
+            {task ? (task.hasTodoTrack ? "执行步骤" : "活动状态") : "任务运行状态"}
+          </span>
+          <em>{task?.hasTodoTrack ? "来自 Session todo" : "无清单时只显示忙闲，不伪造步骤"}</em>
+        </header>
         <div>
           {(task ? task.steps : tasks.slice(0, 4).map((item) => ({ label: item.shortTitle, state: item.status === "completed" ? "done" as const : item.status === "attention" ? "waiting" as const : "working" as const, detail: undefined as string | undefined }))).map((step, index) => (
             <span className={step.state} key={`${index}-${step.label}`}>
@@ -117,8 +143,8 @@ export function TaskFocusDetails({
                 {step.state === "done"
                   ? "已完成"
                   : step.state === "working"
-                    ? (step.detail?.trim() || "进行中")
-                    : "待推进"}
+                    ? (step.detail?.trim() || (task?.hasTodoTrack ? "进行中" : "处理中"))
+                    : (step.detail?.trim() || "待推进")}
               </em>
             </span>
           ))}

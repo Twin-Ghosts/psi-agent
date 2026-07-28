@@ -6,7 +6,7 @@ const todos = (rows: Array<Pick<SessionTodo, 'id' | 'content' | 'status'>>): Ses
   rows.map((r) => ({ ...r, status: r.status }))
 
 describe('resolveTaskProgress (layered)', () => {
-  it('advance without todos → middle 「推进中」', () => {
+  it('streaming without todos → single activity「正在处理」, indeterminate', () => {
     const p = resolveTaskProgress({
       streaming: true,
       turnSettled: false,
@@ -14,12 +14,26 @@ describe('resolveTaskProgress (layered)', () => {
       hasDeliverables: false,
     })
     expect(p.phase).toBe('advance')
-    expect(p.steps[1]).toMatchObject({ label: '推进中', state: 'working' })
-    expect(p.steps[2]?.state).toBe('waiting')
-    expect(p.phaseLabel).toBe('推进中')
+    expect(p.hasTodoTrack).toBe(false)
+    expect(p.indeterminate).toBe(true)
+    expect(p.progressLabel).toBe('')
+    expect(p.steps).toEqual([{ label: '正在处理', state: 'working' }])
+    expect(p.phaseLabel).toBe('正在处理')
   })
 
-  it('advance with todos → middle N/M', () => {
+  it('idle without todos →「待继续」, not indeterminate', () => {
+    const p = resolveTaskProgress({
+      streaming: false,
+      turnSettled: false,
+      todos: [],
+      hasDeliverables: false,
+    })
+    expect(p.phase).toBe('advance')
+    expect(p.indeterminate).toBe(false)
+    expect(p.steps[0]).toMatchObject({ label: '待继续', state: 'waiting' })
+  })
+
+  it('advance with todos → checklist steps + N/M label', () => {
     const p = resolveTaskProgress({
       streaming: true,
       turnSettled: false,
@@ -31,8 +45,16 @@ describe('resolveTaskProgress (layered)', () => {
       hasDeliverables: false,
     })
     expect(p.phase).toBe('advance')
-    expect(p.steps[1]).toMatchObject({ label: '2/3', state: 'working', detail: '写方案' })
+    expect(p.hasTodoTrack).toBe(true)
+    expect(p.progressLabel).toBe('2/3')
     expect(p.progress).toBe(33)
+    expect(p.indeterminate).toBe(false)
+    expect(p.steps).toEqual([
+      { label: '调研', state: 'done' },
+      { label: '写方案', state: 'working' },
+      { label: '评审', state: 'waiting' },
+    ])
+    expect(p.phaseLabel).toBe('2/3 · 写方案')
   })
 
   it('todos all done while streaming → deliver phase', () => {
@@ -46,11 +68,11 @@ describe('resolveTaskProgress (layered)', () => {
       hasDeliverables: false,
     })
     expect(p.phase).toBe('deliver')
-    expect(p.steps[1]).toMatchObject({ label: '2/2', state: 'done' })
-    expect(p.steps[2]).toMatchObject({ label: '产出与确认', state: 'working' })
+    expect(p.steps.at(-1)).toMatchObject({ label: '产出与确认', state: 'working' })
+    expect(p.phaseLabel).toBe('产出与确认')
   })
 
-  it('turn settled → done phase with all steps complete', () => {
+  it('turn settled without todos → done single step', () => {
     const p = resolveTaskProgress({
       streaming: false,
       turnSettled: true,
@@ -58,8 +80,8 @@ describe('resolveTaskProgress (layered)', () => {
       hasDeliverables: true,
     })
     expect(p.phase).toBe('done')
-    expect(p.steps.every((s) => s.state === 'done')).toBe(true)
-    expect(p.steps[1]?.label).toBe('推进中')
+    expect(p.indeterminate).toBe(false)
     expect(p.progress).toBe(100)
+    expect(p.steps).toEqual([{ label: '本轮已完成', state: 'done' }])
   })
 })

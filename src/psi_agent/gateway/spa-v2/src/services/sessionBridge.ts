@@ -120,7 +120,7 @@ export function sessionToTask(
     summary:
       opts?.summary
       ?? '任务已接入 Gateway Session。在下方对话中继续推进，Agent 会真实执行工具并回复。',
-    progress: opts?.progress ?? 8,
+    progress: opts?.progress ?? 0,
     status,
     statusLabel: statusLabelFor(status),
     eta: status === 'completed' ? '已完成' : '进行中',

@@ -20,19 +20,29 @@ export function ProgressRing({
   continuous = false,
   size = "md",
   showValue = true,
+  label,
 }: {
   value: number;
   continuous?: boolean;
   size?: "micro" | "sm" | "md" | "lg";
   showValue?: boolean;
+  /** Prefer over numeric % (e.g. todo ``2/5``). */
+  label?: string;
 }) {
+  const text = label?.trim() || (showValue ? `${value}` : null);
   return (
     <span
       className={`progress-ring ${size} ${continuous ? "continuous" : ""}`}
-      style={{ "--progress": `${value * 3.6}deg` } as CSSProperties}
-      aria-label={continuous ? "持续任务运行中" : `进度 ${value}%`}
+      style={{ "--progress": continuous ? undefined : `${value * 3.6}deg` } as CSSProperties}
+      aria-label={
+        continuous
+          ? "任务处理中"
+          : label?.trim()
+            ? `进度 ${label.trim()}`
+            : `进度 ${value}%`
+      }
     >
-      <span>{continuous ? <Clock3 size={["micro", "sm"].includes(size) ? 11 : 15} /> : showValue ? `${value}` : <i />}</span>
+      <span>{continuous && !label ? <Clock3 size={["micro", "sm"].includes(size) ? 11 : 15} /> : text ?? <i />}</span>
     </span>
   );
 }
@@ -40,9 +50,20 @@ export function ProgressRing({
 export function StatusPill({ task }: { task: Task }) {
   const { status, statusLabel } = task;
   const Icon = status === "attention" ? AlertCircle : CheckCircle2;
+  const busy = ["working", "continuous"].includes(status) || task.progressIndeterminate;
   return (
     <span className={`status-pill ${status}`}>
-      {["working", "continuous"].includes(status) ? <ProgressRing value={task.progress} continuous={status === "continuous"} size="micro" showValue={false} /> : <Icon size={14} strokeWidth={2.4} />}
+      {busy ? (
+        <ProgressRing
+          value={task.progress}
+          continuous={status === "continuous" || !!task.progressIndeterminate}
+          size="micro"
+          showValue={false}
+          label={task.hasTodoTrack ? task.progressLabel : undefined}
+        />
+      ) : (
+        <Icon size={14} strokeWidth={2.4} />
+      )}
       {statusLabel}
     </span>
   );
