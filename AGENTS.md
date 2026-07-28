@@ -211,6 +211,10 @@ SSE 流中的特殊字段：
 
 18. **定时任务归 workspace，触发权归 (session × schedule)（刻意为之，勿"修"回每个 Session 都触发、也勿退回单个布尔）**：`schedules/` 从 **workspace** 加载（不是 agent 包）；每个 Session 都读到全部条目，但**是否起 runner 逐条决定**——`ScheduleRegistry(active_names=…, deactive_names=…)`：白名单 `None`/空 → 一条都不触发（所有用户会话的默认），`{"*"}` → 全部，具名集合 → 仅这些；黑名单**优先**做减法。两个名单都要，因为白名单是枚举、覆盖不到启动后新建的 `TASK.md`——「除某几条以外全归我」只能写成 `*` + 黑名单。未激活的条目照旧被加载进 `ScheduleRegistry.schedules` 并计入 `refresh()` 的 added/updated/removed 统计，只是 `_start_runner` no-op（想只看会触发的用 `active_schedules` property）。因为 Gateway 一进程多 Session、飞书按 `open_id` 给每个用户各 spawn 一个，若同一条被多个 Session 激活，一条定时提醒会被在线会话数乘一遍；不变式是**一条 schedule 恰好被一个 Session 激活**。粒度是逐条而非整个 Session 一个布尔：布尔只能表达「全触发 / 全不触发」，表达不了「A 条归调度 Session、B 条归某个用户会话」。Gateway 侧 `SchedulerManager.ensure()` 为每个 workspace 维护唯一一个全量激活（`("*",)`）的调度 Session——去重发生在**构造期**，因此没有租约 / 选主 / 接管这类运行时协调。详见 `session/AGENTS.md`「调度归属 workspace，触发权归属 (session × schedule)」与 `gateway/AGENTS.md`「SchedulerManager」。
 
+19. **`tg.__aexit__(None, None, None)` 不取消子任务——常驻任务会把它挂死**：传三个 `None` 是「正常退出」语义，anyio 于是**等**子任务自己结束。若任务组里有 `start_soon` 起的常驻 server（Gateway 的 AI / Session、channel core），它们永不返回，`__aexit__` 就永久阻塞。在测试里这最阴：`finally: await tg.__aexit__(None, None, None)` 会把测试体内**任何**断言失败从「失败」放大成「挂死」，traceback 都看不到（曾让 `test_manager.py` 在 Windows 上整个文件跑不完，且因 CI 只跑 Linux 而长期隐身）。退组前必须先 `tg.cancel_scope.cancel()`，或显式 `delete()` 掉每个 spawn 出来的实体。参见 `tests/psi_agent/gateway/test_manager.py` 的 `_close()` 与 `test_feishu_manager.py` 的 `_drain()`。
+
+20. **测试断言跨平台路径不能写死后缀**：`_socket_path()` 在 POSIX 上给 `/tmp/.../{id}.sock`、在 Windows 上给 `\\.\pipe\...`（无后缀）。断言 `.endswith(".sock")` 在 `ubuntu-latest` 的 CI 里永远通过，却在每台 Windows 开发机上必然失败——叠加上一条就是挂死。用平台判定函数（`test_manager.py` 的 `_is_socket_path`）。
+
 ## 测试约定
 
 - **框架**: `pytest` + `pytest-asyncio`（`asyncio_mode = "auto"`，anyio backend）

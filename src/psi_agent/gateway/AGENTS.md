@@ -195,6 +195,16 @@ def _socket_path(prefix: str, kind: str, entity_id: str) -> str:
 | AI socket | `/tmp/{socket_path}/ais/{ai_id}.sock` | `\\.\pipe\{socket_path}\ais\{ai_id}` |
 | Channel socket | `/tmp/{socket_path}/channels/{session_id}.sock` | `\\.\pipe\{socket_path}\channels\{session_id}` |
 
+**测试里断言 socket 路径不能写死 `.sock`**：由上表可见 Windows 上路径没有该后缀。CI 三个 job 全是 `ubuntu-latest`，写死 `.sock` 在 CI 里永远绿、在每台 Windows 开发机上必然失败。测试请用平台判定（见 `tests/psi_agent/gateway/test_manager.py` 的 `_is_socket_path`）。
+
+### `_wait_socket` 超时（120s，刻意为之）
+
+`_wait_socket` 有 `timeout_sec` 上限（默认 `_SOCKET_READY_TIMEOUT_SECONDS = 120.0`），超时抛 `TimeoutError`，由 `create()` 捕获走 rollback。
+
+这里有段反复：#79 最初是 30s → #248 显式移除、改为无限等待（`while True`）→ 现在加回 120s。**加回的理由**：无限等待时，一个永远起不来的服务会把调用方**永久挂住**——而调用方是 `AIManager.create()` / `SessionManager.create()`，它们又跑在 Gateway 的 REST 请求里，于是这条 HTTP 请求永不返回，`create()` 里那套 rollback（pop entry + cancel scope + remove socket + `_persist`）**一行都执行不到**，注册表停在半成品状态。有上限才能把「起不来」变成一个调用方能报告、能回滚的失败。
+
+上限取 120s 而非 30s 是**刻意的**：#248 移除超时想解决的是慢机器上误杀正常启动（冷启动、Windows Defender 扫描、swap），120s 对此足够宽松；只有真正起不来时才触发。所以这不是简单 revert #248，而是**同时**满足两边：慢启动不误杀 + 死服务不挂死。`docs/superpowers/` 下的历史 spec/plan 已同步。
+
 ## AIManager
 
 内存注册表，维护 `dict[str, _AiEntry]` + `anyio.Lock`。
@@ -623,7 +633,7 @@ AI 创建对话框支持从 provider 的 `/models` API 实时拉取可用模型�
 - `from __future__ import annotations`
 - `X | None` 非 `Optional[X]`
 - 参数透传原则（chat endpoint 额外字段穿透到 ChannelCore→Session）
-- 可取消：`finally` 清理所有 task scope + `tg.__aexit__()`
+- 可取消：`finally` 清理所有 task scope + `tg.__aexit__()`（**先取消或清空常驻任务再退**，否则 `__aexit__(None, None, None)` 会等它们结束而永久阻塞；详见「测试策略 → 测试约定」）
 
 ## CLI 集成
 
@@ -675,4 +685,7 @@ Gateway 不在 `_run.py` 的批量启动中。
 - `@pytest.mark.anyio` 标记所有异步测试
 - 集成测试使用 free port（预绑定 socket）避免端口冲突
 - `anyio.create_task_group()` + `__aenter__`/`__aexit__` 手动管理 task 生命周期
+- **退任务组前必须先取消或清空常驻任务，否则断言失败会退化成永久挂死**：manager 通过 `start_soon` 起的是常驻 server，永不自己返回。而 `await tg.__aexit__(None, None, None)` 传三个 `None` 即「正常退出」语义，anyio **不取消**子任务而是等它们结束 → 永久阻塞。于是测试体内**任何**异常都从「失败」变成「挂死」，连 traceback 都看不到（曾让 `test_manager.py` 在 Windows 上整个文件跑不完）。两种正确写法：
+  - `tg.cancel_scope.cancel()` 再 `__aexit__`——见 `test_manager.py` 的 `_close()`，用例本身不关心优雅关闭时首选；
+  - 显式 `delete()` 掉每个 spawn 出来的 Session/AI 再 `__aexit__`——见 `test_feishu_manager.py` 的 `_drain()` 与 `tests/integration/test_gateway.py`，用例要断言 delete 路径时用。
 - Mock AI server 通过 fixture 提供
