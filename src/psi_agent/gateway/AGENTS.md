@@ -108,8 +108,8 @@ Gateway state → `{appdata}/state/`（双读旧 cwd `state/`）          ← �
 
 | CLI | 含义 |
 |-----|------|
-| `--default-agent` | 新建 Session 的 Agent 包目录；空且 cwd 下存在 `examples/haitun-workspace` 时软默认到该路径；仍空则 Session `agent=""`（与 workspace 同根兼容） |
-| `--default-workspace` | 新建 Session / `GET /defaults` 的用户工作区；空 → 软默认 `{Desktop}/haitun交付`（**只宣布路径**；目录在 `SessionManager.create` / 开始对话时才 mkdir。`platformdirs.user_desktop_dir`） |
+| `--default-agent` | 新建 Session 的 Agent 包目录；空则软默认：① `cwd/examples/haitun-workspace`（仓库开发）；② cwd 自身含 `tools/`+`skills/`（Inno 安装布局 `{app}` 即能力包）；仍空则 Session `agent=""`（与 workspace 同根兼容）。Windows 安装包 `haitun.exe` **显式**传 `--default-agent {app}` |
+| `--default-workspace` | 新建 Session / `GET /defaults` 的用户工作区；空 → 软默认 `{Desktop}/haitun交付`（**只宣布路径**；目录在 `SessionManager.create` / 开始对话时才 mkdir。`platformdirs.user_desktop_dir`）。安装包 `haitun.exe` **显式**传该路径（运行时解析桌面，不写死用户名） |
 | `--appdata` | AppData 记忆区根；空 → `PSI_APPDATA` → `platformdirs`（**禁止**手写死 `%AppData%`） |
 
 `POST /sessions` 可显式带 `agent` / `workspace`；省略时用上述默认。`SessionInfo` 与 `state/latest.json` 持久化含 `agent`。
@@ -606,6 +606,20 @@ psi-agent gateway [--listen http://127.0.0.1:PORT] [--socket-path psi] [--icon P
 `--tray` 开启系统托盘图标，此时 **必须** 同时指定 `--icon`（否则报错）。托盘左键点击打开 Web Console，右键可退出 Gateway。托盘可用性与桌面环境有关，缺失时不阻塞启动。`--no-tray` 关闭托盘（默认）。仅设置 `--icon` 不开启 `--tray` 时，图标只用作 favicon。两者均不设置时不创建托盘，也不提供 favicon。
 
 `--webview` 使用原生 pywebview 窗口展示 Web Console。与 `--browser` 互斥，两者同时设为 True 时报错。必须同时指定 `--icon`（否则报错）。关闭窗口行为取决于 `--tray`：有托盘时仅隐藏窗口，无托盘时退出 Gateway 进程。
+
+`--feishu-ai-id` / `--feishu-workspace-root` 见上文飞书多用户独立会话。
+
+### Windows 安装包 launcher（`haitun.exe`）
+
+Inno 安装后 `{app}` **就是** haitun-workspace（`tools/` / `skills/` / `systems/` 在根下），不是仓库的 `examples/haitun-workspace` 嵌套布局。`.github/inno-setup/haitun.c` 编译的 `haitun.exe` 必须显式传：
+
+```text
+psi-agent.exe gateway --tray --browser --icon haitun.ico --verbose
+  --default-agent "{app}"
+  --default-workspace "{Desktop}/haitun交付"
+```
+
+`{app}` / 桌面路径在运行时解析（安装目录 + `SHGetFolderPath`），**禁止**写死本机用户路径。`--appdata` 可不传（软默认 `platformdirs`）。另：Gateway 软默认在 cwd 含 `tools/`+`skills/` 时也会把 cwd 当 agent（兜底直接跑 `psi-agent.exe`）。
 
 `--feishu-ai-id ID` 指定飞书用户 Session（经 `POST /feishu/route` 按需 spawn）默认挂载的 AI 实例 id。未配时若请求也不带 `ai_id`，`/feishu/route` 返回 400。`--feishu-workspace-root DIR` 指定各飞书用户独立 workspace 的父目录（每个 open_id 得 `<root>/<open_id>` 子目录）；空则以 Gateway 进程 cwd 为父。两者均为飞书多用户独立会话渠道服务（配合飞书 channel 的 `--gateway-url`，见 `channel/AGENTS.md`）。
 

@@ -120,11 +120,13 @@ uv run python examples/haitun-workspace/systems/system.py
 `.github/workflows/pyinstaller.yml` 的 `haitun-inno-setup` job 会自动构建 Windows 安装程序：
 
 1. PyInstaller 生成的 `psi-agent.exe` 被拷贝进本目录
-2. `haitun.iss`（Inno Setup 脚本）将整个 workspace 打包为安装程序
-3. 安装后通过 `haitun agent.vbs` 启动 `psi-agent gateway --tray --icon haitun.ico`
+2. Inno Setup（`.github/inno-setup/haitun.iss`）将整个 workspace 打包为安装程序
+3. 安装后通过 `haitun.exe`（由 `.github/inno-setup/haitun.c` 编译）启动 Gateway，**显式**传入：
+   - `--default-agent {app}`（安装目录即能力包：tools / skills / system）
+   - `--default-workspace {Desktop}/haitun交付`（用户文件区；运行时解析桌面路径）
 
-产物为 GitHub artifact `haitun-agent-installer`（`Haitun Agent Setup.exe`）。
+产物为 GitHub artifact `haitun-agent-installer-pyinstaller`（`HaiTun Agent Setup.exe`）。
 
-> `haitun agent.vbs` 启动前会读取本目录下的 `.env`（若存在），把其中的 `KEY=VALUE` 注入 `psi-agent.exe` 的运行环境（跳过空行 / `#` 注释，剥离值两端成对引号）。
+> `haitun.exe` 启动前会读取本目录下的 `.env`（若存在），把其中的 `KEY=VALUE` 注入 `psi-agent.exe` 的运行环境（跳过空行 / `#` 注释，剥离值两端成对引号）。
 
-> 安装包自带一份 MSYS2（位于 `{app}\msys64`，含 bash/git/curl/ssh、以及 ucrt64 的 nodejs/npm/uv，保留 pacman）。`haitun agent.vbs` 会把 `msys64\usr\bin` 与 `msys64\ucrt64\bin` 加到 `PATH` 最前，因此 `bash`、`node`、`npm`、`uv` 等在 Windows 上开箱即用，无需另装 Git Bash / Node。
+> 安装包自带一份 MSYS2（位于 `{app}\msys64`，含 bash/git/curl/ssh、以及 ucrt64 的 nodejs/npm/uv，保留 pacman）。`haitun.exe` 会把 `msys64\usr\bin` 与 `msys64\ucrt64\bin` 加到 `PATH` 最前，因此 `bash`、`node`、`npm`、`uv` 等在 Windows 上开箱即用，无需另装 Git Bash / Node。

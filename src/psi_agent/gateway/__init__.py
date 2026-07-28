@@ -70,9 +70,10 @@ class Gateway:
     互相隔离。空 = 以 Gateway 进程 cwd 为父目录。"""
 
     default_agent: str = ""
-    """Step 2 CLI: default agent package for new Sessions / GET /defaults.
+    """CLI: default agent package for new Sessions / GET /defaults.
 
-    Empty → soft-default ``examples/haitun-workspace`` when present under cwd,
+    Empty → soft-default ``examples/haitun-workspace`` under cwd when present;
+    else cwd when it looks like an install layout (``tools/`` + ``skills/``);
     else Session keeps single-root compat (``agent=\"\"`` → same as workspace).
     """
 
