@@ -7,7 +7,7 @@ import { api } from './api.js'
  */
 export const DEFAULT_REMOTE_AI = {
   provider: 'openai',
-  model: 'deepseek-v4-flash-free',
+  model: 'deepseek-v4-flash',
   base_url: 'https://misakamikoto.genuineknowledge.cn',
   api_key: 'haitun-default',
 }
