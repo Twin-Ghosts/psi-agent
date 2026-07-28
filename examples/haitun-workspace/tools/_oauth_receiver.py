@@ -27,6 +27,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import anyio
+import anyio.abc
 
 # 回调基址: 用户浏览器能打开的 Gateway 地址 (如 https://haitun.example.com)。
 _CALLBACK_BASE_ENV = "PSI_OAUTH_CALLBACK_BASE"
