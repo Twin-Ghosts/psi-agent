@@ -84,18 +84,25 @@ def validate_mcp_url(raw: str) -> str:
         raise ValueError("FUSION_MEMORY_MCP_URL must not contain credentials, query, or fragment")
     if parts.scheme == "https":
         return url
-    if parts.scheme == "http" and _is_loopback_host(hostname):
+    if parts.scheme == "http" and _is_trusted_plaintext_host(hostname):
         return url
-    raise ValueError("FUSION_MEMORY_MCP_URL must use HTTPS except for loopback development")
+    raise ValueError("FUSION_MEMORY_MCP_URL must use HTTPS except for loopback or private-network hosts")
 
 
-def _is_loopback_host(hostname: str) -> bool:
+def _is_trusted_plaintext_host(hostname: str) -> bool:
+    """Hosts allowed to use plain http: loopback and RFC1918 private-network IPs.
+
+    A same-LAN Fusion Memory deployment often terminates on a private IP without
+    public TLS (e.g. ``http://192.168.x.x:PORT/mcp``). Loopback stays allowed for
+    local development; public hosts still require HTTPS.
+    """
     if hostname.lower() == "localhost":
         return True
     try:
-        return ipaddress.ip_address(hostname).is_loopback
+        address = ipaddress.ip_address(hostname)
     except ValueError:
         return False
+    return address.is_loopback or address.is_private
 
 
 def build_memory_config(env: Mapping[str, str] | None = None) -> MemoryMcpConfig:
