@@ -26,9 +26,10 @@ class SystemPrompt:
     ``True`` triggers an in-place rebuild.
     ``compaction_fn(history, complete_fn) → str`` summarises the
     conversation history when the token budget is exceeded.
-    ``refresher() → str`` is called before every agent turn to rebuild only
-    the *volatile tail* of the prompt (wall-clock time, runtime line). See
-    ``refresh_dynamic`` below for why this exists separately from ``checker``.
+    ``refresher(current) → str`` is called before every agent turn to
+    re-render only the *volatile tail* of an existing prompt (wall-clock time,
+    dynamic context files). See ``ensure`` for why this is separate from
+    ``checker``.
 
     Defaults: if no builder is provided, an empty prompt is used.  If
     no checker is provided, the prompt is never rebuilt.  If no
@@ -68,7 +69,33 @@ class SystemPrompt:
         return cls(builder=builder, checker=checker, compaction_fn=compaction_fn, refresher=refresher)
 
     async def ensure(self, conversation: Conversation) -> None:
-        """Build or rebuild the system prompt if needed."""
+        """Build, rebuild, or refresh the volatile tail of the system prompt.
+
+        Three paths, in order of precedence:
+
+        1. Empty history → build the whole prompt.
+        2. ``checker()`` says yes → rebuild the whole prompt (already current,
+           so no refresh on top).
+        3. Otherwise → re-render only the part after the workspace's cache
+           boundary, via ``system_prompt_dynamic_suffix()``.
+
+        Path 3 exists because the prompt is otherwise built once and reused for
+        the life of the history, which freezes everything in it that describes
+        **now**: a Session opened on Monday kept telling users it was Monday
+        all week, and a wrong ``Time zone`` label baked in at build time stayed
+        wrong for as long as the Session lived. Rebuilding it all every turn
+        would fix the clock and break two other things — a full workspace
+        re-scan per turn (~110 ms for a ~150 KB prompt here), and a cached
+        prefix that changes every turn, defeating upstream prompt caching. So
+        only the tail is re-rendered; the stable prefix, and its cache entry,
+        survive byte-for-byte.
+
+        A workspace opts in by exposing ``system_prompt_dynamic_suffix()``;
+        those that don't are left exactly as they were. A refresher that
+        raises, returns a non-string, or finds no boundary is likewise a no-op,
+        because a stale clock is a far smaller problem than a system prompt
+        truncated at a boundary we could not locate.
+        """
         if not conversation.messages:
             try:
                 sp = await self._builder()
@@ -76,40 +103,18 @@ class SystemPrompt:
                 conversation.replace_system(sp)
             except Exception as e:
                 logger.error(f"Failed to build system prompt: {e}")
-        else:
-            try:
-                if await self._checker():
-                    sp = await self._builder()
-                    logger.info(f"System prompt rebuilt ({len(sp)} chars)")
-                    conversation.replace_system(sp)
-                    return
-            except Exception as e:
-                logger.error(f"Rebuild check or rebuild failed: {e}")
-            await self.refresh_dynamic(conversation)
+            return
 
-    async def refresh_dynamic(self, conversation: Conversation) -> None:
-        """Re-render the volatile tail of an existing system prompt in place.
+        try:
+            if await self._checker():
+                sp = await self._builder()
+                logger.info(f"System prompt rebuilt ({len(sp)} chars)")
+                conversation.replace_system(sp)
+                return
+        except Exception as e:
+            logger.error(f"Rebuild check or rebuild failed: {e}")
 
-        The system prompt is built once, on the first turn of a Session, and
-        then reused verbatim for the life of that history. That is right for
-        the *stable* part (identity, skills index, tooling) but wrong for
-        anything that describes **now**: a Session opened on Monday kept
-        telling users it was Monday all week, and a wrong ``Time zone`` label
-        baked in at build time stayed wrong for as long as the Session lived.
-
-        Rebuilding the whole prompt every turn would fix the clock and break
-        two other things: it costs a full workspace re-scan (~130 ms, ~150 KB
-        of prompt here) and it changes the cached prefix on every single turn,
-        defeating upstream prompt caching. So the workspace splits its prompt
-        at a cache boundary and re-renders only what follows it: the stable
-        prefix — and its cache entry — survives untouched.
-
-        A workspace opts in by exposing ``system_prompt_dynamic_suffix()``.
-        Workspaces that don't are left exactly as they were; a refresher that
-        fails or returns no boundary is likewise a no-op, because a stale
-        clock is a much smaller problem than a truncated system prompt.
-        """
-        if self._refresher is None or not conversation.messages:
+        if self._refresher is None:
             return
         head = conversation.messages[0]
         if head.get("role") != "system":
@@ -125,7 +130,7 @@ class SystemPrompt:
         if not isinstance(refreshed, str) or not refreshed or refreshed == current:
             return
         conversation.replace_system(refreshed)
-        logger.debug(f"System prompt dynamic tail refreshed ({len(refreshed)} chars)")
+        logger.info(f"System prompt dynamic tail refreshed ({len(refreshed)} chars)")
 
     # -- module loading --------------------------------------------------------
 

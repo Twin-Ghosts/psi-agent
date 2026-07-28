@@ -70,13 +70,14 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 - AppData 路径助手在 ``psi_agent._appdata``（与 Gateway 共享；**禁止**经 ContextVar 传递 AppData 根）
 - System prompt 在首次 `run()` 调用时惰性构建（通过 `system_prompt_builder`）
 - 后续请求可调用 `system_prompt_rebuild_checker()`（如果定义），返回 True 则重建 system prompt
+- 未整段重建时，若 agent 包定义了 `system_prompt_dynamic_suffix()`，则每回合只重渲染缓存边界之后的易变尾部（见下方「System prompt 生命周期」）
 
 ## Agent Loop 逻辑
 
 1. 收到 channel 请求 → `ChannelAdapter.handle()` 解析请求，提取 user_message + extra_params
 2. `SessionAgent.run()` 入口：
    - add() / replace_system() 在首次变更时自动建立快照（implicit snapshot）
-   - 惰性构建或重建 system prompt（首次 run 或 rebuild checker 返回 True 时）
+   - 惰性构建或重建 system prompt（首次 run 或 rebuild checker 返回 True 时）；两者都没发生时，每回合刷新 system prompt 的易变尾部（见「System prompt 生命周期」）
    - 检查暂存的 schedule 响应 → peek + yield → yield 全部成功后 `clear_pending()`
    - User message 追加到 history 后立即 ``commit()`` 落盘
 3. 获取 `anyio.Lock`（忙则 FIFO 排队等待）—— `handle_request()` 在调用 `run()` 前持有
@@ -101,6 +102,46 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 - Channel 请求中除 `messages` 外的不认识参数全部透传到 AI 层（`extra_params`）。
 - AI 返回多 choice 时报错（`finish_reason="error"`），0 choice 作为心跳跳过。
 - AI 返回非 200 或 `finish_reason="error"` 时，错误信息不写入 conversation history，且通过 turn 快照回滚机制保证本轮用户消息也不落盘。
+
+## System prompt 生命周期
+
+`SystemPrompt.ensure()` 在**每个回合入口**调用，按优先级走三条路径中的一条：
+
+| 触发条件 | 行为 | 日志 |
+|---|---|---|
+| history 为空（首个回合） | 调 `system_prompt_builder()` 整段构建 | `System prompt loaded (N chars)` |
+| `system_prompt_rebuild_checker()` 返回 True | 整段重建（产物已是最新，**不再叠加刷新**） | `System prompt rebuilt (N chars)` |
+| 以上都不成立 | 定义了 `system_prompt_dynamic_suffix()` 时，只重渲染缓存边界之后的易变尾部 | `System prompt dynamic tail refreshed (N chars)` |
+
+### 为什么要第三条路径（易变尾部每回合刷新）
+
+没有它，system prompt 就是「首个回合建一次，此后整段沿用到会话结束」，于是里面**所有描述「现在」的内容都被冻结**：
+
+- 7月24日建的会话连着几天都告诉用户今天是 7月24日；
+- 构建那一刻若时区标签算错了（容器 `TZ` 尚未生效 → `_build_datetime_section` 落到 `astimezone()` 回退分支，`Asia/Shanghai` 被记成 `UTC`），这个错标签会活到会话结束；
+- agent 照读这行陈旧时间作答，被追问矛盾时还会临时编一套时区换算来解释对不上的地方（真实事故）。
+- 更隐蔽的是：haitun 的 `USER.md` / `HEARTBEAT.md` 本就设计在边界**之下**（文档写明「re-read every turn」），但尾部从不重渲染 → 改了这两个文件永远不生效。
+
+### 为什么不整段重建
+
+| | |
+|--|--|
+| **代价一：重扫 workspace** | 整段构建要重扫 skills / tools / bootstrap 文件。实测 haitun 约 **110ms、150KB** 提示词，放进每个回合是净损失 |
+| **代价二：击穿提示缓存** | 整段重建会改动**被缓存的前缀**，上游 prompt caching 每回合全部失效。workspace 把提示词切成 `stable_prefix + CACHE_BOUNDARY + dynamic_suffix` 正是为了避免这件事 |
+| **所以** | 只重渲染边界之后的部分：稳定前缀**逐字节复用**，缓存照旧命中，实测每回合约 **4.6ms**（约 1/22） |
+
+### 契约与容错（刻意为之）
+
+| | 约定 |
+|--|------|
+| **workspace 侧签名** | `async def system_prompt_dynamic_suffix(current: str) -> str`——收当前完整提示词，返回替换尾部后的完整提示词。**未定义即完全不刷新**，老 workspace 行为不变 |
+| **谁切边界** | 边界常量属于 workspace（haitun `<!-- HAITUN_CACHE_BOUNDARY -->`），内核**不认识**它。内核只负责「把旧串交给 workspace、拿新串写回」，切在哪、尾部含什么全由 workspace 决定 |
+| **找不到边界** | workspace 侧原样返回 `current`（内核侧 `refreshed == current` 即 no-op）。提示词可能来自别的 builder 或已被压缩改写，**替换一个定位不到的尾部会毁掉整段** |
+| **刷新失败** | `except Exception` 记 ERROR 后保留原提示词，不中断回合。**时钟走慢远好过 system prompt 被截断** |
+| **返回值不可用** | 非 `str` / 空串一律丢弃（沿用旧提示词）。空串会直接把 system prompt 抹成空 |
+| **首条消息不是 system** | 直接 no-op。压缩后的历史可能不以 system 开头，此时 `messages[0]` 不是提示词 |
+| **为什么不给 `refresher` 设默认函数**（不同于 `builder` / `checker` 的「Default over None」，见根 AGENTS.md 坑 8） | 默认函数只能返回「原样」，那与 `None` 语义重合、却多一次无谓的 `await` 与字符串比较；且 `None` 在这里承载**可观测的语义**——「这个 workspace 没有分层提示词」。`compaction_fn` 同样保持 `None` |
+| **单个 workspace 段落新增** | 往 `build_dynamic_suffix()` 里加的段落**自动获得每回合刷新**；加在 `stable_prefix` 里的不会。日期这个 bug 的根源就是「段落在 dynamic 里、但 dynamic 从不重渲染」 |
 
 ## 其他约定
 
