@@ -435,6 +435,9 @@ class SessionAgent:
 
         try:
             summary = await compaction_fn(self._conversation.messages, complete_fn)
+            if not summary:
+                logger.debug("Compaction returned empty summary, skipping")
+                return
             logger.info(f"Compaction summary generated ({len(summary)} chars)")
 
             self._conversation.add(

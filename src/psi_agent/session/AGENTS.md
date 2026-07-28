@@ -228,7 +228,7 @@ Session 支持将对话历史持久化到 AppData `histories/{session_id}.jsonl`
 - 加载：`SessionAgent.create()` → `Conversation.from_workspace(..., appdata_root=…)` 双读
 - **Turn 级别原子性**：`SessionAgent.run()` 每次调用通过 ``async with self._conversation`` 进入上下文管理器，首次 `add()` / `replace_system()` 自动建立快照。user message 追加后立即 `commit()`（早期落盘，崩溃恢复基线），后续仅在对 AI 响应成功的检查点再次 `commit()` 更新；任何异常（AI error、连接断开、cancellation）都会通过 ``__aexit__`` 自动触发 `Conversation.rollback()` 恢复到快照，保证内存和磁盘始终同步于最近一个成功阶段。
 - 保存时机（一致性检查点）：
-  - `finish_reason="stop"` — assistant 响应追加后立即 `commit()`，随后刷新 schedule registry（完整回合）；若收到 compaction 信号则 `_maybe_compact()` 再执行一次 `replace_system()` + `trim_after(0)` + `commit()`
+  - `finish_reason="stop"` — assistant 响应追加后立即 `commit()`，随后刷新 schedule registry（完整回合）；若收到 compaction 信号则 `_maybe_compact()` 插入 `compacted` 消息并 `commit()`
   - `finish_reason="tool_calls"` — 所有 tool 结果追加后立即 `commit()`（子回合）
   - unexpected `finish_reason` — 累积 content 追加后 `commit()`
   - 达到 `max_tool_rounds` — 追加 `[Max tool rounds reached]` assistant 消息后 `commit()`
@@ -245,9 +245,12 @@ Session 支持将对话历史持久化到 AppData `histories/{session_id}.jsonl`
 3. 从 `{agent}/systems/system.py` 提取 `compact_history()` 函数
 4. 构造 `complete_fn`（使用现有 `AiClient` 做非流式调用的闭包）
 5. `summary = await compact_history(conversation.messages, complete_fn)`
-6. 合并 summary 到 system prompt（`messages[0]`）
-7. `conversation.trim_after(0)` 删除所有非 system 消息
-8. `commit()` 落盘
+6. 插入独立的 `compacted` 消息（`role="compacted"`, `kind="compacted"`）到 conversation
+7. `commit()` 落盘——历史消息**保留**，不删除
+8. 下次发送 AI 请求时，`messages_for_ai()` 负责：找到 system prompt 和最后一个 compacted，删除中间消息，将 compacted 内容合并到 system prompt
+
+JSONL 留存：``system, u1, a1, u2, a2, compacted(summary), u3, a3, ...``
+发给 AI：``[system+summary, u3, a3, ...]``
 
 `compact_history` 约定签名：
 
