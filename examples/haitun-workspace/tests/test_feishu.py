@@ -53,17 +53,17 @@ def test_dumps_result_roundtrip() -> None:
 
 
 class _FakeRaw:
-    def __init__(self, body: bytes) -> None:
+    def __init__(self, body: bytes, status_code: int = 200) -> None:
         self.content = body
-        self.status_code = 200
+        self.status_code = status_code
         self.headers = {}
 
 
 class _FakeResp:
-    def __init__(self, code, msg, body: bytes) -> None:
+    def __init__(self, code, msg, body: bytes, status_code: int = 200) -> None:
         self.code = code
         self.msg = msg
-        self.raw = _FakeRaw(body)
+        self.raw = _FakeRaw(body, status_code)
         self.success = code == 0
 
 
@@ -3803,3 +3803,167 @@ def test_approval_subscribe_tools_are_async_with_docstrings() -> None:
         fn = getattr(mod, name)
         assert inspect.iscoroutinefunction(fn), name
         assert (inspect.getdoc(fn) or "").strip(), f"{name} needs a docstring"
+
+
+# ── Rate limiting (HTTP 429) ───────────────────────────────────────────────────
+
+
+def test_empty_429_body_reports_the_rate_limit_not_none() -> None:
+    """A throttled request must say so.
+
+    Feishu answers 429 with an EMPTY body and no JSON content-type, so the SDK leaves
+    ``code`` as None and there is nothing to parse. Without the HTTP-status fallback
+    every rate limit read "Feishu API error None: " — which is how a plain 429 got
+    misdiagnosed as a document lock and as a broken upload API.
+    """
+    res = _impl._resp_to_result(_FakeResp(None, "", b"", status_code=429))
+    assert res["ok"] is False
+    assert res["http_status"] == 429
+    assert "频率限制" in res["msg"]
+    assert "None" not in res["message"]
+
+
+def test_empty_gateway_error_body_still_names_the_status() -> None:
+    res = _impl._resp_to_result(_FakeResp(None, "", b"", status_code=502))
+    assert res["http_status"] == 502
+    assert "502" in res["message"]
+
+
+def test_json_error_body_keeps_the_feishu_code() -> None:
+    """The status fallback must not shadow a real Feishu error code."""
+    body = json.dumps({"code": 1770032, "msg": "forBidden", "data": {}}).encode()
+    res = _impl._resp_to_result(_FakeResp(1770032, "forBidden", body, status_code=403))
+    assert res["code"] == 1770032
+    assert "http_status" not in res
+    assert _impl._is_permission_error(res) is True
+
+
+def test_rate_limit_is_not_mistaken_for_a_permission_error() -> None:
+    """Otherwise a 429 would trigger the auth flow, asking the user to re-authorize
+    for a problem that authorization has nothing to do with."""
+    res = _impl._resp_to_result(_FakeResp(None, "", b"", status_code=429))
+    assert _impl._is_rate_limited(res) is True
+    assert _impl._is_permission_error(res) is False
+
+
+@pytest.mark.asyncio
+async def test_invoke_retries_while_rate_limited(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 429 means "too fast", not "not allowed" — the same request works moments later."""
+    attempts = 0
+
+    async def once(request: Any, user_key: Any = None, prefer: str = "tenant") -> dict[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return {"ok": False, "code": None, "http_status": 429, "msg": "too many"}
+        return {"ok": True, "code": 0, "msg": "", "data": {}}
+
+    slept: list[float] = []
+
+    async def no_wait(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(_impl, "_invoke_once", once)
+    monkeypatch.setattr(_impl.anyio, "sleep", no_wait)
+    res = await _impl._invoke(object(), user_key="ou_x", prefer="user")
+    assert res["ok"] is True
+    assert attempts == 3
+    # Backoff grows, so a throttled batch spreads out instead of hammering.
+    assert len(slept) == 2
+    assert slept[1] > slept[0]
+
+
+@pytest.mark.asyncio
+async def test_invoke_gives_up_with_a_readable_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retries are bounded: a persistent limit is reported, never hung on."""
+    attempts = 0
+
+    async def always_limited(request: Any, user_key: Any = None, prefer: str = "tenant") -> dict[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        return {"ok": False, "code": None, "http_status": 429, "msg": "触发飞书接口频率限制"}
+
+    async def no_wait(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(_impl, "_invoke_once", always_limited)
+    monkeypatch.setattr(_impl.anyio, "sleep", no_wait)
+    res = await _impl._invoke(object())
+    assert res["ok"] is False
+    assert res["http_status"] == 429
+    assert attempts == _impl._RATE_LIMIT_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_invoke_does_not_retry_other_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only rate limits are worth repeating; a permission denial would just be denied again."""
+    attempts = 0
+
+    async def denied(request: Any, user_key: Any = None, prefer: str = "tenant") -> dict[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        return {"ok": False, "code": 1770032, "msg": "forBidden"}
+
+    monkeypatch.setattr(_impl, "_invoke_once", denied)
+    res = await _impl._invoke(object())
+    assert res["ok"] is False
+    assert attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_wiki_read_user_retry_also_survives_a_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The wiki fallback sends as the user directly, so it needs the same backoff —
+    otherwise a throttled retry would look like "you have no knowledge bases"."""
+    attempts = 0
+
+    async def as_user(request: Any, key: str) -> dict[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return {"ok": False, "code": None, "http_status": 429, "msg": "too many"}
+        return {"ok": True, "code": 0, "msg": "", "data": {"items": [{"space_id": "7"}]}}
+
+    async def tenant_empty(request: Any, user_key: Any = None, prefer: str = "tenant") -> dict[str, Any]:
+        return {"ok": True, "code": 0, "msg": "", "data": {"items": []}}
+
+    async def no_wait(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(_impl, "_invoke", tenant_empty)
+    monkeypatch.setattr(_impl, "_send_as_user", as_user)
+    monkeypatch.setattr(_impl.anyio, "sleep", no_wait)
+    res = await _impl._invoke_wiki_read(object(), "ou_x", lambda r: not r["data"]["items"])
+    assert res["data"]["items"] == [{"space_id": "7"}]
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_wiki_read_keeps_tenant_result_when_the_user_has_no_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing UAT (``None``) is not a rate limit: don't retry, don't crash."""
+
+    async def no_token(request: Any, key: str) -> None:
+        return None
+
+    async def tenant_empty(request: Any, user_key: Any = None, prefer: str = "tenant") -> dict[str, Any]:
+        return {"ok": True, "code": 0, "msg": "", "data": {"items": []}}
+
+    monkeypatch.setattr(_impl, "_invoke", tenant_empty)
+    monkeypatch.setattr(_impl, "_send_as_user", no_token)
+    res = await _impl._invoke_wiki_read(object(), "ou_x", lambda r: not r["data"]["items"])
+    assert res["ok"] is True
+    assert res["data"]["items"] == []
+
+
+def test_backoff_is_bounded_and_jittered() -> None:
+    """Jitter matters: without it a batch throttled together retries in lockstep and
+    throttles itself again."""
+    limited = {"ok": False, "http_status": 429}
+    first = {_impl._retry_after_seconds(limited, 1) for _ in range(20)}
+    assert len(first) > 1, "backoff must be jittered, not a fixed delay"
+    assert min(first) >= _impl._RATE_LIMIT_BACKOFF
+    # Growth is capped so the last attempts stay responsive instead of doubling forever.
+    cap = _impl._RATE_LIMIT_MAX_WAIT * 1.25
+    assert max(_impl._retry_after_seconds(limited, 12) for _ in range(20)) <= cap
+    assert _impl._retry_after_seconds({"retry_after": 999}, 1) == _impl._RATE_LIMIT_MAX_WAIT

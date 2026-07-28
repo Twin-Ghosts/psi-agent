@@ -15,6 +15,7 @@ import io
 import json
 import os
 import pathlib
+import random
 import re
 from typing import Any
 
@@ -80,9 +81,6 @@ _AUTH_PROMPT = (
 )
 
 
-# Feishu permission-denied codes: the 999916xx family (drive/docs "no permission"),
-# 1254xxx (bitable), 131006 (wiki node no permission). Combined with a msg-substring
-# check so we still catch permission failures whose exact code we don't enumerate.
 # Feishu permission-denied codes: the 999916xx family (drive/docs "no permission"),
 # 1254xxx (bitable), 131006 (wiki node no permission), 1770032 (docx block edit denied
 # for this identity). Combined with a msg-substring check so we still catch permission
@@ -183,7 +181,69 @@ async def _send_as_user(request: Any, user_key: str) -> dict[str, Any] | None:
     return _resp_to_result(resp)
 
 
+_RATE_LIMIT_STATUS = 429
+# Feishu's docx write limit is a few requests per second per app, and one agent turn can
+# legitimately queue 20+ writes (a document full of charts). Six attempts of backoff
+# spans ~15s, which is long enough for a burst that size to drain; fewer attempts left
+# the tail of a 21-chart batch still being turned away.
+_RATE_LIMIT_ATTEMPTS = 6
+_RATE_LIMIT_BACKOFF = 0.5
+_RATE_LIMIT_MAX_WAIT = 8.0
+
+
+def _is_rate_limited(res: dict[str, Any]) -> bool:
+    """Whether Feishu turned this request away for being too frequent."""
+    return res.get("http_status") == _RATE_LIMIT_STATUS
+
+
+def _retry_after_seconds(res: dict[str, Any], attempt: int) -> float:
+    """How long to wait before retry ``attempt`` (1-based).
+
+    Feishu's 429 carries no ``Retry-After``, so this is exponential backoff with a
+    little jitter — without jitter a batch of charts throttled together would retry
+    in lockstep and throttle each other again.
+    """
+    after = res.get("retry_after")
+    if isinstance(after, (int, float)) and after > 0:
+        return min(float(after), _RATE_LIMIT_MAX_WAIT)
+    grown = _RATE_LIMIT_BACKOFF * (2 ** (attempt - 1))
+    return min(grown, _RATE_LIMIT_MAX_WAIT) * (1.0 + random.random() * 0.25)
+
+
+async def _retrying_rate_limits(send: Any) -> dict[str, Any]:
+    """Call ``send()`` again while Feishu is only telling us to slow down.
+
+    A 429 means "too fast", not "not allowed": the same request succeeds moments later.
+    A rate limit that outlives every attempt is returned as-is, so the caller still
+    reports a real, readable error instead of hanging.
+    """
+    res: dict[str, Any] = {}
+    for attempt in range(1, _RATE_LIMIT_ATTEMPTS + 1):
+        res = await send()
+        if not _is_rate_limited(res) or attempt == _RATE_LIMIT_ATTEMPTS:
+            return res
+        await anyio.sleep(_retry_after_seconds(res, attempt))
+    return res
+
+
 async def _invoke(request: Any, user_key: str | None = None, prefer: str = "tenant") -> dict[str, Any]:
+    """Send a request, retrying while Feishu is rate-limiting us.
+
+    Retrying here rather than at each call site means every tool gets it — inserting
+    five charts into one document is a single agent turn, and it hits the per-app limit
+    (measured: ~3 concurrent writes go through, 5+ start getting turned away).
+
+    ``_invoke_once`` holds the identity/permission strategy; this wrapper only adds
+    waiting.
+    """
+
+    async def send() -> dict[str, Any]:
+        return await _invoke_once(request, user_key=user_key, prefer=prefer)
+
+    return await _retrying_rate_limits(send)
+
+
+async def _invoke_once(request: Any, user_key: str | None = None, prefer: str = "tenant") -> dict[str, Any]:
     """Send a BaseRequest, preferring the bot's tenant token and only using the
     user's ``user_access_token`` (UAT) when necessary.
 
@@ -251,10 +311,23 @@ async def _invoke_wiki_read(request: Any, user_key: str | None, is_empty: Any) -
     res = await _invoke(request, user_key=user_key, prefer="tenant")
     key = user_key.strip() if user_key else ""
     if res.get("ok") and key and is_empty(res):
-        user_res = await _send_as_user(request, key)
-        if user_res is not None and user_res.get("ok"):
+
+        async def as_user() -> dict[str, Any]:
+            # `or {}` so a missing-token None reads as "nothing to retry", not a rate limit.
+            return await _send_as_user(request, key) or {}
+
+        user_res = await _retrying_rate_limits(as_user)
+        if user_res.get("ok"):
             return user_res
     return res
+
+
+_HTTP_STATUS_HINTS = {
+    429: "触发飞书接口频率限制: 请求过于频繁, 稍后重试或降低并发",
+    502: "飞书网关错误 502",
+    503: "飞书服务暂时不可用 503",
+    504: "飞书网关超时 504",
+}
 
 
 def _resp_to_result(resp: Any) -> dict[str, Any]:
@@ -277,6 +350,22 @@ def _resp_to_result(resp: Any) -> dict[str, Any]:
 
     ok = code == 0
     if not ok:
+        # Rate limits and gateway errors come back with an EMPTY body and no JSON
+        # content-type, so the SDK leaves `code` as None and there is nothing to parse:
+        # the only evidence is the HTTP status. Without this fallback every 429 reported
+        # itself as "Feishu API error None: " — which is how a plain rate limit got
+        # misdiagnosed as a document lock and as a broken upload API.
+        status = getattr(raw, "status_code", None)
+        if code is None and isinstance(status, int) and status >= 400:
+            msg = msg or _HTTP_STATUS_HINTS.get(status, f"飞书返回 HTTP {status}, 响应体为空")
+            return {
+                "ok": False,
+                "code": None,
+                "http_status": status,
+                "msg": msg,
+                "data": data,
+                "message": f"Feishu HTTP {status}: {msg}",
+            }
         return {
             "ok": False,
             "code": code,
