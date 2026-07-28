@@ -96,13 +96,15 @@ describe('historyToDeliverables', () => {
 })
 
 describe('withTodoProgress (via layered resolver)', () => {
-  it('streaming without todos → 推进中', () => {
+  it('streaming without todos → 正在处理 (activity)', () => {
     const next = withTodoProgress(baseTask(), [], { streaming: true, turnSettled: false })
     expect(next.phase).toBe('advance')
-    expect(next.steps[1]?.label).toBe('推进中')
+    expect(next.hasTodoTrack).toBe(false)
+    expect(next.progressIndeterminate).toBe(true)
+    expect(next.steps).toEqual([{ label: '正在处理', state: 'working' }])
   })
 
-  it('maps todo in_progress to N/M', () => {
+  it('maps todo in_progress to checklist + N/M', () => {
     const next = withTodoProgress(
       baseTask(),
       [
@@ -114,11 +116,13 @@ describe('withTodoProgress (via layered resolver)', () => {
       { streaming: true, turnSettled: false },
     )
     expect(next.phase).toBe('advance')
-    expect(next.steps[1]).toEqual({
-      label: '2/3',
-      state: 'working',
-      detail: '写方案',
-    })
+    expect(next.hasTodoTrack).toBe(true)
+    expect(next.progressLabel).toBe('2/3')
+    expect(next.steps).toEqual([
+      { label: '调研', state: 'done' },
+      { label: '写方案', state: 'working' },
+      { label: '评审', state: 'waiting' },
+    ])
     expect(next.progress).toBe(33)
   })
 
@@ -132,7 +136,8 @@ describe('withTodoProgress (via layered resolver)', () => {
       { streaming: true, turnSettled: false },
     )
     expect(next.phase).toBe('deliver')
-    expect(next.steps[2]?.state).toBe('working')
+    expect(next.steps.at(-1)?.state).toBe('working')
+    expect(next.steps.at(-1)?.label).toBe('产出与确认')
   })
 })
 

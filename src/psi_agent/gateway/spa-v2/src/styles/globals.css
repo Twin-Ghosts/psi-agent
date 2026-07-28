@@ -1394,10 +1394,13 @@ textarea:focus-visible {
 
 .task-card {
   --task-accent: var(--brand-500);
-  --task-corner-size: 112px;
-  --task-corner-top: clamp(22px, 2.8dvh, 34px);
+  --task-corner-size: 88px;
+  --task-corner-top: clamp(18px, 2.4dvh, 28px);
+  --task-step-row-height: 88px;
+  --task-steps-gap: 10px;
   display: flex;
   flex-direction: column;
+  min-height: 0;
 }
 
 .card-header-leading {
@@ -1408,59 +1411,49 @@ textarea:focus-visible {
   gap: 8px 10px;
 }
 
-.task-corner-progress {
-  --progress: 0deg;
+/* Treasure sits where the old circular progress ring was. */
+.task-corner-treasure {
   position: absolute;
   z-index: 3;
   top: var(--task-corner-top);
-  right: clamp(26px, 3vw, 42px);
+  right: clamp(22px, 2.8vw, 36px);
   width: var(--task-corner-size);
-  height: var(--task-corner-size);
   display: grid;
-  place-items: center;
-  border-radius: 999px;
-  background: conic-gradient(var(--task-accent) var(--progress), rgba(20, 40, 55, 0.08) 0);
-  box-shadow: 0 12px 28px rgba(22, 43, 50, 0.1), inset 0 0 18px color-mix(in srgb, var(--task-accent) 12%, transparent);
+  justify-items: center;
+  gap: 6px;
 }
 
-.task-corner-progress::before {
-  content: "";
-  position: absolute;
-  width: calc(var(--task-corner-size) - 20px);
-  height: calc(var(--task-corner-size) - 20px);
-  border-radius: inherit;
-  background: #fff;
-  box-shadow: inset 0 1px rgba(255, 255, 255, 0.9);
-}
-
-.task-corner-progress > div {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  place-items: center;
-  gap: 2px;
-}
-
-.task-corner-progress strong {
-  color: #132232;
-  font-size: 22px;
-  font-weight: 720;
-  letter-spacing: -0.04em;
-}
-
-.task-corner-progress span {
+.task-corner-treasure-label {
   color: #8a959e;
-  font-size: 9px;
-  font-weight: 650;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
 }
 
-.task-corner-progress.continuous {
-  background: conic-gradient(from 30deg, transparent 0 22%, var(--task-accent) 31% 54%, transparent 63% 100%);
-  animation: spin 2.8s linear infinite;
+.task-corner-treasure .treasure-button {
+  width: var(--task-corner-size);
+  height: calc(var(--task-corner-size) - 4px);
 }
 
-.task-corner-progress.continuous > div {
-  animation: spin-reverse 2.8s linear infinite;
+.task-steps-activity {
+  grid-template-columns: 1fr;
+}
+
+.task-activity-bar {
+  height: 4px;
+  margin: 2px 0 0 28px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(20, 40, 55, 0.08);
+}
+
+.task-activity-bar > span {
+  display: block;
+  width: 42%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, var(--task-accent), transparent);
+  animation: progress-sweep 1.8s linear infinite;
 }
 
 .task-accent-line {
@@ -1487,10 +1480,10 @@ textarea:focus-visible {
 .status-pill.continuous { color: #356bb2; background: #edf4ff; }
 .status-pill.done { color: #087f68; background: #e6f5f0; }
 
-/* Title + summary sit in the same vertical band as the corner progress ring. */
+/* Title + summary sit beside the corner treasure. */
 .task-card .task-title-block {
   margin-top: 0;
-  min-height: calc(var(--task-corner-top) + var(--task-corner-size) - clamp(30px, 3.6dvh, 42px));
+  min-height: calc(var(--task-corner-top) + var(--task-corner-size) + 18px);
   padding-right: calc(var(--task-corner-size) + 28px);
   display: flex;
   flex-direction: column;
@@ -1613,16 +1606,97 @@ textarea:focus-visible {
   font-size: 9px;
 }
 
+.task-steps-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: clamp(14px, 2.4dvh, 22px);
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.task-steps-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 24px;
+}
+
+.task-steps-caption {
+  color: #6d7882;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.task-steps-caption em {
+  margin-left: 8px;
+  color: var(--task-accent);
+  font-style: normal;
+  font-weight: 750;
+}
+
+.task-steps-pager {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #6d7882;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.task-steps-page-btn {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #e1e6e3;
+  border-radius: 8px;
+  color: #44525c;
+  background: #fff;
+}
+
+.task-steps-page-btn:hover:not(:disabled),
+.task-steps-page-btn:focus-visible:not(:disabled) {
+  border-color: color-mix(in srgb, var(--task-accent) 35%, #e1e6e3);
+  color: var(--task-accent);
+}
+
+.task-steps-page-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Fixed 2-row viewport; overflow scrolls inside this block only. */
+.task-steps-viewport {
+  height: calc(var(--task-step-row-height) * 2 + var(--task-steps-gap));
+  max-height: calc(var(--task-step-row-height) * 2 + var(--task-steps-gap));
+  overflow-x: hidden;
+  overflow-y: auto;
+  min-height: 0;
+  padding-right: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--task-accent) 35%, #cfd6d2) transparent;
+}
+
+.task-steps-panel.is-activity .task-steps-viewport {
+  height: var(--task-step-row-height);
+  max-height: var(--task-step-row-height);
+}
+
 .task-steps {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
-  margin-top: clamp(18px, 3.1dvh, 29px);
+  gap: var(--task-steps-gap);
+  margin-top: 0;
+  align-content: start;
 }
 
 .task-step {
   min-width: 0;
-  min-height: 88px;
+  min-height: var(--task-step-row-height);
+  height: var(--task-step-row-height);
   display: grid;
   grid-template-columns: 32px minmax(0, 1fr);
   align-items: center;
@@ -1634,6 +1708,7 @@ textarea:focus-visible {
   background: #fafaf7;
   font-size: 16px;
   line-height: 1.35;
+  box-sizing: border-box;
 }
 
 .task-step.done { color: #55636d; }
@@ -1690,12 +1765,61 @@ textarea:focus-visible {
 
 .task-card-footer {
   display: flex;
-  align-items: center;
-  justify-content: flex-end;
+  align-items: stretch;
+  justify-content: stretch;
   gap: 16px;
   margin-top: auto;
   padding-top: 14px;
   border-top: 1px solid #e9ecea;
+  flex-shrink: 0;
+}
+
+.task-linear-progress {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+}
+
+.task-linear-progress-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  color: #6d7882;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.task-linear-progress-meta strong {
+  color: var(--task-accent);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.task-linear-track {
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: #e7eef3;
+}
+
+.task-linear-track > span {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--task-accent) 72%, #7ad7c0), var(--task-accent));
+  transition: width 280ms ease;
+}
+
+.task-linear-progress.indeterminate .task-linear-track > span {
+  width: 42%;
+  background: linear-gradient(90deg, transparent, var(--task-accent), transparent);
+  animation: progress-sweep 1.8s linear infinite;
+}
+
+.task-linear-progress.done .task-linear-track > span {
+  width: 100%;
 }
 
 .task-delivery-slot {
@@ -1715,9 +1839,14 @@ textarea:focus-visible {
 .task-card-footer > div:first-child {
   display: grid;
   gap: 4px;
+  width: 100%;
 }
 
-.task-card-footer strong { color: #344451; font-size: 10px; }
+.task-card-footer .task-linear-progress-meta strong {
+  color: var(--task-accent);
+  font-size: 13px;
+  font-weight: 750;
+}
 
 .delivery-cta {
   display: flex;
@@ -2473,23 +2602,70 @@ textarea:focus-visible {
   width: 100%;
   max-width: 100%;
   box-sizing: border-box;
-  padding: 12px !important;
+  padding: 0 !important;
   background: transparent;
+  gap: 10px;
 }
 
-.artifact-preview-host .docx-preview-host .docx,
-.preview-host .docx-preview-host .docx {
+/*
+ * ignoreWidth 只去掉页宽，页边距仍是 Word 绝对长度（常 2–3cm）。
+ * 窄抽屉里左右 padding 会把正文挤成细条、两侧大片空白。
+ * 预览里强制 section 撑满容器，换成适中内边距，禁止横向溢出。
+ */
+.artifact-preview-host .docx-preview-host .docx-wrapper > section.docx,
+.preview-host .docx-preview-host .docx-wrapper > section.docx {
   width: 100% !important;
-  max-width: 100%;
-  box-sizing: border-box;
+  max-width: 100% !important;
+  min-width: 0 !important;
+  box-sizing: border-box !important;
+  padding: 16px 18px !important;
+  margin: 0 !important;
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   background: #fff;
   box-shadow: 0 4px 16px rgba(23, 37, 46, 0.1);
 }
 
+.artifact-preview-host .docx-preview-host .docx-wrapper > section.docx > article,
+.preview-host .docx-preview-host .docx-wrapper > section.docx > article {
+  column-count: 1 !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+}
+
+.artifact-preview-host .docx-preview-host .docx-wrapper p,
+.artifact-preview-host .docx-preview-host .docx-wrapper li,
+.artifact-preview-host .docx-preview-host .docx-wrapper span,
+.preview-host .docx-preview-host .docx-wrapper p,
+.preview-host .docx-preview-host .docx-wrapper li,
+.preview-host .docx-preview-host .docx-wrapper span {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.artifact-preview-host .docx-preview-host .docx-wrapper table,
+.preview-host .docx-preview-host .docx-wrapper table {
+  width: 100% !important;
+  max-width: 100% !important;
+  table-layout: fixed !important;
+  box-sizing: border-box !important;
+}
+
+.artifact-preview-host .docx-preview-host .docx-wrapper td,
+.artifact-preview-host .docx-preview-host .docx-wrapper th,
+.preview-host .docx-preview-host .docx-wrapper td,
+.preview-host .docx-preview-host .docx-wrapper th {
+  max-width: 100% !important;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .artifact-preview-host .docx-preview-host img,
 .preview-host .docx-preview-host img {
-  max-width: 100%;
-  height: auto;
+  max-width: 100% !important;
+  height: auto !important;
 }
 
 /* 宝箱内嵌：去掉双重白卡片，把滚动交给外层 artifact-preview-scroll。 */
@@ -2503,6 +2679,7 @@ textarea:focus-visible {
 .document-preview .artifact-preview-host .office-preview-scroll {
   max-height: none;
   padding: 10px;
+  background: #eef2f6;
 }
 
 .artifact-preview-host .pptx-preview-scroll,
@@ -3599,19 +3776,17 @@ textarea:focus-visible {
   .overview-card .card-header { padding-right: 100px; }
   .overview-card .overall-dial { top: 18px; right: 18px; }
 
-  .task-corner-progress {
-    --task-corner-size: 78px;
+  .task-card {
+    --task-corner-size: 72px;
     --task-corner-top: 16px;
+    --task-step-row-height: 72px;
+  }
+  .task-corner-treasure {
     top: var(--task-corner-top);
     right: 16px;
-    width: var(--task-corner-size);
-    height: var(--task-corner-size);
   }
-  .task-corner-progress::before { width: calc(var(--task-corner-size) - 14px); height: calc(var(--task-corner-size) - 14px); }
-  .task-corner-progress strong { font-size: 16px; }
-  .task-corner-progress span { font-size: 7px; }
   .task-card .task-title-block {
-    min-height: calc(var(--task-corner-top) + var(--task-corner-size) - 22px);
+    min-height: calc(var(--task-corner-top) + var(--task-corner-size) + 12px);
     padding-right: calc(var(--task-corner-size) + 16px);
   }
 
@@ -4091,14 +4266,8 @@ textarea:focus-visible {
   box-sizing: border-box;
 }
 
-.compact-card-shell .task-corner-progress,
 .compact-card-shell .overall-dial {
   --task-corner-size: 88px;
-  width: 88px;
-  height: 88px;
-}
-
-.compact-card-shell .overall-dial {
   width: 96px;
   height: 96px;
 }
@@ -4109,14 +4278,16 @@ textarea:focus-visible {
 }
 
 .compact-card-shell .overall-dial strong { font-size: 20px; }
-.compact-card-shell .task-corner-progress::before {
-  width: calc(88px - 16px);
-  height: calc(88px - 16px);
+
+.compact-card-shell .task-card {
+  --task-corner-size: 72px;
+  --task-step-row-height: 64px;
+  --task-steps-gap: 8px;
 }
-.compact-card-shell .task-corner-progress strong { font-size: 18px; }
+
 .compact-card-shell .task-card .task-title-block {
-  min-height: calc(var(--task-corner-top, 22px) + 88px - clamp(24px, 3dvh, 34px));
-  padding-right: calc(88px + 18px);
+  min-height: calc(var(--task-corner-top, 18px) + var(--task-corner-size) + 12px);
+  padding-right: calc(var(--task-corner-size) + 18px);
 }
 .compact-card-shell .task-card .task-title-block h1 {
   font-size: clamp(18px, 1.6vw, 24px);
@@ -4126,10 +4297,13 @@ textarea:focus-visible {
   -webkit-line-clamp: 4;
 }
 .compact-card-shell .task-step {
-  min-height: 64px;
+  min-height: var(--task-step-row-height);
+  height: var(--task-step-row-height);
   font-size: 13px;
+  padding: 10px 12px;
 }
 .compact-card-shell .task-step-label { font-size: 13px; }
+.compact-card-shell .task-corner-treasure-label { font-size: 9px; }
 .compact-card-shell .task-delivery-label { font-size: 14px; }
 .compact-card-shell .overview-hero h1 {
   font-size: clamp(18px, 1.7vw, 26px);

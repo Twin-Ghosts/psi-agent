@@ -23,7 +23,7 @@
 | 技术栈 | Vue 3 + Pinia | React 19 + Vite |
 | base | `/spa/` | `/spa-v2/` |
 | 对话 | Gateway SSE | 同左（同一套 API） |
-| 交付物 | 气泡 blob chip | 宝箱 UI；SSE `blob` 写入 `deliverables`；抽屉内按 blob 真实渲染（对齐 spa v1：MD/HTML/图片音视频/代码/CSV/PDF/DOCX/XLSX/PPTX，重库动态 `import()`；无 blob 时明确空态）。MD 预览与聊天气泡共用 `renderMd` + `.md-table-card`。**刻意为之**：`renderMd` 超链接 `target=_blank`；附件 chip / 预览抽屉仍本页。DOCX 用 `ignoreWidth` + wrapper `align-items:stretch`——宝箱抽屉窄于 Word 页宽时，库默认居中会裁掉左侧且滚不到。有 `[SEND:]` path 时，气泡 chip / 宝箱 / 预览抽屉可「在文件夹中显示」（`POST /workspace/reveal`） |
+| 交付物 | 气泡 blob chip | 宝箱 UI；SSE `blob` 写入 `deliverables`；抽屉内按 blob 真实渲染（对齐 spa v1：MD/HTML/图片音视频/代码/CSV/PDF/DOCX/XLSX/PPTX，重库动态 `import()`；无 blob 时明确空态）。MD 预览与聊天气泡共用 `renderMd` + `.md-table-card`。**刻意为之**：`renderMd` 超链接 `target=_blank`；附件 chip / 预览抽屉仍本页。DOCX：`ignoreWidth` 去掉页宽；**页边距仍是绝对长度**，预览 CSS 强制 `section.docx` 宽 100% + 适中 padding，避免窄抽屉里正文挤成细条；表格/图片 `max-width:100%` 防横向溢出。有 `[SEND:]` path 时，气泡 chip / 宝箱 / 预览抽屉可「在文件夹中显示」（`POST /workspace/reveal`） |
 | 账户区 | 头像菜单合一 | 头像菜单仅资料/登录；**模型池**与**设置**为侧栏独立快捷入口 |
 | 默认工作区 | 无 / 必须先选 | 启动读 ``GET /defaults``.workspace（Gateway 软默认 `{Desktop}/haitun交付`，**只宣布不建目录**；首个 Session/对话时服务端再 mkdir）；遗留 `*-workspace` / 字面量 `workspace` / `haitun-workspace` 会忽略 |
 | 工作区切换 | 侧栏打开 PathPicker | 设置「切换工作区」→ 选择页；**浏览**按钮走 `/workspace/places` + `/browse`（对齐 v1） |
@@ -56,12 +56,16 @@
 | 层 | 职责 |
 |----|------|
 | **阶段** `phase` | `advance` 推进 → `deliver` 产出与确认 → `done` 本轮完成（`taskProgress.resolveTaskProgress`） |
-| **推进细节** | 有 workspace `todo` → 中间步 `N/M` + 当前项文案；**无 todo** → 中间步固定「推进中」 |
-| **投影** | `applyTaskProgress` 唯一写入口，生成 `steps` / `progress` / `updated` |
+| **推进细节** | **有 Session `todo`** → 真实 checklist 步骤 + 角标 `N/M`；**无 todo** → **单行活动态**（待继续 / 正在处理 / 正在整理交付 / 本轮已完成），不定进度脉冲，**不**画假三步轨、**不**用启发式 % |
+| **投影** | `applyTaskProgress` 唯一写入口，生成 `steps` / `progress` / `progressIndeterminate` / `progressLabel` / `hasTodoTrack` / `updated` |
 
-- 流式中：无 todo 保持 `advance`+「推进中」；todo 全部完成则进入 `deliver`（右侧「产出与确认」working）。
-- 回合成功结束：`turnSettled=true` → `done`，三步全勾；有交付物进度 100%。
-- 加载历史若已有 assistant 回复，同样 `withCompletedTurn` 投影为 `done`。
+**刻意为之（todo 策略不在前端）**：何时建 `todo` 由 agent 包 `skills/task-planning/SKILL.md` 判定；前端**只读** `GET …/todos`。侧栏语义：**有清单报步数，没清单报忙闲**。
+
+**任务卡布局（首页 / 左栏）**：角标圆环已去掉；右上角放**宝箱**；底部为**直线进度条**（有 todo → `N/M` 填充；无 todo 忙时 indeterminate 扫条）。中间步骤区固定 **3×2** 视口高度，超出用小翻页（每页 6 项），视口内仍可纵向滚动；不挤占下方进度条。
+
+- 流式中：无 todo → `正在处理` + indeterminate；有交付物生成中可进 `deliver`（「正在整理交付」）。
+- 有 todo 且全部 completed 仍在流式 → `deliver`（追加「产出与确认」）。
+- 回合成功结束：`turnSettled=true` → `done`；有 todo 则步骤全勾，无 todo 则单行「本轮已完成」。
 - 空 todo 轮询**不会**把已 `done` 的卡打回推进中（保留 `turnSettled`）。
 
 ### 对话气泡操作（对齐 spa v1）
