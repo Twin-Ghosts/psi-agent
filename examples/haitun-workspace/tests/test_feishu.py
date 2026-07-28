@@ -1336,6 +1336,11 @@ async def test_auth_start_builds_authorize_url(monkeypatch: pytest.MonkeyPatch, 
     monkeypatch.setenv("PSI_FEISHU_APP_ID", "cli_x")
     monkeypatch.setenv("PSI_FEISHU_APP_SECRET", "sec")
     monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(tmp_path / "pending.json"))
+    monkeypatch.setattr(
+        _impl._oauth_rx,
+        "plan_receiver",
+        lambda explicit="": _impl._oauth_rx.ReceiverPlan(mode="manual", redirect_uri="http://localhost/"),
+    )
     result = await _impl.auth_start_impl("")
     assert result["ok"] is True
     parsed = urlparse(result["authorize_url"])
@@ -1348,15 +1353,47 @@ async def test_auth_start_builds_authorize_url(monkeypatch: pytest.MonkeyPatch, 
     # (e.g. "drive:drive:drive:readonly") that Feishu rejects with error 20043
     assert q["scope"][0] == _impl._DEFAULT_SCOPES
     assert "drive:drive:drive" not in q["scope"][0]
+    # PKCE: challenge goes on the authorize URL, verifier stays with us
+    assert q["code_challenge_method"] == ["S256"]
+    assert q["code_challenge"][0]
+    pending = json.loads((tmp_path / "pending.json").read_text())
     # state persisted for CSRF check
-    assert json.loads((tmp_path / "pending.json").read_text())["state"] == q["state"][0]
-    # the prompt must be explicit about copying the code from the browser ADDRESS BAR
+    assert pending["state"] == q["state"][0]
+    assert 43 <= len(pending["code_verifier"]) <= 128
+    assert pending["redirect_uri"] == q["redirect_uri"][0]
+    # manual fallback keeps the old address-bar instructions
+    assert result["auto_receive"] is False
     msg = result["message"]
     assert "地址栏" in msg
     assert "code=" in msg
     assert "feishu_auth_complete" in msg
     # reassure the user they won't be asked again after authorizing once
     assert "不会再" in msg or "自动续期" in msg
+
+
+@pytest.mark.asyncio
+async def test_auth_start_prefers_automatic_receive(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """有自动通道时不再让用户复制 code, 而是引导到 feishu_auth_wait。"""
+    monkeypatch.setenv("PSI_FEISHU_APP_ID", "cli_x")
+    monkeypatch.setenv("PSI_FEISHU_APP_SECRET", "sec")
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(tmp_path / "pending.json"))
+    monkeypatch.setattr(
+        _impl._oauth_rx,
+        "plan_receiver",
+        lambda explicit="": _impl._oauth_rx.ReceiverPlan(
+            mode="gateway", redirect_uri="https://gw.example.com/oauth/callback"
+        ),
+    )
+    result = await _impl.auth_start_impl("")
+    assert result["auto_receive"] is True
+    assert result["mode"] == "gateway"
+    assert result["next_step"] == "feishu_auth_wait"
+    q = parse_qs(urlparse(result["authorize_url"]).query)
+    assert q["redirect_uri"] == ["https://gw.example.com/oauth/callback"]
+    # 自动路径的提示里不能再出现「从地址栏复制」的指令
+    assert "地址栏" not in result["message"]
+    assert "不用复制" in result["message"]
+    assert json.loads((tmp_path / "pending.json").read_text())["mode"] == "gateway"
 
 
 @pytest.mark.asyncio
@@ -1388,7 +1425,12 @@ def test_extract_code_from_url_or_bare() -> None:
 async def test_auth_complete_exchanges_code(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     monkeypatch.setenv("PSI_FEISHU_APP_ID", "cli_x")
     monkeypatch.setenv("PSI_FEISHU_APP_SECRET", "sec")
-    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(tmp_path / "pending.json"))
+    pending = tmp_path / "pending.json"
+    pending.write_text(
+        json.dumps({"state": "st", "code_verifier": "v" * 64, "redirect_uri": "http://localhost/", "mode": "manual"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(pending))
 
     stored: dict[str, Any] = {}
 
@@ -1423,7 +1465,87 @@ async def test_auth_complete_exchanges_code(monkeypatch: pytest.MonkeyPatch, tmp
     exchange = next(c for c in calls if c[0].endswith("/authen/v1/access_token"))
     assert exchange[1]["grant_type"] == "authorization_code"
     assert exchange[1]["code"] == "THECODE"
+    # PKCE verifier + redirect_uri must match the authorize step (Feishu 20071 otherwise)
+    assert exchange[1]["code_verifier"] == "v" * 64
+    assert exchange[1]["redirect_uri"] == "http://localhost/"
     assert stored["uat"].access_token == "u-tok"
+
+
+@pytest.mark.asyncio
+async def test_auth_wait_receives_code_and_completes(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """自动通道拿回 code 后直接完成授权 —— 用户不复制任何东西。"""
+    pending = tmp_path / "pending.json"
+    pending.write_text(
+        json.dumps({"state": "st", "code_verifier": "v" * 64, "redirect_uri": "https://gw/x", "mode": "gateway"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(pending))
+
+    async def _fake_poll(state: str, timeout_seconds: float, interval: float = 1.0) -> dict[str, str]:
+        assert state == "st"
+        return {"code": "AUTOCODE"}
+
+    monkeypatch.setattr(_impl._oauth_rx, "poll_gateway", _fake_poll)
+
+    completed: dict[str, Any] = {}
+
+    async def _fake_complete(code: str, user_key: str = "") -> dict[str, Any]:
+        completed["code"] = code
+        return {"ok": True}
+
+    monkeypatch.setattr(_impl, "auth_complete_impl", _fake_complete)
+    result = await _impl.auth_wait_impl("", 30)
+    assert result["ok"] is True
+    assert completed["code"] == "AUTOCODE"
+
+
+@pytest.mark.asyncio
+async def test_auth_wait_without_pending_asks_for_start(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(tmp_path / "missing.json"))
+    result = await _impl.auth_wait_impl("")
+    assert result["ok"] is False
+    assert "feishu_auth_start" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_auth_wait_manual_mode_says_so(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    pending = tmp_path / "pending.json"
+    pending.write_text(json.dumps({"state": "st", "mode": "manual"}), encoding="utf-8")
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(pending))
+    result = await _impl.auth_wait_impl("")
+    assert result["ok"] is False
+    assert result["manual_required"] is True
+
+
+@pytest.mark.asyncio
+async def test_auth_wait_timeout_is_retryable(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    pending = tmp_path / "pending.json"
+    pending.write_text(json.dumps({"state": "st", "mode": "gateway"}), encoding="utf-8")
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(pending))
+
+    async def _no_code(state: str, timeout_seconds: float, interval: float = 1.0) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(_impl._oauth_rx, "poll_gateway", _no_code)
+    result = await _impl.auth_wait_impl("", 10)
+    assert result["ok"] is False
+    assert result["timed_out"] is True
+    assert "feishu_auth_wait" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_auth_wait_surfaces_user_denial(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    pending = tmp_path / "pending.json"
+    pending.write_text(json.dumps({"state": "st", "mode": "gateway"}), encoding="utf-8")
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(pending))
+
+    async def _denied(state: str, timeout_seconds: float, interval: float = 1.0) -> dict[str, str]:
+        return {"error": "access_denied"}
+
+    monkeypatch.setattr(_impl._oauth_rx, "poll_gateway", _denied)
+    result = await _impl.auth_wait_impl("", 10)
+    assert result["ok"] is False
+    assert "access_denied" in result["message"]
 
 
 def test_norm_user_key_empty_falls_back_to_default() -> None:

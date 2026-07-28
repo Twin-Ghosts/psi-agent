@@ -19,6 +19,7 @@ import random
 import re
 from typing import Any
 
+import _oauth_receiver as _oauth_rx
 import _runtime_paths as _paths
 import anyio
 from lark_channel.api.drive import comment as _comment
@@ -78,9 +79,11 @@ def _get_client() -> Any:
 # key gotcha is that the code lives in the browser ADDRESS BAR after redirect.
 _AUTH_PROMPT = (
     "需要用你的飞书身份授权一次才能继续 (机器人自己的权限做不了这一步). 步骤:\n"
-    "1. 调 feishu_auth_start 拿到 authorize_url, 打开它并点「同意授权」;\n"
-    "2. 浏览器会跳转到一个网址, 从**地址栏**里复制 code= 后面那一串 (或直接整段网址);\n"
-    "3. 把它交给 feishu_auth_complete.\n"
+    "1. 调 feishu_auth_start 拿到 authorize_url, 把它发给用户打开并点「同意授权」;\n"
+    "2. 返回里 auto_receive=True 时**不用复制 code**: 直接调 feishu_auth_wait (同一个 user_key), "
+    "授权码会自动回流并完成授权;\n"
+    "3. 只有 auto_receive=False 时才退回手工: 让用户从浏览器**地址栏**复制 code= 后面那一串 "
+    "(或整段网址) 交给 feishu_auth_complete.\n"
     "授权一次即缓存并自动续期, 之后同类操作不会再让你授权."
 )
 
@@ -2018,6 +2021,26 @@ def _redirect_uri() -> str:
     return os.environ.get("PSI_FEISHU_REDIRECT_URI", "").strip() or "http://localhost/"
 
 
+def _explicit_redirect_uri() -> str:
+    """用户在应用后台登记并显式指定的 redirect_uri; 未设置返回空串。"""
+    return os.environ.get("PSI_FEISHU_REDIRECT_URI", "").strip()
+
+
+def _new_pkce_pair() -> tuple[str, str]:
+    """生成 PKCE ``(code_verifier, code_challenge)``, S256。
+
+    verifier 取 64 字符 (飞书要求 43-128, 字符集 ``[A-Za-z0-9-._~]``); challenge 是其
+    SHA-256 的 base64url (去 padding)。实测飞书 authorize 接受 ``code_challenge``,
+    换 token 时接受 ``code_verifier``, 故整条链路可直接开 PKCE。
+    """
+    import base64  # noqa: PLC0415
+    import hashlib  # noqa: PLC0415
+
+    verifier = base64.urlsafe_b64encode(os.urandom(48)).rstrip(b"=").decode("ascii")
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
+    return verifier, challenge
+
+
 def _extract_code(code_or_url: str) -> str:
     """Accept either a bare code or a full callback URL and return the code."""
     s = code_or_url.strip()
@@ -2074,7 +2097,13 @@ def _uat_from_token_response(payload: dict[str, Any]) -> Any:
 
 
 async def auth_start_impl(scopes: str = "", user_key: str = "") -> dict[str, Any]:
-    """Build the browser authorize URL for the authorization-code flow."""
+    """Build the browser authorize URL, and pick an automatic code-receiving channel.
+
+    授权码流程真正折磨人的是「同意之后还要自己从地址栏复制 code」。这里按环境选一条
+    自动接收通道 (Gateway 回调 → 本机回环 → 都不行才手工), 把 ``state`` / PKCE
+    verifier / 通道信息一并写进 pending 文件, 供 ``auth_wait_impl`` 与
+    ``auth_complete_impl`` 取用。
+    """
     creds = _config()
     if creds is None:
         return _error("Feishu app not configured. Set PSI_FEISHU_APP_ID / PSI_FEISHU_APP_SECRET.")
@@ -2082,20 +2111,53 @@ async def auth_start_impl(scopes: str = "", user_key: str = "") -> dict[str, Any
 
     app_id, _ = creds
     scope_str = scopes or _DEFAULT_SCOPES
-    state = os.urandom(8).hex()
-    await anyio.Path(_pending_auth_path(user_key)).write_text(json.dumps({"state": state}), encoding="utf-8")
+    state = os.urandom(24).hex()
+    verifier, challenge = _new_pkce_pair()
+    plan = _oauth_rx.plan_receiver(_explicit_redirect_uri())
+    await anyio.Path(_pending_auth_path(user_key)).write_text(
+        json.dumps(
+            {
+                "state": state,
+                "code_verifier": verifier,
+                "redirect_uri": plan.redirect_uri,
+                "mode": plan.mode,
+            }
+        ),
+        encoding="utf-8",
+    )
     query = urlencode(
         {
             "client_id": app_id,
-            "redirect_uri": _redirect_uri(),
+            "redirect_uri": plan.redirect_uri,
             "response_type": "code",
             "scope": scope_str,
             "state": state,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
         }
     )
+    authorize_url = f"{_AUTHORIZE_URL}?{query}"
+    if plan.automatic:
+        return {
+            "ok": True,
+            "authorize_url": authorize_url,
+            "auto_receive": True,
+            "mode": plan.mode,
+            "redirect_uri": plan.redirect_uri,
+            "message": (
+                "请把 authorize_url 发给用户, 让其打开并点「同意授权」-- **不用复制任何 code**, "
+                "授权码会自动回流.\n"
+                "发完链接后立刻调 feishu_auth_wait (同一个 user_key) 等待用户点完, 它会自己完成授权.\n"
+                "授权一次即缓存并自动续期, 之后同类操作不会再让你授权."
+            ),
+            "next_step": "feishu_auth_wait",
+        }
     return {
         "ok": True,
-        "authorize_url": f"{_AUTHORIZE_URL}?{query}",
+        "authorize_url": authorize_url,
+        "auto_receive": False,
+        "mode": plan.mode,
+        "redirect_uri": plan.redirect_uri,
         "message": (
             "请按以下步骤完成一次性授权 (只读文档/云盘):\n"
             "1. 打开下面的 authorize_url, 在飞书页面点「同意授权」;\n"
@@ -2103,22 +2165,78 @@ async def auth_start_impl(scopes: str = "", user_key: str = "") -> dict[str, Any
             "`http://localhost/?code=xxxxxxxx&state=...`, 把 `code=` 后面, `&` 之前的那一串复制下来 "
             "(复制整段网址也行, 工具会自动提取);\n"
             "3. 把它作为 code 交给 feishu_auth_complete.\n"
-            "授权一次即缓存并自动续期, 之后同类操作不会再让你授权."
+            "授权一次即缓存并自动续期, 之后同类操作不会再让你授权.\n"
+            "(想免掉第 2 步的复制: 给 Gateway 配 PSI_OAUTH_CALLBACK_BASE, 或让 PSI_FEISHU_REDIRECT_URI "
+            "指向本机回环端口并在飞书后台登记.)"
         ),
         "authorize_url_note": "把 authorize_url 原样发给用户点击; 下一步要的是跳转后地址栏里的 code.",
     }
+
+
+async def _read_pending(user_key: str) -> dict[str, Any]:
+    """读回 ``auth_start`` 写下的 pending 记录; 缺失/损坏返回空 dict。"""
+    with contextlib.suppress(OSError, ValueError):
+        raw = await anyio.Path(_pending_auth_path(user_key)).read_text(encoding="utf-8")
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+async def auth_wait_impl(user_key: str = "", timeout_seconds: int = 180) -> dict[str, Any]:
+    """等浏览器把授权码送回来, 然后直接完成授权 -- 用户无需复制任何东西。
+
+    按 ``auth_start`` 选定的通道等待: ``gateway`` 轮询 Gateway 的 ``/oauth/code``,
+    ``loopback`` 起一次性本机监听。拿到 code 后立即走 token 交换。
+    """
+    pending = await _read_pending(user_key)
+    state = str(pending.get("state") or "")
+    mode = str(pending.get("mode") or "manual")
+    if not state:
+        return _error("没有待完成的授权, 请先调 feishu_auth_start.")
+    if mode == "manual":
+        return _error(
+            "当前环境无法自动接收授权码, 请让用户从浏览器地址栏复制 code 后交给 feishu_auth_complete.",
+            manual_required=True,
+        )
+    timeout = float(max(10, min(timeout_seconds, 600)))
+    if mode == "gateway":
+        got = await _oauth_rx.poll_gateway(state, timeout)
+    else:
+        port = _oauth_rx.loopback_port()
+        with contextlib.suppress(ValueError):
+            from urllib.parse import urlsplit  # noqa: PLC0415
+
+            port = urlsplit(str(pending.get("redirect_uri") or "")).port or port
+        got = await _oauth_rx.wait_loopback(port, state, timeout)
+    if not got:
+        return _error(
+            f"等了 {int(timeout)} 秒还没收到授权回调. 确认用户点了「同意授权」; "
+            "也可以再调一次 feishu_auth_wait 继续等.",
+            timed_out=True,
+        )
+    if got.get("error"):
+        return _error(f"用户侧授权失败: {got['error']}")
+    return await auth_complete_impl(got.get("code", ""), user_key)
 
 
 async def auth_complete_impl(code: str, user_key: str = "") -> dict[str, Any]:
     """Exchange the authorization code for a user_access_token and cache it."""
     if not code.strip():
         return _error("No code provided.")
+    pending = await _read_pending(user_key)
     app_token = await _get_app_access_token()
     if app_token is None:
         return _error("Feishu app not configured or app_access_token fetch failed.")
+    body: dict[str, Any] = {"grant_type": "authorization_code", "code": _extract_code(code)}
+    # PKCE verifier 与 redirect_uri 必须与 authorize 阶段一致 (飞书: 不一致报 20071)。
+    if pending.get("code_verifier"):
+        body["code_verifier"] = pending["code_verifier"]
+    if pending.get("redirect_uri"):
+        body["redirect_uri"] = pending["redirect_uri"]
     payload = await _post_json(
         _TOKEN_URL,
-        {"grant_type": "authorization_code", "code": _extract_code(code)},
+        body,
         headers={"Authorization": f"Bearer {app_token}"},
     )
     if payload.get("code") not in (0, None):

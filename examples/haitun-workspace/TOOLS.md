@@ -77,18 +77,30 @@ message_id / sender_open_id）。需要群里之前的上下文时：
 - `feishu_wiki_create_space`（新建知识库，新库归授权用户所有）。
 其余读/写/删除/下载类都是 tenant 优先、失败才回退，通常无需授权。
 
-### 引导用户授权（提示要明显，一次授权后不再问）
+### 引导用户授权（默认免复制，一次授权后不再问）
 
-当工具返回 `need_auth=True`，按工具返回的 `message` 分步引导用户（把 `sender_open_id` 作为
-`user_key` 贯穿以下三步，多人场景各自授权、互不覆盖）：
+当工具返回 `need_auth=True`，按工具返回的 `message` 引导用户（把 `sender_open_id` 作为
+`user_key` 贯穿全过程，多人场景各自授权、互不覆盖）：
 
 1. 调 `feishu_auth_start(user_key=<sender_open_id>)`，把返回的 `authorize_url` **原样发给用户**，
    让其打开并点「同意授权」；
-2. **明确告诉用户**：同意后浏览器会跳转到一个新网址，让他**看浏览器地址栏**——地址形如
-   `http://localhost/?code=xxxxxxxx&state=...`，把 `code=` 后面、`&` 之前那一串复制回来
-   （复制整段网址也行，工具会自动提取）；
-3. 拿到 code 后调 `feishu_auth_complete(code, user_key=<sender_open_id>)`。成功后凭证缓存并
-   自动续期，之后同类操作不会再让用户授权。
+2. 看返回里的 `auto_receive`：
+   - **`auto_receive=True`（默认路径）**：**不要向用户索要任何 code**。直接调
+     `feishu_auth_wait(user_key=<sender_open_id>)` 等待——用户点完「同意授权」后浏览器会看到
+     「授权成功」页，授权码自动回流并完成授权。返回 `timed_out=True` 时可以再调一次继续等；
+   - **`auto_receive=False`（无自动通道时的兜底）**：才需要**明确告诉用户**看浏览器地址栏，
+     地址形如 `http://localhost/?code=xxxxxxxx&state=...`，把 `code=` 后面、`&` 之前那一串
+     复制回来（整段网址也行），然后调 `feishu_auth_complete(code, user_key=<sender_open_id>)`。
+
+成功后凭证缓存并自动续期，之后同类操作不会再让用户授权。
+
+想让自动通道可用（部署侧一次性配置，二者其一即可）：
+- 给 Gateway 配一个用户浏览器可达的回调基址 `PSI_OAUTH_CALLBACK_BASE`（如
+  `https://haitun.example.com`），并把 `<基址>/oauth/callback` 登记到飞书后台重定向 URL。
+  手机上点授权也能自动回流，**多用户部署走这条**；
+- 或纯本机场景：不配 `PSI_FEISHU_REDIRECT_URI`，工具会用
+  `http://127.0.0.1:17860/oauth/callback`（端口可用 `PSI_OAUTH_LOOPBACK_PORT` 改），
+  同样需要登记到飞书后台。
 
 ### 免授权优先：手上有链接就直接读
 

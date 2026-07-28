@@ -21,6 +21,7 @@ from psi_agent.gateway._defaults import (
 )
 from psi_agent.gateway._feishu_manager import FeishuManager
 from psi_agent.gateway._history_manager import HistoryManager
+from psi_agent.gateway._oauth_manager import OAuthRelay
 from psi_agent.gateway._openapi import render_openapi
 from psi_agent.gateway._router_manager import RouterManager, RouterUpstreamInfo
 from psi_agent.gateway._scheduler_manager import SchedulerManager
@@ -174,6 +175,7 @@ async def create_app(
     # startup restore); standalone tests may omit it.
     app["schedm"] = schedm or SchedulerManager(_sm=sm, _ai_id=scheduler_ai_id or feishu_ai_id)
     app["fm"] = FeishuManager(_sm=sm, _ai_id=feishu_ai_id, _workspace_root=feishu_workspace_root)
+    app["oauth"] = OAuthRelay()
     app["wm"] = WorkspaceManager()
     app["cm"] = ChatManager()
     app["hm"] = HistoryManager()
@@ -230,6 +232,8 @@ async def create_app(
     app.router.add_post("/sessions/{session_id}/chat", _handle_chat)
     app.router.add_post("/feishu/route", _feishu_route)
     app.router.add_get("/feishu/routes", _list_feishu_routes)
+    app.router.add_get("/oauth/callback", _oauth_callback)
+    app.router.add_get("/oauth/code", _oauth_take_code)
 
     return app
 
@@ -421,6 +425,56 @@ async def _feishu_route(request: web.Request) -> web.Response:
 async def _list_feishu_routes(request: web.Request) -> web.Response:
     fm: FeishuManager = request.app["fm"]
     return _json([asdict(r) for r in fm.list_routes()])
+
+
+_OAUTH_DONE_HTML = (
+    "<!doctype html><meta charset=utf-8><title>授权完成</title>"
+    "<body style='font:16px/1.7 system-ui;padding:3rem;text-align:center'>"
+    "<h2>{title}</h2><p style='color:#666'>{note}</p></body>"
+)
+
+
+def _oauth_html(title: str, note: str, status: int = 200) -> web.Response:
+    return web.Response(
+        text=_OAUTH_DONE_HTML.format(title=title, note=note),
+        content_type="text/html",
+        charset="utf-8",
+        status=status,
+    )
+
+
+async def _oauth_callback(request: web.Request) -> web.Response:
+    """OAuth 重定向落地点: 收下 ``?code=&state=`` 交给中继, 给用户一个成功页。
+
+    发起方(workspace 工具)随后用同一个 ``state`` 去 ``/oauth/code`` 取回 —— 用户
+    因此**不需要**再从地址栏手工复制 code。
+    """
+    relay: OAuthRelay = request.app["oauth"]
+    state = request.query.get("state", "")
+    code = request.query.get("code", "")
+    error = request.query.get("error", "") or request.query.get("error_description", "")
+    if not state:
+        return _oauth_html("授权链接不完整", "回调缺少 state 参数, 请回到对话里重新发起授权。", status=400)
+    if not code and not error:
+        error = "callback carried neither code nor error"
+    await relay.deliver(state, code=code, error=error)
+    if error:
+        return _oauth_html("授权未完成", "可以回到对话里重新发起授权。", status=400)
+    return _oauth_html("授权成功 ✅", "可以关掉这个页面, 回到对话继续 —— 不用复制任何东西。")
+
+
+async def _oauth_take_code(request: web.Request) -> web.Response:
+    """发起方取件: ``?state=`` 命中则返回 ``{code}`` 并作废, 未到达返回 404。"""
+    relay: OAuthRelay = request.app["oauth"]
+    state = request.query.get("state", "")
+    if not state:
+        return _error("state query parameter is required", status=400)
+    pending = await relay.take(state)
+    if pending is None:
+        return _error("no callback received for this state yet", status=404)
+    if pending.error:
+        return _json({"state": state, "error": pending.error}, status=200)
+    return _json({"state": state, "code": pending.code}, status=200)
 
 
 async def _list_titles(request: web.Request) -> web.Response:
