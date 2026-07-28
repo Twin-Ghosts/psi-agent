@@ -373,7 +373,7 @@ uv run psi-agent channel feishu \
 - 处理状态表情：处理中显示 `Typing`，完成移除，失败显示 `CrossMark`
 - 支持文本、图片、文件、音频
 - 文档评论回复：`--respond-to-comments`（默认开）文档评论区 @机器人 时，用 agent 的回答回复该评论（需后台订阅 `drive.notice.comment_add_v1`）
-- 按用户独立会话：`--gateway-url http://127.0.0.1:8080` 接上 Gateway 后，每个飞书用户首次发消息时由 Gateway 按其 open_id 幂等 spawn 一个独立 Session（独立 workspace 子目录、独立历史），实现同一机器人对不同用户的隔离会话。所挂 AI 与 workspace 父目录由 Gateway 的 `--feishu-ai-id` / `--feishu-workspace-root` 决定。不设 `--gateway-url` 时全体共用 `--session-socket`（行为不变）。Gateway 不可达时自动回退共享 socket
+- 按用户独立会话：`--gateway-url http://127.0.0.1:8080` 接上 Gateway 后，每个飞书用户首次发消息时由 Gateway 按其 open_id 幂等 spawn 一个独立 Session（独立用户数据 workspace 子目录、独立历史），但仍可共用同一个 `examples/haitun-workspace` Agent 能力包。附件落在对应 Session workspace 的 `uploads/<日期>/<message_id>/`；若 `--feishu-workspace-root` 为 `users`，完整形态即 `users/<open_id>/uploads/...`。所挂 AI 与 workspace 父目录由 Gateway 的 `--feishu-ai-id` / `--feishu-workspace-root` 决定。配置 Gateway 后，路由失败会拒绝消息，不回退共享 socket；不设 `--gateway-url` 时全体共用 `--session-socket` 和原下载目录（行为不变）
 
 ## 示例 Workspace
 

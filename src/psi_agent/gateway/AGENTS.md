@@ -288,7 +288,7 @@ REST ``DELETE /sessions/{id}`` 在 SessionManager.delete 之后还会：
 
 ## FeishuManager
 
-「飞书 open_id → Session」路由表，让同一飞书机器人对不同飞书用户提供**各自独立**的会话渠道。用户是**动态**的（事先不知道有哪些人），故某用户首次路由时按需 spawn 一个 Session。本组件是 gateway 侧「open_id → Session」的**唯一权威**——飞书 channel 只拿 open_id 问 Gateway 要 socket，不再自己决定 `ai_id`/`workspace`（对比早期把路由塞进 channel 内部调 `/sessions` 的做法）。
+「飞书 open_id → Session」路由表，让同一飞书机器人对不同飞书用户提供**各自独立**的会话渠道。用户是**动态**的（事先不知道有哪些人），故某用户首次路由时按需 spawn 一个 Session。本组件是 gateway 侧「open_id → Session / 用户数据 workspace」的**唯一权威**——飞书 channel 只拿 open_id 问 Gateway 要完整路由，不再自己决定 `ai_id`/`workspace`（对比早期把路由塞进 channel 内部调 `/sessions` 的做法）。这里的 workspace 是 Session 用户数据目录；多个 Session 仍可共用同一个 `examples/haitun-workspace` Agent 能力包。
 
 **字段**：
 - `_sm: SessionManager` — 复用其 spawn/查询能力管理 Session 生命周期
@@ -310,6 +310,8 @@ REST ``DELETE /sessions/{id}`` 在 SessionManager.delete 之后还会：
 **内存态自愈（有意为之）**：`_routes` 不持久化。因 session_id 由 open_id 确定性派生，Gateway 重启后 Session 经 state 恢复，下次 `route()` 走 adopt 分支自愈，无需额外持久化。
 
 **list_routes() → list[FeishuRoute]**：`[{open_id, session_id}]`，供观测（`GET /feishu/routes`）。
+
+**附件路由契约**：`POST /feishu/route` 在 `FeishuManager.route()` 后用 `SessionManager.get_workspace(session_id)` 返回实际 workspace，响应为 `{open_id, session_id, channel_socket, workspace}`。Channel 必须缓存这份完整路由并先路由再下载；附件写入 `<workspace>/uploads/<date>/<message_id>/`。Channel 不自行拼 `<root>/<open_id>`，否则 adopt/显式 workspace 场景会漂移。配置 Gateway 时失败必须 fail-closed，禁止回退共享 Session。
 
 ## TitleManager
 
@@ -339,7 +341,7 @@ REST ``DELETE /sessions/{id}`` 在 SessionManager.delete 之后还会：
 | POST | `/sessions/{session_id}/chat` | Web UI chat（SSE） |
 | GET | `/sessions/{session_id}/history` | 获取会话历史（AppData ``histories/`` 优先 + legacy 双读；``is_displayable_chat_message`` 白名单 + 剥 `[SEND:]`/`[RECV:]`；assistant 行另附 ``sends``） |
 | GET | `/sessions/{session_id}/todos` | 读取 todos（AppData ``todos/{id}.json`` 优先，否则 legacy workspace ``.psi/todos``）；返回 ``{todos, summary}``，文件缺失则为空列表 |
-| POST | `/feishu/route` | 按飞书 `open_id` 幂等路由到其独立 Session（首次按需 spawn）`{open_id, ai_id?, workspace?}` → 201 `{open_id, session_id, channel_socket}`；缺 open_id / 无 ai_id → 400 |
+| POST | `/feishu/route` | 按飞书 `open_id` 幂等路由到其独立 Session（首次按需 spawn）`{open_id, ai_id?, workspace?}` → 201 `{open_id, session_id, channel_socket, workspace}`；缺 open_id / 无 ai_id → 400 |
 | GET | `/feishu/routes` | 列出所有飞书 open_id → Session 路由 `[{open_id, session_id}]` |
 | GET | `/defaults` | 默认 `agent` + `workspace` + `appdata`（建 Session 调用方可读；`appdata` 为记忆区根：todos / history / Gateway state） |
 | GET | `/workspace/cwd` | Gateway 进程当前工作目录 |

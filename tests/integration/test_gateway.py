@@ -185,6 +185,7 @@ async def test_gateway_feishu_route(tmp_path: str) -> None:
     sm = SessionManager(_aim=aim, _prefix="gw-test", _tg=tg)
     app = await create_app(aim, sm, TitleManager(), feishu_workspace_root=str(tmp_path))
     base_url, runner = await _start_app_on_free_port(app)
+    user_workspace = str(anyio.Path(tmp_path) / "users" / "ou_alice")
 
     try:
         timeout = ClientTimeout(total=10)
@@ -205,16 +206,23 @@ async def test_gateway_feishu_route(tmp_path: str) -> None:
             async with session.post(f"{base_url}/feishu/route", json={"open_id": "ou_alice"}) as resp:
                 assert resp.status == 400
 
-            # 带 ai_id → 幂等 spawn, 返回 channel_socket + session_id。
-            async with session.post(f"{base_url}/feishu/route", json={"open_id": "ou_alice", "ai_id": "ai1"}) as resp:
+            # 带 ai_id + 用户数据 workspace → 幂等 spawn, 返回完整实际路由。
+            async with session.post(
+                f"{base_url}/feishu/route",
+                json={"open_id": "ou_alice", "ai_id": "ai1", "workspace": user_workspace},
+            ) as resp:
                 assert resp.status == 201
                 data = await resp.json()
                 assert data["open_id"] == "ou_alice"
                 assert data["session_id"] == "feishu-ou_alice"
+                assert data["workspace"] == str(await anyio.Path(user_workspace).resolve())
                 socket1 = data["channel_socket"]
 
             # 二次幂等: 同 socket。
-            async with session.post(f"{base_url}/feishu/route", json={"open_id": "ou_alice", "ai_id": "ai1"}) as resp:
+            async with session.post(
+                f"{base_url}/feishu/route",
+                json={"open_id": "ou_alice", "ai_id": "ai1", "workspace": user_workspace},
+            ) as resp:
                 assert resp.status == 201
                 assert (await resp.json())["channel_socket"] == socket1
 

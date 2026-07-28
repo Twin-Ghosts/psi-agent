@@ -371,8 +371,9 @@ async def _list_sessions(request: web.Request) -> web.Response:
 async def _feishu_route(request: web.Request) -> web.Response:
     """按飞书 ``open_id`` 幂等地路由到其独立 Session, 首次见到时按需 spawn。
 
-    body: ``{open_id, ai_id?, workspace?}`` → ``201 {open_id, session_id, channel_socket}``。
-    channel 拿回 ``channel_socket`` 连接即得该用户隔离的会话。
+    body: ``{open_id, ai_id?, workspace?}`` →
+    ``201 {open_id, session_id, channel_socket, workspace}``。
+    channel 拿回完整路由后连接该用户隔离的会话, 并在实际 workspace 内隔离附件目录。
     """
     fm: FeishuManager = request.app["fm"]
     schedm: SchedulerManager = request.app["schedm"]
@@ -388,12 +389,21 @@ async def _feishu_route(request: web.Request) -> web.Response:
         # Schedules under this user's workspace belong to its dedicated scheduler
         # Session, not to the user session.
         sm: SessionManager = request.app["sm"]
+        workspace = sm.get_workspace(session_id)
         await schedm.ensure(
-            sm.get_workspace(session_id),
+            workspace,
             ai_id=sm.get_backend_id(session_id),
             agent=sm.get_agent(session_id),
         )
-        return _json({"open_id": body["open_id"], "session_id": session_id, "channel_socket": socket}, status=201)
+        return _json(
+            {
+                "open_id": body["open_id"],
+                "session_id": session_id,
+                "channel_socket": socket,
+                "workspace": workspace,
+            },
+            status=201,
+        )
     except (TypeError, ValueError, KeyError) as e:
         return _error(str(e), status=400)
     except LookupError as e:

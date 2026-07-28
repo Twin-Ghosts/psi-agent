@@ -525,10 +525,15 @@ OPENAPI_SPEC = {
             },
             "FeishuRoute": {
                 "type": "object",
+                "required": ["open_id", "session_id", "channel_socket", "workspace"],
                 "properties": {
                     "open_id": {"type": "string"},
                     "session_id": {"type": "string"},
                     "channel_socket": {"type": "string"},
+                    "workspace": {
+                        "type": "string",
+                        "description": "Actual user data workspace of the routed Session",
+                    },
                 },
             },
             "FeishuRouteEntry": {
