@@ -818,6 +818,33 @@ async def test_wildcard_picks_up_schedule_created_after_start(tmp_path: Path) ->
 
 
 @pytest.mark.anyio
+async def test_named_whitelist_with_no_match_still_starts_watcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """白名单非空但当前一条都没命中, 仍要起 watcher (刻意为之)。
+
+    门是「白名单非空」而不是「当前有激活条目」: 名单里那条 ``TASK.md`` 可能之后
+    才被建出来, 少了 watcher 就永远发现不了它。
+    """
+    monkeypatch.setattr(schedule_registry_module, "_WATCH_INTERVAL_SECONDS", 0.05)
+    refreshed = anyio.Event()
+    sr = await _load_three(tmp_path, {"not-on-disk-yet"})
+    assert sr.active_schedules == []
+
+    async def _signal_refresh() -> dict[str, str]:
+        refreshed.set()
+        return {}
+
+    monkeypatch.setattr(sr, "refresh", _signal_refresh)
+    async with anyio.create_task_group() as tg:
+        sr.start_all(tg, cast(Any, _MockAgent()))
+        assert sr._runner_scopes == {}
+        with anyio.fail_after(2):
+            await refreshed.wait()
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
 async def test_empty_registry_start_all_is_noop(tmp_path: Path) -> None:
     """空 registry (无 work_dir): 不加载、不触发。"""
     sr = ScheduleRegistry()

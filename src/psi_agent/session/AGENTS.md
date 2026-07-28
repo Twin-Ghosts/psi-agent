@@ -16,7 +16,7 @@ Session 层是 psi-agent 的核心——负责 workspace 解析、agent loop、t
 
 ### 调度归属 workspace，触发权归属 (session × schedule)（刻意为之）
 
-`schedules/` 从 **workspace** 加载——每个 Session 都读到全部条目，但**是否触发逐条决定**：`ScheduleRegistry(active_names=…)` 命中的条目才起 runner。
+`schedules/` 从 **workspace** 加载——每个 Session 都读到全部条目，但**是否触发逐条决定**：`ScheduleRegistry(active_names=…, deactive_names=…)` 判定为激活（白名单命中且不在黑名单里）的条目才起 runner。
 
 | | |
 |--|--|
@@ -27,7 +27,7 @@ Session 层是 psi-agent 的核心——负责 workspace 解析、agent loop、t
 | **为什么还要黑名单** | 白名单是**枚举**，只覆盖启动那一刻已存在的条目——之后 `_watch_dir` / `refresh()` 新发现的 `TASK.md` 不在名单里，永远不会被触发。要「除某几条以外全都归我」（调度 Session 的常态），只能写 `active='*'` + `deactive=让出的几条`：通配符让新条目自动激活，黑名单精确挖掉划给别人的那几条 |
 | **未激活条目** | 照旧加载进 registry：`schedules` 属性与 `refresh()` 的 add/update/remove 统计都**不受激活影响**，只是不起 runner。`active_schedules` 属性给出本 Session 实际触发的那些（schedule 列表目前不经 REST / SPA 暴露） |
 | **谁触发** | `_start_runner` 逐条查 `is_active(name)`，未激活即 no-op。去重发生在**构造期**（谁激活哪条由创建方决定），不是运行时抢锁，所以没有租约、没有选主、没有「持有者退出谁接管」 |
-| **怎么感知新任务** | 调度 Session 没有 channel → 永远没有回合 → 回合内的两个 refresh 时机都不发生。故 `start_all` 在**有激活条目时**额外起 `_watch_dir` 协程每 30s `refresh()`。**这不是可选优化**：少了它，用户新建的定时任务永远不会被加载（见下方「动态重载」第 3 条）。一条都不激活的 Session 不起 watcher，不做无用扫盘 |
+| **怎么感知新任务** | 调度 Session 没有 channel → 永远没有回合 → 回合内的两个 refresh 时机都不发生。故 `start_all` 在**白名单非空时**额外起 `_watch_dir` 协程每 30s `refresh()`。**这不是可选优化**：少了它，用户新建的定时任务永远不会被加载（见下方「动态重载」第 3 条）。门是「白名单非空」而非「当前有激活条目」——白名单写了个磁盘上还不存在的名字时也要起 watcher，那个 `TASK.md` 之后可能被建出来；白名单空则黑名单只做减法、一条都不可能激活，不起 watcher，不做无用扫盘 |
 | **谁创建** | Gateway `SchedulerManager.ensure(workspace)`（见 `gateway/AGENTS.md`），为每个 workspace 幂等地维护唯一一个**全量激活**（`("*",)`）的调度 Session（key 经 `await anyio.Path(workspace).resolve()` + `os.path.normcase` 归一；不用 `os.path.realpath`，那是同步 IO，违反「一切异步」）；**按需**——workspace 无 `schedules/*/TASK.md` 时不 spawn。用户会话一律传空名单 |
 | **display 结果** | 调度 Session 没有 channel 连着它，`visibility: display` 的结果只写它自己的 JSONL，**不再回流给用户**（刻意接受的降级）。要可靠推送就用 `fire=tool` + `feishu_message_send`，那条路不依赖 pending |
 | **`fire=prompt` 的历史** | 落在 AppData 的 `histories/scheduler-<hash>.jsonl`（第 4C 起 history 归 AppData），与用户对话历史分开 |
@@ -184,7 +184,7 @@ Session 层使用两个对称的协议适配器，将 `SessionAgent.run()` 包�
 - Schedule 刷新的三个时机：
   1. 每次 `run()` 入口（turn 开始），与 tool 一并刷新
   2. `finish_reason="stop"` 后（turn 结束），仅刷新 schedule——因本轮 tool 可能修改了 workspace schedules 下的文件，需立即生效，不等下次 turn
-  3. **`_watch_dir` 常驻协程每 30s 刷新**（仅**有激活条目**的 Session 才起）。**必需**：上面两个时机都在 `SessionAgent.run()` 里，而调度 Session 没有 channel 连着它、永远不会有回合；少了这个 watcher，用户经 `schedule_manage` 新建的定时任务永远不会被加载，只有 spawn 那一刻已存在的能跑。用轮询而非 inotify/watchdog——`refresh()` 已是 hash 增量（未变的文件不重新解析），一次目录 stat 成本可忽略，且零新依赖、跨平台一致
+  3. **`_watch_dir` 常驻协程每 30s 刷新**（仅**白名单非空**的 Session 才起）。**必需**：上面两个时机都在 `SessionAgent.run()` 里，而调度 Session 没有 channel 连着它、永远不会有回合；少了这个 watcher，用户经 `schedule_manage` 新建的定时任务永远不会被加载，只有 spawn 那一刻已存在的能跑。用轮询而非 inotify/watchdog——`refresh()` 已是 hash 增量（未变的文件不重新解析），一次目录 stat 成本可忽略，且零新依赖、跨平台一致
      - **循环体内 `except Exception` 兜底（对标 `_run_one`）**：watcher 经 `start_soon` 挂在 Session 的 task group 上，任何逸出的异常都会**连坐整个调度 Session**（实测过：`refresh()` 之外抛异常会直接杀掉 Session）。单次刷新失败只记 ERROR，下一周期重试。`CancelledError` 是 `BaseException` 不被捕获，取消照常传播
 
 ## Tool 调用细节
@@ -210,7 +210,7 @@ AI 的 tool_calls 通过 SSE 流式传输——多个 chunk 中的 `delta.tool_c
 ## Schedule 机制完整流程
 
 ```
-每个**激活的** schedule 一个 run_one_schedule() coroutine（+ 有激活条目时一个 _watch_dir()）：
+每个**激活的** schedule 一个 run_one_schedule() coroutine（+ 白名单非空时一个 _watch_dir()）：
   while True:
     _seconds_until_next(cron)   ← 本地墙钟下次触发（勿用 time.time() 作 croniter base；TZ 设了则按该时区）
     await anyio.sleep(wait)     ← 睡到触发
