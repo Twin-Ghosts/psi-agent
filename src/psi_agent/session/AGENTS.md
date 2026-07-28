@@ -262,7 +262,7 @@ async def compact_history(
 ```
 
 未定义时 → 记录 warning，跳过压缩，history 持续增长。
-多次 compaction → 累积追加 `[Compacted History]` 到同一个 system prompt。
+多次 compaction → 每次插入独立的 `compacted` 消息；`messages_for_ai()` 仅取最后一条合并到 system prompt。
 
 ### peek_pending / clear_pending 安全机制
 
