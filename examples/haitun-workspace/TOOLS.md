@@ -199,17 +199,29 @@ message_id / sender_open_id）。需要群里之前的上下文时：
     提交按钮一次提交，让所选值进入回调的 `form_value`。不要依赖 `standalone` 的 `select_static`/`date_picker`
     连续变更回调：SDK 1.2.0 的去重 key 不区分所有选项变化。典型：审批卡（同意/驳回按钮）、让人从下拉里选值、
     收集一小段表单。
-    按钮/表单操作会由 Feishu Channel 接回**操作者自己的 agent 会话**，作为下一条用户消息，格式为
-    `<feishu_card_action>` 包裹的 JSON；agent 处理后会在原卡片所在聊天中流式回复。每个按钮的
-    `value` 必须同时带明确动作名和稳定业务 ID，且不同按钮使用不同值，例如
-    `{"action":"approve","request_id":"req_1"}`。
+    给其他人发卡片时必须同时提供 `business_context_json` 和 `action_handlers_json`，例如
+    `business_context_json='{"request_type":"leave","request_id":"req_1","requester":"ou_sender"}'`、
+    `action_handlers_json='{"approve":"approval_decide","reject":"approval_decide"}'`。前者要包含收件方
+    agent 独立处理所需的业务事实，后者必须覆盖所有允许的按钮动作。按钮/表单操作会由 Feishu Channel 接回
+    **操作者自己的 agent 会话**，作为下一条结构化用户消息，格式为 `<feishu_card_action>` 包裹的 JSON；
+    agent 处理后会在原卡片所在聊天中流式回复。JSON 同时包含发卡方 `source`、原始完整 `card`、
+    `business_context`、确定性 `dispatch` 和飞书原始 `action`。每个按钮的 `value` 必须同时带明确动作名和
+    稳定业务 ID，且不同按钮使用不同值，例如 `{"action":"approve","request_id":"req_1"}`。
+    Channel 只从映射中确定 handler，仍把回调交给点击者 agent，不直接执行工具。映射键、handler 和回调 action ID
+    都必须是无首尾空白的 canonical 字符串并精确匹配。配置了映射但 action 未命中时，
+    `dispatch.matched=false` 且 `handler=null`；不得臆造或执行未匹配 handler。未配置映射的旧卡片才把
+    `value.action` / `action_id` 本身作为兼容 handler；snapshot 缺失/损坏时一律 fail closed。首个回调会留下
+    持久 `.consumed` tombstone，因此不同 Channel 进程或重启后的重复点击也会被忽略。自定义 AppData 时 Channel
+    和 Gateway/workspace tool 必须解析到同一根，推荐统一设置 `PSI_APPDATA`，否则回调拿不到业务上下文并安全失败。
     收到回调后把它视为用户提交的操作，但执行审批、写数据等有后果的动作前仍须复核操作者权限与当前业务状态；
     每张卡片只接受**第一个**有效按钮/表单操作：首次回调后 Channel 会保留原卡片标题和正文，把交互区替换为
     “已选择: <选项>”只读提示，同一 `message_id` 的后续操作直接忽略；需要用户再次选择时必须发送一张新卡片。底层操作仍须保持
     **idempotent**，以防飞书重投、卡片更新失败或多实例并发。工具返回 `ok=true` 后卡片已直接对用户可见；若卡片
     已承载全部必要信息，本轮以**零 assistant 文本**结束，不要输出 `NO_REPLY`、确认“卡片已发送”，也不要重复卡片
     内容或按钮名称。只有仍有卡片未承载的必要信息时才继续回复，例如风险提示、部分失败或必须执行的后续步骤；
-    此时只回复这些必要信息，不得省略。纯粹只是发一段文字仍用 `feishu_message_send`。
+    此时只回复这些必要信息，不得省略。若返回 `ok=false, sent=true, callback_context_saved=false`，说明卡片已经
+    发出但回调上下文保存失败；只提示这项必要的部分失败，不要重发卡片。纯粹只是发一段文字仍用
+    `feishu_message_send`。
 16. **建新群拉人（没有现成群可发时）**：`feishu_message_send` 只能往**已存在**的群发消息；要**从零建一个
     新群并把人拉进来**时，用 `feishu_chat_create(name, user_ids=[...], description=..., owner_id=...)`。
     机器人用自己 tenant 身份建群，**群主默认设成提需求的那个人**——把 `<feishu_context>` 的 `sender_open_id`

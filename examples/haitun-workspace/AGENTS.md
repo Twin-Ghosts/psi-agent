@@ -161,7 +161,29 @@ service tools:
 - `feishu-todo-board-sync` — 搬运一篇飞书 docx 个人 ToDoList 进团队看板电子表格（列=日期、行=人）: slice the doc's newest date section, split its `ToDo` items **by the `@name` mentioned in each item** (items mentioning nobody go to the doc's owner), assemble each person's cell text, and write it to the **caller-specified** column. Three hard rules: attribution follows `@name`; the target column is always given by the caller (**never** inferred from the source doc's date, whose format differs from the header's); a non-empty target cell is reported for confirmation instead of being silently overwritten. Board structure (header row / name column / `SHEET_ID`) is discovered per run, never hardcoded. Drives the existing `feishu_wiki_get_node` → `feishu_sheet_tabs` → `feishu_doc_read` → `feishu_sheet_read` → `feishu_sheet_write` tools; `productivity`, no dedicated tool, no extra deps. Never adds rows for people absent from the board — it reports them as skipped.
 - `feishu-schedule-message` — Feishu timed reminders via **`schedule_manage` `fire=tool`**: Session **directly** calls `feishu_message_send(**tool_args)` at fire time (no LLM). Pass `tool_args` JSON with real `chat_id`/`open_id` from `<feishu_context>` (**not** Gateway `session_id`). Prefer `visibility=silent`. One-shot (`once_at`) **rejects** `fire=prompt` / content-embedded calls — create must include `fire`+`tool`+`tool_args` in one shot; Session `run_once` deletes TASK after fire.
 - **Feishu tool credentials on Gateway（踩坑）**：`feishu_message_send` 等 workspace 工具跑在 **Session / Gateway 进程**里，读的是该进程的 `PSI_FEISHU_APP_ID` / `PSI_FEISHU_APP_SECRET`。只给 Feishu **channel** 进程设环境变量不够——定时触发时会报 `Feishu app not configured`，飞书收不到推送。启动 Gateway 时也要带上同一组凭证。
-- **Feishu interactive-card callback contract**：`feishu_message_send_card` 发出的按钮/表单操作由 Feishu Channel 按操作者 `open_id` 路由回对应 agent，会以 `<feishu_card_action>` 包裹的 JSON 进入下一条用户消息，并在原卡片所在聊天流式回复。按钮组/表单优先用旧版卡片；Card 2.0 不支持旧版 `action` 标签。按钮 `value` 必须包含明确动作名和稳定业务 ID（如 `request_id`），且不同按钮使用不同值；选择器/日期输入放进 `form` 后提交，让结果进入 `form_value`，不要依赖 SDK 1.2.0 无法完整区分选项变化的 `standalone` 回调。每张卡片按 `message_id` 只接受首个有效操作，随后保留原卡片标题和正文，并把交互区替换为“已选择: <选项>”只读提示；再次收集输入必须发新卡片。有后果的操作执行前重新校验权限和当前状态，底层写操作保持 **idempotent**，以覆盖飞书重投、卡片更新失败和多实例并发。工具成功后卡片已经对用户可见：若卡片已承载全部必要信息，本轮以零 assistant 文本结束，不得输出 `NO_REPLY`、发送确认或重复卡片内容/按钮；若仍有卡片未承载的必要信息（风险、部分失败、必要后续步骤），则必须只回复这些信息。
+- **Feishu interactive-card callback contract**：发送给其他人的卡片必须同时传
+  `business_context_json`（业务类型、稳定业务 ID、发起人、当前状态等收件方 agent 独立处理所需事实）和
+  `action_handlers_json`（按钮 `value.action` 到 handler 标识符的完整映射）。工具会把原卡片、发送来源、
+  业务上下文和映射保存到 v2 snapshot；按钮/表单操作由 Feishu Channel 按操作者 `open_id` 路由回点击者
+  agent，以 `<feishu_card_action>` 包裹的结构化 JSON 作为下一条 user 消息，并在原卡片所在聊天流式回复。
+  信封中的 `source` 是发卡方 Session / open_id 与接收目标，`card` 是原始完整卡片，
+  `business_context` 是发卡时提供的业务事实，`dispatch` 是确定性选择结果，`action` 是飞书原始操作。
+  Channel **只选择 handler，不直接执行 handler，也不绕过 LLM**。映射键和 handler 必须是无首尾空白的
+  canonical 字符串；配置非空映射后，未知 action 必须得到
+  `dispatch.matched=false` 和 `handler=null`；点击者 agent 不得臆造或执行未匹配 handler。只有未配置映射的
+  v1/v2 snapshot 才回退到把 `action.value.action` / `action_id` 本身作为 handler；snapshot 缺失或损坏时
+  必须 fail closed，不能假定它是旧卡片。首个回调留下持久 `.consumed` tombstone，后续进程/重启后的重复点击
+  直接忽略。自定义 AppData 时 Channel 和 Gateway/workspace tool 必须使用同一根，推荐统一设置 `PSI_APPDATA`。
+  按钮组/表单优先用旧版卡片；
+  Card 2.0 不支持旧版 `action` 标签。按钮 `value` 必须包含明确动作名和稳定业务 ID（如 `request_id`），
+  且不同按钮使用不同值；选择器/日期输入放进 `form` 后提交，让结果进入 `form_value`，不要依赖 SDK 1.2.0
+  无法完整区分选项变化的 `standalone` 回调。每张卡片按 `message_id` 只接受首个有效操作，随后保留原卡片
+  标题和正文，并把交互区替换为“已选择: <选项>”只读提示；再次收集输入必须发新卡片。有后果的操作执行前
+  重新校验权限和当前状态，底层写操作保持 **idempotent**，以覆盖飞书重投、卡片更新失败和多实例并发。
+  工具成功后卡片已经对用户可见：若卡片已承载全部必要信息，本轮以零 assistant 文本结束，不得输出
+  `NO_REPLY`、发送确认或重复卡片内容/按钮；若仍有卡片未承载的必要信息（风险、部分失败、必要后续步骤），
+  则必须只回复这些信息。若卡片已发送但 snapshot 保存失败，工具返回
+  `ok=false, sent=true, callback_context_saved=false`；必须告知这项必要的部分失败，且不要重发卡片造成重复。
 - `fusion-flow` — the immutable Fusion Flow runtime skill (node-based). **Do not edit it.**
 
 ## Schedules (`schedules/`)

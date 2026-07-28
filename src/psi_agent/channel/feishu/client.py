@@ -28,7 +28,7 @@ from loguru import logger
 from psi_agent.channel._core import ChannelCore
 from psi_agent.channel._types import FileChunk, InputChunk, TextChunk
 
-from ._card_store import pop_card_snapshot
+from ._card_store import CardSnapshot, pop_card_snapshot
 
 _EMOJI_PROCESSING = "Typing"
 _EMOJI_FAILED = "CrossMark"
@@ -186,8 +186,14 @@ def _context_header(ctx: Any) -> str:
     return "\n".join(lines)
 
 
-def _card_action_context(event: Any) -> str:
-    """Serialize a Feishu card action as structured agent input."""
+def _card_action_context(
+    event: Any,
+    *,
+    snapshot: CardSnapshot | None = None,
+    card: dict[str, Any] | None = None,
+    snapshot_status: str = "not_found",
+) -> str:
+    """Serialize card/source/business data and deterministic dispatch as agent input."""
     operator = getattr(event, "operator", None)
     action = getattr(event, "action", None)
     raw = getattr(event, "raw", None)
@@ -201,10 +207,40 @@ def _card_action_context(event: Any) -> str:
     if value is None:
         value = raw_action.get("value")
 
+    normalized_value = _normalize_card_action_value(value)
+    action_id = None
+    if isinstance(normalized_value, dict):
+        for key in ("action", "action_id"):
+            raw_action_id = normalized_value.get(key)
+            if isinstance(raw_action_id, str) and raw_action_id and raw_action_id.strip() == raw_action_id:
+                action_id = raw_action_id
+                break
+
+    action_handlers = snapshot.action_handlers if snapshot is not None else None
+    if snapshot is None:
+        handler = None
+        strategy = "snapshot_invalid" if snapshot_status == "invalid" else "snapshot_unavailable"
+    elif action_handlers:
+        handler = action_handlers.get(action_id or "")
+        strategy = "action_handlers"
+    else:
+        handler = action_id
+        strategy = "action_id"
+
     payload = {
+        "schema_version": 2,
         "chat_id": getattr(event, "chat_id", "") or "",
         "message_id": getattr(event, "message_id", "") or "",
         "operator_open_id": getattr(operator, "open_id", "") or "",
+        "source": snapshot.source if snapshot is not None else {},
+        "card": snapshot.card if snapshot is not None else card or {},
+        "business_context": snapshot.business_context if snapshot is not None else {},
+        "dispatch": {
+            "action_id": action_id,
+            "handler": handler,
+            "matched": handler is not None,
+            "strategy": strategy,
+        },
         "action": {
             "tag": tag,
             "value": value,
@@ -571,11 +607,20 @@ async def _handle_card_action(
             return
 
         action_value = _card_action_value(event)
+        snapshot = None
+        snapshot_status = "error"
+        original_card = None
         replacement = None
         try:
-            card = await pop_card_snapshot(message_id, appdata)
-            if card is not None:
-                replacement = _consumed_card_content(card, action_value)
+            claim = await pop_card_snapshot(message_id, appdata)
+            if claim.status == "already_consumed":
+                logger.info(f"card action ignored for durably-consumed message={message_id}")
+                return
+            snapshot_status = claim.status
+            snapshot = claim.snapshot
+            if snapshot is not None:
+                original_card = snapshot.card
+                replacement = _consumed_card_content(snapshot.card, action_value)
                 if replacement is None:
                     logger.warning(f"failed to consume card snapshot {message_id}, trying Feishu payload")
         except Exception as e:
@@ -583,7 +628,10 @@ async def _handle_card_action(
         if replacement is None:
             try:
                 payload = await channel.fetch_message(message_id)
-                replacement = _consumed_card(payload, action_value)
+                fetched_card = _parse_fetched_card(payload)
+                if original_card is None:
+                    original_card = fetched_card
+                replacement = _consumed_card_content(fetched_card, action_value)
                 if replacement is None:
                     logger.warning(f"failed to preserve consumed card {message_id}, using fallback")
             except Exception as e:
@@ -602,7 +650,16 @@ async def _handle_card_action(
             f"card action operator={operator_open_id} chat={chat_id} "
             f"message={message_id or None} socket={core.session_socket}"
         )
-        chunks: list[InputChunk] = [TextChunk(_card_action_context(event))]
+        chunks: list[InputChunk] = [
+            TextChunk(
+                _card_action_context(
+                    event,
+                    snapshot=snapshot,
+                    card=original_card,
+                    snapshot_status=snapshot_status,
+                )
+            )
+        ]
         await _stream_reply(channel, core, chat_id, chunks, reply_to=message_id or None)
         logger.debug("card action stream completed")
     except Exception as e:

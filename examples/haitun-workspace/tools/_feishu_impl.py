@@ -28,6 +28,7 @@ from lark_channel.core.model import BaseRequest
 from loguru import logger
 
 from psi_agent.channel.feishu._card_store import save_card_snapshot
+from psi_agent.session.runtime_context import get_session_id
 
 _client: Any = None
 
@@ -957,7 +958,12 @@ async def send_message_impl(receive_id: str, text: str, receive_id_type: str, on
 
 
 async def send_card_impl(
-    receive_id: str, card_json: str, receive_id_type: str, user_key: str | None = None
+    receive_id: str,
+    card_json: str,
+    receive_id_type: str,
+    user_key: str | None = None,
+    business_context_json: str = "{}",
+    action_handlers_json: str = "{}",
 ) -> dict[str, Any]:
     """Send an interactive card (``msg_type=interactive``) — buttons/forms/selectors etc.
 
@@ -970,6 +976,8 @@ async def send_card_impl(
     ``receive_id_type`` is auto-corrected from the id prefix, same as ``send_message_impl``.
     Returns ``message_id`` + ``thread_id`` (thread_id is the topic root if in a thread).
     """
+    if not isinstance(card_json, str):
+        return _error("card_json must be a JSON string containing an object")
     try:
         card = json.loads(card_json)
     except ValueError as exc:
@@ -979,6 +987,33 @@ async def send_card_impl(
             "card_json must be a JSON object — the Feishu card, e.g. "
             '{"schema":"2.0","body":{"elements":[...]}} or {"config":...,"elements":[...]}.'
         )
+    if not isinstance(business_context_json, str):
+        return _error("business_context_json must be a JSON string containing an object")
+    try:
+        business_context = json.loads(business_context_json)
+    except ValueError as exc:
+        return _error(f"business_context_json is not valid JSON: {exc}")
+    if not isinstance(business_context, dict):
+        return _error("business_context_json must be a JSON object")
+    if not isinstance(action_handlers_json, str):
+        return _error("action_handlers_json must be a JSON string containing an object")
+    try:
+        raw_action_handlers = json.loads(action_handlers_json)
+    except ValueError as exc:
+        return _error(f"action_handlers_json is not valid JSON: {exc}")
+    if not isinstance(raw_action_handlers, dict):
+        return _error("action_handlers_json must be a JSON object")
+    if not all(
+        isinstance(action_id, str)
+        and bool(action_id)
+        and action_id.strip() == action_id
+        and isinstance(handler, str)
+        and bool(handler)
+        and handler.strip() == handler
+        for action_id, handler in raw_action_handlers.items()
+    ):
+        return _error("action_handlers_json keys and values must be non-empty strings without surrounding whitespace")
+    action_handlers = dict(raw_action_handlers)
     receive_id_type = _infer_receive_id_type(receive_id, receive_id_type)
     content = json.dumps(card, ensure_ascii=False)
     req = _build_send_message_request(receive_id, receive_id_type, "interactive", content)
@@ -989,11 +1024,32 @@ async def send_card_impl(
     message_id = data.get("message_id", "")
     if isinstance(message_id, str) and message_id:
         try:
-            await save_card_snapshot(message_id, card)
+            source = {
+                "session_id": get_session_id().strip(),
+                "sender_open_id": (user_key or "").strip(),
+                "receive_id": receive_id,
+                "receive_id_type": receive_id_type,
+            }
+            await save_card_snapshot(
+                message_id,
+                card,
+                source=source,
+                business_context=business_context,
+                action_handlers=action_handlers,
+            )
         except Exception as exc:
             logger.warning(f"failed to save Feishu card snapshot for {message_id} — {exc!r}")
+            return _error(
+                "Feishu card was sent, but its callback context could not be saved; card actions will fail closed.",
+                sent=True,
+                callback_context_saved=False,
+                message_id=message_id,
+                thread_id=data.get("thread_id", ""),
+                chat_id=data.get("chat_id", ""),
+            )
     return {
         "ok": True,
+        "callback_context_saved": bool(message_id),
         "message_id": message_id,
         "thread_id": data.get("thread_id", ""),
         "chat_id": data.get("chat_id", ""),
