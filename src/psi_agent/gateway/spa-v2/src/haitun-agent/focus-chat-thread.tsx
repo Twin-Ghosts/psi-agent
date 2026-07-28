@@ -7,7 +7,7 @@ import { htmlEscape, renderMd } from "../services/renderMd";
 import { stripTransferMarkers } from "../services/sendMarkers";
 import { downloadMatrixXlsx, matrixToTsv, tableToMatrix } from "../services/mdTable";
 import { preferResultBelowRule } from "../services/assistantDisplay";
-import type { ProgressLog } from "../services/turnProgress";
+import { TURN_PROGRESS, type ProgressLog } from "../services/turnProgress";
 import { FAILED_REASON_LABEL, isCompleteAgent } from "../services/messageTurn";
 import { ensureChatFileData, revealDeliverableInFolder } from "../utils/filePreviewUtils";
 import { isBlobPreviewable } from "../utils/renderBlobPreview";
@@ -242,10 +242,11 @@ export function FocusChatThread({
       )}
       {messages.map((message, index) => {
         const isLast = index === messages.length - 1;
-        // Cursor-style: while the turn is live, never paint interim agent prose
-        // (plans / "我先看看…") into the bubble — only the bouncing process line.
-        // Content is revealed when typing ends (final result).
-        const hideAgentProse = typing && isLast && message.role === "agent";
+        const isLiveAgent = typing && isLast && message.role === "agent";
+        // Cursor-style: hide interim prose during tools/planning; once content
+        // SSE arrives (trailer → 撰写回复…), stream 正文 live under the process log.
+        const writing = progressLog?.current === TURN_PROGRESS.writing;
+        const hideAgentProse = isLiveAgent && !writing;
         const clean = stripTransferMarkers(message.text);
         const displayText = hideAgentProse ? "" : preferResultBelowRule(clean);
         const showFiles = !hideAgentProse && (message.files?.length ?? 0) > 0;
@@ -258,7 +259,7 @@ export function FocusChatThread({
           );
         }
 
-        if (!displayText.trim() && !showFiles) return null;
+        if (!displayText.trim() && !showFiles && !(isLiveAgent && writing)) return null;
 
         const html = message.role === "agent"
           ? renderMd(displayText)
@@ -268,8 +269,51 @@ export function FocusChatThread({
           ? (FAILED_REASON_LABEL[message.failedReason ?? "incomplete"] ?? FAILED_REASON_LABEL.incomplete)
           : "";
 
+        const fileChips = showFiles ? (
+          <div className="focus-chat-files">
+            {message.files!.map((f, fi) => {
+              const canPreview = isPreviewable(f.name) && Boolean(f.data.trim() || f.path?.trim());
+              const canReveal = Boolean(f.path?.trim());
+              const busyKey = f.path || f.name;
+              const busy = previewBusy === busyKey;
+              const revealing = revealBusy === busyKey;
+              return (
+                <div className="focus-chat-file-row" key={`${f.name}-${fi}`}>
+                  <button
+                    type="button"
+                    className="focus-chat-file-chip"
+                    disabled={!canPreview || busy}
+                    onClick={() => {
+                      void openPreview(f);
+                    }}
+                    title={canPreview ? `预览 ${f.name}` : f.name}
+                  >
+                    <span>{f.name}</span>
+                    {isPreviewable(f.name) ? <em>{busy ? "加载中" : "预览"}</em> : null}
+                  </button>
+                  {canReveal ? (
+                    <button
+                      type="button"
+                      className="focus-chat-file-reveal"
+                      disabled={revealing}
+                      title={revealing ? "正在打开…" : "在文件夹中显示"}
+                      aria-label={`在文件夹中显示 ${f.name}`}
+                      onClick={() => {
+                        void revealFile(f);
+                      }}
+                    >
+                      <FolderOpen size={14} aria-hidden />
+                    </button>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        ) : null;
+
         return (
           <ChatBlock role={message.role} key={`${message.role}-${index}`}>
+            {isLiveAgent && writing ? thinkingBubble : null}
             <div className="focus-chat-bubble-wrap">
               {message.role === "user" && (
                 <div className={`focus-chat-side-actions${message.failed ? " has-retry" : ""}`}>
@@ -295,47 +339,7 @@ export function FocusChatThread({
                 />
               ) : null}
             </div>
-            {showFiles && (
-              <div className="focus-chat-files">
-                {message.files!.map((f, fi) => {
-                  const canPreview = isPreviewable(f.name) && Boolean(f.data.trim() || f.path?.trim());
-                  const canReveal = Boolean(f.path?.trim());
-                  const busyKey = f.path || f.name;
-                  const busy = previewBusy === busyKey;
-                  const revealing = revealBusy === busyKey;
-                  return (
-                    <div className="focus-chat-file-row" key={`${f.name}-${fi}`}>
-                      <button
-                        type="button"
-                        className="focus-chat-file-chip"
-                        disabled={!canPreview || busy}
-                        onClick={() => {
-                          void openPreview(f);
-                        }}
-                        title={canPreview ? `预览 ${f.name}` : f.name}
-                      >
-                        <span>{f.name}</span>
-                        {isPreviewable(f.name) ? <em>{busy ? "加载中" : "预览"}</em> : null}
-                      </button>
-                      {canReveal ? (
-                        <button
-                          type="button"
-                          className="focus-chat-file-reveal"
-                          disabled={revealing}
-                          title={revealing ? "正在打开…" : "在文件夹中显示"}
-                          aria-label={`在文件夹中显示 ${f.name}`}
-                          onClick={() => {
-                            void revealFile(f);
-                          }}
-                        >
-                          <FolderOpen size={14} aria-hidden />
-                        </button>
-                      ) : null}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+            {fileChips}
             {showAgentActions(message) && (
               <div className="focus-chat-msg-actions" role="toolbar" aria-label="消息操作">
                 <button
