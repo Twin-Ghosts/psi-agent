@@ -18,6 +18,14 @@ from psi_agent.session.system_prompt import SystemPrompt
 from psi_agent.session.tool_registry import FileEntry, ToolFunction, ToolRegistry
 
 
+def test_agent_source_has_no_merge_conflict_markers() -> None:
+    source = (Path(__file__).parents[3] / "src/psi_agent/session/agent.py").read_text(encoding="utf-8")
+
+    assert "<<<<<<<" not in source
+    assert "=======" not in source
+    assert ">>>>>>>" not in source
+
+
 async def _get_weather(city: str) -> str:
     """Get weather for a city."""
     return f"Weather in {city}: sunny, 22 C"
