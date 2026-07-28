@@ -58,9 +58,7 @@ async def test_resolve_default_agent_soft_haitun_workspace(tmp_path: Path, monke
 
 
 @pytest.mark.anyio
-async def test_resolve_default_agent_soft_install_layout_cwd(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_resolve_default_agent_soft_install_layout_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Inno {app} layout: tools/ + skills/ live at cwd (no examples/ nesting)."""
     monkeypatch.chdir(tmp_path)
     await anyio.Path(tmp_path / "tools").mkdir()
