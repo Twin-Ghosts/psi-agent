@@ -86,11 +86,11 @@ def test_workspace_empty_string_uses_cwd(tmp_path: Path) -> None:
     assert session.workspace == ""
 
 
-# ── 激活名单解析 (--active-schedules / --deactive-schedules) ──────────────────
+# ── Activation list parsing (--active-schedules / --deactive-schedules) ───────
 
 
 def test_name_set_empty_by_default() -> None:
-    """默认一条都不激活 —— 一条 schedule 必须恰好被一个 Session 触发。"""
+    """Nothing is activated by default - a schedule must be fired by exactly one Session."""
     assert Session._name_set("") == set()
 
 
@@ -103,5 +103,5 @@ def test_name_set_splits_and_trims() -> None:
 
 
 def test_name_set_wildcard_with_names() -> None:
-    """通配符 + 具名并存: is_active 里通配符已覆盖全部, 具名是冗余但无害。"""
+    """Wildcard alongside names: is_active already covers all, so the names are redundant but harmless."""
     assert Session._name_set("*, daily") == {ACTIVATE_ALL, "daily"}

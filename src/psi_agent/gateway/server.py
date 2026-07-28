@@ -140,8 +140,8 @@ def _session_data(info: SessionInfo) -> dict[str, Any]:
     data = asdict(info)
     if data.get("backend_type") == "ai":
         data["ai_id"] = data["backend_id"]
-    # ``scheduler`` 是由 active_schedules 派生的 property, asdict 不含它 —— 显式补上,
-    # REST / SPA 契约不变。
+    # ``scheduler`` is a property derived from active_schedules, so asdict omits
+    # it — add it back explicitly; the REST / SPA contract is unchanged.
     data["active_schedules"] = list(info.active_schedules)
     data["deactive_schedules"] = list(info.deactive_schedules)
     data["scheduler"] = info.scheduler
@@ -169,8 +169,9 @@ async def create_app(
     app["rm"] = rm
     app["sm"] = sm
     app["tm"] = tm
-    # 调度 Session 归它管: 每个 workspace 一个, 按需创建, 对 SPA / state 隐藏。
-    # Gateway.run 会传入自己那一个实例 (启动恢复时也要用); 独立测试可省略。
+    # Owns the scheduler Sessions: one per workspace, created on demand, hidden
+    # from SPA / state. Gateway.run passes its own instance (also needed by
+    # startup restore); standalone tests may omit it.
     app["schedm"] = schedm or SchedulerManager(_sm=sm, _ai_id=scheduler_ai_id or feishu_ai_id)
     app["fm"] = FeishuManager(_sm=sm, _ai_id=feishu_ai_id, _workspace_root=feishu_workspace_root)
     app["wm"] = WorkspaceManager()
@@ -330,7 +331,8 @@ async def _create_session(request: web.Request) -> web.Response:
             workspace=body.get("workspace", ""),
             agent=body.get("agent", ""),
         )
-        # 该 workspace 的定时任务由专用调度 Session 拥有, 不由本会话触发。
+        # This workspace's schedules are owned by its dedicated scheduler
+        # Session, not fired by this session.
         await schedm.ensure(info.workspace, ai_id=info.backend_id, agent=info.agent)
         return _json(_session_data(info), status=201)
     except (TypeError, ValueError, KeyError) as e:
@@ -383,7 +385,8 @@ async def _feishu_route(request: web.Request) -> web.Response:
             ai_id=body.get("ai_id"),
             workspace=body.get("workspace"),
         )
-        # 该用户 workspace 的定时任务归专用调度 Session, 不由用户会话触发。
+        # Schedules under this user's workspace belong to its dedicated scheduler
+        # Session, not to the user session.
         sm: SessionManager = request.app["sm"]
         await schedm.ensure(
             sm.get_workspace(session_id),

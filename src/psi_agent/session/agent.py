@@ -95,17 +95,20 @@ class SessionAgent:
         *appdata_root* holds history JSONL (Step 4C); empty → resolve via
         ``PSI_APPDATA`` / platformdirs.
 
-        *active_schedules* / *deactive_schedules* 逐条决定本 Session 触发
-        ``{workspace}/schedules`` 里的哪些定时任务: 白名单 ``None`` / 空 → 一条都
-        不触发 (普通用户 Session 的默认), ``{ACTIVATE_ALL}`` → 全部, 具名集合 →
-        仅这些 ``name``; 黑名单优先, 从中减掉划给别人的那几条。**激活是
-        (session x schedule) 的属性** —— 同一 workspace 的不同 Session 可各激活
-        不同子集, 未激活的条目照样加载进 registry (可读、可 refresh), 只是不起
-        runner。刻意为之: 飞书按 open_id 给每个用户 spawn 独立 Session, 一条
-        schedule 必须恰好被一个 Session 激活, 否则提醒会被在线会话数乘一遍;
-        Gateway ``SchedulerManager`` 为每个 workspace 维护唯一一个全量激活
-        (``ACTIVATE_ALL``) 的调度 Session。用通配符 + 黑名单 (而非枚举白名单) 才
-        能让之后新建的 ``TASK.md`` 自动被触发。
+        *active_schedules* / *deactive_schedules* decide, per entry, which
+        schedules under ``{workspace}/schedules`` this Session fires: a whitelist
+        of ``None`` / empty fires none (the default for user Sessions),
+        ``{ACTIVATE_ALL}`` fires all, a named set fires only those ``name`` s;
+        the blacklist wins and subtracts the ones assigned elsewhere.
+        **Activation is a property of (session x schedule)** — two Sessions on
+        the same workspace may activate disjoint subsets, and non-activated
+        entries are still loaded into the registry (readable, refreshable), they
+        just get no runner. 刻意为之: Feishu spawns one Session per ``open_id``,
+        so a schedule must be activated by exactly one Session or the reminder
+        gets multiplied by the number of live sessions; the Gateway's
+        ``SchedulerManager`` keeps exactly one fully activated (``ACTIVATE_ALL``)
+        scheduler Session per workspace. Only the wildcard plus a blacklist (not
+        an enumerated whitelist) fires ``TASK.md`` files created later on.
         """
         agent_root = agent_path if agent_path is not None else workspace_path
 
@@ -139,8 +142,9 @@ class SessionAgent:
     def start_all(self, task_group: object) -> None:
         """Start schedule runners — called by ``Session.run()``.
 
-        只为**本 Session 激活的** schedule 起 runner; 未激活的条目仍在 registry
-        里可读 (见 ``SessionAgent.create`` 的 *active_schedules*)。
+        Starts runners only for schedules **activated in this Session**;
+        non-activated entries stay readable in the registry (see
+        *active_schedules* on ``SessionAgent.create``).
         """
         self._schedule_registry.start_all(task_group, self)
 

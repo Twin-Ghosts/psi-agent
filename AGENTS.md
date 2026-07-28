@@ -266,6 +266,14 @@ async def handler(request):
 - 禁止使用 raw `any`——始终用 `typing.Any`
 - `anyio.abc.ByteStream` → 用 `Any` 代替（ty 不识别的第三方类型）
 
+## 注释约定
+
+- **语种与风格跟随所在文件**，不跟随个人习惯：改一个文件前先看它现有的注释/docstring 是英文还是中文，然后与之保持一致。**单个 `.py` 文件内必须统一**
+- 仓库整体是混合的（`src/` 与 `tests/` 均约 1:6 中英），但这不是「随便写」的许可——它是逐文件收敛的结果。典型：`gateway/_feishu_manager.py`、`gateway/_scheduler_manager.py` 与其对应测试通篇中文；`session/schedule_registry.py`、`session/agent.py`、`gateway/server.py`、`gateway/_session_manager.py` 通篇英文
+- **`刻意为之:` 是例外**，可嵌在英文注释里作反直觉行为的标记词（如 `# prompt = LLM turn on task_content; tool = direct ToolRegistry call (刻意为之).`）。它是全仓统一的检索词，配合「改动后自检清单」第 1 条使用，不算破坏语种一致性
+- 新建文件按**同层同类邻居**定语种（如 `gateway/_scheduler_manager.py` 对标 `gateway/_feishu_manager.py`），别按仓库全局比例猜
+- 中文注释里避免全角 `，`、`（`、`）`、`：` 与 `×`——ruff 的 RUF001/002/003 报 ambiguous unicode，一律改半角 `,` `(` `)` `:` 和 `x`；`。`、`——`、`「」`、`→` 不在规则里，可用（本条以 `ruff check --isolated --select RUF001,RUF002,RUF003` 实测为准）
+
 ## 开发命令
 
 ```bash

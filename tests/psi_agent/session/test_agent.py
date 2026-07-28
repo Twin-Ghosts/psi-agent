@@ -823,7 +823,7 @@ async def test_conversation_dual_read_legacy_workspace_history(
 
 @pytest.mark.anyio
 async def test_schedules_load_from_workspace_not_agent_package(tmp_path: Path) -> None:
-    """schedules 归 workspace (刻意为之) - 飞书多用户共用 agent 包时不能共享定时任务。"""
+    """Schedules belong to the workspace (刻意为之) - Feishu users sharing one agent pack must not share tasks."""
     workspace = tmp_path / "user-ws"
     agent_pkg = tmp_path / "agent-pkg"
     await anyio.Path(workspace / "schedules" / "mine").mkdir(parents=True)
@@ -849,7 +849,7 @@ async def test_schedules_load_from_workspace_not_agent_package(tmp_path: Path) -
 
 @pytest.mark.anyio
 async def test_session_without_active_schedules_fires_none(tmp_path: Path) -> None:
-    """普通用户 Session 读得到条目但不触发 —— 否则一条提醒会被在线会话数乘一遍。"""
+    """A user Session reads the entries but fires none - otherwise one reminder is multiplied by live sessions."""
     workspace = tmp_path / "user-ws"
     await anyio.Path(workspace / "schedules" / "mine").mkdir(parents=True)
     await anyio.Path(workspace / "schedules" / "mine" / "TASK.md").write_text(
@@ -868,7 +868,7 @@ async def test_session_without_active_schedules_fires_none(tmp_path: Path) -> No
 
 @pytest.mark.anyio
 async def test_session_activates_only_named_schedules(tmp_path: Path) -> None:
-    """激活是 (session x schedule) 的属性: 逐条指定, 不是整个 Session 一个开关。"""
+    """Activation is a property of (session x schedule): named per entry, not one switch per Session."""
     workspace = tmp_path / "user-ws"
     for name in ("mine", "theirs"):
         await anyio.Path(workspace / "schedules" / name).mkdir(parents=True)

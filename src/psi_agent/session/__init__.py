@@ -36,10 +36,10 @@ class Session:
     """
 
     active_schedules: str = ""
-    """触发哪些定时任务, 逗号分隔; ``*`` = 全部。默认一条都不触发。"""
+    """Schedules to fire, comma-separated; ``*`` = all. Default fires none."""
 
     deactive_schedules: str = ""
-    """从上面排除掉的定时任务名, 逗号分隔; 优先于白名单。"""
+    """Schedule names excluded from the above, comma-separated; wins over it."""
 
     max_tool_rounds: int = 128
     session_id: str | None = None
@@ -83,7 +83,7 @@ class Session:
 
     @staticmethod
     def _name_set(raw: str) -> set[str]:
-        """逗号分隔的名单字符串 → 名字集合 (去空、去首尾空白)。"""
+        """Comma-separated list string -> set of names (empties and whitespace stripped)."""
         names = {part.strip() for part in raw.split(",")}
         names.discard("")
         return names

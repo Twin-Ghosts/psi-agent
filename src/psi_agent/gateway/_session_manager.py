@@ -37,27 +37,32 @@ class SessionInfo:
     """Agent package path (tools/system). Empty → single-root compat."""
 
     active_schedules: tuple[str, ...] = ()
-    """本 Session 激活 (即实际触发) 的定时任务名; ``("*",)`` 表示全部。
+    """Schedule names this Session activates (i.e. actually fires); ``("*",)`` = all.
 
-    激活是 **(session x schedule)** 的属性: 同一 workspace 的多个 Session 都能
-    读到全部条目, 但各自只触发自己名单里的那些。``SchedulerManager`` 为每个
-    workspace 维护唯一一个全量激活 (``("*",)``) 的调度 Session, 该 Session 对
-    SPA 与 ``state/latest.json`` **完全隐藏** (``list_all`` 默认过滤, 持久化跳过)
-    —— 刻意为之: 它不是用户会话, 出现在会话列表里只会让人误删。
+    Activation is a property of **(session x schedule)**: every Session on a
+    workspace reads every entry, but each fires only the ones in its own list.
+    ``SchedulerManager`` keeps exactly one fully activated (``("*",)``) scheduler
+    Session per workspace, and that Session is **entirely hidden** from the SPA
+    and from ``state/latest.json`` (filtered out of ``list_all`` by default,
+    skipped when persisting) — 刻意为之: it is not a user session, and listing it
+    would only invite someone to delete it.
     """
 
     deactive_schedules: tuple[str, ...] = ()
-    """从 ``active_schedules`` 中排除的定时任务名 (黑名单, 优先于白名单)。
+    """Schedule names excluded from ``active_schedules`` (blacklist, wins over it).
 
-    通配符白名单 + 黑名单是「除某几条以外全归我」的唯一写法: 白名单是枚举, 覆盖
-    不到启动后新建的 ``TASK.md``; 通配符能覆盖, 再用黑名单挖掉划给别人的那几条。
+    A wildcard whitelist plus a blacklist is the only way to say "all of these
+    except a few": a whitelist is an enumeration and cannot cover a ``TASK.md``
+    created after startup, whereas the wildcard does, with the blacklist carving
+    out the entries assigned elsewhere.
     """
 
     @property
     def scheduler(self) -> bool:
-        """本 Session 是否是该 workspace 的全量调度 Session。
+        """Whether this Session is the workspace's fully activated scheduler.
 
-        供 ``list_all`` 过滤与 REST 展示用; 真实归属信息在 ``active_schedules``。
+        Used for ``list_all`` filtering and REST display; the authoritative
+        ownership information lives in ``active_schedules``.
         """
         return ACTIVATE_ALL in self.active_schedules
 
@@ -106,10 +111,11 @@ class SessionManager:
         from that directory. Tools that resolve relative paths via ContextVar
         are a later PR — this only passes the path in.
 
-        *active_schedules* / *deactive_schedules* 逐条指定本 Session 触发哪些定时
-        任务 (``("*",)`` = 全部, 默认空 = 一条都不触发; 黑名单优先做减法)。全量
-        激活的 Session 由 ``SchedulerManager`` 按 workspace 去重地创建, 且对 SPA /
-        state 隐藏。普通调用方不传这两个参数。
+        *active_schedules* / *deactive_schedules* name, per entry, which schedules
+        this Session fires (``("*",)`` = all; empty by default = none, with the
+        blacklist subtracting first). The fully activated Session is created by
+        ``SchedulerManager``, deduplicated per workspace and hidden from SPA /
+        state. Ordinary callers pass neither argument.
         """
         session_id = id or _new_uuid()
         workspace = workspace.strip() or self._default_workspace or os.getcwd()
@@ -201,10 +207,11 @@ class SessionManager:
         logger.info(f"Session {session_id!r} deleted")
 
     async def list_all(self, *, include_scheduler: bool = False) -> list[SessionInfo]:
-        """用户会话列表。
+        """List the user sessions.
 
-        调度 Session 默认**不**出现 (刻意为之: 它不是用户会话, 列在 SPA 里只会
-        让人误删)。运维 / 内部去重需要看到它时传 ``include_scheduler=True``。
+        Scheduler Sessions are **not** included by default (刻意为之: they are not
+        user sessions, and listing them in the SPA only invites deletion). Pass
+        ``include_scheduler=True`` for operational or internal dedup use.
         """
         infos = [e.info for e in list(self._entries.values())]
         if include_scheduler:
@@ -230,7 +237,7 @@ class SessionManager:
         return self._entries[session_id].info.agent
 
     def get_backend_id(self, session_id: str) -> str:
-        """会话挂载的后端 id — 调度 Session 复用同一个 AI 实例时要它。"""
+        """Backend id the session is attached to — needed when a scheduler Session reuses the same AI instance."""
         if session_id not in self._entries:
             raise LookupError(f"Session {session_id!r} not found")
         return self._entries[session_id].info.backend_id

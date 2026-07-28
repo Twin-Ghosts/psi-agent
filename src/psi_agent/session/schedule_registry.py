@@ -41,11 +41,13 @@ if TYPE_CHECKING:
 FIRE_PROMPT = "prompt"
 FIRE_TOOL = "tool"
 
-# 调度 Session 重扫 schedules 目录的间隔。取 30s: 用户经 schedule_manage 建完提醒
-# 最多等这么久生效, 而 refresh() 是 hash 增量, 空转成本只是一次目录 stat。
+# Interval at which a scheduler Session rescans the schedules directory. 30s: the
+# most a user waits for a freshly created reminder to take effect, while refresh()
+# is hash-incremental so an idle cycle costs one directory stat.
 _WATCH_INTERVAL_SECONDS = 30.0
 
-# 激活名单里的通配符: 本 Session 触发该 workspace 下的**全部** schedule。
+# Wildcard in either activation list: this Session activates *every* schedule
+# under the workspace.
 ACTIVATE_ALL = "*"
 
 
@@ -95,27 +97,33 @@ class ScheduleRegistry:
     Each schedule gets a ``CancelScope`` for per-schedule cancellation
     on update or removal.
 
-    **激活是 (session x schedule) 的属性, 不是 session 的 (刻意为之)**: schedules
-    目录取自 *workspace* (每个 Session 都能读到全部条目, ``schedules`` 属性与
-    ``refresh()`` 的 add/update/remove 统计都不受激活影响), 但**是否起
-    runner** 由名单逐条决定 —— 同一 workspace 的不同 Session 可以各自激活不同
-    的子集。
+    **Activation is a property of (session x schedule), not of a session
+    (刻意为之)**: the schedules directory belongs to the *workspace*, so every
+    Session reads every entry (the ``schedules`` property and ``refresh()``'s
+    add/update/remove counts are unaffected by activation), but **whether a
+    runner starts** is decided per entry by the lists — two Sessions on the same
+    workspace may activate disjoint subsets.
 
-    为什么按条而非按 Session 一个布尔: 触发权本质上是「这条任务归哪个 Session」,
-    一个整体开关只能表达「全触发 / 全不触发」, 表达不了「A 条归调度 Session、B 条
-    归某个用户会话」。飞书按 open_id 给每个用户 spawn 独立 Session, 一条 schedule
-    必须**恰好**被一个 Session 激活, 否则提醒会被在线会话数乘一遍。
+    Why per-entry rather than one boolean per Session: activation answers "which
+    Session owns this task", and a single switch can only say "fire all / fire
+    none" — it cannot express "entry A belongs to the scheduler Session, entry B
+    to some user session". Feishu spawns one Session per ``open_id``, so a
+    schedule must be activated by **exactly one** Session or the reminder gets
+    multiplied by the number of live sessions.
 
-    为什么白名单之外还要黑名单: 白名单是**枚举**, 只覆盖启动那一刻已存在的条目 ——
-    之后 ``_watch_dir`` / ``refresh()`` 新发现的 ``TASK.md`` 不在名单里, 永远不会被
-    触发。要「除某几条以外全都归我」(调度 Session 的常态), 只能用
-    ``active_names={ACTIVATE_ALL}`` + ``deactive_names={排除的}``: 通配符让新条目自动
-    激活, 黑名单精确挖掉划给别人的那几条。
+    Why a blacklist on top of the whitelist: the whitelist is an **enumeration**,
+    covering only the entries that exist at startup — a ``TASK.md`` discovered
+    later by ``_watch_dir`` / ``refresh()`` is not in the list and would never
+    fire. Expressing "everything except these few" (the scheduler Session's
+    normal case) requires ``active_names={ACTIVATE_ALL}`` +
+    ``deactive_names={excluded}``: the wildcard activates new entries
+    automatically, the blacklist carves out the ones assigned elsewhere.
 
-    名单语义: ``deactive_names`` 优先 (含 ``ACTIVATE_ALL`` 即一条都不激活);
-    ``active_names`` 为 ``None`` / 空集 → 一条都不激活 (普通用户 Session 的默认,
-    ``start_all`` 不起任何 runner); ``{ACTIVATE_ALL}`` → 除黑名单外全部 (调度
-    Session 的默认); 具名集合 → 仅这些 ``schedule.name``。
+    List semantics: ``deactive_names`` wins (containing ``ACTIVATE_ALL`` means
+    activate nothing); ``active_names`` of ``None`` / empty set activates nothing
+    (the default for user Sessions — ``start_all`` starts no runner);
+    ``{ACTIVATE_ALL}`` activates everything except the blacklist (the scheduler
+    Session's default); a named set activates only those ``schedule.name`` s.
     """
 
     def __init__(
@@ -136,18 +144,19 @@ class ScheduleRegistry:
 
     @property
     def schedules(self) -> list[Schedule]:
-        """Flat list of all registered schedules (激活与否都在内)。"""
+        """Flat list of all registered schedules (activated or not)."""
         return [entry.schedule for entry in self._files.values()]
 
     @property
     def active_schedules(self) -> list[Schedule]:
-        """本 Session 实际触发的 schedule —— 即通过名单筛选的那些。"""
+        """Schedules this Session actually fires — those passing the lists."""
         return [s for s in self.schedules if self.is_active(s.name)]
 
     def is_active(self, name: str) -> bool:
-        """本 Session 是否触发名为 *name* 的 schedule。
+        """Whether this Session fires the schedule named *name*.
 
-        黑名单优先于白名单; 两个名单里的 ``ACTIVATE_ALL`` 都表示「全部」。
+        The blacklist wins over the whitelist; ``ACTIVATE_ALL`` means "every
+        schedule" in either list.
         """
         if ACTIVATE_ALL in self._deactive_names or name in self._deactive_names:
             return False
@@ -167,8 +176,8 @@ class ScheduleRegistry:
     ) -> ScheduleRegistry:
         """Full initial load — scan *schedules_dir*.
 
-        *active_names* / *deactive_names* 决定哪些条目由本 Session 触发 (默认一条
-        都不, 见类文档)。
+        *active_names* / *deactive_names* decide which entries this Session fires
+        (none by default — see the class docstring).
         """
         files = await cls._load_from_dir(schedules_dir)
         return cls(
@@ -181,13 +190,15 @@ class ScheduleRegistry:
     # -- runner lifecycle -------------------------------------------------------
 
     def start_all(self, task_group: Any, agent: SessionAgent) -> None:
-        """Start a runner for every **激活的** schedule in *task_group*.
+        """Start a runner for every **activated** schedule in *task_group*.
 
-        Stores *agent* and *task_group* for use by ``refresh()``; 白名单非空时额外
-        起一个 ``_watch_dir`` 常驻协程周期性 ``refresh()``。未激活的条目照旧留在
-        ``schedules`` 里 (可读、可 refresh), 只是不起 runner。
+        Stores *agent* and *task_group* for use by ``refresh()``; when the
+        whitelist is non-empty, also starts a perpetual ``_watch_dir`` coroutine
+        that calls ``refresh()`` periodically. Entries that are not activated
+        stay in ``schedules`` (readable, refreshable) but get no runner.
 
-        白名单空 → 一条都不可能激活 (黑名单只做减法), 不起 watcher, 不做无用扫盘。
+        Empty whitelist means nothing can ever be activated (the blacklist only
+        subtracts), so no watcher is started and no directory is scanned in vain.
         """
         self._agent = agent
         self._task_group = task_group
@@ -197,21 +208,26 @@ class ScheduleRegistry:
             task_group.start_soon(self._watch_dir)
 
     async def _watch_dir(self) -> None:
-        """周期性 ``refresh()`` —— 调度 Session 感知 ``TASK.md`` 增删改的唯一途径。
+        """Periodic ``refresh()`` — the only way a scheduler Session notices
+        ``TASK.md`` additions, edits and removals.
 
-        刻意为之: 另外两个 refresh 时机都在 ``SessionAgent.run()`` 里 (回合开始 /
-        ``finish_reason=stop`` 后), 而**调度 Session 没有 channel 连着它**, 永远不会
-        有回合。少了这个 watcher, 用户经 ``schedule_manage`` 新建的定时任务就永远
-        不会被加载 —— 只有 spawn 那一刻已存在的那些能跑。
+        刻意为之: the other two refresh points both live in ``SessionAgent.run()``
+        (turn start, and after ``finish_reason=stop``), but **no channel is
+        attached to a scheduler Session**, so it never has a turn. Without this
+        watcher a schedule created through ``schedule_manage`` would never be
+        loaded — only the ones present at spawn time would ever run.
 
-        轮询而非 inotify/watchdog: ``refresh()`` 已是 hash 增量 (未变的文件不重新
-        解析), 一个目录的 stat 成本可忽略; 且零新依赖, 跨平台一致 (见根 AGENTS.md
-        「最小化核心」)。
+        Polling rather than inotify/watchdog: ``refresh()`` is already
+        hash-incremental (unchanged files are not reparsed), so one directory stat
+        is negligible; and it adds no dependency and behaves the same on every
+        platform (see the root AGENTS.md "minimal core" principle).
 
-        循环体内 ``except Exception`` 兜底 (对标 ``_run_one``): 本协程经
-        ``start_soon`` 挂在 Session 的 task group 上, 任何逸出的异常都会连坐整个
-        调度 Session。单次刷新失败只记 ERROR, 下一周期重试。
-        ``CancelledError`` 是 ``BaseException``, 不被这里捕获, 取消照常传播。
+        The in-loop ``except Exception`` mirrors ``_run_one``: this coroutine is
+        attached to the Session's task group via ``start_soon``, so any escaping
+        exception would take the whole scheduler Session down with it. A single
+        failed refresh only logs ERROR and is retried next cycle.
+        ``CancelledError`` is a ``BaseException``, is not caught here, and
+        propagates as usual.
         """
         logger.info(f"Schedule watcher started for {self._work_dir!r} (every {_WATCH_INTERVAL_SECONDS}s)")
         try:
@@ -282,10 +298,12 @@ class ScheduleRegistry:
     # -- runner management ------------------------------------------------------
 
     def _start_runner(self, schedule: Schedule) -> None:
-        """Start a perpetual runner coroutine for *schedule* —— 仅当它被本 Session 激活。
+        """Start a perpetual runner coroutine for *schedule*, if activated here.
 
-        未激活时是 no-op (刻意为之): 激活是 (session x schedule) 的属性, 未激活的
-        条目仍在 ``schedules`` 里可读, 但触发权归激活它的那个 Session。
+        A no-op when it is not activated (刻意为之): activation is a property of
+        (session x schedule), so a non-activated entry stays readable in
+        ``schedules`` while the right to fire it belongs to whichever Session did
+        activate it.
         """
         if not self.is_active(schedule.name):
             logger.debug(f"Schedule {schedule.name!r} not active in this session; runner not started")

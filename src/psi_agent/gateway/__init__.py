@@ -209,7 +209,8 @@ class Gateway:
                 schedm=schedm,
             )
 
-            # 恢复的会话各自的 workspace 也要有调度 Session (按需: 无 schedules 则跳过)。
+            # Restored sessions need a scheduler Session for their workspace too
+            # (on demand: skipped when there are no schedules).
             for info in await sm.list_all():
                 await schedm.ensure(info.workspace, ai_id=info.backend_id, agent=info.agent)
 
