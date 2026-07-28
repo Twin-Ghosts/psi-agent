@@ -1569,6 +1569,162 @@ async def test_delete_bitable_fields_empty() -> None:
     assert result["ok"] is False
 
 
+@pytest.mark.asyncio
+async def test_create_bitable_app_builds_post(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke(
+        {
+            "app": {
+                "app_token": "bascnNew",
+                "name": "合同台账",
+                "folder_token": "fldA",
+                "default_table_id": "tblDefault",
+                "time_zone": "Asia/Shanghai",
+                "url": "https://feishu.cn/base/bascnNew",
+            }
+        }
+    )
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.create_bitable_app_impl("合同台账", "fldA", "Asia/Shanghai", "ou_1")
+    req = cap.request
+    assert req.http_method.name == "POST"
+    assert req.uri == "/open-apis/bitable/v1/apps"
+    assert req.body == {"name": "合同台账", "folder_token": "fldA", "time_zone": "Asia/Shanghai"}
+    assert cap.prefer == "user"
+    assert cap.user_key == "ou_1"
+    assert result["app_token"] == "bascnNew"
+    assert result["default_table_id"] == "tblDefault"
+    assert result["url"] == "https://feishu.cn/base/bascnNew"
+
+
+@pytest.mark.asyncio
+async def test_create_bitable_app_omits_blank_optionals(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"app": {"app_token": "bascnX"}})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.create_bitable_app_impl("台账")
+    assert cap.request.body == {"name": "台账"}
+    # No url in the response: derive one from the app_token so the user gets a link.
+    assert result["url"] == "https://feishu.cn/base/bascnX"
+
+
+@pytest.mark.asyncio
+async def test_create_bitable_table_with_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"table_id": "tblNew", "default_view_id": "vew1", "field_id_list": ["fld1", "fld2"]})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    fields = '[{"field_name":"编号","type":1},{"field_name":"金额","type":2}]'
+    result = await _impl.create_bitable_table_impl("appX", "合同", fields, "表格视图", "ou_1")
+    req = cap.request
+    assert req.http_method.name == "POST"
+    assert req.uri == "/open-apis/bitable/v1/apps/:app_token/tables"
+    assert req.paths["app_token"] == "appX"
+    assert req.body["table"]["name"] == "合同"
+    assert req.body["table"]["fields"][0] == {"field_name": "编号", "type": 1}
+    assert req.body["table"]["default_view_name"] == "表格视图"
+    assert cap.prefer == "user"
+    assert result["table_id"] == "tblNew"
+    assert result["field_ids"] == ["fld1", "fld2"]
+
+
+@pytest.mark.asyncio
+async def test_create_bitable_table_without_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"table_id": "tblBare"})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.create_bitable_table_impl("appX", "空表")
+    assert cap.request.body == {"table": {"name": "空表"}}
+    assert result["table_id"] == "tblBare"
+    assert result["field_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_create_bitable_table_requires_app_token_and_name() -> None:
+    assert (await _impl.create_bitable_table_impl("", "表"))["ok"] is False
+    assert (await _impl.create_bitable_table_impl("appX", " "))["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_create_bitable_table_bad_fields_json() -> None:
+    assert (await _impl.create_bitable_table_impl("appX", "表", "not json"))["ok"] is False
+    assert (await _impl.create_bitable_table_impl("appX", "表", "{}"))["ok"] is False
+    assert (await _impl.create_bitable_table_impl("appX", "表", "[]"))["ok"] is False
+    missing_name = await _impl.create_bitable_table_impl("appX", "表", '[{"type":1}]')
+    assert missing_name["ok"] is False
+    assert "field_name" in missing_name["message"]
+    bad_type = await _impl.create_bitable_table_impl("appX", "表", '[{"field_name":"a","type":"1"}]')
+    assert bad_type["ok"] is False
+    assert "integer" in bad_type["message"]
+    lookup = await _impl.create_bitable_table_impl(
+        "appX", "表", '[{"field_name":"a","type":1},{"field_name":"b","type":19}]'
+    )
+    assert lookup["ok"] is False
+    assert "19" in lookup["message"]
+
+
+@pytest.mark.asyncio
+async def test_create_bitable_table_rejects_bad_index_field_type() -> None:
+    # A 人员 (11) column cannot be the index column — Feishu answers 1254012.
+    result = await _impl.create_bitable_table_impl("appX", "表", '[{"field_name":"负责人","type":11}]')
+    assert result["ok"] is False
+    assert "index" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_create_bitable_table_view_name_needs_fields() -> None:
+    result = await _impl.create_bitable_table_impl("appX", "表", "", "视图")
+    assert result["ok"] is False
+    assert "fields_json" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_create_bitable_field_builds_post(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"field": {"field_id": "fldNew", "field_name": "状态", "type": 3, "is_primary": False}})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.create_bitable_field_impl(
+        "appX", "tbl1", "状态", 3, '{"options":[{"name":"生效","color":0}]}', "SingleSelect", "ou_1"
+    )
+    req = cap.request
+    assert req.http_method.name == "POST"
+    assert req.uri == "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields"
+    assert req.paths["table_id"] == "tbl1"
+    assert req.body["field_name"] == "状态"
+    assert req.body["type"] == 3
+    assert req.body["property"] == {"options": [{"name": "生效", "color": 0}]}
+    assert req.body["ui_type"] == "SingleSelect"
+    assert cap.prefer == "user"
+    assert result["field_id"] == "fldNew"
+    assert result["type"] == "单选"  # decoded via _BITABLE_FIELD_TYPES
+
+
+@pytest.mark.asyncio
+async def test_create_bitable_field_minimal(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"field": {"field_id": "fldT", "field_name": "备注", "type": 1}})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.create_bitable_field_impl("appX", "tbl1", "备注")
+    assert cap.request.body == {"field_name": "备注", "type": 1}
+    assert result["type"] == "文本"
+
+
+@pytest.mark.asyncio
+async def test_create_bitable_field_validates_args() -> None:
+    assert (await _impl.create_bitable_field_impl("", "tbl1", "a"))["ok"] is False
+    assert (await _impl.create_bitable_field_impl("appX", "", "a"))["ok"] is False
+    assert (await _impl.create_bitable_field_impl("appX", "tbl1", " "))["ok"] is False
+    assert (await _impl.create_bitable_field_impl("appX", "tbl1", "a", 19))["ok"] is False
+    bad_prop = await _impl.create_bitable_field_impl("appX", "tbl1", "a", 3, "{not json")
+    assert bad_prop["ok"] is False
+    assert "JSON" in bad_prop["message"]
+    non_object = await _impl.create_bitable_field_impl("appX", "tbl1", "a", 3, '["x"]')
+    assert non_object["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_create_bitable_field_allows_person_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 11 is rejected only as a table's first (index) column, not as an added field.
+    cap = _CapturedInvoke({"field": {"field_id": "fldP", "field_name": "负责人", "type": 11}})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.create_bitable_field_impl("appX", "tbl1", "负责人", 11)
+    assert result["ok"] is True
+    assert result["type"] == "人员"
+
+
 def test_bitable_tools_async_with_docstrings() -> None:
     mod = importlib.import_module("feishu_bitable")
     for name in (
@@ -1579,6 +1735,9 @@ def test_bitable_tools_async_with_docstrings() -> None:
         "feishu_bitable_clear_table",
         "feishu_bitable_list_fields",
         "feishu_bitable_delete_fields",
+        "feishu_bitable_create_app",
+        "feishu_bitable_create_table",
+        "feishu_bitable_create_field",
     ):
         fn = getattr(mod, name)
         assert inspect.iscoroutinefunction(fn), name

@@ -206,3 +206,21 @@ message_id / sender_open_id）。需要群里之前的上下文时：
     只有纯机器人自建、没有具体发起人时才留空（此时机器人当群主）。`user_ids` 传的是 **open_id 不是姓名**——先用
     `feishu_chat_find_member`（从别的群）或 `feishu_department_members` 把姓名反查成 open_id（单次最多 50 人，
     超了先建再补拉）。返回里的 `invalid_user_ids` 是飞书没能加进来的人（多为不在通讯录权限范围内），如实反馈。
+17. **从零建一张多维表格（没有现成台账可写时）**：`feishu_bitable_create_record` 等工具都要一个**已存在**的
+    `app_token`；用户说"建个台账/跟踪表/登记表"而手里没有链接时，别让他先自己去飞书里建表，按三步自己建：
+    1. `feishu_bitable_create_app(name=<表名>, user_key=<sender_open_id>)` 建**表格本体**，返回 `app_token`、
+       `url`（把这个链接回给用户，他才点得进去）和 `default_table_id`（飞书自动建的那张空表，只有一个占位列）。
+       传 `user_key` 让表**归提需求的人所有**；不传则表建在机器人云空间里、用户默认看不到。
+    2. `feishu_bitable_create_table(app_token, table_name, fields_json=...)` 建**真正要用的数据表连列一起**——
+       `fields_json` 是 `[{"field_name":"合同编号","type":1},{"field_name":"金额","type":2},
+       {"field_name":"状态","type":3,"property":{"options":[{"name":"生效","color":0}]}},
+       {"field_name":"到期日","type":5},{"field_name":"负责人","type":11}]`。`type` 是飞书的字段类型数字：
+       1 文本、2 数字、3 单选、4 多选、5 日期、7 复选框、11 人员、13 电话、15 超链接、17 附件、20 公式、
+       22 地理位置、1001 创建时间、1005 自动编号（19 查找引用建不了）。**第一个字段是索引列**，只能是
+       1/2/5/13/15/20/22，所以把文本类主键（编号/名称）放第一个，别拿"人员/单选"开头（飞书报 1254012）。
+       建完 `default_table_id` 那张空表用不上，`feishu_bitable_clear_table` / `feishu_bitable_delete_fields`
+       收拾干净或直接留着，别把数据写进它。
+    3. 逐行 `feishu_bitable_create_record(app_token, table_id, fields_json)` 填数据（列名必须和上一步一致）。
+    事后要加列用 `feishu_bitable_create_field(app_token, table_id, field_name, field_type, property_json)`；
+    要"同一张表不同人看到不同内容"用 `feishu_bitable_create_role` + `feishu_bitable_add_role_member`（需在表上
+    开高级权限）。表名/列名一律**按用户说的建，缺信息就问**，别自己编一套字段糊上去。
