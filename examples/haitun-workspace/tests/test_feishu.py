@@ -1416,6 +1416,18 @@ async def test_auth_start_wrapper_ignores_llm_scopes(monkeypatch: pytest.MonkeyP
     assert captured["scopes"] == ""
 
 
+def test_auth_tools_are_async_with_docstrings() -> None:
+    mod = importlib.import_module("feishu_auth")
+    for name in (
+        "feishu_auth_start",
+        "feishu_auth_wait",
+        "feishu_auth_complete",
+    ):
+        fn = getattr(mod, name)
+        assert inspect.iscoroutinefunction(fn), name
+        assert (inspect.getdoc(fn) or "").strip(), f"{name} needs a docstring"
+
+
 def test_extract_code_from_url_or_bare() -> None:
     assert _impl._extract_code("https://localhost/?code=ABC123&state=x") == "ABC123"
     assert _impl._extract_code("  ABC123  ") == "ABC123"

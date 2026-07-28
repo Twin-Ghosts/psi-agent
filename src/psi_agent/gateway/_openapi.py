@@ -217,6 +217,35 @@ OPENAPI_SPEC = {
                 },
             },
         },
+        "/oauth/callback": {
+            "get": {
+                "summary": "OAuth redirect landing point (relays the code, no manual copy)",
+                "operationId": "oauthCallback",
+                "parameters": [
+                    {"name": "state", "in": "query", "required": True, "schema": {"type": "string"}},
+                    {"name": "code", "in": "query", "schema": {"type": "string"}},
+                    {"name": "error", "in": "query", "schema": {"type": "string"}},
+                ],
+                "responses": {
+                    "200": {"description": "HTML success page; the code is held for the initiator"},
+                    "400": {"description": "HTML failure page (missing state, or provider error)"},
+                },
+            },
+        },
+        "/oauth/code": {
+            "get": {
+                "summary": "Take the relayed authorization code once, by state",
+                "operationId": "oauthTakeCode",
+                "parameters": [
+                    {"name": "state", "in": "query", "required": True, "schema": {"type": "string"}},
+                ],
+                "responses": {
+                    "200": {"description": "{state, code} — or {state, error}; consumed on read"},
+                    "400": {"$ref": "#/components/responses/Error"},
+                    "404": {"$ref": "#/components/responses/Error"},
+                },
+            },
+        },
         "/sessions/{session_id}/history": {
             "get": {
                 "summary": "Get session conversation history",

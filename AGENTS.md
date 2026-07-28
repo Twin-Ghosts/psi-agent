@@ -100,6 +100,9 @@ src/
         ├── _ai_manager.py         # AIManager
         ├── _session_manager.py    # SessionManager
         ├── _scheduler_manager.py  # SchedulerManager — 每 workspace 一个全量激活的调度 Session（触发其 schedules/）
+        ├── _router_manager.py      # RouterManager — 内部语义路由服务注册表
+        ├── _feishu_manager.py      # FeishuManager — 飞书 open_id → Session 路由
+        ├── _oauth_manager.py       # OAuthRelay — OAuth 回调中继（免手抄授权码）
         ├── _title_manager.py       # 会话标题 CRUD + AI 生成
         ├── _state.py               # GatewayState — 状态持久化 (state/latest.json)
         ├── server.py               # aiohttp REST handlers
@@ -107,6 +110,7 @@ src/
         ├── _history_manager.py     # JSONL 历史读取
         ├── _workspace_manager.py   # 目录浏览
         ├── _openapi.py             # OpenAPI schema 生成
+        ├── _attention.py           # AttentionHub — tray/webview 注意力提示
         ├── _tray.py                # 系统托盘图标 (pystray)
         ├── _webview.py            # 原生 webview 窗口 (pywebview)
         ├── spa/                    # Vue 3 SPA v1（Vite + SFC）

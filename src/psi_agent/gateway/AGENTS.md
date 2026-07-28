@@ -19,6 +19,7 @@ Gateway 进程
 ├── ChatManager        — SSE 流式对话管理
 ├── HistoryManager     — JSONL 历史读取（AppData `histories/` + legacy 双读）
 ├── TodoManager        — 会话 todo 列表只读（AppData `todos/` + legacy workspace 双读）
+├── OAuthRelay         — OAuth 回调中继（state → code 一次性信箱，免用户手工复制授权码）
 ├── GatewayState       — 状态持久化到 AppData `state/latest.json`（legacy cwd 双读）
 ├── aiohttp REST Server  — OpenAPI CRUD + Web UI chat
 ├── spa/               — Vue 3 SPA 前端项目 (Vite + SFC)
@@ -39,6 +40,7 @@ Gateway 进程
 | `_scheduler_manager.py` | `SchedulerManager` — 每个 workspace 恰好一个**全量激活**（`active_schedules=("*",)`）的调度 Session，按需 spawn，对 SPA / state 隐藏 |
 | `_defaults.py` | `resolve_default_agent` / `resolve_default_workspace`；再导出 ``psi_agent._appdata`` 路径助手 — CLI / `GET /defaults` 用 |
 | `_feishu_manager.py` | `FeishuManager` — 飞书会话 → Session 路由表（私聊按 `open_id`、群聊按 `chat_id`；复用 SessionManager 按需 spawn）+ FeishuRoute |
+| `_oauth_manager.py` | `OAuthRelay` — OAuth 回调中继（`state → code` 一次性信箱，带 TTL；供 `GET /oauth/callback` + `GET /oauth/code`），让授权码免用户手工复制 |
 | `_title_manager.py` | 会话标题 CRUD + AI 自动生成 |
 | `_state.py` | `GatewayState` — `{appdata}/state/latest.json` + 时间戳快照；缺则双读 cwd `state/latest.json` |
 | `_spa_shell.py` | SPA 外壳注入 — `DEFAULT_APP_NAME`、`inject_app_name()`、`read_spa_index_template()`；`GET /spa/index.html` 替换 `__GATEWAY_APP_NAME__` |

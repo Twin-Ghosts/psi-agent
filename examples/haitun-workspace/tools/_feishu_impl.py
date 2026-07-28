@@ -2017,10 +2017,6 @@ _REFRESH_URL = "https://open.feishu.cn/open-apis/authen/v1/refresh_access_token"
 _APP_TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal"
 
 
-def _redirect_uri() -> str:
-    return os.environ.get("PSI_FEISHU_REDIRECT_URI", "").strip() or "http://localhost/"
-
-
 def _explicit_redirect_uri() -> str:
     """用户在应用后台登记并显式指定的 redirect_uri; 未设置返回空串。"""
     return os.environ.get("PSI_FEISHU_REDIRECT_URI", "").strip()
