@@ -2447,6 +2447,196 @@ async def delete_bitable_fields_impl(
     return {"ok": True, "deleted": deleted, "count": len(deleted)}
 
 
+# ── Bitable creation — new base, new data table, new field ────────────────────
+#
+# The tools above all need an app_token that already exists, i.e. a base somebody
+# built by hand. These three create it: base (POST /bitable/v1/apps) → data table
+# (POST .../tables, optionally with its initial columns) → extra field
+# (POST .../fields). Writes prefer the user's identity so the base is owned by the
+# person who asked for it, falling back to the bot's tenant token.
+#
+# Field `type` is the same integer vocabulary list_bitable_fields decodes:
+# 1 文本, 2 数字, 3 单选, 4 多选, 5 日期, 7 复选框, 11 人员, 13 电话, 15 超链接,
+# 17 附件, 18 单向关联, 20 公式, 21 双向关联, 22 地理位置, 23 群组, 1001 创建时间,
+# 1002 最后更新时间, 1003 创建人, 1004 修改人, 1005 自动编号. Type 19 (查找引用)
+# cannot be created. The first field of a table is its index (primary) column and
+# only accepts 1, 2, 5, 13, 15, 20, 22 — Feishu answers 1254012 otherwise.
+
+_INDEX_FIELD_TYPES = {1, 2, 5, 13, 15, 20, 22}
+_UNCREATABLE_FIELD_TYPE = 19
+
+
+def _build_create_bitable_app_request(name: str, folder_token: str, time_zone: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.POST
+    req.uri = "/open-apis/bitable/v1/apps"
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    body: dict[str, Any] = {}
+    if name:
+        body["name"] = name
+    if folder_token:
+        body["folder_token"] = folder_token
+    if time_zone:
+        body["time_zone"] = time_zone
+    req.body = body
+    return req
+
+
+async def create_bitable_app_impl(
+    name: str, folder_token: str = "", time_zone: str = "", user_key: str = ""
+) -> dict[str, Any]:
+    """Create a new bitable (多维表格). Returns its app_token, url and default_table_id."""
+    res = await _invoke(
+        _build_create_bitable_app_request(name.strip(), folder_token.strip(), time_zone.strip()),
+        user_key=user_key,
+        prefer="user",
+    )
+    if not res["ok"]:
+        return res
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    app = data.get("app", {}) if isinstance(data.get("app"), dict) else {}
+    app_token = app.get("app_token", "")
+    return {
+        "ok": True,
+        "app_token": app_token,
+        "name": app.get("name", name),
+        "folder_token": app.get("folder_token", ""),
+        "default_table_id": app.get("default_table_id", ""),
+        "time_zone": app.get("time_zone", ""),
+        "url": app.get("url") or (f"{_DOC_BASE_URL}/base/{app_token}" if app_token else ""),
+    }
+
+
+def _validate_bitable_fields(fields: Any, *, as_table_fields: bool) -> str | None:
+    """Check a parsed fields list; return an error message, or None when it is usable."""
+    if not isinstance(fields, list) or not fields:
+        return "fields_json must be a non-empty JSON array of field objects."
+    for i, f in enumerate(fields):
+        if not isinstance(f, dict):
+            return f"fields_json[{i}] must be a JSON object with field_name and type."
+        if not str(f.get("field_name", "")).strip():
+            return f"fields_json[{i}] is missing a non-empty field_name."
+        ftype = f.get("type")
+        if not isinstance(ftype, int) or isinstance(ftype, bool):
+            return f"fields_json[{i}].type must be an integer field type (1=文本, 2=数字, 3=单选, 5=日期, ...)."
+        if ftype == _UNCREATABLE_FIELD_TYPE:
+            return f"fields_json[{i}].type 19 (查找引用) cannot be created via the API."
+        if as_table_fields and i == 0 and ftype not in _INDEX_FIELD_TYPES:
+            return (
+                f"fields_json[0].type {ftype} cannot be the index (primary) column; "
+                f"the first field must be one of {sorted(_INDEX_FIELD_TYPES)} "
+                "(1=文本, 2=数字, 5=日期, 13=电话, 15=超链接, 20=公式, 22=地理位置)."
+            )
+    return None
+
+
+def _build_create_table_request(app_token: str, table: dict[str, Any]) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.POST
+    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables"
+    req.paths["app_token"] = app_token
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    req.body = {"table": table}
+    return req
+
+
+async def create_bitable_table_impl(
+    app_token: str,
+    table_name: str,
+    fields_json: str = "",
+    default_view_name: str = "",
+    user_key: str = "",
+) -> dict[str, Any]:
+    """Create a data table in a bitable. fields_json is a JSON array of field objects."""
+    if not app_token.strip():
+        return _error("No app_token provided (the segment in a feishu.cn/base/<app_token> URL).")
+    if not table_name.strip():
+        return _error("No table_name provided.")
+    table: dict[str, Any] = {"name": table_name.strip()}
+    if fields_json.strip():
+        try:
+            fields = json.loads(fields_json)
+        except ValueError as exc:
+            return _error(f"fields_json is not valid JSON: {exc}")
+        problem = _validate_bitable_fields(fields, as_table_fields=True)
+        if problem:
+            return _error(problem)
+        table["fields"] = fields
+    if default_view_name.strip():
+        if "fields" not in table:
+            # Feishu rejects default_view_name on its own; say so instead of failing upstream.
+            return _error("default_view_name requires fields_json (Feishu only accepts the two together).")
+        table["default_view_name"] = default_view_name.strip()
+    res = await _invoke(_build_create_table_request(app_token.strip(), table), user_key=user_key, prefer="user")
+    if not res["ok"]:
+        return res
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    field_ids = data.get("field_id_list", [])
+    return {
+        "ok": True,
+        "table_id": data.get("table_id", ""),
+        "name": table["name"],
+        "default_view_id": data.get("default_view_id", ""),
+        "field_ids": field_ids if isinstance(field_ids, list) else [],
+    }
+
+
+def _build_create_field_request(app_token: str, table_id: str, field: dict[str, Any]) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.POST
+    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields"
+    req.paths["app_token"] = app_token
+    req.paths["table_id"] = table_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    req.body = field
+    return req
+
+
+async def create_bitable_field_impl(
+    app_token: str,
+    table_id: str,
+    field_name: str,
+    field_type: int = 1,
+    property_json: str = "",
+    ui_type: str = "",
+    user_key: str = "",
+) -> dict[str, Any]:
+    """Add one field (column) to an existing table. property_json holds type-specific settings."""
+    if not app_token.strip():
+        return _error("No app_token provided (the segment in a feishu.cn/base/<app_token> URL).")
+    if not table_id.strip():
+        return _error("No table_id provided (get it from feishu_bitable_list_tables).")
+    field: dict[str, Any] = {"field_name": field_name.strip(), "type": field_type}
+    problem = _validate_bitable_fields([field], as_table_fields=False)
+    if problem:
+        return _error(problem.replace("fields_json[0].", "").replace("fields_json[0]", "field"))
+    if property_json.strip():
+        try:
+            prop = json.loads(property_json)
+        except ValueError as exc:
+            return _error(f"property_json is not valid JSON: {exc}")
+        if not isinstance(prop, dict):
+            return _error('property_json must be a JSON object, e.g. \'{"options":[{"name":"高","color":0}]}\'.')
+        field["property"] = prop
+    if ui_type.strip():
+        field["ui_type"] = ui_type.strip()
+    res = await _invoke(
+        _build_create_field_request(app_token.strip(), table_id.strip(), field), user_key=user_key, prefer="user"
+    )
+    if not res["ok"]:
+        return res
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    created = data.get("field", {}) if isinstance(data.get("field"), dict) else {}
+    ftype = created.get("type", field_type)
+    return {
+        "ok": True,
+        "field_id": created.get("field_id", ""),
+        "name": created.get("field_name", field["field_name"]),
+        "type": _BITABLE_FIELD_TYPES.get(ftype, ftype),
+        "is_primary": bool(created.get("is_primary")),
+    }
+
+
 # ── Attendance (考勤) — read clock-in/out results (read-only) ─────────────────
 #
 # Query attendance task results (who clocked in/out, when, where, and whether
