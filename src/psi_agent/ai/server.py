@@ -37,8 +37,11 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
     body.pop("api_base", None)
     body.pop("routing", None)
     stream_opts = body.get("stream_options", {})
-    stream_opts["include_usage"] = True
-    body["stream_options"] = stream_opts
+    if isinstance(stream_opts, dict):
+        stream_opts["include_usage"] = True
+        body["stream_options"] = stream_opts
+    else:
+        body["stream_options"] = {"include_usage": True}
     logger.debug(f"Body keys to passthrough: {list(body)}")
 
     response = web.StreamResponse(

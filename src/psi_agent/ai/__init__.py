@@ -90,9 +90,9 @@ class Ai:
     verbose: bool = False
     """Enable DEBUG-level logging."""
 
-    max_context_tokens: int = 100000
+    max_context_tokens: int = -1
     """Prompt token threshold for triggering compaction (default 100K).
-    0 disables compaction. Falls back to PSI_MAX_CONTEXT_TOKENS env var.
+    -1 = use PSI_MAX_CONTEXT_TOKENS env var or 100K. 0 disables compaction.
     CLI: --max-context-tokens."""
 
     async def run(self) -> None:
@@ -102,12 +102,16 @@ class Ai:
         model = self.model or os.environ.get("PSI_AI_MODEL", "")
         api_key = self.api_key or os.environ.get("PSI_AI_API_KEY", "")
         base_url = self.base_url or os.environ.get("PSI_AI_BASE_URL", "")
-        max_context_tokens_str = os.environ.get("PSI_MAX_CONTEXT_TOKENS", "")
-        if not self.max_context_tokens and max_context_tokens_str:
-            try:
-                self.max_context_tokens = int(max_context_tokens_str)
-            except ValueError:
-                logger.warning(f"Invalid PSI_MAX_CONTEXT_TOKENS={max_context_tokens_str!r}, ignoring")
+        if self.max_context_tokens == -1:
+            env_val = os.environ.get("PSI_MAX_CONTEXT_TOKENS", "")
+            if env_val:
+                try:
+                    self.max_context_tokens = int(env_val)
+                except ValueError:
+                    logger.warning(f"Invalid PSI_MAX_CONTEXT_TOKENS={env_val!r}, using default 100K")
+                    self.max_context_tokens = 100000
+            else:
+                self.max_context_tokens = 100000
         logger.debug(
             f"AI resolved params: provider={provider!r}, model={model!r}, "
             f"base_url={base_url!r}, api_key={'*' * 8 if api_key else '(empty)'}, "

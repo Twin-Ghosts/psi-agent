@@ -116,7 +116,8 @@ class AiDelta:
 
     Consumed by ``SessionAgent.run()`` to drive the agent loop.  Contains
     SSE-level fields (``tool_calls`` as partial dicts, ``finish_reason``)
-    that the agent loop accumulates and acts on.
+    that the agent loop accumulates and acts on.  ``compaction_needed``
+    signals that the AI layer detected a token-threshold exceed.
 
     Never exposed to the Channel side.
     """

@@ -243,7 +243,7 @@ Session 支持将对话历史持久化到 AppData `histories/{session_id}.jsonl`
 1. `AiClient.stream()` 解析 `psi_compaction` → `AiDelta.compaction_needed=True`
 2. Agent loop 在 `finish_reason="stop"` 后调用 `_maybe_compact()`
 3. 从 `{agent}/systems/system.py` 提取 `compact_history()` 函数
-4. 构造 `complete_fn`（使用现有 `AiClient` 做非流式调用的闭包）
+4. 构造 `complete_fn`（使用现有 `AiClient` 做流式调用并收集全部 content 的闭包）
 5. `summary = await compact_history(conversation.messages, complete_fn)`
 6. 插入独立的 `compacted` 消息（`role="compacted"`, `kind="compacted"`）到 conversation
 7. `commit()` 落盘——历史消息**保留**，不删除
