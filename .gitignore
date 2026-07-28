@@ -9,6 +9,43 @@ dist/
 *.sock
 .coverage
 /result
-state/
-wiki/
+# Local Git worktrees are development-only and can be very large.
 .worktrees/
+
+# Runtime state. These files are generated per installation/user and must not
+# be included in source archives or release installers.
+/state/
+/wiki/
+examples/*-workspace/state/
+examples/*-workspace/wiki/
+examples/*-workspace/histories/
+examples/*-workspace/.psi/
+
+# Local evaluation evidence and generated user-facing test documents. Publish
+# selected anonymized reports explicitly with `git add -f <path>` when needed.
+/artifacts/
+/blocks_temp.json
+
+# uv and long-running pytest/test-harness scratch directories.
+/.uv-cache/
+/uv-*.lock
+/.fast-*/
+/.green-*/
+/.red-*/
+/.warm-*/
+/.quality-*/
+/.review-*/
+/.scenario-*/
+/.runner-*/
+/.profile-*/
+/.map-*/
+/.long-*/
+/.final-*/
+/.verify-*/
+/.pytest-tmp-*/
+/.tmp-review-*/
+/.t/
+/.t-*/
+/.t[0-9]*/
+/.task*-tmp/
+/.test-tmp/
