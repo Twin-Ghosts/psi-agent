@@ -132,7 +132,7 @@ async def _iter_pages(workspace: anyio.Path) -> list[tuple[str, dict[str, Any], 
         return []
     pages: list[tuple[str, dict[str, Any], str]] = []
     async for entry in root.glob("*.md"):
-        # 跳过 CHANGELOG.md（特殊页面，不作为知识内容）
+        # 跳过 CHANGELOG.md (特殊页面, 不作为知识内容)
         if entry.name == "CHANGELOG.md":
             continue
         page = await _read_page(entry)
@@ -178,7 +178,7 @@ async def _append_changelog(workspace: anyio.Path, slug: str, title: str, create
         links_str += f" 等{len(links)}个"
     entry = f"- {timestamp} | **{action}** [{title}]({slug}) | 链接: {links_str}\n"
 
-    # 原子写入：如果已存在则追加，否则新建
+    # 原子写入: 如果已存在则追加, 否则新建
     if await changelog_path.exists():
         existing = await changelog_path.read_text(encoding="utf-8")
         await _atomic_write(changelog_path, existing + entry)
@@ -238,7 +238,7 @@ async def wiki_write_impl(
     except OSError as exc:
         return _error(f"Failed to write page: {exc}", slug=slug)
 
-    # 变更日志（新增）
+    # 变更日志 (新增)
     is_created = existing is None
     await _append_changelog(workspace, slug, meta["title"], is_created, links)
 
@@ -264,7 +264,7 @@ async def wiki_read_impl(title_or_slug: str, *, workspace_raw: str = "") -> dict
     page = await _read_page(path)
     if page is None:
         return _error(
-            f"No wiki page named {slug!r}.", slug=slug, hint="尝试 `wiki_search` 查找相似页面，或 `wiki_write` 创建它。"
+            f"No wiki page named {slug!r}.", slug=slug, hint="尝试 `wiki_search` 查找相似页面, 或 `wiki_write` 创建它。"
         )
     meta, body = page
     return {
@@ -294,7 +294,7 @@ async def wiki_list_impl(*, tag: str = "", workspace_raw: str = "") -> dict[str,
 
     for slug, meta, body in pages:
         links = extract_links(body)
-        broken = [l for l in links if l not in all_slugs]
+        broken = [link for link in links if link not in all_slugs]
         all_broken.update(broken)
         summary = _page_summary(slug, meta, body)
         if tag_filter and tag_filter not in [t.lower() for t in summary["tags"]]:
@@ -303,20 +303,20 @@ async def wiki_list_impl(*, tag: str = "", workspace_raw: str = "") -> dict[str,
         summary["broken_preview"] = broken[:3]
         out.append(summary)
 
-    # 按断链数降序排列，方便用户优先处理断链多的页面
+    # 按断链数降序排列, 方便用户优先处理断链多的页面
     out.sort(key=lambda p: (-p["broken_count"], p["slug"]))
 
-    # 生成 wanted 列表（按被引用次数排序）
+    # 生成 wanted 列表 (按被引用次数排序)
     wanted_list = sorted(all_broken)
 
     page_titles = [f"「{p['title']}」" for p in out]
-    summary_msg = f"共 {len(out)} 个页面，{len(all_broken)} 个断链待补。"
+    summary_msg = f"共 {len(out)} 个页面, {len(all_broken)} 个断链待补。"
     if out:
-        summary_msg += f" 页面：{', '.join(page_titles[:3])}"
+        summary_msg += f" 页面: {', '.join(page_titles[:3])}"
         if len(out) > 3:
             summary_msg += f" 等 {len(out)} 个。"
     if wanted_list:
-        summary_msg += f" 建议优先创建：{', '.join(wanted_list[:5])}"
+        summary_msg += f" 建议优先创建: {', '.join(wanted_list[:5])}"
         if len(wanted_list) > 5:
             summary_msg += f" 等 {len(wanted_list)} 个。"
 
@@ -386,9 +386,9 @@ async def wiki_search_impl(
                     suggestions.append({"title": s, "slug": slug})
                     break
         if suggestions:
-            msg = f"未找到与 '{query}' 相关的页面。您是否想找：{', '.join([s['title'] for s in suggestions])}？"
+            msg = f"未找到与 '{query}' 相关的页面。您是否想找: {', '.join([s['title'] for s in suggestions])}?"
         else:
-            msg = f"未找到与 '{query}' 相关的页面。您可以尝试其他关键词，或使用 `wiki_write` 创建新页面。"
+            msg = f"未找到与 '{query}' 相关的页面。您可以尝试其他关键词, 或使用 `wiki_write` 创建新页面。"
 
         return {
             "ok": True,
@@ -402,7 +402,7 @@ async def wiki_search_impl(
 
     # 有结果 -> 生成友好摘要
     top_titles = [m["title"] for m in matched[:3]]
-    msg = f"找到 {len(matched)} 个相关页面，最匹配的是：{', '.join(top_titles)}"
+    msg = f"找到 {len(matched)} 个相关页面, 最匹配的是: {', '.join(top_titles)}"
     if len(matched) > 3:
         msg += f" 等 {len(matched)} 个结果。"
 
@@ -426,7 +426,7 @@ async def wiki_links_impl(title_or_slug: str, *, workspace_raw: str = "") -> dic
     known = {slug for slug, _, _ in pages}
     if target not in known:
         return _error(
-            f"No wiki page named {target!r}.", slug=target, hint="检查拼写，或使用 `wiki_list` 查看所有页面。"
+            f"No wiki page named {target!r}.", slug=target, hint="检查拼写, 或使用 `wiki_list` 查看所有页面。"
         )
 
     outgoing: list[str] = []
@@ -456,7 +456,7 @@ async def wiki_delete_impl(title_or_slug: str, *, workspace_raw: str = "") -> di
     slug = slugify(title_or_slug)
     path = _page_path(workspace, slug)
     if not await path.exists():
-        return _error(f"No wiki page named {slug!r}.", slug=slug, hint="检查拼写，或使用 `wiki_list` 查看所有页面。")
+        return _error(f"No wiki page named {slug!r}.", slug=slug, hint="检查拼写, 或使用 `wiki_list` 查看所有页面。")
 
     orphaned: list[str] = []
     for other_slug, _, body in await _iter_pages(workspace):
@@ -487,7 +487,7 @@ async def wiki_stats_impl(workspace_raw: str = "") -> dict[str, Any]:
             "total_pages": 0,
             "unique_tags": 0,
             "recent_pages": [],
-            "message": "Wiki 是空的。使用 `wiki_write` 创建第一篇文章吧！",
+            "message": "Wiki 是空的。使用 `wiki_write` 创建第一篇文章吧!",
         }
 
     sorted_by_updated = sorted(pages, key=lambda p: p[1].get("updated", ""), reverse=True)
@@ -507,11 +507,11 @@ async def wiki_stats_impl(workspace_raw: str = "") -> dict[str, Any]:
     tag_list = sorted(all_tags)[:10]
     recent_titles = [str(p["title"]) for p in recent]
 
-    msg = f"知识库共 {len(pages)} 个页面，涵盖 {len(all_tags)} 个标签。"
+    msg = f"知识库共 {len(pages)} 个页面, 涵盖 {len(all_tags)} 个标签。"
     if recent_titles:
-        msg += f" 最近更新：{', '.join(recent_titles)}。"
+        msg += f" 最近更新: {', '.join(recent_titles)}。"
     if tag_list:
-        msg += f" 热门标签：{', '.join(tag_list)}。"
+        msg += f" 热门标签: {', '.join(tag_list)}。"
 
     return {
         "ok": True,
@@ -542,7 +542,7 @@ async def wiki_related_impl(
 
     # 获取目标页面的出链
     target_links = []
-    for slug, meta, body in pages:
+    for slug, _meta, body in pages:
         if slug == target:
             target_links = extract_links(body)
             break
@@ -552,7 +552,7 @@ async def wiki_related_impl(
             "ok": True,
             "slug": target,
             "related": [],
-            "message": f"页面「{target}」没有出链，无法推荐相关页面。",
+            "message": f"页面「{target}」没有出链, 无法推荐相关页面。",
         }
 
     # 统计每个页面的共同引用数量
@@ -580,7 +580,7 @@ async def wiki_related_impl(
 
     related_list = [{"slug": s, "title": t, "shared_links": score} for s, score, t in top]
     titles = [str(r["title"]) for r in related_list]
-    msg = f"与「{target}」相关的页面：{', '.join(titles)}。"
+    msg = f"与「{target}」相关的页面: {', '.join(titles)}。"
 
     return {
         "ok": True,
