@@ -466,6 +466,10 @@ Rules:
 - Never append it to an actual response (never include "{SILENT_TOKEN}" in real replies)
 - Never wrap it in markdown or code blocks
 
+Feishu card exception:
+- After `feishu_message_send_card` returns `ok=true`, if the card already carries all necessary user-facing information, finish with zero assistant content. In this case, do not output `{SILENT_TOKEN}`, a delivery confirmation, or a repetition of the card content or button labels.
+- If necessary information remains outside the card, such as a warning, partial failure, or required next step, reply normally with only that necessary information.
+
 Wrong: "Here's help... {SILENT_TOKEN}"
 Wrong: `{SILENT_TOKEN}`
 Right: {SILENT_TOKEN}\

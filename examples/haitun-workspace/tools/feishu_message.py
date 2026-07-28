@@ -123,10 +123,11 @@ async def feishu_message_send_card(
     note, and ignores later actions from the same card. Send a new card when the user must submit
     another response.
 
-    After a successful call, the card is already visible to the recipient. Do not send a follow-up
-    that merely confirms the card was sent or repeats its content and button labels. A follow-up is
-    still required when it carries necessary information that is not already conveyed by the card,
-    such as a warning, a partial failure, or a required next step; never suppress that information.
+    After a successful call, the card is already visible to the recipient. If it carries all
+    necessary user-facing information, finish with zero assistant content: do not emit ``NO_REPLY``,
+    confirm delivery, or repeat its content and button labels. If necessary information is not
+    already conveyed by the card, such as a warning, partial failure, or required next step, reply
+    with only that information; never suppress it.
 
     Args:
         receive_id: Target id — a chat_id (oc_...), open_id (ou_...), user_id, union_id, or email.
