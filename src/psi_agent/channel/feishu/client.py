@@ -30,6 +30,8 @@ from psi_agent.channel._types import FileChunk, InputChunk, TextChunk
 
 _EMOJI_PROCESSING = "Typing"
 _EMOJI_FAILED = "CrossMark"
+_INTERACTIVE_CARD_TAGS = {"action", "form"}
+_REMOVED_CARD_ELEMENT = object()
 
 
 def _allowed(sender_id: str | None, allowed_ids: list[str] | None) -> bool:
@@ -217,6 +219,159 @@ def _card_action_context(event: Any) -> str:
     }
     body = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
     return f"<feishu_card_action>\n{body}\n</feishu_card_action>"
+
+
+def _card_action_value(event: Any) -> Any:
+    action = getattr(event, "action", None)
+    value = getattr(action, "value", None)
+    if value is not None:
+        return value
+    raw = getattr(event, "raw", None)
+    raw_event = raw.get("event") if isinstance(raw, dict) else None
+    raw_action = raw_event.get("action") if isinstance(raw_event, dict) else None
+    return raw_action.get("value") if isinstance(raw_action, dict) else None
+
+
+def _parse_fetched_card(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data")
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        if not isinstance(item, dict) or item.get("msg_type") != "interactive":
+            continue
+        body = item.get("body")
+        content = body.get("content") if isinstance(body, dict) else None
+        if isinstance(content, dict):
+            return content
+        if not isinstance(content, str):
+            continue
+        try:
+            card = json.loads(content)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(card, dict):
+            return card
+    return None
+
+
+def _normalize_card_action_value(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
+def _card_text_content(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value or None
+    if not isinstance(value, dict):
+        return None
+    content = value.get("content")
+    return content if isinstance(content, str) and content else None
+
+
+def _find_card_action_label(value: Any, action_value: Any) -> str | None:
+    normalized_action_value = _normalize_card_action_value(action_value)
+    if isinstance(value, dict):
+        if "value" in value and _normalize_card_action_value(value["value"]) == normalized_action_value:
+            label = _card_text_content(value.get("text"))
+            if label:
+                return label
+        for child in value.values():
+            label = _find_card_action_label(child, action_value)
+            if label:
+                return label
+    elif isinstance(value, list):
+        for child in value:
+            label = _find_card_action_label(child, action_value)
+            if label:
+                return label
+    return None
+
+
+def _remove_card_interactions(
+    value: Any,
+    action_value: Any,
+    selected_label: str,
+    selected_replaced: bool = False,
+) -> tuple[Any, bool]:
+    if isinstance(value, dict):
+        if value.get("tag") in _INTERACTIVE_CARD_TAGS:
+            if not selected_replaced and _find_card_action_label(value, action_value):
+                return (
+                    {
+                        "tag": "note",
+                        "elements": [
+                            {
+                                "tag": "plain_text",
+                                "content": f"已选择: {selected_label}",
+                            }
+                        ],
+                    },
+                    True,
+                )
+            return _REMOVED_CARD_ELEMENT, selected_replaced
+
+        result: dict[str, Any] = {}
+        for key, child in value.items():
+            cleaned, selected_replaced = _remove_card_interactions(
+                child,
+                action_value,
+                selected_label,
+                selected_replaced,
+            )
+            if cleaned is not _REMOVED_CARD_ELEMENT:
+                result[key] = cleaned
+        return result, selected_replaced
+
+    if isinstance(value, list):
+        result: list[Any] = []
+        for child in value:
+            cleaned, selected_replaced = _remove_card_interactions(
+                child,
+                action_value,
+                selected_label,
+                selected_replaced,
+            )
+            if cleaned is not _REMOVED_CARD_ELEMENT:
+                result.append(cleaned)
+        return result, selected_replaced
+
+    return value, selected_replaced
+
+
+def _consumed_card(payload: Any, action_value: Any) -> dict[str, Any] | None:
+    if action_value is None:
+        return None
+    card = _parse_fetched_card(payload)
+    if card is None:
+        return None
+    selected_label = _find_card_action_label(card, action_value)
+    if not selected_label:
+        return None
+    consumed, selected_replaced = _remove_card_interactions(card, action_value, selected_label)
+    return consumed if selected_replaced and isinstance(consumed, dict) else None
+
+
+def _submitted_card() -> dict[str, Any]:
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "green",
+            "title": {"tag": "plain_text", "content": "已提交"},
+        },
+        "elements": [
+            {
+                "tag": "markdown",
+                "content": "你的操作已提交, 请查看本会话中的处理结果。",
+            }
+        ],
+    }
 
 
 def _comment_context_header(event: Any, ctx: Any) -> str:
@@ -409,19 +564,16 @@ async def _handle_card_action(
             logger.info(f"card action ignored for already-consumed message={message_id}")
             return
 
-        replacement = {
-            "config": {"wide_screen_mode": True},
-            "header": {
-                "template": "green",
-                "title": {"tag": "plain_text", "content": "已提交"},
-            },
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": "你的操作已提交, 请查看本会话中的处理结果。",
-                }
-            ],
-        }
+        replacement = None
+        try:
+            payload = await channel.fetch_message(message_id)
+            replacement = _consumed_card(payload, _card_action_value(event))
+            if replacement is None:
+                logger.warning(f"failed to preserve consumed card {message_id}, using fallback")
+        except Exception as e:
+            logger.warning(f"failed to fetch consumed card {message_id}, using fallback — {e!r}")
+        if replacement is None:
+            replacement = _submitted_card()
         try:
             result = await channel.update_card(message_id, replacement)
             if not getattr(result, "success", False):
