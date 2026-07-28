@@ -17,6 +17,7 @@ from psi_agent.gateway._ai_manager import AIManager
 from psi_agent.gateway._attention import AttentionHub
 from psi_agent.gateway._defaults import resolve_appdata_root, resolve_default_agent, resolve_default_workspace
 from psi_agent.gateway._router_manager import RouterManager, RouterUpstreamInfo
+from psi_agent.gateway._scheduler_manager import SchedulerManager
 from psi_agent.gateway._session_manager import SessionManager
 from psi_agent.gateway._spa_shell import DEFAULT_APP_NAME
 from psi_agent.gateway._state import GatewayState
@@ -92,6 +93,15 @@ class Gateway:
     Step 4B: todos write under ``{appdata}/todos/`` (legacy workspace path dual-read).
     Step 4C: history writes under ``{appdata}/histories/`` (legacy dual-read).
     Step 4D: Gateway ``state/`` under ``{appdata}/state/`` (legacy cwd dual-read).
+    """
+
+    scheduler_ai_id: str = ""
+    """调度 Session 挂载的 AI 实例 id。每个 workspace 会得到一个专用调度 Session
+    (对 SPA / state 隐藏), 以 ``active_schedules=("*",)`` 激活该 workspace 下的全部
+    定时任务 —— 定时任务从 workspace 加载, 但**触发权是 (session x schedule) 逐条的**,
+    一条必须恰好被一个 Session 激活, 否则飞书多用户下一条提醒会被在线会话数乘一遍。
+
+    空 = 回落 ``--feishu-ai-id``; 两者都空则不启动调度 Session (记 warning)。
     """
 
     verbose: bool = False
@@ -181,6 +191,7 @@ class Gateway:
                 await tm.set(t["id"], t["title"])
 
             attention = AttentionHub()
+            schedm = SchedulerManager(_sm=sm, _ai_id=self.scheduler_ai_id or self.feishu_ai_id)
             app = await create_app(
                 aim,
                 sm,
@@ -194,7 +205,14 @@ class Gateway:
                 default_agent=agent_default,
                 default_workspace=workspace_default,
                 appdata=appdata_root,
+                scheduler_ai_id=self.scheduler_ai_id,
+                schedm=schedm,
             )
+
+            # Restored sessions need a scheduler Session for their workspace too
+            # (on demand: skipped when there are no schedules).
+            for info in await sm.list_all():
+                await schedm.ensure(info.workspace, ai_id=info.backend_id, agent=info.agent)
 
             async def _do_persist() -> None:
                 await state.save(

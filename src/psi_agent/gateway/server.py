@@ -23,6 +23,7 @@ from psi_agent.gateway._feishu_manager import FeishuManager
 from psi_agent.gateway._history_manager import HistoryManager
 from psi_agent.gateway._openapi import render_openapi
 from psi_agent.gateway._router_manager import RouterManager, RouterUpstreamInfo
+from psi_agent.gateway._scheduler_manager import SchedulerManager
 from psi_agent.gateway._session_manager import SessionInfo, SessionManager
 from psi_agent.gateway._spa_shell import DEFAULT_APP_NAME, inject_app_name, read_spa_index_template
 from psi_agent.gateway._title_manager import TitleManager
@@ -139,6 +140,11 @@ def _session_data(info: SessionInfo) -> dict[str, Any]:
     data = asdict(info)
     if data.get("backend_type") == "ai":
         data["ai_id"] = data["backend_id"]
+    # ``scheduler`` is a property derived from active_schedules, so asdict omits
+    # it — add it back explicitly; the REST / SPA contract is unchanged.
+    data["active_schedules"] = list(info.active_schedules)
+    data["deactive_schedules"] = list(info.deactive_schedules)
+    data["scheduler"] = info.scheduler
     return data
 
 
@@ -155,12 +161,18 @@ async def create_app(
     default_agent: str = "",
     default_workspace: str = "",
     appdata: str = "",
+    scheduler_ai_id: str = "",
+    schedm: SchedulerManager | None = None,
 ) -> web.Application:
     app = web.Application(client_max_size=100 * 1024 * 1024)
     app["aim"] = aim
     app["rm"] = rm
     app["sm"] = sm
     app["tm"] = tm
+    # Owns the scheduler Sessions: one per workspace, created on demand, hidden
+    # from SPA / state. Gateway.run passes its own instance (also needed by
+    # startup restore); standalone tests may omit it.
+    app["schedm"] = schedm or SchedulerManager(_sm=sm, _ai_id=scheduler_ai_id or feishu_ai_id)
     app["fm"] = FeishuManager(_sm=sm, _ai_id=feishu_ai_id, _workspace_root=feishu_workspace_root)
     app["wm"] = WorkspaceManager()
     app["cm"] = ChatManager()
@@ -307,6 +319,7 @@ async def _list_routers(request: web.Request) -> web.Response:
 async def _create_session(request: web.Request) -> web.Response:
     """POST /sessions — Step 2 accepts optional ``agent`` (else Gateway default)."""
     sm: SessionManager = request.app["sm"]
+    schedm: SchedulerManager = request.app["schedm"]
     try:
         body = await request.json()
         backend_type = body.get("backend_type", "ai")
@@ -318,6 +331,9 @@ async def _create_session(request: web.Request) -> web.Response:
             workspace=body.get("workspace", ""),
             agent=body.get("agent", ""),
         )
+        # This workspace's schedules are owned by its dedicated scheduler
+        # Session, not fired by this session.
+        await schedm.ensure(info.workspace, ai_id=info.backend_id, agent=info.agent)
         return _json(_session_data(info), status=201)
     except (TypeError, ValueError, KeyError) as e:
         return _error(str(e), status=400)
@@ -359,6 +375,7 @@ async def _feishu_route(request: web.Request) -> web.Response:
     channel 拿回 ``channel_socket`` 连接即得该用户隔离的会话。
     """
     fm: FeishuManager = request.app["fm"]
+    schedm: SchedulerManager = request.app["schedm"]
     try:
         body = await request.json()
         if not isinstance(body, dict):
@@ -367,6 +384,14 @@ async def _feishu_route(request: web.Request) -> web.Response:
             body["open_id"],
             ai_id=body.get("ai_id"),
             workspace=body.get("workspace"),
+        )
+        # Schedules under this user's workspace belong to its dedicated scheduler
+        # Session, not to the user session.
+        sm: SessionManager = request.app["sm"]
+        await schedm.ensure(
+            sm.get_workspace(session_id),
+            ai_id=sm.get_backend_id(session_id),
+            agent=sm.get_agent(session_id),
         )
         return _json({"open_id": body["open_id"], "session_id": session_id, "channel_socket": socket}, status=201)
     except (TypeError, ValueError, KeyError) as e:

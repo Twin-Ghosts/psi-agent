@@ -14,6 +14,7 @@ from psi_agent.session.ai_client import AiClient
 from psi_agent.session.conversation import Conversation
 from psi_agent.session.protocol import AgentChunk, AgentError
 from psi_agent.session.runtime_context import get_agent, get_workspace, runtime_scope
+from psi_agent.session.schedule_registry import ACTIVATE_ALL
 from psi_agent.session.tool_registry import FileEntry, ToolFunction, ToolRegistry
 
 
@@ -818,6 +819,90 @@ async def test_conversation_dual_read_legacy_workspace_history(
     conv = await Conversation.from_workspace(workspace, "old", appdata_root=str(appdata))
     assert conv.messages[0]["content"] == "legacy-hi"
     assert conv._path == appdata / "histories" / "old.jsonl"
+
+
+@pytest.mark.anyio
+async def test_schedules_load_from_workspace_not_agent_package(tmp_path: Path) -> None:
+    """Schedules belong to the workspace (刻意为之) - Feishu users sharing one agent pack must not share tasks."""
+    workspace = tmp_path / "user-ws"
+    agent_pkg = tmp_path / "agent-pkg"
+    await anyio.Path(workspace / "schedules" / "mine").mkdir(parents=True)
+    await anyio.Path(workspace / "schedules" / "mine" / "TASK.md").write_text(
+        '---\nname: mine\ncron: "0 12 * * *"\n---\nMy task', encoding="utf-8"
+    )
+    await anyio.Path(agent_pkg / "tools").mkdir(parents=True)
+    await anyio.Path(agent_pkg / "schedules" / "shared").mkdir(parents=True)
+    await anyio.Path(agent_pkg / "schedules" / "shared" / "TASK.md").write_text(
+        '---\nname: shared\ncron: "0 12 * * *"\n---\nShared task', encoding="utf-8"
+    )
+
+    session_agent = await SessionAgent.create(
+        ai_socket="http://x",
+        workspace_path=workspace,
+        agent_path=agent_pkg,
+        session_id="sched-src",
+        active_schedules={ACTIVATE_ALL},
+    )
+    names = {s.name for s in session_agent._schedule_registry.schedules}
+    assert names == {"mine"}
+
+
+@pytest.mark.anyio
+async def test_session_without_active_schedules_fires_none(tmp_path: Path) -> None:
+    """A user Session reads the entries but fires none - otherwise one reminder is multiplied by live sessions."""
+    workspace = tmp_path / "user-ws"
+    await anyio.Path(workspace / "schedules" / "mine").mkdir(parents=True)
+    await anyio.Path(workspace / "schedules" / "mine" / "TASK.md").write_text(
+        '---\nname: mine\ncron: "0 12 * * *"\n---\nMy task', encoding="utf-8"
+    )
+
+    session_agent = await SessionAgent.create(
+        ai_socket="http://x",
+        workspace_path=workspace,
+        session_id="plain-user",
+    )
+    registry = session_agent._schedule_registry
+    assert {s.name for s in registry.schedules} == {"mine"}
+    assert registry.active_schedules == []
+
+
+@pytest.mark.anyio
+async def test_session_activates_only_named_schedules(tmp_path: Path) -> None:
+    """Activation is a property of (session x schedule): named per entry, not one switch per Session."""
+    workspace = tmp_path / "user-ws"
+    for name in ("mine", "theirs"):
+        await anyio.Path(workspace / "schedules" / name).mkdir(parents=True)
+        await anyio.Path(workspace / "schedules" / name / "TASK.md").write_text(
+            f'---\nname: {name}\ncron: "0 12 * * *"\n---\nT', encoding="utf-8"
+        )
+
+    session_agent = await SessionAgent.create(
+        ai_socket="http://x",
+        workspace_path=workspace,
+        session_id="subset-user",
+        active_schedules={"mine"},
+    )
+    registry = session_agent._schedule_registry
+    assert {s.name for s in registry.schedules} == {"mine", "theirs"}
+    assert {s.name for s in registry.active_schedules} == {"mine"}
+
+
+@pytest.mark.anyio
+async def test_session_without_active_schedules_start_all_starts_nothing(tmp_path: Path) -> None:
+    workspace = tmp_path / "user-ws"
+    await anyio.Path(workspace / "schedules" / "mine").mkdir(parents=True)
+    await anyio.Path(workspace / "schedules" / "mine" / "TASK.md").write_text(
+        '---\nname: mine\ncron: "* * * * *"\n---\nMy task', encoding="utf-8"
+    )
+    session_agent = await SessionAgent.create(
+        ai_socket="http://x",
+        workspace_path=workspace,
+        session_id="plain-user-2",
+    )
+    async with anyio.create_task_group() as tg:
+        session_agent.start_all(tg)
+        assert session_agent._schedule_registry._runner_scopes == {}
+        tg.cancel_scope.cancel()
 
 
 @pytest.mark.anyio

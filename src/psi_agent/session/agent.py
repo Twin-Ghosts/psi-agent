@@ -83,14 +83,32 @@ class SessionAgent:
         session_id: str | None = None,
         agent_path: Path | None = None,
         appdata_root: str = "",
+        active_schedules: set[str] | None = None,
+        deactive_schedules: set[str] | None = None,
     ) -> SessionAgent:
         """Production entry point.
 
-        *workspace_path* is the user open-folder (relative file tools).
-        *agent_path* loads tools / schedules / system; when omitted, falls
+        *workspace_path* is the user open-folder (relative file tools) and owns
+        **schedules** (``schedules/``).
+        *agent_path* loads tools / system; when omitted, falls
         back to *workspace_path* (single-root compatibility).
         *appdata_root* holds history JSONL (Step 4C); empty → resolve via
         ``PSI_APPDATA`` / platformdirs.
+
+        *active_schedules* / *deactive_schedules* decide, per entry, which
+        schedules under ``{workspace}/schedules`` this Session fires: a whitelist
+        of ``None`` / empty fires none (the default for user Sessions),
+        ``{ACTIVATE_ALL}`` fires all, a named set fires only those ``name`` s;
+        the blacklist wins and subtracts the ones assigned elsewhere.
+        **Activation is a property of (session x schedule)** — two Sessions on
+        the same workspace may activate disjoint subsets, and non-activated
+        entries are still loaded into the registry (readable, refreshable), they
+        just get no runner. 刻意为之: Feishu spawns one Session per ``open_id``,
+        so a schedule must be activated by exactly one Session or the reminder
+        gets multiplied by the number of live sessions; the Gateway's
+        ``SchedulerManager`` keeps exactly one fully activated (``ACTIVATE_ALL``)
+        scheduler Session per workspace. Only the wildcard plus a blacklist (not
+        an enumerated whitelist) fires ``TASK.md`` files created later on.
         """
         agent_root = agent_path if agent_path is not None else workspace_path
 
@@ -101,7 +119,11 @@ class SessionAgent:
             appdata_root=appdata_root,
         )
         tool_registry = await ToolRegistry.load(agent_root / "tools", conversation.session_id)
-        schedule_registry = await ScheduleRegistry.load(agent_root / "schedules")
+        schedule_registry = await ScheduleRegistry.load(
+            workspace_path / "schedules",
+            active_names=active_schedules,
+            deactive_names=deactive_schedules,
+        )
         system_prompt = await SystemPrompt.from_workspace(agent_root, conversation.session_id)
 
         return cls(
@@ -118,7 +140,12 @@ class SessionAgent:
     # -- delegation -----------------------------------------------------------
 
     def start_all(self, task_group: object) -> None:
-        """Start schedule runners — called by ``Session.run()``."""
+        """Start schedule runners — called by ``Session.run()``.
+
+        Starts runners only for schedules **activated in this Session**;
+        non-activated entries stay readable in the registry (see
+        *active_schedules* on ``SessionAgent.create``).
+        """
         self._schedule_registry.start_all(task_group, self)
 
     def set_pending_schedule_chunks(self, chunks: list[AgentChunk]) -> None:

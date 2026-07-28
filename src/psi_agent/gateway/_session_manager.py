@@ -20,6 +20,7 @@ from psi_agent.gateway._manager import (
 )
 from psi_agent.gateway._router_manager import RouterManager
 from psi_agent.session import Session
+from psi_agent.session.schedule_registry import ACTIVATE_ALL
 
 
 @dataclass
@@ -33,7 +34,37 @@ class SessionInfo:
     channel_socket: str
     # Step 2: surfaced to REST / state. Empty → Session treats agent ≡ workspace.
     agent: str = ""
-    """Agent package path (tools/schedules/system). Empty → single-root compat."""
+    """Agent package path (tools/system). Empty → single-root compat."""
+
+    active_schedules: tuple[str, ...] = ()
+    """Schedule names this Session activates (i.e. actually fires); ``("*",)`` = all.
+
+    Activation is a property of **(session x schedule)**: every Session on a
+    workspace reads every entry, but each fires only the ones in its own list.
+    ``SchedulerManager`` keeps exactly one fully activated (``("*",)``) scheduler
+    Session per workspace, and that Session is **entirely hidden** from the SPA
+    and from ``state/latest.json`` (filtered out of ``list_all`` by default,
+    skipped when persisting) — 刻意为之: it is not a user session, and listing it
+    would only invite someone to delete it.
+    """
+
+    deactive_schedules: tuple[str, ...] = ()
+    """Schedule names excluded from ``active_schedules`` (blacklist, wins over it).
+
+    A wildcard whitelist plus a blacklist is the only way to say "all of these
+    except a few": a whitelist is an enumeration and cannot cover a ``TASK.md``
+    created after startup, whereas the wildcard does, with the blacklist carving
+    out the entries assigned elsewhere.
+    """
+
+    @property
+    def scheduler(self) -> bool:
+        """Whether this Session is the workspace's fully activated scheduler.
+
+        Used for ``list_all`` filtering and REST display; the authoritative
+        ownership information lives in ``active_schedules``.
+        """
+        return ACTIVATE_ALL in self.active_schedules
 
     @property
     def ai_id(self) -> str:
@@ -70,6 +101,8 @@ class SessionManager:
         id: str = "",
         workspace: str = "",
         agent: str = "",
+        active_schedules: tuple[str, ...] = (),
+        deactive_schedules: tuple[str, ...] = (),
     ) -> SessionInfo:
         """Spawn a Session.
 
@@ -77,6 +110,12 @@ class SessionManager:
         omitted. ``Session(agent=…)`` (from #472) then loads the capability pack
         from that directory. Tools that resolve relative paths via ContextVar
         are a later PR — this only passes the path in.
+
+        *active_schedules* / *deactive_schedules* name, per entry, which schedules
+        this Session fires (``("*",)`` = all; empty by default = none, with the
+        blacklist subtracting first). The fully activated Session is created by
+        ``SchedulerManager``, deduplicated per workspace and hidden from SPA /
+        state. Ordinary callers pass neither argument.
         """
         session_id = id or _new_uuid()
         workspace = workspace.strip() or self._default_workspace or os.getcwd()
@@ -101,6 +140,8 @@ class SessionManager:
                 channel_socket=channel_socket,
                 ai_socket=upstream_socket,
                 session_id=session_id,
+                active_schedules=",".join(active_schedules),
+                deactive_schedules=",".join(deactive_schedules),
             )
             scope = anyio.CancelScope()
 
@@ -123,6 +164,8 @@ class SessionManager:
                 workspace=workspace,
                 channel_socket=channel_socket,
                 agent=agent,
+                active_schedules=active_schedules,
+                deactive_schedules=deactive_schedules,
             )
             self._entries[session_id] = _SessionEntry(scope=scope, info=info)
         try:
@@ -163,8 +206,17 @@ class SessionManager:
         await self._persist()
         logger.info(f"Session {session_id!r} deleted")
 
-    async def list_all(self) -> list[SessionInfo]:
-        return [e.info for e in list(self._entries.values())]
+    async def list_all(self, *, include_scheduler: bool = False) -> list[SessionInfo]:
+        """List the user sessions.
+
+        Scheduler Sessions are **not** included by default (刻意为之: they are not
+        user sessions, and listing them in the SPA only invites deletion). Pass
+        ``include_scheduler=True`` for operational or internal dedup use.
+        """
+        infos = [e.info for e in list(self._entries.values())]
+        if include_scheduler:
+            return infos
+        return [info for info in infos if not info.scheduler]
 
     def get_socket(self, session_id: str) -> str:
         if session_id not in self._entries:
@@ -183,3 +235,9 @@ class SessionManager:
         if session_id not in self._entries:
             raise LookupError(f"Session {session_id!r} not found")
         return self._entries[session_id].info.agent
+
+    def get_backend_id(self, session_id: str) -> str:
+        """Backend id the session is attached to — needed when a scheduler Session reuses the same AI instance."""
+        if session_id not in self._entries:
+            raise LookupError(f"Session {session_id!r} not found")
+        return self._entries[session_id].info.backend_id
