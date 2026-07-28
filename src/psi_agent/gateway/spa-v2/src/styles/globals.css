@@ -2473,23 +2473,70 @@ textarea:focus-visible {
   width: 100%;
   max-width: 100%;
   box-sizing: border-box;
-  padding: 12px !important;
+  padding: 0 !important;
   background: transparent;
+  gap: 10px;
 }
 
-.artifact-preview-host .docx-preview-host .docx,
-.preview-host .docx-preview-host .docx {
+/*
+ * ignoreWidth 只去掉页宽，页边距仍是 Word 绝对长度（常 2–3cm）。
+ * 窄抽屉里左右 padding 会把正文挤成细条、两侧大片空白。
+ * 预览里强制 section 撑满容器，换成适中内边距，禁止横向溢出。
+ */
+.artifact-preview-host .docx-preview-host .docx-wrapper > section.docx,
+.preview-host .docx-preview-host .docx-wrapper > section.docx {
   width: 100% !important;
-  max-width: 100%;
-  box-sizing: border-box;
+  max-width: 100% !important;
+  min-width: 0 !important;
+  box-sizing: border-box !important;
+  padding: 16px 18px !important;
+  margin: 0 !important;
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   background: #fff;
   box-shadow: 0 4px 16px rgba(23, 37, 46, 0.1);
 }
 
+.artifact-preview-host .docx-preview-host .docx-wrapper > section.docx > article,
+.preview-host .docx-preview-host .docx-wrapper > section.docx > article {
+  column-count: 1 !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+}
+
+.artifact-preview-host .docx-preview-host .docx-wrapper p,
+.artifact-preview-host .docx-preview-host .docx-wrapper li,
+.artifact-preview-host .docx-preview-host .docx-wrapper span,
+.preview-host .docx-preview-host .docx-wrapper p,
+.preview-host .docx-preview-host .docx-wrapper li,
+.preview-host .docx-preview-host .docx-wrapper span {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.artifact-preview-host .docx-preview-host .docx-wrapper table,
+.preview-host .docx-preview-host .docx-wrapper table {
+  width: 100% !important;
+  max-width: 100% !important;
+  table-layout: fixed !important;
+  box-sizing: border-box !important;
+}
+
+.artifact-preview-host .docx-preview-host .docx-wrapper td,
+.artifact-preview-host .docx-preview-host .docx-wrapper th,
+.preview-host .docx-preview-host .docx-wrapper td,
+.preview-host .docx-preview-host .docx-wrapper th {
+  max-width: 100% !important;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .artifact-preview-host .docx-preview-host img,
 .preview-host .docx-preview-host img {
-  max-width: 100%;
-  height: auto;
+  max-width: 100% !important;
+  height: auto !important;
 }
 
 /* 宝箱内嵌：去掉双重白卡片，把滚动交给外层 artifact-preview-scroll。 */
@@ -2503,6 +2550,7 @@ textarea:focus-visible {
 .document-preview .artifact-preview-host .office-preview-scroll {
   max-height: none;
   padding: 10px;
+  background: #eef2f6;
 }
 
 .artifact-preview-host .pptx-preview-scroll,

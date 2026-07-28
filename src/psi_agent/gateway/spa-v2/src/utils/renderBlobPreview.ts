@@ -398,8 +398,9 @@ export async function renderBlobPreview(
       stage.className = 'office-preview-stage docx-preview-host'
       shell.append(stage)
       host.append(shell)
-      // ignoreWidth: 宝箱抽屉约 455px，Word 页宽常 ~794px；库默认 wrapper
-      // align-items:center 会把超宽页居中，左侧溢出被裁且无法滚到（半边预览）。
+      // ignoreWidth: drop Word page width (~794px) so the drawer can own layout.
+      // Page *margins* are still absolute lengths — CSS overrides them so the
+      // body fills the panel instead of a skinny centered column.
       await renderAsync(bytesToArrayBuffer(bytes), stage, undefined, {
         inWrapper: true,
         ignoreWidth: true,
