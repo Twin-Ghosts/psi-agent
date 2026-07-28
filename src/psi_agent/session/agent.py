@@ -14,6 +14,7 @@ from psi_agent.session.ai_client import AiClient
 from psi_agent.session.channel_adapter import ChannelAdapter
 from psi_agent.session.conversation import Conversation
 from psi_agent.session.history_display import (
+    KIND_COMPACTED,
     message_kind,
     messages_for_ai,
     with_kind,
@@ -414,7 +415,7 @@ class SessionAgent:
 
     async def _maybe_compact(self) -> None:
         """Invoke compact_history from system.py, merge result into system
-        prompt, delete all non-system messages."""
+        prompt, mark old messages as compacted."""
         compaction_fn = self._system_prompt.compaction_fn
         if compaction_fn is None:
             logger.warning("No compact_history function in system.py, skipping compaction")
@@ -442,7 +443,9 @@ class SessionAgent:
             else:
                 self._conversation.replace_system(f"[Compacted History]\n{summary}")
 
-            self._conversation.trim_after(0)
+            for msg in self._conversation.messages[1:]:
+                msg["kind"] = KIND_COMPACTED
+
             await self._conversation.commit()
             logger.info("Compaction completed")
         except Exception as e:

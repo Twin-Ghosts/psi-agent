@@ -110,10 +110,13 @@ def with_chat_type(msg: dict[str, Any], chat_type: str) -> dict[str, Any]:
 
 
 def messages_for_ai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Project history for the AI backend: drop display-only keys; fix legacy roles."""
+    """Project history for the AI backend: skip compacted messages,
+    drop display-only keys, fix legacy roles."""
     out: list[dict[str, Any]] = []
     for msg in messages:
         if not isinstance(msg, dict):
+            continue
+        if message_kind(msg) == KIND_COMPACTED:
             continue
         role = wire_role(msg.get("role"))
         if role is None:
