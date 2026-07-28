@@ -785,21 +785,6 @@ class System:
 
         stable_prefix = "\n".join(stable_parts)
 
-        return stable_prefix + CACHE_BOUNDARY + await self.build_dynamic_suffix(model, tools)
-
-    async def build_dynamic_suffix(self, model: str | None = None, tools: list[str] | None = None) -> str:
-        """Assemble the part of the prompt that follows ``CACHE_BOUNDARY``.
-
-        Split out from ``build_system_prompt`` so a running Session can
-        re-render it every turn (``system_prompt_dynamic_suffix``) without
-        rebuilding — or invalidating the cache of — the stable prefix. Keeping
-        one definition of "dynamic" means a section added here starts
-        refreshing per turn automatically, instead of silently freezing at
-        first build the way the date did.
-        """
-        if tools is None:
-            tools = await _scan_tool_names(self._workspace_dir)
-
         # ── Dynamic suffix ────────────────────────────────────────────────
         dynamic_parts: list[str] = []
 
@@ -857,7 +842,9 @@ class System:
         while dynamic_parts and dynamic_parts[-1] == "":
             dynamic_parts.pop()
 
-        return "\n".join(dynamic_parts)
+        dynamic_suffix = "\n".join(dynamic_parts)
+
+        return stable_prefix + CACHE_BOUNDARY + dynamic_suffix
 
     async def compact_history(
         self,
@@ -954,25 +941,6 @@ async def system_prompt_builder() -> str:
     """
     workspace_dir = anyio.Path(__file__).parent.parent
     return await System(workspace_dir).build_system_prompt()
-
-
-async def system_prompt_dynamic_suffix(current: str) -> str:
-    """Re-render everything after ``CACHE_BOUNDARY`` for the turn about to run.
-
-    ``system_prompt_builder`` runs once per Session, so every "now" it renders
-    freezes — a Session opened last Friday goes on reporting Friday's date.
-    Only the volatile tail is rebuilt, so the stable prefix is reused
-    byte-for-byte and upstream prompt caching still hits.
-
-    Returns the prompt unchanged if it carries no boundary: that means it came
-    from a different builder (or was already compacted), and replacing a tail
-    we cannot locate would corrupt it.
-    """
-    head, sep, _tail = current.partition(CACHE_BOUNDARY)
-    if not sep:
-        return current
-    workspace_dir = anyio.Path(__file__).parent.parent
-    return head + sep + await System(workspace_dir).build_dynamic_suffix()
 
 
 async def compact_history(history: list[dict[str, Any]], complete_fn) -> str:

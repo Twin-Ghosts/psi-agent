@@ -1104,20 +1104,7 @@ Never write API keys into this workspace, generated `.flow.ts` files, or committ
 
         stable_prefix = "\n".join(stable_parts)
 
-        return stable_prefix + CACHE_BOUNDARY + await self.build_dynamic_suffix(model)
-
-    async def build_dynamic_suffix(self, model: str | None = None) -> str:
-        """Assemble the part of the prompt that follows ``CACHE_BOUNDARY``.
-
-        Split out from ``build_system_prompt`` so a running Session can
-        re-render it every turn (``system_prompt_dynamic_suffix``) without
-        rebuilding — or invalidating the cache of — the stable prefix. Keeping
-        one definition of "dynamic" means a section added here starts
-        refreshing per turn automatically, instead of silently freezing at
-        first build the way the date did.
-        """
-        ws = self._agent_dir
-
+        # -- Dynamic suffix ------------------------------------------------
         # NOTE: the heartbeat instruction is intentionally NOT injected here.
         # The heartbeat schedule (schedules/heartbeat/TASK.md) already tells the
         # agent to reply HEARTBEAT_OK on its poll; injecting it into every turn's
@@ -1142,7 +1129,9 @@ Never write API keys into this workspace, generated `.flow.ts` files, or committ
         while dynamic_parts and dynamic_parts[-1] == "":
             dynamic_parts.pop()
 
-        return "\n".join(dynamic_parts)
+        dynamic_suffix = "\n".join(dynamic_parts)
+
+        return stable_prefix + CACHE_BOUNDARY + dynamic_suffix
 
     async def compact_history(
         self,
@@ -1340,38 +1329,6 @@ async def system_prompt_rebuild_checker() -> bool:
     agent_dir = anyio.Path(__file__).parent.parent
     await _activate_fusion_memory(agent_dir)
     return False
-
-
-async def system_prompt_dynamic_suffix(current: str) -> str:
-    """Re-render everything after ``CACHE_BOUNDARY`` for the turn about to run.
-
-    ``system_prompt_builder`` runs once per Session, so every "now" it renders
-    freezes: a Session opened last Friday goes on reporting Friday's date, and
-    a ``Time zone`` label that was wrong at build time (a container whose TZ
-    had not taken effect yet reported ``UTC`` for Asia/Shanghai) stays wrong
-    for the whole life of that history. The agent then answers from that stale
-    line and, asked to reconcile it with reality, invents timezone arithmetic
-    to explain the gap.
-
-    Only the volatile tail is rebuilt, which is why the prompt has a boundary
-    at all: the stable prefix (identity, skills, tooling — the bulk of ~150 KB)
-    is reused byte-for-byte, so upstream prompt caching still hits and the
-    per-turn cost is a few string operations instead of a workspace re-scan.
-
-    Returns the prompt unchanged if it carries no boundary — that means it was
-    written by a different builder (or already compacted), and replacing a tail
-    we cannot locate would corrupt it.
-    """
-    head, sep, _tail = current.partition(CACHE_BOUNDARY)
-    if not sep:
-        return current
-    agent_dir = anyio.Path(__file__).parent.parent
-    user_workspace = agent_dir
-    raw = (_runtime_workspace() or "").strip()
-    if raw:
-        user_workspace = anyio.Path(raw)
-    system = System(agent_dir, user_workspace=user_workspace)
-    return head + sep + await system.build_dynamic_suffix()
 
 
 async def _activate_fusion_memory(workspace_dir: anyio.Path) -> None:
