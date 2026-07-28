@@ -119,8 +119,14 @@ async def feishu_message_send_card(
     ``request_id``; different buttons need different values. Before a consequential operation,
     re-check authorization and current business state; keep the underlying operation idempotent
     because delivery is at-least-once. A card is single-use: the first accepted button/form action
-    replaces it with an ``已提交`` state, and later actions from the same card are ignored. Send a
-    new card when the user must submit another response.
+    preserves its original content, replaces its interactive region with a read-only selected-value
+    note, and ignores later actions from the same card. Send a new card when the user must submit
+    another response.
+
+    After a successful call, the card is already visible to the recipient. Do not send a follow-up
+    that merely confirms the card was sent or repeats its content and button labels. A follow-up is
+    still required when it carries necessary information that is not already conveyed by the card,
+    such as a warning, a partial failure, or a required next step; never suppress that information.
 
     Args:
         receive_id: Target id — a chat_id (oc_...), open_id (ou_...), user_id, union_id, or email.
