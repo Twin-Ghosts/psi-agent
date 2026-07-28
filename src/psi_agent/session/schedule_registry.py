@@ -109,10 +109,10 @@ class ScheduleRegistry:
     为什么白名单之外还要黑名单: 白名单是**枚举**, 只覆盖启动那一刻已存在的条目 ——
     之后 ``_watch_dir`` / ``refresh()`` 新发现的 ``TASK.md`` 不在名单里, 永远不会被
     触发。要「除某几条以外全都归我」(调度 Session 的常态), 只能用
-    ``active_names={ACTIVATE_ALL}`` + ``inactive_names={排除的}``: 通配符让新条目自动
+    ``active_names={ACTIVATE_ALL}`` + ``deactive_names={排除的}``: 通配符让新条目自动
     激活, 黑名单精确挖掉划给别人的那几条。
 
-    名单语义: ``inactive_names`` 优先 (含 ``ACTIVATE_ALL`` 即一条都不激活);
+    名单语义: ``deactive_names`` 优先 (含 ``ACTIVATE_ALL`` 即一条都不激活);
     ``active_names`` 为 ``None`` / 空集 → 一条都不激活 (普通用户 Session 的默认,
     ``start_all`` 不起任何 runner); ``{ACTIVATE_ALL}`` → 除黑名单外全部 (调度
     Session 的默认); 具名集合 → 仅这些 ``schedule.name``。
@@ -124,12 +124,12 @@ class ScheduleRegistry:
         files: dict[str, ScheduleEntry] | None = None,
         work_dir: Path | None = None,
         active_names: set[str] | None = None,
-        inactive_names: set[str] | None = None,
+        deactive_names: set[str] | None = None,
     ) -> None:
         self._files: dict[str, ScheduleEntry] = dict(files or {})
         self._work_dir = work_dir
         self._active_names: set[str] = set(active_names or ())
-        self._inactive_names: set[str] = set(inactive_names or ())
+        self._deactive_names: set[str] = set(deactive_names or ())
         self._agent: SessionAgent | None = None
         self._task_group: Any = None
         self._runner_scopes: dict[str, anyio.CancelScope] = {}
@@ -149,7 +149,7 @@ class ScheduleRegistry:
 
         黑名单优先于白名单; 两个名单里的 ``ACTIVATE_ALL`` 都表示「全部」。
         """
-        if ACTIVATE_ALL in self._inactive_names or name in self._inactive_names:
+        if ACTIVATE_ALL in self._deactive_names or name in self._deactive_names:
             return False
         if ACTIVATE_ALL in self._active_names:
             return True
@@ -163,11 +163,11 @@ class ScheduleRegistry:
         schedules_dir: Path,
         *,
         active_names: set[str] | None = None,
-        inactive_names: set[str] | None = None,
+        deactive_names: set[str] | None = None,
     ) -> ScheduleRegistry:
         """Full initial load — scan *schedules_dir*.
 
-        *active_names* / *inactive_names* 决定哪些条目由本 Session 触发 (默认一条
+        *active_names* / *deactive_names* 决定哪些条目由本 Session 触发 (默认一条
         都不, 见类文档)。
         """
         files = await cls._load_from_dir(schedules_dir)
@@ -175,7 +175,7 @@ class ScheduleRegistry:
             files=files,
             work_dir=schedules_dir,
             active_names=active_names,
-            inactive_names=inactive_names,
+            deactive_names=deactive_names,
         )
 
     # -- runner lifecycle -------------------------------------------------------

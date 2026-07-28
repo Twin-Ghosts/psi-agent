@@ -46,7 +46,7 @@ class SessionInfo:
     —— 刻意为之: 它不是用户会话, 出现在会话列表里只会让人误删。
     """
 
-    inactive_schedules: tuple[str, ...] = ()
+    deactive_schedules: tuple[str, ...] = ()
     """从 ``active_schedules`` 中排除的定时任务名 (黑名单, 优先于白名单)。
 
     通配符白名单 + 黑名单是「除某几条以外全归我」的唯一写法: 白名单是枚举, 覆盖
@@ -97,7 +97,7 @@ class SessionManager:
         workspace: str = "",
         agent: str = "",
         active_schedules: tuple[str, ...] = (),
-        inactive_schedules: tuple[str, ...] = (),
+        deactive_schedules: tuple[str, ...] = (),
     ) -> SessionInfo:
         """Spawn a Session.
 
@@ -106,7 +106,7 @@ class SessionManager:
         from that directory. Tools that resolve relative paths via ContextVar
         are a later PR — this only passes the path in.
 
-        *active_schedules* / *inactive_schedules* 逐条指定本 Session 触发哪些定时
+        *active_schedules* / *deactive_schedules* 逐条指定本 Session 触发哪些定时
         任务 (``("*",)`` = 全部, 默认空 = 一条都不触发; 黑名单优先做减法)。全量
         激活的 Session 由 ``SchedulerManager`` 按 workspace 去重地创建, 且对 SPA /
         state 隐藏。普通调用方不传这两个参数。
@@ -135,7 +135,7 @@ class SessionManager:
                 ai_socket=upstream_socket,
                 session_id=session_id,
                 active_schedules=",".join(active_schedules),
-                inactive_schedules=",".join(inactive_schedules),
+                deactive_schedules=",".join(deactive_schedules),
             )
             scope = anyio.CancelScope()
 
@@ -159,7 +159,7 @@ class SessionManager:
                 channel_socket=channel_socket,
                 agent=agent,
                 active_schedules=active_schedules,
-                inactive_schedules=inactive_schedules,
+                deactive_schedules=deactive_schedules,
             )
             self._entries[session_id] = _SessionEntry(scope=scope, info=info)
         try:

@@ -84,7 +84,7 @@ class SessionAgent:
         agent_path: Path | None = None,
         appdata_root: str = "",
         active_schedules: set[str] | None = None,
-        inactive_schedules: set[str] | None = None,
+        deactive_schedules: set[str] | None = None,
     ) -> SessionAgent:
         """Production entry point.
 
@@ -95,7 +95,7 @@ class SessionAgent:
         *appdata_root* holds history JSONL (Step 4C); empty → resolve via
         ``PSI_APPDATA`` / platformdirs.
 
-        *active_schedules* / *inactive_schedules* 逐条决定本 Session 触发
+        *active_schedules* / *deactive_schedules* 逐条决定本 Session 触发
         ``{workspace}/schedules`` 里的哪些定时任务: 白名单 ``None`` / 空 → 一条都
         不触发 (普通用户 Session 的默认), ``{ACTIVATE_ALL}`` → 全部, 具名集合 →
         仅这些 ``name``; 黑名单优先, 从中减掉划给别人的那几条。**激活是
@@ -119,7 +119,7 @@ class SessionAgent:
         schedule_registry = await ScheduleRegistry.load(
             workspace_path / "schedules",
             active_names=active_schedules,
-            inactive_names=inactive_schedules,
+            deactive_names=deactive_schedules,
         )
         system_prompt = await SystemPrompt.from_workspace(agent_root, conversation.session_id)
 

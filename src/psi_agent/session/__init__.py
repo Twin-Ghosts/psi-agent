@@ -38,7 +38,7 @@ class Session:
     active_schedules: str = ""
     """触发哪些定时任务, 逗号分隔; ``*`` = 全部。默认一条都不触发。"""
 
-    inactive_schedules: str = ""
+    deactive_schedules: str = ""
     """从上面排除掉的定时任务名, 逗号分隔; 优先于白名单。"""
 
     max_tool_rounds: int = 128
@@ -54,7 +54,7 @@ class Session:
         if not appdata_root:
             appdata_root = await resolve_appdata_root()
         active = self._name_set(self.active_schedules)
-        inactive = self._name_set(self.inactive_schedules)
+        deactive = self._name_set(self.deactive_schedules)
 
         logger.info(f"Loading workspace from {workspace_path}")
         if agent_path != workspace_path:
@@ -63,8 +63,8 @@ class Session:
         if active:
             names = "all" if ACTIVATE_ALL in active else sorted(active)
             logger.info(f"Active schedules under {workspace_path / 'schedules'}: {names}")
-            if inactive:
-                logger.info(f"Excluded schedules: {sorted(inactive)}")
+            if deactive:
+                logger.info(f"Excluded schedules: {sorted(deactive)}")
 
         agent = await SessionAgent.create(
             ai_socket=self.ai_socket,
@@ -74,7 +74,7 @@ class Session:
             max_tool_rounds=self.max_tool_rounds,
             session_id=self.session_id,
             active_schedules=active,
-            inactive_schedules=inactive,
+            deactive_schedules=deactive,
         )
 
         async with anyio.create_task_group() as task_group:

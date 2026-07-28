@@ -143,7 +143,7 @@ def _session_data(info: SessionInfo) -> dict[str, Any]:
     # ``scheduler`` 是由 active_schedules 派生的 property, asdict 不含它 —— 显式补上,
     # REST / SPA 契约不变。
     data["active_schedules"] = list(info.active_schedules)
-    data["inactive_schedules"] = list(info.inactive_schedules)
+    data["deactive_schedules"] = list(info.deactive_schedules)
     data["scheduler"] = info.scheduler
     return data
 

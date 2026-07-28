@@ -23,8 +23,8 @@ Session 层是 psi-agent 的核心——负责 workspace 解析、agent loop、t
 | **为什么** | Gateway 一个进程跑多个 Session；飞书 channel 更是**按 open_id 给每个用户 spawn 独立 Session**（`gateway/_feishu_manager.py`），多 Session 共用同一个 agent 包。旧行为「每个 Session 为自己加载到的每条 schedule 各起一个 runner」会让一条定时任务被在线会话数乘一遍 → 飞书上一条提醒推 N 次 |
 | **为什么按条而非按 Session 一个布尔** | 触发权本质是「**这一条**任务归哪个 Session」。整个 Session 一个开关只能表达「全触发 / 全不触发」，表达不了「A 条归调度 Session、B 条归某个用户会话」。名单模型下的不变式是：一条 schedule 必须**恰好**被一个 Session 激活 |
 | **加载源** | `workspace_path / "schedules"`。单根模式（`agent=""` → agent≡workspace）行为不变 |
-| **激活名单语义** | 白名单 `active_names`：`None` / 空集 → 一条都不激活（用户会话默认）；`{"*"}`（`ACTIVATE_ALL`）→ 全部；具名集合 → 仅这些 `schedule.name`。黑名单 `inactive_names` **优先**做减法 |
-| **为什么还要黑名单** | 白名单是**枚举**，只覆盖启动那一刻已存在的条目——之后 `_watch_dir` / `refresh()` 新发现的 `TASK.md` 不在名单里，永远不会被触发。要「除某几条以外全都归我」（调度 Session 的常态），只能写 `active='*'` + `inactive=让出的几条`：通配符让新条目自动激活，黑名单精确挖掉划给别人的那几条 |
+| **激活名单语义** | 白名单 `active_names`：`None` / 空集 → 一条都不激活（用户会话默认）；`{"*"}`（`ACTIVATE_ALL`）→ 全部；具名集合 → 仅这些 `schedule.name`。黑名单 `deactive_names` **优先**做减法 |
+| **为什么还要黑名单** | 白名单是**枚举**，只覆盖启动那一刻已存在的条目——之后 `_watch_dir` / `refresh()` 新发现的 `TASK.md` 不在名单里，永远不会被触发。要「除某几条以外全都归我」（调度 Session 的常态），只能写 `active='*'` + `deactive=让出的几条`：通配符让新条目自动激活，黑名单精确挖掉划给别人的那几条 |
 | **未激活条目** | 照旧加载进 registry：`schedules` 属性与 `refresh()` 的 add/update/remove 统计都**不受激活影响**，只是不起 runner。`active_schedules` 属性给出本 Session 实际触发的那些（schedule 列表目前不经 REST / SPA 暴露） |
 | **谁触发** | `_start_runner` 逐条查 `is_active(name)`，未激活即 no-op。去重发生在**构造期**（谁激活哪条由创建方决定），不是运行时抢锁，所以没有租约、没有选主、没有「持有者退出谁接管」 |
 | **怎么感知新任务** | 调度 Session 没有 channel → 永远没有回合 → 回合内的两个 refresh 时机都不发生。故 `start_all` 在**有激活条目时**额外起 `_watch_dir` 协程每 30s `refresh()`。**这不是可选优化**：少了它，用户新建的定时任务永远不会被加载（见下方「动态重载」第 3 条）。一条都不激活的 Session 不起 watcher，不做无用扫盘 |
@@ -33,7 +33,7 @@ Session 层是 psi-agent 的核心——负责 workspace 解析、agent loop、t
 | **`fire=prompt` 的历史** | 落在 AppData 的 `histories/scheduler-<hash>.jsonl`（第 4C 起 history 归 AppData），与用户对话历史分开 |
 | **workspace 工具侧** | `schedule_manage` 经 `_runtime_paths.resolve_workspace()`（#485 起的统一路径解析）落盘到 `{workspace}/schedules`。否则内核读 workspace、工具写 agent 包，两边对不上 |
 | **迁移注意** | agent 包（如 `examples/haitun-workspace/schedules/heartbeat`）里的 schedules 在**分离根**部署下不再被加载；需要它跑就放进 workspace |
-| **单进程 CLI** | `psi-agent session` 默认不激活任何条目；`--active-schedules '*'` 触发全部（含之后新建的），`--active-schedules daily,weekly` 只触发具名的几条，`--inactive-schedules x` 从中排除。`psi-agent run` 的 session 配置项同名（`active_schedules:` / `inactive_schedules:`）。**没有布尔开关**——一个 `--scheduler` 表达不了「除 x 以外全部」，且会让「全部」与「具名子集」两种意图落在两个参数上 |
+| **单进程 CLI** | `psi-agent session` 默认不激活任何条目；`--active-schedules '*'` 触发全部（含之后新建的），`--active-schedules daily,weekly` 只触发具名的几条，`--deactive-schedules x` 从中排除。`psi-agent run` 的 session 配置项同名（`active_schedules:` / `deactive_schedules:`）。**没有布尔开关**——一个 `--scheduler` 表达不了「除 x 以外全部」，且会让「全部」与「具名子集」两种意图落在两个参数上 |
 
 ### `runtime_context` 适用范围（刻意限制）
 
@@ -57,7 +57,7 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 3. SessionAgent.create(workspace_path=…, agent_path=…, appdata_root=…) → session_id、AiClient、从 agent 加载 tools/system、**从 workspace 加载 schedules**；history 在 AppData（legacy 双读）
 4. 启动 anyio.task_group：
    ├── serve_session(agent=agent)  ← 从 agent 读取 channel_socket + handle_request
-   └── 每个**激活的** schedule 一个 run_one_schedule(schedule, agent) task（激活名单由 `--active-schedules` / `--inactive-schedules` 决定；用户会话名单为空，无 runner）
+   └── 每个**激活的** schedule 一个 run_one_schedule(schedule, agent) task（激活名单由 `--active-schedules` / `--deactive-schedules` 决定；用户会话名单为空，无 runner）
 
 **关键点**：
 - `SessionAgent` 自包含：持有 `_ai_client`、`_channel_adapter`、`_lock`、`_workspace_path`、`_agent_path`
@@ -180,7 +180,7 @@ Session 层使用两个对称的协议适配器，将 `SessionAgent.run()` 包�
   - 文件内 tool 增删 → 分别标记 `added` / `removed`
 - `fresh` 标志保证 skipped 文件不被误删
 - `ScheduleRegistry` 以 per-file `ScheduleEntry` 存储（含 hash），`refresh()` 支持 add/update/remove/skip。每个 schedule 有独立 `CancelScope`，update/remove 时取消旧 runner 并启动新 runner。`refresh()` 内部已 try/except，失败时 log warning 返回 `{}`，不修改内部状态，调用方可直接 await 无需自行容错
-- **激活是 (session × schedule) 的属性**：`ScheduleRegistry(active_names=…, inactive_names=…)` 逐条决定起不起 runner——白名单 `None`/空 → 一条都不起（所有用户会话的默认），`{"*"}` → 全部，具名集合 → 仅这些；黑名单优先做减法。未激活的条目仍加载进 registry（`schedules` 属性与 `refresh()` 统计都不受影响），`_start_runner` 查 `is_active(name)` 后 no-op。「一条定时任务只触发一次」由此在构造期成立（谁激活哪条由创建方决定），无需运行时协调。**黑名单不是冗余**：`refresh()` 之后新出现的 `TASK.md` 只有通配符白名单能覆盖到，「除某几条以外全归我」必须写成 `*` + 黑名单
+- **激活是 (session × schedule) 的属性**：`ScheduleRegistry(active_names=…, deactive_names=…)` 逐条决定起不起 runner——白名单 `None`/空 → 一条都不起（所有用户会话的默认），`{"*"}` → 全部，具名集合 → 仅这些；黑名单优先做减法。未激活的条目仍加载进 registry（`schedules` 属性与 `refresh()` 统计都不受影响），`_start_runner` 查 `is_active(name)` 后 no-op。「一条定时任务只触发一次」由此在构造期成立（谁激活哪条由创建方决定），无需运行时协调。**黑名单不是冗余**：`refresh()` 之后新出现的 `TASK.md` 只有通配符白名单能覆盖到，「除某几条以外全归我」必须写成 `*` + 黑名单
 - Schedule 刷新的三个时机：
   1. 每次 `run()` 入口（turn 开始），与 tool 一并刷新
   2. `finish_reason="stop"` 后（turn 结束），仅刷新 schedule——因本轮 tool 可能修改了 workspace schedules 下的文件，需立即生效，不等下次 turn

@@ -307,9 +307,9 @@ async def test_blacklist_is_recorded_and_keeps_scheduler_flag(tmp_path: Path) ->
             ai_id="ai1",
             workspace=str(tmp_path),
             active_schedules=(ACTIVATE_ALL,),
-            inactive_schedules=("daily",),
+            deactive_schedules=("daily",),
         )
-        assert info.inactive_schedules == ("daily",)
+        assert info.deactive_schedules == ("daily",)
         assert info.scheduler is True
         # 全量激活的调度 Session 对 SPA / state 隐藏, 让出几条也不改变这一点。
         assert await sm.list_all() == []

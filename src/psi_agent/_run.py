@@ -24,7 +24,7 @@ Config format (``run-config.yml``):
                                    # fires; "*" = all. 激活是 (session x schedule) 的
                                    # 属性 — 同一 workspace 的多个 session 各触发不同
                                    # 子集; 一条任务被两个 session 同时激活会推两遍。
-      inactive_schedules: "daily"  # optional. 从上面排除掉的任务名 (黑名单, 优先)。
+      deactive_schedules: "daily"  # optional. 从上面排除掉的任务名 (黑名单, 优先)。
                                    # "*" + 黑名单 = 除这几条外全归我, 且启动后新建的
                                    # TASK.md 也自动触发 (纯枚举白名单覆盖不到)。
 

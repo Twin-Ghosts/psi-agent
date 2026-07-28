@@ -169,7 +169,7 @@ service tools:
 - **Schedules belong to the *workspace*, not to this agent package.** The Session loads
   `{workspace}/schedules/`, but **activation is per (session × schedule)**: every Session sees
   all entries, and only the ones its lists select actually fire — `--active-schedules a,b` for a
-  named subset, `--active-schedules '*'` for everything, `--inactive-schedules x` to carve out
+  named subset, `--active-schedules '*'` for everything, `--deactive-schedules x` to carve out
   entries (the blacklist wins). The default is empty, so a user session fires nothing; the
   per-workspace **scheduler session** spawned by Gateway `SchedulerManager` is activated with
   `'*'`. Each schedule must be activated by exactly one Session — otherwise one reminder

@@ -653,7 +653,7 @@ async def _load_three(
     tmp_path: Path,
     active: set[str] | None,
     *,
-    inactive: set[str] | None = None,
+    deactive: set[str] | None = None,
 ) -> ScheduleRegistry:
     sched_root = tmp_path / "schedules"
     for name in ("alpha", "beta", "gamma"):
@@ -662,7 +662,7 @@ async def _load_three(
         await anyio.Path(d / "TASK.md").write_text(
             f'---\nname: {name}\ncron: "0 12 * * *"\n---\nTask {name}', encoding="utf-8"
         )
-    return await ScheduleRegistry.load(sched_root, active_names=active, inactive_names=inactive)
+    return await ScheduleRegistry.load(sched_root, active_names=active, deactive_names=deactive)
 
 
 @pytest.mark.anyio
@@ -744,7 +744,7 @@ async def test_refresh_only_starts_runners_for_active_names(tmp_path: Path) -> N
 
 
 @pytest.mark.anyio
-async def test_inactive_registry_starts_no_watcher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_empty_whitelist_starts_no_watcher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """一条都不激活的 Session 不该周期性扫盘。"""
     monkeypatch.setattr(schedule_registry_module, "_WATCH_INTERVAL_SECONDS", 0.05)
     refreshed = 0
@@ -772,21 +772,21 @@ async def test_is_active_wildcard_and_names() -> None:
 
 
 @pytest.mark.anyio
-async def test_inactive_names_win_over_active() -> None:
+async def test_deactive_names_win_over_active() -> None:
     """黑名单优先: 通配符白名单也要给黑名单让路。"""
-    sr = ScheduleRegistry(active_names={ACTIVATE_ALL}, inactive_names={"skip"})
+    sr = ScheduleRegistry(active_names={ACTIVATE_ALL}, deactive_names={"skip"})
     assert sr.is_active("skip") is False
     assert sr.is_active("other") is True
     # 同一条同时进两个名单 → 不触发。
-    assert ScheduleRegistry(active_names={"x"}, inactive_names={"x"}).is_active("x") is False
+    assert ScheduleRegistry(active_names={"x"}, deactive_names={"x"}).is_active("x") is False
     # 黑名单通配符 = 一条都不触发。
-    assert ScheduleRegistry(active_names={ACTIVATE_ALL}, inactive_names={ACTIVATE_ALL}).is_active("x") is False
+    assert ScheduleRegistry(active_names={ACTIVATE_ALL}, deactive_names={ACTIVATE_ALL}).is_active("x") is False
 
 
 @pytest.mark.anyio
 async def test_blacklist_excludes_named_entry_only(tmp_path: Path) -> None:
     """「除 beta 以外全归我」—— 白名单枚举做不到的划分。"""
-    sr = await _load_three(tmp_path, {ACTIVATE_ALL}, inactive={"beta"})
+    sr = await _load_three(tmp_path, {ACTIVATE_ALL}, deactive={"beta"})
     async with anyio.create_task_group() as tg:
         sr.start_all(tg, cast(Any, _MockAgent()))
         assert set(sr._runner_scopes) == {"alpha", "gamma"}
@@ -800,7 +800,7 @@ async def test_wildcard_picks_up_schedule_created_after_start(tmp_path: Path) ->
 
     这就是黑名单存在的理由: 「除某几条以外全归我」只能写成 ``*`` + 黑名单。
     """
-    wild = await _load_three(tmp_path, {ACTIVATE_ALL}, inactive={"beta"})
+    wild = await _load_three(tmp_path, {ACTIVATE_ALL}, deactive={"beta"})
     enumerated = await ScheduleRegistry.load(tmp_path / "schedules", active_names={"alpha", "gamma"})
     sched_root = tmp_path / "schedules"
     d = sched_root / "delta"

@@ -86,7 +86,7 @@ def test_workspace_empty_string_uses_cwd(tmp_path: Path) -> None:
     assert session.workspace == ""
 
 
-# ── 激活名单解析 (--active-schedules / --inactive-schedules) ──────────────────
+# ── 激活名单解析 (--active-schedules / --deactive-schedules) ──────────────────
 
 
 def test_name_set_empty_by_default() -> None:

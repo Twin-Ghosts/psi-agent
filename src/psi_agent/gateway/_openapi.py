@@ -474,7 +474,7 @@ OPENAPI_SPEC = {
                             "each fire a different subset"
                         ),
                     },
-                    "inactive_schedules": {
+                    "deactive_schedules": {
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
