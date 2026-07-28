@@ -13,6 +13,7 @@ from typing import Any, TypedDict
 import _background_process_registry as _bg
 import anyio
 import yaml
+from anyio import to_thread
 
 logger = logging.getLogger(__name__)
 
@@ -263,7 +264,7 @@ class UserProfile:
         await path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(".tmp")
         await temporary.write_text(page, encoding="utf-8")
-        await anyio.to_thread.run_sync(os.replace, str(temporary), str(path))
+        await to_thread.run_sync(os.replace, str(temporary), str(path))
 
     async def record_turn(self, user_msg: str, agent_msg: str) -> str:
         async with self._lock:
