@@ -52,3 +52,5 @@ examples/*-workspace/.psi/
 /.task*-tmp/
 /.task*-exclusive-*/
 /.test-tmp/
+examples/haitun-workspace/build_live_legal_reports.py
+examples/haitun-workspace/build_stability_reports.py
