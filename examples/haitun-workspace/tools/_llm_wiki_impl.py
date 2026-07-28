@@ -294,7 +294,7 @@ async def wiki_list_impl(*, tag: str = "", workspace_raw: str = "") -> dict[str,
 
     for slug, meta, body in pages:
         links = extract_links(body)
-        broken = [l for l in links if l not in all_slugs]
+        broken = [link for link in links if link not in all_slugs]
         all_broken.update(broken)
         summary = _page_summary(slug, meta, body)
         if tag_filter and tag_filter not in [t.lower() for t in summary["tags"]]:
@@ -542,7 +542,7 @@ async def wiki_related_impl(
 
     # 获取目标页面的出链
     target_links = []
-    for slug, meta, body in pages:
+    for slug, _meta, body in pages:
         if slug == target:
             target_links = extract_links(body)
             break
