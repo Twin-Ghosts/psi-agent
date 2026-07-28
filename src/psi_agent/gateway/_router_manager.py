@@ -123,8 +123,8 @@ class RouterManager:
                             router_timeout=router_timeout,
                             router_context_chars=router_context_chars,
                         )
-                except Exception as exc:
-                    logger.error(f"Router {router_id!r} crashed: {exc!r}")
+                except Exception:
+                    logger.exception(f"Router {router_id!r} crashed")
                     async with self._lock:
                         self._entries.pop(router_id, None)
                     await self._persist()

@@ -218,6 +218,7 @@ A tool is just an async function — in each non-`_`-prefixed `.py` file, every 
 # tools/bash.py
 import anyio
 
+
 async def bash(command: str) -> str:
     """Execute a bash command.
     Args:
@@ -239,6 +240,7 @@ Define two optional async functions in `systems/system.py`:
 async def system_prompt_builder() -> str:
     """Construct the system prompt. Returns a string."""
     return "You are a helpful assistant."
+
 
 async def system_prompt_rebuild_checker() -> bool:
     """Called before every agent turn. Return True to rebuild the system prompt."""

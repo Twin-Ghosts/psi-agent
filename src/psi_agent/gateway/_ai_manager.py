@@ -71,8 +71,8 @@ class AIManager:
                 try:
                     with scope:
                         await ai.run()
-                except Exception as e:
-                    logger.error(f"AI {ai_id!r} crashed: {e!r}")
+                except Exception:
+                    logger.exception(f"AI {ai_id!r} crashed")
                     async with self._lock:
                         self._entries.pop(ai_id, None)
                     await self._persist()

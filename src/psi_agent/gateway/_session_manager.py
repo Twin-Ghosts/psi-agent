@@ -149,8 +149,8 @@ class SessionManager:
                 try:
                     with scope:
                         await sess.run()
-                except Exception as e:
-                    logger.error(f"Session {session_id!r} crashed: {e!r}")
+                except Exception:
+                    logger.exception(f"Session {session_id!r} crashed")
                     async with self._lock:
                         self._entries.pop(session_id, None)
                     await self._persist()
