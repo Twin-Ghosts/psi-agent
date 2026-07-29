@@ -41,7 +41,7 @@ async def feishu_doc_read(file_type: str, token: str, max_chars: int = 20000) ->
     return _f.dumps_result(await _f.read_doc_impl(file_type, token, max_chars))
 
 
-async def feishu_doc_create(title: str, folder_token: str = "", user_key: str = "") -> str:
+async def feishu_doc_create(title: str, folder_token: str = "", user_key: str = "", identity: str = "") -> str:
     """Create a new (empty) Feishu/Lark docx cloud document.
 
     Creates a standalone document in the cloud drive (not attached to a wiki/
@@ -52,13 +52,17 @@ async def feishu_doc_create(title: str, folder_token: str = "", user_key: str = 
     Args:
         title: The document title (plain text, 1-800 chars).
         folder_token: Optional target folder token; empty places it in the root.
-        user_key: The sender's open_id (from ``<feishu_context>``). Pass it to create
-            the doc as that user (owned by them); empty uses the bot's tenant token.
+        user_key: The sender's open_id (from ``<feishu_context>``), identifying whose
+            authorization and remembered ownership choice apply.
+        identity: Who owns the result: ``"user"`` (this person — needs their
+            authorization) or ``"bot"`` (the bot). Omit to use the choice remembered
+            for this ``user_key``; if they have never been asked, the tool does
+            nothing and returns ``need_identity_choice`` so you can ask them.
     """
-    return _f.dumps_result(await _f.create_docx_impl(title, folder_token, user_key))
+    return _f.dumps_result(await _f.create_docx_impl(title, folder_token, user_key, identity))
 
 
-async def feishu_doc_append_content(document_id: str, content: str, user_key: str = "") -> str:
+async def feishu_doc_append_content(document_id: str, content: str, user_key: str = "", identity: str = "") -> str:
     """Append body content (headings + paragraphs) to a Feishu/Lark docx document.
 
     Writes into the document created by ``feishu_doc_create`` or the docx behind a
@@ -70,11 +74,15 @@ async def feishu_doc_append_content(document_id: str, content: str, user_key: st
     Args:
         document_id: The docx document_id (or a wiki node's obj_token).
         content: The text/Markdown body to append.
-        user_key: The sender's open_id (from ``<feishu_context>``). Pass it to write
-            as that user — required when the doc lives in a user-owned wiki and the
-            bot isn't a collaborator. Empty uses the bot's tenant token.
+        user_key: The sender's open_id (from ``<feishu_context>``). Writing into a
+            user-owned wiki generally requires their identity, since the bot isn't a
+            collaborator there.
+        identity: Who owns the result: ``"user"`` (this person — needs their
+            authorization) or ``"bot"`` (the bot). Omit to use the choice remembered
+            for this ``user_key``; if they have never been asked, the tool does
+            nothing and returns ``need_identity_choice`` so you can ask them.
     """
-    return _f.dumps_result(await _f.append_doc_content_impl(document_id, content, user_key))
+    return _f.dumps_result(await _f.append_doc_content_impl(document_id, content, user_key, identity))
 
 
 async def feishu_doc_append_table(
@@ -83,6 +91,7 @@ async def feishu_doc_append_table(
     header_row: bool = True,
     column_width_json: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append a native, editable Feishu table to a docx document.
 
@@ -98,16 +107,22 @@ async def feishu_doc_append_table(
             Rows are padded to the widest row; numbers/bools become text.
         header_row: Style the first row as a header (default true).
         column_width_json: Optional JSON array of per-column pixel widths, e.g. '[120,200,80]'.
-        user_key: The sender's open_id (from ``<feishu_context>``). Pass it to write as
-            that user — required when the doc lives in a user-owned wiki and the bot
-            isn't a collaborator. Empty uses the bot's tenant token.
+        user_key: The sender's open_id (from ``<feishu_context>``). Writing into a
+            user-owned wiki generally requires their identity, since the bot isn't a
+            collaborator there.
+        identity: Who owns the result: ``"user"`` (this person — needs their
+            authorization) or ``"bot"`` (the bot). Omit to use the choice remembered
+            for this ``user_key``; if they have never been asked, the tool does
+            nothing and returns ``need_identity_choice`` so you can ask them.
     """
     return _f.dumps_result(
-        await _f.append_doc_table_impl(document_id, rows_json, header_row, column_width_json, user_key)
+        await _f.append_doc_table_impl(document_id, rows_json, header_row, column_width_json, user_key, identity)
     )
 
 
-async def feishu_doc_append_flowchart(document_id: str, steps_json: str, title: str = "", user_key: str = "") -> str:
+async def feishu_doc_append_flowchart(
+    document_id: str, steps_json: str, title: str = "", user_key: str = "", identity: str = ""
+) -> str:
     """Append a flowchart to a docx — rendered as a single-column table of steps.
 
     Feishu's open API can NOT draw a real flowchart/diagram block (block_type 21 is
@@ -120,13 +135,14 @@ async def feishu_doc_append_flowchart(document_id: str, steps_json: str, title: 
         steps_json: A JSON array of step labels in order, e.g.
             '["提交申请","主管审批","财务复核","归档"]'.
         title: Optional heading cell shown at the top of the flowchart.
-        user_key: The sender's open_id; pass it to write as that user (see append_content).
+        user_key: The sender's open_id (from ``<feishu_context>``).
+        identity: ``"user"`` / ``"bot"`` — who owns the result (see append_content).
     """
-    return _f.dumps_result(await _f.append_doc_flowchart_impl(document_id, steps_json, title, user_key))
+    return _f.dumps_result(await _f.append_doc_flowchart_impl(document_id, steps_json, title, user_key, identity))
 
 
 async def feishu_doc_append_swimlane(
-    document_id: str, lanes_json: str, stages_json: str = "", user_key: str = ""
+    document_id: str, lanes_json: str, stages_json: str = "", user_key: str = "", identity: str = ""
 ) -> str:
     """Append a swimlane / cross-functional diagram to a docx — rendered as a table.
 
@@ -142,6 +158,7 @@ async def feishu_doc_append_swimlane(
             case pass the body rows in ``stages_json``.
         stages_json: Only when ``lanes_json`` is an array: a JSON 2-D array of body rows
             (each row aligns to the lane columns), e.g. '[["下单","接单","发货"]]'.
-        user_key: The sender's open_id; pass it to write as that user (see append_content).
+        user_key: The sender's open_id (from ``<feishu_context>``).
+        identity: ``"user"`` / ``"bot"`` — who owns the result (see append_content).
     """
-    return _f.dumps_result(await _f.append_doc_swimlane_impl(document_id, lanes_json, stages_json, user_key))
+    return _f.dumps_result(await _f.append_doc_swimlane_impl(document_id, lanes_json, stages_json, user_key, identity))

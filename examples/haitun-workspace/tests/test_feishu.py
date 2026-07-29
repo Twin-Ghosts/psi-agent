@@ -101,7 +101,14 @@ class _CapturedInvoke:
         self.request: Any = None
         self._data = data or {}
 
-    async def __call__(self, request: Any, user_key: str | None = None, prefer: str = "tenant") -> dict[str, Any]:
+    async def __call__(
+        self,
+        request: Any,
+        user_key: str | None = None,
+        prefer: str = "tenant",
+        identity: str = "",
+        capabilities: list[str] | None = None,
+    ) -> dict[str, Any]:
         # Retryable call sites pass a request factory (see _feishu_impl._fresh); resolve
         # it like the real _invoke so assertions see the request that would be sent.
         self.request = request() if callable(request) else request
@@ -815,7 +822,14 @@ class _PagedInvoke:
         self.requests: list[Any] = []
         self._pages = list(pages)
 
-    async def __call__(self, request: Any, user_key: str | None = None, prefer: str = "tenant") -> dict[str, Any]:
+    async def __call__(
+        self,
+        request: Any,
+        user_key: str | None = None,
+        prefer: str = "tenant",
+        identity: str = "",
+        capabilities: list[str] | None = None,
+    ) -> dict[str, Any]:
         self.requests.append(request)
         page = self._pages.pop(0) if self._pages else {}
         return {"ok": True, "code": 0, "msg": "", "data": page}
@@ -1174,7 +1188,7 @@ async def test_get_wiki_node_builds_request(monkeypatch: pytest.MonkeyPatch) -> 
 
 @pytest.mark.asyncio
 async def test_get_wiki_node_error_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fake(_req: Any, user_key: str | None = None, prefer: str = "tenant") -> dict[str, Any]:
+    async def _fake(_req: Any, user_key: str | None = None, prefer: str = "tenant", **_kw: Any) -> dict[str, Any]:
         return {"ok": False, "code": 131006, "msg": "node not found", "message": "Feishu API error 131006"}
 
     monkeypatch.setattr(_impl, "_invoke", _fake)
@@ -1341,6 +1355,7 @@ async def test_auth_start_builds_authorize_url(monkeypatch: pytest.MonkeyPatch, 
         "plan_receiver",
         lambda explicit="": _impl._oauth_rx.ReceiverPlan(mode="manual", redirect_uri="http://localhost/"),
     )
+    monkeypatch.setattr(_impl, "_granted_scopes_path", lambda: str(tmp_path / "granted.json"))
     result = await _impl.auth_start_impl("")
     assert result["ok"] is True
     parsed = urlparse(result["authorize_url"])
@@ -1349,9 +1364,10 @@ async def test_auth_start_builds_authorize_url(monkeypatch: pytest.MonkeyPatch, 
     assert q["client_id"] == ["cli_x"]
     assert q["response_type"] == ["code"]
     assert "offline_access" in q["scope"][0]
-    # scope must be exactly the fixed default — no fabricated/invalid scope
-    # (e.g. "drive:drive:drive:readonly") that Feishu rejects with error 20043
-    assert q["scope"][0] == _impl._DEFAULT_SCOPES
+    # No capabilities named -> the documented default set, and only real scopes: a
+    # fabricated one (e.g. "drive:drive:drive:readonly") fails the page with 20043.
+    # Order is normalized to the catalog's, so compare as a set.
+    assert set(q["scope"][0].split()) == set(_impl._scope_string(list(_impl._DEFAULT_CAPABILITIES)).split())
     assert "drive:drive:drive" not in q["scope"][0]
     # PKCE: challenge goes on the authorize URL, verifier stays with us
     assert q["code_challenge_method"] == ["S256"]
@@ -1363,6 +1379,9 @@ async def test_auth_start_builds_authorize_url(monkeypatch: pytest.MonkeyPatch, 
     assert pending["redirect_uri"] == q["redirect_uri"][0]
     # manual fallback keeps the old address-bar instructions
     assert result["auto_receive"] is False
+    # state persisted for CSRF check, capabilities parked for auth_complete
+    assert set(pending["capabilities"]) == set(_impl._DEFAULT_CAPABILITIES)
+    # the prompt must be explicit about copying the code from the browser ADDRESS BAR
     msg = result["message"]
     assert "地址栏" in msg
     assert "code=" in msg
@@ -1397,23 +1416,72 @@ async def test_auth_start_prefers_automatic_receive(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
-async def test_auth_start_wrapper_ignores_llm_scopes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The feishu_auth_start tool exposes no scopes arg — LLM can't inject a bad scope."""
+async def test_auth_start_requests_only_named_capabilities(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """Asking for one capability must not drag in the rest of the catalog."""
+    monkeypatch.setenv("PSI_FEISHU_APP_ID", "cli_x")
+    monkeypatch.setenv("PSI_FEISHU_APP_SECRET", "sec")
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(tmp_path / "pending.json"))
+    monkeypatch.setattr(_impl, "_granted_scopes_path", lambda: str(tmp_path / "granted.json"))
+    result = await _impl.auth_start_impl("bitable_write", "ou_a")
+    scope = parse_qs(urlparse(result["authorize_url"]).query)["scope"][0]
+    assert "bitable:app" in scope
+    assert "docx:document" not in scope
+    assert "wiki:wiki" not in scope
+    assert result["capabilities"] == ["bitable_write"]
+
+
+@pytest.mark.asyncio
+async def test_auth_start_unions_with_already_granted(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """A second authorization must not revoke what the first one granted.
+
+    Feishu issues a token carrying exactly the latest grant's scopes, so asking for
+    only the new capability would silently drop the working ones.
+    """
+    monkeypatch.setenv("PSI_FEISHU_APP_ID", "cli_x")
+    monkeypatch.setenv("PSI_FEISHU_APP_SECRET", "sec")
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(tmp_path / "pending.json"))
+    monkeypatch.setattr(_impl, "_granted_scopes_path", lambda: str(tmp_path / "granted.json"))
+    _impl._record_granted_capabilities("ou_a", ["docx_write"])
+    result = await _impl.auth_start_impl("bitable_write", "ou_a")
+    scope = parse_qs(urlparse(result["authorize_url"]).query)["scope"][0]
+    assert "docx:document" in scope  # kept
+    assert "bitable:app" in scope  # added
+    assert result["newly_requested"] == ["bitable_write"]
+    assert result["already_granted"] == ["docx_write"]
+
+
+@pytest.mark.asyncio
+async def test_auth_start_refuses_raw_scope_strings(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """A raw/invented scope is refused here, not sent to Feishu as a broken page."""
+    monkeypatch.setenv("PSI_FEISHU_APP_ID", "cli_x")
+    monkeypatch.setenv("PSI_FEISHU_APP_SECRET", "sec")
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(tmp_path / "pending.json"))
+    for bad in ("docs:doc:readonly", "docx:write", "drive:drive:drive:readonly"):
+        result = await _impl.auth_start_impl(bad, "ou_a")
+        assert result["ok"] is False
+        assert "authorize_url" not in result
+        assert "capability_keys" in result
+
+
+@pytest.mark.asyncio
+async def test_auth_start_wrapper_takes_capabilities_not_scopes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tool exposes capability keys, never raw scopes."""
     auth_mod = importlib.import_module("feishu_auth")
     params = inspect.signature(auth_mod.feishu_auth_start).parameters
     assert "scopes" not in params
-    assert list(params) == ["user_key"]
+    assert list(params) == ["user_key", "capabilities"]
 
     captured: dict[str, Any] = {}
 
-    async def _fake_start(scopes: str = "", user_key: str = "") -> dict[str, Any]:
-        captured["scopes"] = scopes
+    async def _fake_start(capabilities: str = "", user_key: str = "") -> dict[str, Any]:
+        captured["capabilities"] = capabilities
+        captured["user_key"] = user_key
         return {"ok": True, "authorize_url": "x"}
 
     monkeypatch.setattr(auth_mod._f, "auth_start_impl", _fake_start)
-    await auth_mod.feishu_auth_start("ou_a")
-    # wrapper always passes empty scopes -> impl uses the fixed default
-    assert captured["scopes"] == ""
+    await auth_mod.feishu_auth_start("ou_a", "docx_write,wiki_write")
+    assert captured["user_key"] == "ou_a"
+    assert captured["capabilities"] == "docx_write,wiki_write"
 
 
 def test_auth_tools_are_async_with_docstrings() -> None:
@@ -3013,32 +3081,31 @@ async def test_delete_file_user_key_routes_through_uat(monkeypatch: pytest.Monke
         return _FakeUAT()
 
     monkeypatch.setattr(_impl, "_get_valid_uat", _uat)
-    result = await _impl.delete_file_impl("doccnX", "docx", "ou_a")
+    monkeypatch.setattr(_impl, "missing_capabilities", lambda key, needed: [])
+    result = await _impl.delete_file_impl("doccnX", "docx", "ou_a", "user")
     assert result["ok"] is True
     assert client.option.user_access_token == "uat_tok"
     assert client.request.http_method.name == "DELETE"
 
 
 @pytest.mark.asyncio
-async def test_delete_file_no_uat_tenant_denied_needs_auth(monkeypatch: pytest.MonkeyPatch) -> None:
-    """delete is prefer='user': with no UAT it falls back to tenant; if tenant is also
-    permission-denied, the user is prompted to authorize."""
-    body = json.dumps({"code": 99991672, "msg": "permission denied", "data": {}}).encode()
-    monkeypatch.setattr(_impl, "_get_client", lambda: _FakeClient(_FakeResp(99991672, "permission denied", body)))
+async def test_delete_file_as_user_without_token_prompts_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Acting as the user with no usable token asks them to authorize."""
     monkeypatch.setattr(_impl, "_get_uat_client", lambda: object())
 
     async def _no_uat(user_key: str = "") -> Any:
         return None
 
     monkeypatch.setattr(_impl, "_get_valid_uat", _no_uat)
-    result = await _impl.delete_file_impl("doccnX", "docx", "ou_a")
+    monkeypatch.setattr(_impl, "missing_capabilities", lambda key, needed: [])
+    result = await _impl.delete_file_impl("doccnX", "docx", "ou_a", "user")
     assert result["ok"] is False
     assert result.get("need_auth") is True
 
 
 @pytest.mark.asyncio
-async def test_delete_file_no_uat_tenant_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
-    """delete with no UAT but tenant has permission: the bot deletes it (no auth prompt)."""
+async def test_delete_file_as_bot_uses_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """identity='bot': the bot deletes it with its own permissions, no auth prompt."""
 
     class _TenantClient:
         async def arequest(self, request: Any, option: Any = None) -> Any:
@@ -3046,13 +3113,7 @@ async def test_delete_file_no_uat_tenant_succeeds(monkeypatch: pytest.MonkeyPatc
             return type("R", (), {"raw": raw, "code": 0, "msg": ""})()
 
     monkeypatch.setattr(_impl, "_get_client", lambda: _TenantClient())
-    monkeypatch.setattr(_impl, "_get_uat_client", lambda: object())
-
-    async def _no_uat(user_key: str = "") -> Any:
-        return None
-
-    monkeypatch.setattr(_impl, "_get_valid_uat", _no_uat)
-    result = await _impl.delete_file_impl("doccnX", "docx", "ou_a")
+    result = await _impl.delete_file_impl("doccnX", "docx", "ou_a", "bot")
     assert result["ok"] is True
     assert result.get("need_auth") is not True
 
@@ -3130,12 +3191,12 @@ async def test_create_wiki_node_requires_space_id() -> None:
 
 @pytest.mark.asyncio
 async def test_create_wiki_doc_with_content_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fake_node(space_id, title, obj_type="docx", parent="", user_key="") -> dict[str, Any]:
+    async def _fake_node(space_id, title, obj_type="docx", parent="", user_key="", identity="") -> dict[str, Any]:
         return {"ok": True, "node_token": "nodeX", "obj_token": "docX", "space_id": space_id, "title": title}
 
     appended: dict[str, Any] = {}
 
-    async def _fake_append(document_id, content, user_key="") -> dict[str, Any]:
+    async def _fake_append(document_id, content, user_key="", identity="") -> dict[str, Any]:
         appended["document_id"] = document_id
         appended["user_key"] = user_key
         return {"ok": True, "document_id": document_id, "added": 3}
@@ -3154,10 +3215,10 @@ async def test_create_wiki_doc_with_content_success(monkeypatch: pytest.MonkeyPa
 
 @pytest.mark.asyncio
 async def test_create_wiki_doc_with_content_body_fails_returns_node(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fake_node(space_id, title, obj_type="docx", parent="", user_key="") -> dict[str, Any]:
+    async def _fake_node(space_id, title, obj_type="docx", parent="", user_key="", identity="") -> dict[str, Any]:
         return {"ok": True, "node_token": "nodeX", "obj_token": "docX"}
 
-    async def _fake_append(document_id, content, user_key="") -> dict[str, Any]:
+    async def _fake_append(document_id, content, user_key="", identity="") -> dict[str, Any]:
         return {"ok": False, "message": "boom", "added": 0}
 
     monkeypatch.setattr(_impl, "create_wiki_node_impl", _fake_node)
@@ -3172,7 +3233,7 @@ async def test_create_wiki_doc_with_content_body_fails_returns_node(monkeypatch:
 
 @pytest.mark.asyncio
 async def test_create_wiki_doc_with_content_empty_body_is_ok(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fake_node(space_id, title, obj_type="docx", parent="", user_key="") -> dict[str, Any]:
+    async def _fake_node(space_id, title, obj_type="docx", parent="", user_key="", identity="") -> dict[str, Any]:
         return {"ok": True, "node_token": "nodeX", "obj_token": "docX"}
 
     async def _fail_append(document_id, content, user_key="") -> dict[str, Any]:
@@ -3187,7 +3248,7 @@ async def test_create_wiki_doc_with_content_empty_body_is_ok(monkeypatch: pytest
 
 @pytest.mark.asyncio
 async def test_create_wiki_doc_with_content_node_fails_short_circuits(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fake_node(space_id, title, obj_type="docx", parent="", user_key="") -> dict[str, Any]:
+    async def _fake_node(space_id, title, obj_type="docx", parent="", user_key="", identity="") -> dict[str, Any]:
         return {"ok": False, "message": "no space"}
 
     async def _fail_append(document_id, content, user_key="") -> dict[str, Any]:
@@ -3283,7 +3344,7 @@ async def test_invoke_empty_user_key_uses_tenant(monkeypatch: pytest.MonkeyPatch
 
 @pytest.mark.asyncio
 async def test_invoke_prefer_user_routes_through_uat(monkeypatch: pytest.MonkeyPatch) -> None:
-    """prefer='user' with a cached UAT must act as the user (content owned by them)."""
+    """identity='user' with a cached UAT must act as the user (content owned by them)."""
     client = _CapturingUatClient({"code": 0, "data": {"ok": 1}})
     monkeypatch.setattr(_impl, "_get_uat_client", lambda: client)
 
@@ -3291,7 +3352,7 @@ async def test_invoke_prefer_user_routes_through_uat(monkeypatch: pytest.MonkeyP
         return _FakeUAT()
 
     monkeypatch.setattr(_impl, "_get_valid_uat", _uat)
-    res = await _impl._invoke(object(), user_key="ou_a", prefer="user")
+    res = await _impl._invoke(object(), user_key="ou_a", prefer="user", identity="user", capabilities=[])
     assert res["ok"] is True
     assert client.option.user_access_token == "uat_tok"
 
@@ -3350,8 +3411,8 @@ async def test_invoke_tenant_permission_error_no_user_key_passes_through(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_invoke_prefer_user_no_uat_falls_back_to_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
-    """prefer='user' but no cached UAT: the bot's tenant token still does the write."""
+async def test_invoke_write_identity_bot_uses_tenant_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """identity='bot': the user's token is never touched, so the output is the bot's."""
     calls: dict[str, Any] = {}
 
     class _TenantClient:
@@ -3361,31 +3422,123 @@ async def test_invoke_prefer_user_no_uat_falls_back_to_tenant(monkeypatch: pytes
             return type("R", (), {"raw": raw, "code": 0, "msg": ""})()
 
     monkeypatch.setattr(_impl, "_get_client", lambda: _TenantClient())
-    monkeypatch.setattr(_impl, "_get_uat_client", lambda: object())
 
-    async def _no_uat(user_key: str = "") -> Any:
-        return None
+    async def _uat_must_not_run(user_key: str = "") -> Any:
+        raise AssertionError("the user's token must not be used when they chose 'bot'")
 
-    monkeypatch.setattr(_impl, "_get_valid_uat", _no_uat)
-    res = await _impl._invoke(object(), user_key="ou_a", prefer="user")
+    monkeypatch.setattr(_impl, "_get_valid_uat", _uat_must_not_run)
+    res = await _impl._invoke(object(), user_key="ou_a", prefer="user", identity="bot", capabilities=[])
     assert res["ok"] is True
     assert calls.get("tenant") is True
 
 
 @pytest.mark.asyncio
-async def test_invoke_prefer_user_no_uat_tenant_denied_needs_auth(monkeypatch: pytest.MonkeyPatch) -> None:
-    """prefer='user', no UAT, and tenant is also permission-denied → prompt to authorize."""
-    body = json.dumps({"code": 99991672, "msg": "permission denied", "data": {}}).encode()
-    monkeypatch.setattr(_impl, "_get_client", lambda: _FakeClient(_FakeResp(99991672, "permission denied", body)))
+async def test_invoke_write_identity_user_without_token_asks_to_authorize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """identity='user' but no token: ask them to authorize.
+
+    It must NOT quietly fall back to the bot — the user just said they want to own
+    this, and bot-owned output would contradict that choice behind their back.
+    """
+
+    class _TenantMustNotRun:
+        async def arequest(self, request: Any, option: Any = None) -> Any:
+            raise AssertionError("must not silently produce bot-owned content")
+
+    monkeypatch.setattr(_impl, "_get_client", lambda: _TenantMustNotRun())
     monkeypatch.setattr(_impl, "_get_uat_client", lambda: object())
 
     async def _no_uat(user_key: str = "") -> Any:
         return None
 
     monkeypatch.setattr(_impl, "_get_valid_uat", _no_uat)
-    res = await _impl._invoke(object(), user_key="ou_a", prefer="user")
+    res = await _impl._invoke(object(), user_key="ou_a", prefer="user", identity="user", capabilities=[])
     assert res["ok"] is False
     assert res.get("need_auth") is True
+
+
+@pytest.mark.asyncio
+async def test_invoke_write_without_choice_asks_who_owns_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """A user who was never asked gets the ownership question — and nothing is sent."""
+    monkeypatch.setattr(_impl, "_identity_path", lambda: str(tmp_path / "identity.json"))
+    monkeypatch.setattr(_impl, "_granted_scopes_path", lambda: str(tmp_path / "granted.json"))
+
+    class _NothingMayBeSent:
+        async def arequest(self, request: Any, option: Any = None) -> Any:
+            raise AssertionError("ownership must be settled before anything is created")
+
+    monkeypatch.setattr(_impl, "_get_client", lambda: _NothingMayBeSent())
+    monkeypatch.setattr(_impl, "_get_uat_client", lambda: _NothingMayBeSent())
+    res = await _impl._invoke(object(), user_key="ou_new", prefer="user", capabilities=["docx_write"])
+    assert res["ok"] is False
+    assert res.get("need_identity_choice") is True
+    assert res["identity_options"] == ["user", "bot"]
+    assert res["would_need_capabilities"] == ["docx_write"]
+
+
+@pytest.mark.asyncio
+async def test_invoke_write_uses_remembered_choice_without_asking_again(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Asked once, remembered after: an un-updated call site still honours the choice."""
+    monkeypatch.setattr(_impl, "_identity_path", lambda: str(tmp_path / "identity.json"))
+    monkeypatch.setattr(_impl, "_granted_scopes_path", lambda: str(tmp_path / "granted.json"))
+    assert _impl.set_identity("ou_a", "bot") == ""
+    calls: dict[str, Any] = {}
+
+    class _TenantClient:
+        async def arequest(self, request: Any, option: Any = None) -> Any:
+            calls["tenant"] = True
+            raw = _FakeRaw(json.dumps({"code": 0, "data": {"ok": 1}}).encode())
+            return type("R", (), {"raw": raw, "code": 0, "msg": ""})()
+
+    monkeypatch.setattr(_impl, "_get_client", lambda: _TenantClient())
+    # identity omitted entirely, as a legacy call site would
+    res = await _impl._invoke(object(), user_key="ou_a", prefer="user", capabilities=[])
+    assert res["ok"] is True
+    assert calls.get("tenant") is True
+    assert res.get("need_identity_choice") is not True
+
+
+@pytest.mark.asyncio
+async def test_invoke_write_missing_capability_names_what_to_authorize(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """A user who authorized docs reading is not re-asked for it, only for the gap."""
+    monkeypatch.setattr(_impl, "_identity_path", lambda: str(tmp_path / "identity.json"))
+    monkeypatch.setattr(_impl, "_granted_scopes_path", lambda: str(tmp_path / "granted.json"))
+    _impl.set_identity("ou_a", "user")
+    _impl._record_granted_capabilities("ou_a", ["docs_read"])
+
+    class _NothingMayBeSent:
+        async def arequest(self, request: Any, option: Any = None) -> Any:
+            raise AssertionError("must not send without the required permission")
+
+    monkeypatch.setattr(_impl, "_get_client", lambda: _NothingMayBeSent())
+    monkeypatch.setattr(_impl, "_get_uat_client", lambda: _NothingMayBeSent())
+    res = await _impl._invoke(object(), user_key="ou_a", prefer="user", capabilities=["docs_read", "bitable_write"])
+    assert res["ok"] is False
+    assert res.get("need_auth") is True
+    assert res["need_capabilities"] == ["bitable_write"]
+
+
+@pytest.mark.asyncio
+async def test_invoke_write_no_user_key_uses_tenant_without_asking(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No user_key: nobody to attribute to and nobody to ask, so the bot proceeds."""
+    calls: dict[str, Any] = {}
+
+    class _TenantClient:
+        async def arequest(self, request: Any, option: Any = None) -> Any:
+            calls["tenant"] = True
+            raw = _FakeRaw(json.dumps({"code": 0, "data": {"ok": 1}}).encode())
+            return type("R", (), {"raw": raw, "code": 0, "msg": ""})()
+
+    monkeypatch.setattr(_impl, "_get_client", lambda: _TenantClient())
+    res = await _impl._invoke(object(), prefer="user", capabilities=["docx_write"])
+    assert res["ok"] is True
+    assert calls.get("tenant") is True
+    assert res.get("need_identity_choice") is not True
 
 
 @pytest.mark.asyncio
@@ -3393,7 +3546,13 @@ async def test_create_wiki_node_forwards_user_key(monkeypatch: pytest.MonkeyPatc
     """create_wiki_node_impl must pass user_key down to _invoke."""
     seen: dict[str, Any] = {}
 
-    async def _fake_invoke(request: Any, user_key: str | None = None, prefer: str = "tenant") -> dict[str, Any]:
+    async def _fake_invoke(
+        request: Any,
+        user_key: str | None = None,
+        prefer: str = "tenant",
+        identity: str = "",
+        capabilities: list[str] | None = None,
+    ) -> dict[str, Any]:
         seen["user_key"] = user_key
         return {"ok": True, "code": 0, "msg": "", "data": {"node": {"node_token": "n", "obj_token": "o"}}}
 
@@ -3470,7 +3629,13 @@ async def test_list_wiki_spaces_nonempty_tenant_no_uat_retry(monkeypatch: pytest
 async def test_get_wiki_node_forwards_user_key(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, Any] = {}
 
-    async def _fake_invoke(request: Any, user_key: str | None = None, prefer: str = "tenant") -> dict[str, Any]:
+    async def _fake_invoke(
+        request: Any,
+        user_key: str | None = None,
+        prefer: str = "tenant",
+        identity: str = "",
+        capabilities: list[str] | None = None,
+    ) -> dict[str, Any]:
         seen["user_key"] = user_key
         return {"ok": True, "code": 0, "msg": "", "data": {"node": {"obj_token": "o", "obj_type": "docx"}}}
 
@@ -3554,7 +3719,13 @@ async def test_append_doc_content_builds_root_request(monkeypatch: pytest.Monkey
 async def test_append_doc_content_batches_over_50(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[int] = []
 
-    async def fake_invoke(request: Any, user_key: str | None = None, prefer: str = "tenant") -> dict[str, Any]:
+    async def fake_invoke(
+        request: Any,
+        user_key: str | None = None,
+        prefer: str = "tenant",
+        identity: str = "",
+        capabilities: list[str] | None = None,
+    ) -> dict[str, Any]:
         calls.append(len(request.body["children"]))
         return {"ok": True, "code": 0, "msg": "", "data": {}}
 
@@ -4155,7 +4326,13 @@ async def test_subscribe_approval_requires_code() -> None:
 
 @pytest.mark.asyncio
 async def test_subscribe_approval_propagates_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fail(request: Any, user_key: str | None = None, prefer: str = "tenant") -> dict[str, Any]:
+    async def _fail(
+        request: Any,
+        user_key: str | None = None,
+        prefer: str = "tenant",
+        identity: str = "",
+        capabilities: list[str] | None = None,
+    ) -> dict[str, Any]:
         return {"ok": False, "code": 99991672, "msg": "no permission", "message": "err"}
 
     monkeypatch.setattr(_impl, "_invoke", _fail)
@@ -4217,7 +4394,7 @@ async def test_invoke_retries_while_rate_limited(monkeypatch: pytest.MonkeyPatch
     """A 429 means "too fast", not "not allowed" — the same request works moments later."""
     attempts = 0
 
-    async def once(request: Any, user_key: Any = None, prefer: str = "tenant") -> dict[str, Any]:
+    async def once(request: Any, user_key: Any = None, prefer: str = "tenant", **_kw: Any) -> dict[str, Any]:
         nonlocal attempts
         attempts += 1
         if attempts < 3:
@@ -4244,7 +4421,7 @@ async def test_invoke_gives_up_with_a_readable_error(monkeypatch: pytest.MonkeyP
     """Retries are bounded: a persistent limit is reported, never hung on."""
     attempts = 0
 
-    async def always_limited(request: Any, user_key: Any = None, prefer: str = "tenant") -> dict[str, Any]:
+    async def always_limited(request: Any, user_key: Any = None, prefer: str = "tenant", **_kw: Any) -> dict[str, Any]:
         nonlocal attempts
         attempts += 1
         return {"ok": False, "code": None, "http_status": 429, "msg": "触发飞书接口频率限制"}
@@ -4265,7 +4442,7 @@ async def test_invoke_does_not_retry_other_failures(monkeypatch: pytest.MonkeyPa
     """Only rate limits are worth repeating; a permission denial would just be denied again."""
     attempts = 0
 
-    async def denied(request: Any, user_key: Any = None, prefer: str = "tenant") -> dict[str, Any]:
+    async def denied(request: Any, user_key: Any = None, prefer: str = "tenant", **_kw: Any) -> dict[str, Any]:
         nonlocal attempts
         attempts += 1
         return {"ok": False, "code": 1770032, "msg": "forBidden"}
@@ -4289,7 +4466,7 @@ async def test_wiki_read_user_retry_also_survives_a_rate_limit(monkeypatch: pyte
             return {"ok": False, "code": None, "http_status": 429, "msg": "too many"}
         return {"ok": True, "code": 0, "msg": "", "data": {"items": [{"space_id": "7"}]}}
 
-    async def tenant_empty(request: Any, user_key: Any = None, prefer: str = "tenant") -> dict[str, Any]:
+    async def tenant_empty(request: Any, user_key: Any = None, prefer: str = "tenant", **_kw: Any) -> dict[str, Any]:
         return {"ok": True, "code": 0, "msg": "", "data": {"items": []}}
 
     async def no_wait(seconds: float) -> None:
@@ -4312,7 +4489,7 @@ async def test_wiki_read_keeps_tenant_result_when_the_user_has_no_token(
     async def no_token(request: Any, key: str) -> None:
         return None
 
-    async def tenant_empty(request: Any, user_key: Any = None, prefer: str = "tenant") -> dict[str, Any]:
+    async def tenant_empty(request: Any, user_key: Any = None, prefer: str = "tenant", **_kw: Any) -> dict[str, Any]:
         return {"ok": True, "code": 0, "msg": "", "data": {"items": []}}
 
     monkeypatch.setattr(_impl, "_invoke", tenant_empty)
@@ -4333,3 +4510,287 @@ def test_backoff_is_bounded_and_jittered() -> None:
     cap = _impl._RATE_LIMIT_MAX_WAIT * 1.25
     assert max(_impl._retry_after_seconds(limited, 12) for _ in range(20)) <= cap
     assert _impl._retry_after_seconds({"retry_after": 999}, 1) == _impl._RATE_LIMIT_MAX_WAIT
+
+
+# ── Capability catalog & per-user grant memory ────────────────────────────────
+
+
+def test_capability_catalog_holds_only_real_scopes() -> None:
+    """Every catalog entry must look like a Feishu scope, not an invented name.
+
+    A scope Feishu doesn't know fails the authorize page outright (20043), so this is
+    the guard against a plausible-sounding typo reaching users.
+    """
+    assert _impl.scope_catalog_keys()  # non-empty
+    for key, scopes in _impl._SCOPE_CATALOG.items():
+        assert isinstance(scopes, tuple) and scopes, key
+        for scope in scopes:
+            assert ":" in scope, (key, scope)
+            assert not scope.startswith(":") and not scope.endswith(":"), (key, scope)
+            assert " " not in scope, (key, scope)
+
+
+def test_parse_capabilities_accepts_keys_and_refuses_raw_scopes() -> None:
+    keys, err = _impl._parse_capabilities("docx_write, wiki_write")
+    assert err == ""
+    assert keys == ["docx_write", "wiki_write"]
+    # empty -> documented default set
+    assert _impl._parse_capabilities("")[0] == list(_impl._DEFAULT_CAPABILITIES)
+    # duplicates collapse rather than listing a permission twice on the consent screen
+    assert _impl._parse_capabilities("docx_write docx_write")[0] == ["docx_write"]
+    # a raw scope string is NOT a capability key
+    for bad in ("docx:document", "offline_access", "made_up_key"):
+        keys, err = _impl._parse_capabilities(bad)
+        assert keys == []
+        assert "未知的权限能力键" in err
+
+
+def test_scope_string_dedupes_and_always_allows_refresh() -> None:
+    scope = _impl._scope_string(["contact_read", "contact_phone_email_read"])
+    parts = scope.split()
+    assert len(parts) == len(set(parts)), "a shared scope must not be listed twice"
+    assert parts[-1] == _impl._OFFLINE_SCOPE, "without offline_access every expiry re-prompts"
+    assert "contact:contact.base:readonly" in parts
+
+
+def test_granted_capabilities_are_remembered_and_only_grow(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tracked in our own file, not read back from the token.
+
+    A refresh response need not echo ``scope``; trusting the token would make granted
+    permissions look revoked and re-prompt the user for what already works.
+    """
+    monkeypatch.setattr(_impl, "_granted_scopes_path", lambda: str(tmp_path / "granted.json"))
+    assert _impl.granted_capabilities("ou_a") == []
+    _impl._record_granted_capabilities("ou_a", ["docx_write"])
+    assert _impl.granted_capabilities("ou_a") == ["docx_write"]
+    # a later, unrelated grant must not drop the earlier one
+    _impl._record_granted_capabilities("ou_a", ["bitable_write"])
+    assert set(_impl.granted_capabilities("ou_a")) == {"docx_write", "bitable_write"}
+    # keys are per user
+    assert _impl.granted_capabilities("ou_b") == []
+    # junk is not persisted as if it were a capability
+    _impl._record_granted_capabilities("ou_a", ["not_a_capability"])
+    assert "not_a_capability" not in _impl.granted_capabilities("ou_a")
+
+
+def test_missing_capabilities_reports_only_the_gap(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_impl, "_granted_scopes_path", lambda: str(tmp_path / "granted.json"))
+    _impl._record_granted_capabilities("ou_a", ["docs_read"])
+    assert _impl.missing_capabilities("ou_a", ["docs_read"]) == []
+    assert _impl.missing_capabilities("ou_a", ["docs_read", "wiki_write"]) == ["wiki_write"]
+
+
+def test_corrupt_store_reads_as_empty_instead_of_breaking(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A damaged file must degrade to "ask again", never to a crash on every write."""
+    path = tmp_path / "granted.json"
+    path.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(_impl, "_granted_scopes_path", lambda: str(path))
+    assert _impl.granted_capabilities("ou_a") == []
+    monkeypatch.setattr(_impl, "_identity_path", lambda: str(path))
+    assert _impl.get_identity("ou_a") == ""
+
+
+# ── Write-ownership identity ──────────────────────────────────────────────────
+
+
+def test_identity_is_remembered_per_user(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_impl, "_identity_path", lambda: str(tmp_path / "identity.json"))
+    assert _impl.get_identity("ou_a") == "", "never asked -> no assumed answer"
+    assert _impl.set_identity("ou_a", "user") == ""
+    assert _impl.get_identity("ou_a") == "user"
+    # one person's answer is not another's
+    assert _impl.get_identity("ou_b") == ""
+    # changeable
+    assert _impl.set_identity("ou_a", "bot") == ""
+    assert _impl.get_identity("ou_a") == "bot"
+
+
+def test_identity_rejects_anything_but_user_or_bot(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_impl, "_identity_path", lambda: str(tmp_path / "identity.json"))
+    for bad in ("", "nobody", "tenant", "USERR"):
+        assert _impl.set_identity("ou_a", bad) != ""
+    assert _impl.get_identity("ou_a") == "", "a rejected value must not be stored"
+    # case/space tolerance for a real answer
+    assert _impl.set_identity("ou_a", " User ") == ""
+    assert _impl.get_identity("ou_a") == "user"
+
+
+@pytest.mark.asyncio
+async def test_identity_tools_report_choice_and_capabilities(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_impl, "_identity_path", lambda: str(tmp_path / "identity.json"))
+    monkeypatch.setattr(_impl, "_granted_scopes_path", lambda: str(tmp_path / "granted.json"))
+    auth_mod = importlib.import_module("feishu_auth")
+
+    before = json.loads(await auth_mod.feishu_identity_get("ou_a"))
+    assert before["ok"] is True
+    assert before["identity"] == ""
+    assert before["asked"] is False
+    assert "docx_write" in before["capability_keys"]
+
+    setres = json.loads(await auth_mod.feishu_identity_set("ou_a", "bot"))
+    assert setres["ok"] is True
+    assert setres["identity"] == "bot"
+
+    after = json.loads(await auth_mod.feishu_identity_get("ou_a"))
+    assert after["identity"] == "bot"
+    assert after["asked"] is True
+
+    bad = json.loads(await auth_mod.feishu_identity_set("ou_a", "whatever"))
+    assert bad["ok"] is False
+    assert bad["identity_options"] == ["user", "bot"]
+
+
+# ── Capability inference from the API path ────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("uri", "expected"),
+    [
+        ("/open-apis/docx/v1/documents", ["docx_write"]),
+        ("/open-apis/docx/v1/documents/doc1/blocks/b1/children", ["docx_write"]),
+        ("/open-apis/wiki/v2/spaces/s1/nodes", ["wiki_write"]),
+        ("/open-apis/bitable/v1/apps", ["bitable_write"]),
+        ("/open-apis/task/v2/tasks", ["task_write"]),
+        ("/open-apis/calendar/v4/calendars/primary", ["calendar_write"]),
+        # spreadsheets and file/permission/media work are all cloud-drive writes
+        ("/open-apis/sheets/v2/spreadsheets/tok/values", ["drive_write"]),
+        ("/open-apis/drive/v1/permissions/tok/members", ["drive_write"]),
+        ("/open-apis/drive/v1/medias/upload_all", ["drive_write"]),
+        ("/open-apis/drive/v1/files/tok", ["drive_write"]),
+        ("/open-apis/contact/v3/users/batch", ["contact_read"]),
+        # unattributable path -> claim nothing rather than prompt for the wrong scope
+        ("/open-apis/im/v1/messages", []),
+        ("", []),
+    ],
+)
+def test_capabilities_inferred_from_request_path(uri: str, expected: list[str]) -> None:
+    req = _impl.BaseRequest()
+    req.uri = uri
+    assert _impl.capabilities_for(req) == expected
+
+
+def test_capabilities_for_inspects_a_factory_without_sending() -> None:
+    """Retry-safe call sites pass a factory; it must be inspected, not treated as opaque."""
+    calls = {"n": 0}
+
+    def factory() -> Any:
+        calls["n"] += 1
+        req = _impl.BaseRequest()
+        req.uri = "/open-apis/bitable/v1/apps"
+        return req
+
+    assert _impl.capabilities_for(factory) == ["bitable_write"]
+    assert calls["n"] == 1
+
+
+def test_capabilities_for_survives_a_broken_factory() -> None:
+    """Inference is best-effort: a factory that raises must not break the write."""
+
+    def boom() -> Any:
+        raise RuntimeError("nope")
+
+    assert _impl.capabilities_for(boom) == []
+
+
+@pytest.mark.asyncio
+async def test_write_infers_capability_when_caller_names_none(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A legacy call site that declares no capabilities still asks for the right one."""
+    monkeypatch.setattr(_impl, "_identity_path", lambda: str(tmp_path / "identity.json"))
+    monkeypatch.setattr(_impl, "_granted_scopes_path", lambda: str(tmp_path / "granted.json"))
+    _impl.set_identity("ou_a", "user")
+
+    class _NothingMayBeSent:
+        async def arequest(self, request: Any, option: Any = None) -> Any:
+            raise AssertionError("must not send without the required permission")
+
+    monkeypatch.setattr(_impl, "_get_client", lambda: _NothingMayBeSent())
+    monkeypatch.setattr(_impl, "_get_uat_client", lambda: _NothingMayBeSent())
+    req = _impl.BaseRequest()
+    req.uri = "/open-apis/bitable/v1/apps"
+    res = await _impl._invoke(req, user_key="ou_a", prefer="user")  # no capabilities= given
+    assert res["ok"] is False
+    assert res["need_capabilities"] == ["bitable_write"]
+
+
+@pytest.mark.asyncio
+async def test_reads_never_ask_about_ownership(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reading creates nothing, so a user who was never asked must not be interrupted."""
+    monkeypatch.setattr(_impl, "_identity_path", lambda: str(tmp_path / "identity.json"))
+    monkeypatch.setattr(_impl, "_granted_scopes_path", lambda: str(tmp_path / "granted.json"))
+
+    class _TenantClient:
+        async def arequest(self, request: Any, option: Any = None) -> Any:
+            raw = _FakeRaw(json.dumps({"code": 0, "data": {"ok": 1}}).encode())
+            return type("R", (), {"raw": raw, "code": 0, "msg": ""})()
+
+    monkeypatch.setattr(_impl, "_get_client", lambda: _TenantClient())
+    res = await _impl._invoke(object(), user_key="ou_never_asked")  # prefer defaults to tenant
+    assert res["ok"] is True
+    assert res.get("need_identity_choice") is not True
+
+
+@pytest.mark.asyncio
+async def test_auth_complete_records_granted_capabilities(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """What the grant covered is decided at auth_start and must survive to the store."""
+    monkeypatch.setenv("PSI_FEISHU_APP_ID", "cli_x")
+    monkeypatch.setenv("PSI_FEISHU_APP_SECRET", "sec")
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(tmp_path / "pending.json"))
+    monkeypatch.setattr(_impl, "_granted_scopes_path", lambda: str(tmp_path / "granted.json"))
+
+    started = await _impl.auth_start_impl("bitable_write", "ou_a")
+    assert started["ok"] is True
+
+    async def _fake_app_token() -> str:
+        return "app_tok"
+
+    async def _fake_post(url: str, body: Any, headers: Any = None) -> dict[str, Any]:
+        return {"code": 0, "data": {"access_token": "u-tok", "expires_in": 7200, "open_id": "ou_a"}}
+
+    monkeypatch.setattr(_impl, "_get_app_access_token", _fake_app_token)
+    monkeypatch.setattr(_impl, "_post_json", _fake_post)
+
+    class _Store:
+        def __init__(self) -> None:
+            self.saved: dict[str, Any] = {}
+
+        async def set(self, key: str, uat: Any) -> None:
+            self.saved[key] = uat
+
+    monkeypatch.setattr(_impl, "_get_token_store", lambda: _Store())
+    done = await _impl.auth_complete_impl("THECODE", "ou_a")
+    assert done["ok"] is True
+    assert done["capabilities"] == ["bitable_write"]
+    assert _impl.granted_capabilities("ou_a") == ["bitable_write"]
+    # the pending file is consumed, so a replayed code can't re-grant silently
+    assert not (tmp_path / "pending.json").exists()
+
+
+def test_write_tools_expose_identity(tmp_path: Any) -> None:
+    """Every ownership-creating tool must let the caller state who owns the result."""
+    expected = {
+        "feishu_doc": ["feishu_doc_create", "feishu_doc_append_content", "feishu_doc_append_table"],
+        "feishu_wiki": ["feishu_wiki_create_doc", "feishu_wiki_create_doc_with_content"],
+        "feishu_bitable": ["feishu_bitable_create_app", "feishu_bitable_create_table"],
+        "feishu_sheet": ["feishu_sheet_write", "feishu_sheet_append", "feishu_sheet_format"],
+        "feishu_task": ["feishu_task_create"],
+        "feishu_drive": ["feishu_drive_delete_file", "feishu_drive_upload"],
+        "feishu_permission": ["feishu_permission_add_member"],
+    }
+    for mod_name, tools in expected.items():
+        mod = importlib.import_module(mod_name)
+        for tool in tools:
+            params = inspect.signature(getattr(mod, tool)).parameters
+            assert "identity" in params, f"{tool} cannot state who owns its output"
+            assert params["identity"].default == "", f"{tool} must default to the remembered choice"
+
+
+def test_read_tools_do_not_take_identity() -> None:
+    """Reads own nothing, so offering an ownership knob there would only confuse."""
+    for mod_name, tool in [
+        ("feishu_doc", "feishu_doc_read"),
+        ("feishu_sheet", "feishu_sheet_read"),
+        ("feishu_wiki", "feishu_wiki_list_spaces"),
+        ("feishu_bitable", "feishu_bitable_list_records"),
+    ]:
+        mod = importlib.import_module(mod_name)
+        assert "identity" not in inspect.signature(getattr(mod, tool)).parameters, tool

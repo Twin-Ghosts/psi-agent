@@ -80,7 +80,9 @@ async def feishu_wiki_list_nodes(
     return _f.dumps_result(await _f.list_wiki_nodes_impl(space_id, page_size, page_token, parent_node_token, user_key))
 
 
-async def feishu_wiki_create_doc(space_id: str, title: str, parent_node_token: str = "", user_key: str = "") -> str:
+async def feishu_wiki_create_doc(
+    space_id: str, title: str, parent_node_token: str = "", user_key: str = "", identity: str = ""
+) -> str:
     """Create a new document (docx node) inside a Feishu/Lark wiki knowledge base.
 
     Creates a wiki node backed by a new docx. Returns the ``node_token`` (the wiki
@@ -94,14 +96,18 @@ async def feishu_wiki_create_doc(space_id: str, title: str, parent_node_token: s
         parent_node_token: Optional parent node token; empty creates a top-level node.
         user_key: The sender's open_id (from ``<feishu_context>``). Pass it when the
             wiki space is owned by that user (so the bot isn't a collaborator) — the
-            node is created as that user. Empty uses the bot's tenant token. Use the
-            same user_key for the follow-up ``feishu_doc_append_content``.
+            node is created as that user. Use the same user_key for the follow-up
+            ``feishu_doc_append_content``.
+        identity: ``"user"`` / ``"bot"`` — who owns the new node (see
+            ``feishu_wiki_create_doc_with_content``).
     """
-    return _f.dumps_result(await _f.create_wiki_node_impl(space_id, title, "docx", parent_node_token, user_key))
+    return _f.dumps_result(
+        await _f.create_wiki_node_impl(space_id, title, "docx", parent_node_token, user_key, identity)
+    )
 
 
 async def feishu_wiki_create_doc_with_content(
-    space_id: str, title: str, content: str, parent_node_token: str = "", user_key: str = ""
+    space_id: str, title: str, content: str, parent_node_token: str = "", user_key: str = "", identity: str = ""
 ) -> str:
     """Create a wiki document AND write its body in ONE call (preferred over create+append).
 
@@ -118,11 +124,15 @@ async def feishu_wiki_create_doc_with_content(
         content: The body as plain text or light Markdown (``# ``..``###### `` headings,
             other non-blank lines become paragraphs). Empty content creates an empty doc.
         parent_node_token: Optional parent node token; empty creates a top-level node.
-        user_key: The sender's open_id (from ``<feishu_context>``). Pass it when the
-            wiki space is user-owned (bot isn't a collaborator); empty uses tenant token.
+        user_key: The sender's open_id (from ``<feishu_context>``). A user-owned wiki
+            space generally needs that user's identity, since the bot isn't a collaborator.
+        identity: Who owns the result: ``"user"`` (this person — needs their
+            authorization) or ``"bot"`` (the bot). Omit to use the choice remembered
+            for this ``user_key``; if they have never been asked, the tool does
+            nothing and returns ``need_identity_choice`` so you can ask them.
     """
     return _f.dumps_result(
-        await _f.create_wiki_doc_with_content_impl(space_id, title, content, parent_node_token, user_key)
+        await _f.create_wiki_doc_with_content_impl(space_id, title, content, parent_node_token, user_key, identity)
     )
 
 

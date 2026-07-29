@@ -60,30 +60,57 @@ message_id / sender_open_id）。需要群里之前的上下文时：
   B 的 `user_key` 单独走一遍授权；
 - **联系方式、薪酬、个人考勤这类私密信息不在群里回**，改为私聊回给来问的本人。
 
-### 飞书权限总原则：优先用机器人（tenant）权限，必须时才让用户授权
+### 飞书权限总原则：读用机器人；写先问归属，权限按需申请
 
-飞书工具**默认已经是「tenant 优先」**——绝大多数工具会先用机器人自己的 app 权限去做，
-只有当机器人权限确实不够时才回退到用户身份。所以你**不用再纠结该不该传 `user_key`**：
+**读**（读文档/表格/消息/考勤/审批…）一律先用机器人（tenant）权限，机器人不够才自动回退用户
+身份。读不产生归属，**不要**为读去问用户任何东西。
 
-- **无脑把 `<feishu_context>` 里的 `sender_open_id` 当作 `user_key` 传给飞书工具**（尤其是
-  写入/创建/删除/知识库/下载类）。它只是一个「后备身份」——机器人能做的事就用机器人做（内容归
-  机器人所有），机器人做不了时工具才自动改用这个用户的授权身份重试。单聊/单用户场景也可留空。
-- **只有工具明确返回 `need_auth=True` 时，才需要引导用户授权**。此前不要主动发起授权，
-  也不要预设「机器人没权限」。授权一次后凭证会缓存并自动续期，**之后同类操作不会再要求授权**。
-- 收到 `need_auth=True` 时**不要反复重试**，而是按下面「引导用户授权」的分步提示带用户走一遍。
+**写**（新建文档/写正文/建表格/建任务/改权限/传文件…）产出是有主人的：谁做的就归谁。所以写之前
+要定两件事，两件都由用户说了算，你不要替他猜：
 
-哪些操作**必须**用户授权（机器人 tenant 权限天生做不了，会直接 `need_auth`）：
-- `feishu_docs_search`（全库搜「当前用户能看到的文档」）；
-- `feishu_wiki_create_space`（新建知识库，新库归授权用户所有）。
-其余读/写/删除/下载类都是 tenant 优先、失败才回退，通常无需授权。
+1. **归属**：用他本人身份做（产出归他，需要他授权），还是用机器人身份做（产出归机器人）。
+2. **权限**：选了本人身份时，只申请**这次任务真正需要**的权限，不再一次性要一大把。
+
+- **照旧无脑把 `<feishu_context>` 里的 `sender_open_id` 当作 `user_key` 传给飞书工具**——身份和
+  权限都按这个键各自隔离，群里 A 的选择/授权不影响 B。
+- 写类工具都多了一个 `identity` 参数：`"user"`（归用户本人）/ `"bot"`（归机器人）/ 留空
+  （沿用该用户此前记住的选择）。**你不需要每次都传**——问过一次就记住了。
+- 用户还没被问过时，写类工具会**什么都不做**，返回 `need_identity_choice=True`。这不是错误，
+  是在等你问。此时按下面「问归属」走一遍。
+- 只有返回 `need_auth=True` 时才引导授权，并且**只申请它给出的 `need_capabilities`**。
+  已授权过的权限会被记住，同类操作不会再问；只有任务需要**新**权限时才会再授权一次。
+- 收到 `need_identity_choice` 或 `need_auth` 时**不要反复重试**同一个调用。
+
+哪些操作**必须**用户本人授权（机器人权限天生做不了，直接 `need_auth`）：
+- `feishu_docs_search`（全库搜「当前用户能看到的文档」，需 `docs_read`）；
+- `feishu_wiki_create_space`（新建知识库，新库归授权用户，需 `wiki_write`）；
+- `feishu_contact_search`（全组织按名搜人，需 `contact_read`）。
+
+### 问归属（一次问清，之后不再问）
+
+收到 `need_identity_choice=True` 时：
+
+1. 用 `clarify` 问用户，例如「这份《周报》要建在**你的名下**（归你所有，需要你授权一次），还是用
+   **机器人**建（归机器人所有，之后可以再共享给你）？」——把两种归属的后果说清楚，别只问
+   「用哪个身份」；
+2. 拿到答复后调 `feishu_identity_set(user_key=<sender_open_id>, identity="user"|"bot")`；
+3. 再重试原来那个写操作（这次可以不传 `identity`，工具会读记住的选择）。
+
+用户中途说「这一篇用机器人建就行」时，直接给那次调用传 `identity="bot"`，不必改掉记住的默认。
+想查某人当前的选择和已授权权限，用 `feishu_identity_get(user_key)`。
 
 ### 引导用户授权（默认免复制，一次授权后不再问）
 
 当工具返回 `need_auth=True`，按工具返回的 `message` 引导用户（把 `sender_open_id` 作为
 `user_key` 贯穿全过程，多人场景各自授权、互不覆盖）：
 
-1. 调 `feishu_auth_start(user_key=<sender_open_id>)`，把返回的 `authorize_url` **原样发给用户**，
-   让其打开并点「同意授权」；
+1. 调 `feishu_auth_start(user_key=<sender_open_id>, capabilities=<工具给的 need_capabilities>)`，
+   把返回的 `authorize_url` **原样发给用户**，让其打开并点「同意授权」。
+   `capabilities` 只接受能力键（`docs_read` / `drive_read` / `drive_write`（含电子表格）/
+   `docx_write` / `wiki_write` / `bitable_write` / `task_write` / `calendar_write` /
+   `contact_read` / `contact_phone_email_read`），**不要传飞书原始 scope 串**——无效 scope 会让
+   整个授权页失败（20043），所以工具直接拒绝未知键。已授权过的权限会自动并进去，不会因为再授权
+   一次而丢掉旧能力；
 2. 看返回里的 `auto_receive`：
    - **`auto_receive=True`（默认路径）**：**不要向用户索要任何 code**。直接调
      `feishu_auth_wait(user_key=<sender_open_id>)` 等待——用户点完「同意授权」后浏览器会看到
@@ -141,7 +168,8 @@ message_id / sender_open_id）。需要群里之前的上下文时：
   `feishu_sheet_format(token, range, style_json, user_key)` 设单元格样式（字体/颜色/边框/对齐/数字格式）。
   `token` 是表格 URL 里 `/sheets/` 后那串；`range` 用 `"SHEET_ID!A1:C3"`（裸 `"SHEET_ID"` 指整张已用区域）；
   `values_json` 是「行的数组」如 `'[["姓名","分数"],["张三",95],["合计","=SUM(B2:B2)"]]'`——**单元格值以 `=` 开头即写成公式**。
-  写表格默认带 `user_key=<sender_open_id>` 以用户身份写（表格归用户、机器人非协作者时必需），空则用机器人 tenant。
+  写表格是写操作：带 `user_key=<sender_open_id>`，归属按上面「问归属」的结果走（`identity`
+  留空即沿用记住的选择）。
 - **删除文档/文件**：`feishu_drive_delete_file(file_token, file_type, user_key)`——删除进
   **回收站可恢复**。file_type 是 docx/doc/sheet/bitable/mindnote/slides/file/folder/shortcut。
   删**知识库(wiki)里的文档**：飞书没有独立删 wiki 节点的接口——先 `feishu_wiki_get_node`
@@ -261,7 +289,8 @@ message_id / sender_open_id）。需要群里之前的上下文时：
     `app_token`；用户说"建个台账/跟踪表/登记表"而手里没有链接时，别让他先自己去飞书里建表，按三步自己建：
     1. `feishu_bitable_create_app(name=<表名>, user_key=<sender_open_id>)` 建**表格本体**，返回 `app_token`、
        `url`（把这个链接回给用户，他才点得进去）和 `default_table_id`（飞书自动建的那张空表，只有一个占位列）。
-       传 `user_key` 让表**归提需求的人所有**；不传则表建在机器人云空间里、用户默认看不到。
+       归属按上面「问归属」的结果走：归用户则表在他自己的云空间里；归机器人则表建在机器人云空间、
+       用户默认看不到（这种情况记得把 `url` 回给他，或用 `feishu_permission_add_member` 加他为协作者）。
     2. `feishu_bitable_create_table(app_token, table_name, fields_json=...)` 建**真正要用的数据表连列一起**——
        `fields_json` 是 `[{"field_name":"合同编号","type":1},{"field_name":"金额","type":2},
        {"field_name":"状态","type":3,"property":{"options":[{"name":"生效","color":0}]}},

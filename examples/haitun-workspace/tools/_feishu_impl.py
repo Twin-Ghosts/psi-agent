@@ -233,7 +233,13 @@ async def _retrying_rate_limits(send: Any) -> dict[str, Any]:
     return res
 
 
-async def _invoke(request: Any, user_key: str | None = None, prefer: str = "tenant") -> dict[str, Any]:
+async def _invoke(
+    request: Any,
+    user_key: str | None = None,
+    prefer: str = "tenant",
+    identity: str = "",
+    capabilities: list[str] | None = None,
+) -> dict[str, Any]:
     """Send a request, retrying while Feishu is rate-limiting us.
 
     Retrying here rather than at each call site means every tool gets it — inserting
@@ -245,55 +251,166 @@ async def _invoke(request: Any, user_key: str | None = None, prefer: str = "tena
     """
 
     async def send() -> dict[str, Any]:
-        return await _invoke_once(request, user_key=user_key, prefer=prefer)
+        return await _invoke_once(
+            request, user_key=user_key, prefer=prefer, identity=identity, capabilities=capabilities
+        )
 
     return await _retrying_rate_limits(send)
 
 
-async def _invoke_once(request: Any, user_key: str | None = None, prefer: str = "tenant") -> dict[str, Any]:
-    """Send a BaseRequest, preferring the bot's tenant token and only using the
-    user's ``user_access_token`` (UAT) when necessary.
+# Which capability an API path needs, matched by URI prefix (longest first, so the
+# sheets/drive overlap resolves the specific way). Derived centrally instead of being
+# named at each of the ~30 write call sites: a call site that forgets to declare its
+# capability would ask the user for the wrong permissions, and every future tool would
+# have to remember. Anything unmatched needs no *user* scope beyond the login itself.
+_URI_CAPABILITIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("/open-apis/docx/v1/", ("docx_write",)),
+    ("/open-apis/wiki/v2/", ("wiki_write",)),
+    ("/open-apis/bitable/v1/", ("bitable_write",)),
+    ("/open-apis/task/v2/", ("task_write",)),
+    ("/open-apis/calendar/v4/", ("calendar_write",)),
+    # Spreadsheets and file/permission operations are all cloud-drive writes.
+    ("/open-apis/sheets/v2/", ("drive_write",)),
+    ("/open-apis/drive/v1/permissions/", ("drive_write",)),
+    ("/open-apis/drive/v1/medias/", ("drive_write",)),
+    ("/open-apis/drive/v1/files/", ("drive_write",)),
+    ("/open-apis/contact/v3/", ("contact_read",)),
+)
+
+
+def capabilities_for(request: Any) -> list[str]:
+    """The user capabilities a request needs, inferred from its API path.
+
+    ``request`` may be a factory (as passed for retry-safe uploads); it is inspected,
+    never sent. An unrecognized path yields no capabilities, which means "a plain
+    authorization is enough" — the honest answer when we can't attribute a scope, and
+    it degrades to Feishu's own permission error rather than to a wrong prompt.
+    """
+    probe = request
+    if callable(probe):
+        with contextlib.suppress(Exception):
+            probe = probe()
+    uri = getattr(probe, "uri", "") or ""
+    if not isinstance(uri, str):
+        return []
+    for prefix, caps in sorted(_URI_CAPABILITIES, key=lambda kv: -len(kv[0])):
+        if uri.startswith(prefix):
+            return list(caps)
+    return []
+
+
+_IDENTITY_PROMPT = (
+    "这次操作会产出内容 (文档/表格/任务), 需要先定归属 -- 用**你本人的飞书身份**做, 产出就归你; "
+    "用**机器人身份**做, 产出归机器人 (你可能需要它再共享给你).\n"
+    "请问用哪个身份? 得到答复后调 feishu_identity_set 记下来, 之后不会再问."
+)
+
+
+def _identity_choice_needed(user_key: str, capabilities: list[str] | None) -> dict[str, Any]:
+    """The 'ask the user who should own this' result. Deliberately sends nothing."""
+    return _error(
+        _IDENTITY_PROMPT,
+        need_identity_choice=True,
+        user_key=user_key,
+        identity_options=list(_IDENTITY_CHOICES),
+        would_need_capabilities=list(capabilities or []),
+    )
+
+
+async def _invoke_write(request: Any, key: str, identity: str, capabilities: list[str] | None) -> dict[str, Any]:
+    """Perform an ownership-creating request under an explicitly chosen identity.
+
+    Split out of ``_invoke_once`` so the ownership rules read in one place: without a
+    user there is nobody to own anything, with a user the choice is theirs to make,
+    and a chosen identity is honoured rather than silently swapped for the other one.
+
+    The one exception is a *resource*-level denial: if Feishu refuses the user's own
+    identity on this particular document, the bot retries, because that says nothing
+    about who should own the result and refusing outright would abandon a write the
+    user asked for.
+    """
+    if not key:
+        # Nobody to attribute to and nobody to ask — the bot is the only identity.
+        return await _send_as_tenant(request)
+
+    # An explicit list wins; otherwise infer from the API path being called.
+    needed = list(capabilities) if capabilities is not None else capabilities_for(request)
+    choice = (identity or "").strip().lower() or get_identity(key)
+    if choice not in _IDENTITY_CHOICES:
+        return _identity_choice_needed(key, needed)
+
+    if choice == _IDENTITY_BOT:
+        # Explicitly the bot's: never reach for the user's token, even if cached.
+        return await _send_as_tenant(request)
+
+    missing = missing_capabilities(key, needed)
+    if missing:
+        return _error(
+            f"{_AUTH_PROMPT}\n本次需要新的权限: {', '.join(missing)}.",
+            need_auth=True,
+            need_capabilities=missing,
+        )
+    user_res = await _send_as_user(request, key)
+    if user_res is None:
+        # No usable token at all: the user chose to own this, so ask them to
+        # authorize rather than producing it under the bot's name behind their back.
+        return _error(_AUTH_PROMPT, need_auth=True, need_capabilities=needed)
+    if not _is_permission_error(user_res):
+        return user_res
+    # The user authorized the app, but Feishu refuses their identity on THIS resource
+    # (e.g. 1770032 on a block they may not edit) — a fact about the target, not about
+    # ownership. The bot can often do it, and finishing the write is what the user
+    # asked for; failing here is how captions broke while the image went in fine.
+    tenant_res = await _send_as_tenant(request)
+    if tenant_res.get("ok"):
+        return tenant_res
+    # Neither identity may touch it: report the denial itself. Re-authorizing cannot
+    # grant rights on someone else's document, so an auth prompt would be a dead end.
+    return user_res
+
+
+async def _invoke_once(
+    request: Any,
+    user_key: str | None = None,
+    prefer: str = "tenant",
+    identity: str = "",
+    capabilities: list[str] | None = None,
+) -> dict[str, Any]:
+    """Send a BaseRequest under a deliberate identity.
 
     ``request`` may be a ``BaseRequest`` or a zero-arg factory returning one. Pass a
     factory whenever the request could be sent twice (see ``_fresh``) — notably for
     uploads, whose file entry the SDK strips from the body on the first send.
 
-    ``prefer`` controls the strategy (``user_key`` is the sender's open_id, used to
-    resolve that user's cached UAT):
+    ``prefer`` selects the strategy (``user_key`` is the sender's open_id, used to
+    resolve that user's cached UAT and remembered choices):
 
-    - ``"tenant"`` (default, read-oriented): try tenant first; if it fails with a
-      *permission* error and the user has a cached UAT, transparently retry as the
-      user. The user is only asked to authorize when tenant is denied AND no UAT
-      exists. Passing ``user_key`` here is harmless — it's just a fallback identity.
-    - ``"user"`` (write/create-oriented): if the user has a cached UAT, act as that
-      user so the created content is owned by them; otherwise fall back to the
-      tenant token so the bot can still do it without forcing authorization. A UAT
-      that is *permission-denied* also falls back to tenant — the user having
-      authorized the app says nothing about whether they can edit this particular
-      document, and the bot often can. ``need_auth`` is returned only when neither
-      identity is allowed.
+    - ``"tenant"`` (reads): try tenant first; if it fails with a *permission* error
+      and the user has a cached UAT, transparently retry as the user. Reads create
+      nothing, so nobody is asked to choose an owner — only to authorize, and only
+      when tenant is genuinely denied. Passing ``user_key`` here is harmless.
+    - ``"user"`` (writes/creates): the result is *owned* by whoever performs it, so
+      the owner is chosen explicitly rather than inferred from who happens to have a
+      cached token. ``identity`` decides:
 
-    ``user_key`` empty/None means "no user identity available" — tenant only.
+      * ``"user"`` — act as the user; if their grant doesn't cover ``capabilities``
+        (or they have no token), return ``need_auth`` with the missing capabilities
+        instead of quietly producing bot-owned content under a different owner than
+        the one just chosen.
+      * ``"bot"`` — tenant token only, never the UAT. Content is owned by the bot.
+      * ``""`` — fall back to this user's remembered choice; if they have never been
+        asked, send nothing and return ``need_identity_choice`` so the caller asks.
+        Ownership is not a detail to guess on someone's behalf.
+
+    ``user_key`` empty/None means there is no user to own anything or to ask —
+    tenant only, and no ownership question.
     """
     key = user_key.strip() if user_key else ""
     # Both branches below can send twice; make the request survive the first send.
     request = _restorable(request)
 
     if prefer == "user":
-        user_res = await _send_as_user(request, key) if key else None
-        if user_res is not None and not _is_permission_error(user_res):
-            return user_res
-        # Either no usable UAT, or the UAT is not allowed here — let the bot try.
-        tenant_res = await _send_as_tenant(request)
-        if tenant_res.get("ok"):
-            return tenant_res
-        if key and _is_permission_error(tenant_res):
-            # Neither identity may write here: re-authorizing wouldn't help, so report
-            # the denial itself rather than sending the user through the auth flow.
-            if user_res is not None:
-                return user_res
-            return _error(_AUTH_PROMPT, need_auth=True)
-        return tenant_res
+        return await _invoke_write(request, key, identity, capabilities)
 
     # prefer == "tenant": tenant first, UAT retry only on permission failure.
     tenant_res = await _send_as_tenant(request)
@@ -305,7 +422,10 @@ async def _invoke_once(request: Any, user_key: str | None = None, prefer: str = 
     user_res = await _send_as_user(request, key)
     if user_res is not None:
         return user_res
-    return _error(_AUTH_PROMPT, need_auth=True)
+    # Tenant is denied and this user has no token: name the capability the read needs
+    # so the authorize page asks for that rather than a blanket set.
+    needed = list(capabilities) if capabilities is not None else capabilities_for(request)
+    return _error(_AUTH_PROMPT, need_auth=True, need_capabilities=needed)
 
 
 async def _invoke_wiki_read(request: Any, user_key: str | None, is_empty: Any) -> dict[str, Any]:
@@ -383,9 +503,15 @@ def _resp_to_result(resp: Any) -> dict[str, Any]:
     return {"ok": True, "code": 0, "msg": msg, "data": data}
 
 
-async def add_comment_impl(file_token: str, file_type: str, content: str, user_key: str = "") -> dict[str, Any]:
+async def add_comment_impl(
+    file_token: str,
+    file_type: str,
+    content: str,
+    user_key: str = "",
+    identity: str = "",
+) -> dict[str, Any]:
     req = _comment.build_comment_create_request(file_token=file_token, file_type=file_type, content=content)
-    return await _invoke(req, user_key=user_key, prefer="user")
+    return await _invoke(req, user_key=user_key, prefer="user", identity=identity)
 
 
 async def list_comments_impl(file_token: str, file_type: str, page_size: int, page_token: str) -> dict[str, Any]:
@@ -431,7 +557,13 @@ def _build_reply_create_request(
 
 
 async def reply_comment_impl(
-    file_token: str, file_type: str, comment_id: str, content: str, at_user_id: str, user_key: str = ""
+    file_token: str,
+    file_type: str,
+    comment_id: str,
+    content: str,
+    at_user_id: str,
+    user_key: str = "",
+    identity: str = "",
 ) -> dict[str, Any]:
     req = _build_reply_create_request(
         file_token=file_token,
@@ -440,7 +572,7 @@ async def reply_comment_impl(
         content=content,
         at_user_id=at_user_id,
     )
-    return await _invoke(req, user_key=user_key, prefer="user")
+    return await _invoke(req, user_key=user_key, prefer="user", identity=identity)
 
 
 def _raw_get(uri: str, path_name: str, path_value: str) -> BaseRequest:
@@ -696,7 +828,13 @@ def _parse_values_json(values_json: str) -> tuple[list[list[Any]] | None, str | 
     return values, None
 
 
-async def write_sheet_impl(token: str, range_: str, values_json: str, user_key: str = "") -> dict[str, Any]:
+async def write_sheet_impl(
+    token: str,
+    range_: str,
+    values_json: str,
+    user_key: str = "",
+    identity: str = "",
+) -> dict[str, Any]:
     """Overwrite the given range of a spreadsheet with a grid of values/formulas."""
     if not token.strip():
         return _error("token (spreadsheet_token) is required.")
@@ -706,13 +844,21 @@ async def write_sheet_impl(token: str, range_: str, values_json: str, user_key: 
     if err or values is None:
         return _error(err or "values_json produced no rows.")
     res = await _invoke(
-        _build_sheet_write_request(token.strip(), range_.strip(), values), user_key=user_key, prefer="user"
+        _build_sheet_write_request(token.strip(), range_.strip(), values),
+        user_key=user_key,
+        prefer="user",
+        identity=identity,
     )
     return _sheet_result(res)
 
 
 async def append_sheet_impl(
-    token: str, range_: str, values_json: str, insert_data_option: str = "OVERWRITE", user_key: str = ""
+    token: str,
+    range_: str,
+    values_json: str,
+    insert_data_option: str = "OVERWRITE",
+    user_key: str = "",
+    identity: str = "",
 ) -> dict[str, Any]:
     """Append rows after the last used row of the given range."""
     if not token.strip():
@@ -726,12 +872,21 @@ async def append_sheet_impl(
     if err or values is None:
         return _error(err or "values_json produced no rows.")
     res = await _invoke(
-        _build_sheet_append_request(token.strip(), range_.strip(), values, option), user_key=user_key, prefer="user"
+        _build_sheet_append_request(token.strip(), range_.strip(), values, option),
+        user_key=user_key,
+        prefer="user",
+        identity=identity,
     )
     return _sheet_result(res)
 
 
-async def format_sheet_impl(token: str, range_: str, style_json: str, user_key: str = "") -> dict[str, Any]:
+async def format_sheet_impl(
+    token: str,
+    range_: str,
+    style_json: str,
+    user_key: str = "",
+    identity: str = "",
+) -> dict[str, Any]:
     """Apply a cell style (font/color/border/alignment/number-format) to a range."""
     if not token.strip():
         return _error("token (spreadsheet_token) is required.")
@@ -744,7 +899,10 @@ async def format_sheet_impl(token: str, range_: str, style_json: str, user_key: 
     if not isinstance(style, dict) or not style:
         return _error("style_json must be a non-empty JSON object of style fields.")
     res = await _invoke(
-        _build_sheet_style_request(token.strip(), range_.strip(), style), user_key=user_key, prefer="user"
+        _build_sheet_style_request(token.strip(), range_.strip(), style),
+        user_key=user_key,
+        prefer="user",
+        identity=identity,
     )
     return _sheet_result(res)
 
@@ -1942,14 +2100,82 @@ async def start_topic_impl(
 _UAT_USER_KEY = "default"  # fallback key when a caller does not pass user_key
 _token_store: Any = None
 _uat_client: Any = None
-_DEFAULT_SCOPES = (
-    "docs:doc:readonly drive:drive:readonly "
-    # write scopes: create/edit docx bodies and create/manage wiki nodes so the
-    # user-token path (create doc, append blocks, create wiki node) is not
-    # limited to read-only. docx:document covers both creating and editing docs.
-    "docx:document wiki:wiki "
-    "offline_access"
-)
+
+# ── Capability-keyed OAuth scopes ────────────────────────────────────────────
+#
+# Ask the user for the permissions the task actually needs, instead of one fixed
+# blanket set. But scopes can't be free text: a scope Feishu doesn't recognize
+# makes it reject the whole authorize page (error 20043), so an LLM inventing
+# "docx:write" would break authorization outright rather than degrade. Callers
+# therefore name CAPABILITIES from this catalog and the real scope strings stay
+# here, where they can be verified against Feishu's console.
+#
+# Every scope string below is one this project has already used against the live
+# Feishu console. Adding a capability means verifying its scope there first —
+# guessing a plausible-looking name here is what produces error 20043.
+_SCOPE_CATALOG: dict[str, tuple[str, ...]] = {
+    "docs_read": ("docs:doc:readonly",),
+    "drive_read": ("drive:drive:readonly",),
+    # Cloud-drive write: creating/deleting files and writing spreadsheets both go
+    # through the drive, so sheet writing needs no separate capability.
+    "drive_write": ("drive:drive",),
+    "docx_write": ("docx:document",),  # covers both creating and editing docs
+    "wiki_write": ("wiki:wiki",),
+    "bitable_write": ("bitable:app",),
+    "task_write": ("task:task:write",),
+    "calendar_write": ("calendar:calendar",),
+    "contact_read": ("contact:contact.base:readonly",),
+    # Phone/email are separately gated: without these the contact tools still
+    # succeed but return those fields empty, so ask for them only when needed.
+    "contact_phone_email_read": (
+        "contact:contact.base:readonly",
+        "contact:user.phone:readonly",
+        "contact:user.email:readonly",
+    ),
+}
+# Granted alongside every request so a token can be refreshed instead of
+# re-authorized; never itself a capability the caller has to ask for.
+_OFFLINE_SCOPE = "offline_access"
+# What a caller gets when it names no capabilities: the read-only docs/drive pair
+# plus docx/wiki writing — the set this tool granted unconditionally before
+# capabilities existed, so an un-updated caller keeps working.
+_DEFAULT_CAPABILITIES = ("docs_read", "drive_read", "docx_write", "wiki_write")
+
+
+def scope_catalog_keys() -> list[str]:
+    """The capability keys a caller may ask to be authorized for."""
+    return sorted(_SCOPE_CATALOG)
+
+
+def _parse_capabilities(capabilities: str) -> tuple[list[str], str]:
+    """Split a comma/space-separated capability list into (keys, error).
+
+    Unknown keys are refused *before* the authorize URL is built — sending them to
+    Feishu would fail the whole page with error 20043, which reads to the user as
+    "authorization is broken" rather than "that capability doesn't exist".
+    """
+    raw = [c.strip() for c in re.split(r"[,\s]+", capabilities or "") if c.strip()]
+    if not raw:
+        return list(_DEFAULT_CAPABILITIES), ""
+    unknown = [c for c in raw if c not in _SCOPE_CATALOG]
+    if unknown:
+        return [], (
+            f"未知的权限能力键: {', '.join(unknown)}. 只能用这些: {', '.join(scope_catalog_keys())}. "
+            "(不要直接传飞书原始 scope 串 — 无效 scope 会让整个授权页失败.)"
+        )
+    # Preserve caller order but drop duplicates.
+    return list(dict.fromkeys(raw)), ""
+
+
+def _scope_string(capabilities: list[str]) -> str:
+    """The OAuth ``scope`` value granting ``capabilities`` (plus refresh).
+
+    Capabilities can share a scope (the contact ones both need the base scope), so
+    the flattened list is de-duplicated — a repeated scope is not an error, but it
+    makes the consent screen list the same permission twice.
+    """
+    scopes = [s for c in capabilities if c in _SCOPE_CATALOG for s in _SCOPE_CATALOG[c]]
+    return " ".join([*dict.fromkeys(scopes), _OFFLINE_SCOPE])
 
 
 def _norm_user_key(user_key: str = "") -> str:
@@ -1967,6 +2193,89 @@ def _uat_store_path() -> str:
     d = base / ".psi" / "feishu"
     d.mkdir(parents=True, exist_ok=True)
     return str(d / "uat.json")
+
+
+def _granted_scopes_path() -> str:
+    return str(pathlib.Path(_uat_store_path()).parent / "granted_scopes.json")
+
+
+def _identity_path() -> str:
+    return str(pathlib.Path(_uat_store_path()).parent / "identity.json")
+
+
+def _read_json_map(path: str) -> dict[str, Any]:
+    """Read a ``{user_key: value}`` JSON map; unreadable/corrupt reads as empty.
+
+    A damaged file must not break the tools: losing the record means the user gets
+    asked again, which is recoverable, whereas raising here would block every write.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except OSError, ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_json_map(path: str, data: dict[str, Any]) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=2)
+
+
+def granted_capabilities(user_key: str = "") -> list[str]:
+    """Capabilities ``user_key`` has already authorized, in catalog order.
+
+    Tracked here rather than read back from ``UAT.scopes`` because a token refresh
+    response need not echo ``scope`` — trusting the token would make previously
+    granted permissions look revoked and re-prompt the user.
+    """
+    stored = _read_json_map(_granted_scopes_path()).get(_norm_user_key(user_key))
+    if not isinstance(stored, list):
+        return []
+    return [c for c in scope_catalog_keys() if c in stored]
+
+
+def _record_granted_capabilities(user_key: str, capabilities: list[str]) -> None:
+    """Add ``capabilities`` to what ``user_key`` has authorized (union, never shrink)."""
+    path = _granted_scopes_path()
+    data = _read_json_map(path)
+    key = _norm_user_key(user_key)
+    stored = data.get(key)
+    existing = stored if isinstance(stored, list) else []
+    merged = {c for c in [*existing, *capabilities] if c in _SCOPE_CATALOG}
+    data[key] = [c for c in scope_catalog_keys() if c in merged]
+    with contextlib.suppress(OSError):
+        _write_json_map(path, data)
+
+
+def missing_capabilities(user_key: str, needed: list[str]) -> list[str]:
+    """Which of ``needed`` this user has not authorized yet."""
+    have = set(granted_capabilities(user_key))
+    return [c for c in needed if c in _SCOPE_CATALOG and c not in have]
+
+
+_IDENTITY_USER = "user"
+_IDENTITY_BOT = "bot"
+_IDENTITY_CHOICES = (_IDENTITY_USER, _IDENTITY_BOT)
+
+
+def get_identity(user_key: str = "") -> str:
+    """This user's remembered ownership choice (``user``/``bot``), or "" if unasked."""
+    stored = _read_json_map(_identity_path()).get(_norm_user_key(user_key))
+    return stored if stored in _IDENTITY_CHOICES else ""
+
+
+def set_identity(user_key: str, identity: str) -> str:
+    """Remember this user's ownership choice. Returns "" or an error message."""
+    choice = (identity or "").strip().lower()
+    if choice not in _IDENTITY_CHOICES:
+        return f"identity must be one of {', '.join(_IDENTITY_CHOICES)} (got {identity!r})."
+    path = _identity_path()
+    data = _read_json_map(path)
+    data[_norm_user_key(user_key)] = choice
+    with contextlib.suppress(OSError):
+        _write_json_map(path, data)
+    return ""
 
 
 def _pending_auth_path(user_key: str = "") -> str:
@@ -2092,21 +2401,31 @@ def _uat_from_token_response(payload: dict[str, Any]) -> Any:
     )
 
 
-async def auth_start_impl(scopes: str = "", user_key: str = "") -> dict[str, Any]:
-    """Build the browser authorize URL, and pick an automatic code-receiving channel.
+async def auth_start_impl(capabilities: str = "", user_key: str = "") -> dict[str, Any]:
+    """Build the browser authorize URL, asking only for the capabilities needed, and
+    pick an automatic code-receiving channel.
 
     授权码流程真正折磨人的是「同意之后还要自己从地址栏复制 code」。这里按环境选一条
     自动接收通道 (Gateway 回调 → 本机回环 → 都不行才手工), 把 ``state`` / PKCE
     verifier / 通道信息一并写进 pending 文件, 供 ``auth_wait_impl`` 与
     ``auth_complete_impl`` 取用。
+
+    The requested scope is the UNION of what this user already granted and what
+    ``capabilities`` asks for: Feishu issues a token carrying exactly the scopes of
+    the latest grant, so asking for only the new capability would silently revoke
+    the ones already working.
     """
     creds = _config()
     if creds is None:
         return _error("Feishu app not configured. Set PSI_FEISHU_APP_ID / PSI_FEISHU_APP_SECRET.")
+    requested, err = _parse_capabilities(capabilities)
+    if err:
+        return _error(err, capability_keys=scope_catalog_keys())
     from urllib.parse import urlencode  # noqa: PLC0415
 
     app_id, _ = creds
-    scope_str = scopes or _DEFAULT_SCOPES
+    already = granted_capabilities(user_key)
+    union = [c for c in scope_catalog_keys() if c in {*already, *requested}]
     state = os.urandom(24).hex()
     verifier, challenge = _new_pkce_pair()
     plan = _oauth_rx.plan_receiver(_explicit_redirect_uri())
@@ -2117,6 +2436,7 @@ async def auth_start_impl(scopes: str = "", user_key: str = "") -> dict[str, Any
                 "code_verifier": verifier,
                 "redirect_uri": plan.redirect_uri,
                 "mode": plan.mode,
+                "capabilities": union,
             }
         ),
         encoding="utf-8",
@@ -2126,7 +2446,7 @@ async def auth_start_impl(scopes: str = "", user_key: str = "") -> dict[str, Any
             "client_id": app_id,
             "redirect_uri": plan.redirect_uri,
             "response_type": "code",
-            "scope": scope_str,
+            "scope": _scope_string(union),
             "state": state,
             "code_challenge": challenge,
             "code_challenge_method": "S256",
@@ -2140,11 +2460,14 @@ async def auth_start_impl(scopes: str = "", user_key: str = "") -> dict[str, Any
             "auto_receive": True,
             "mode": plan.mode,
             "redirect_uri": plan.redirect_uri,
+            "capabilities": union,
+            "newly_requested": [c for c in requested if c not in already],
+            "already_granted": already,
             "message": (
-                "请把 authorize_url 发给用户, 让其打开并点「同意授权」-- **不用复制任何 code**, "
-                "授权码会自动回流.\n"
+                f"请把 authorize_url 发给用户 (本次申请的权限: {', '.join(union)}), "
+                "让其打开并点「同意授权」-- **不用复制任何 code**, 授权码会自动回流.\n"
                 "发完链接后立刻调 feishu_auth_wait (同一个 user_key) 等待用户点完, 它会自己完成授权.\n"
-                "授权一次即缓存并自动续期, 之后同类操作不会再让你授权."
+                "授权一次即缓存并自动续期; 只有当以后的任务需要**新的**权限时才会再请你授权一次."
             ),
             "next_step": "feishu_auth_wait",
         }
@@ -2154,14 +2477,17 @@ async def auth_start_impl(scopes: str = "", user_key: str = "") -> dict[str, Any
         "auto_receive": False,
         "mode": plan.mode,
         "redirect_uri": plan.redirect_uri,
+        "capabilities": union,
+        "newly_requested": [c for c in requested if c not in already],
+        "already_granted": already,
         "message": (
-            "请按以下步骤完成一次性授权 (只读文档/云盘):\n"
+            f"请按以下步骤完成授权 (本次申请的权限: {', '.join(union)}):\n"
             "1. 打开下面的 authorize_url, 在飞书页面点「同意授权」;\n"
             "2. 同意后浏览器会自动跳转到一个新网址, **看浏览器地址栏** -- 它形如 "
             "`http://localhost/?code=xxxxxxxx&state=...`, 把 `code=` 后面, `&` 之前的那一串复制下来 "
             "(复制整段网址也行, 工具会自动提取);\n"
             "3. 把它作为 code 交给 feishu_auth_complete.\n"
-            "授权一次即缓存并自动续期, 之后同类操作不会再让你授权.\n"
+            "授权一次即缓存并自动续期; 只有当以后的任务需要**新的**权限时才会再请你授权一次.\n"
             "(想免掉第 2 步的复制: 给 Gateway 配 PSI_OAUTH_CALLBACK_BASE, 或让 PSI_FEISHU_REDIRECT_URI "
             "指向本机回环端口并在飞书后台登记.)"
         ),
@@ -2216,6 +2542,58 @@ async def auth_wait_impl(user_key: str = "", timeout_seconds: int = 180) -> dict
     return await auth_complete_impl(got.get("code", ""), user_key)
 
 
+async def identity_set_impl(user_key: str, identity: str) -> dict[str, Any]:
+    """Record who owns what this user creates: themselves, or the bot."""
+    err = set_identity(user_key, identity)
+    if err:
+        return _error(err, identity_options=list(_IDENTITY_CHOICES))
+    choice = get_identity(user_key)
+    owner = "你本人 (产出归你)" if choice == _IDENTITY_USER else "机器人 (产出归机器人)"
+    missing = missing_capabilities(user_key, list(_DEFAULT_CAPABILITIES)) if choice == _IDENTITY_USER else []
+    return {
+        "ok": True,
+        "identity": choice,
+        "capabilities": granted_capabilities(user_key),
+        "message": (
+            f"已记住: 之后飞书写入操作用{owner}. 需要改的时候再调一次这个工具即可."
+            + ("\n注意: 用你本人身份需要授权, 首次写入时会请你授权一次." if missing else "")
+        ),
+    }
+
+
+async def identity_get_impl(user_key: str = "") -> dict[str, Any]:
+    """Report this user's remembered ownership choice and granted capabilities."""
+    choice = get_identity(user_key)
+    return {
+        "ok": True,
+        "identity": choice,
+        "asked": bool(choice),
+        "capabilities": granted_capabilities(user_key),
+        "capability_keys": scope_catalog_keys(),
+        "message": (
+            f"该用户的写入身份: {choice}."
+            if choice
+            else (
+                "该用户还没被问过写入身份 -- 首次写入操作会返回 need_identity_choice, 那时问他并调 feishu_identity_set."
+            )
+        ),
+    }
+
+
+async def _pending_capabilities(user_key: str = "") -> list[str]:
+    """Capabilities the matching ``auth_start_impl`` asked for.
+
+    Falls back to the default set when the pending file is missing or predates this
+    field — an old pending authorization still grants *something*, and recording the
+    conservative default is better than recording nothing (which would re-prompt).
+    """
+    parked = await _read_pending(user_key)
+    caps = parked.get("capabilities")
+    if not isinstance(caps, list):
+        return list(_DEFAULT_CAPABILITIES)
+    return [c for c in caps if c in _SCOPE_CATALOG]
+
+
 async def auth_complete_impl(code: str, user_key: str = "") -> dict[str, Any]:
     """Exchange the authorization code for a user_access_token and cache it."""
     if not code.strip():
@@ -2246,13 +2624,21 @@ async def auth_complete_impl(code: str, user_key: str = "") -> dict[str, Any]:
     if not uat.access_token:
         return _error("Token exchange returned no access_token.")
     await _get_token_store().set(_norm_user_key(user_key), uat)
+    # Which capabilities this grant covers was decided in auth_start_impl and parked
+    # in the pending-auth file; read it back before unlinking so the union survives.
+    granted = await _pending_capabilities(user_key)
+    _record_granted_capabilities(user_key, granted)
     with contextlib.suppress(OSError):
         await anyio.Path(_pending_auth_path(user_key)).unlink()
     return {
         "ok": True,
         "open_id": uat.open_id or "",
         "scopes": uat.scopes,
-        "message": "授权成功, 已缓存 user_access_token 并会自动续期 -- 之后同类操作不会再让你授权.",
+        "capabilities": granted_capabilities(user_key),
+        "message": (
+            "授权成功, 已缓存 user_access_token 并会自动续期 -- 已获得的权限会被记住, "
+            "之后同类操作不会再让你授权 (只有需要新权限时才会再问一次)."
+        ),
     }
 
 
@@ -2300,7 +2686,7 @@ async def search_docs_impl(
         return _error("Feishu app not configured. Set PSI_FEISHU_APP_ID / PSI_FEISHU_APP_SECRET.")
     uat = await _get_valid_uat(user_key)
     if uat is None or not uat.access_token:
-        return _error(_AUTH_PROMPT, need_auth=True)
+        return _error(_AUTH_PROMPT, need_auth=True, need_capabilities=["docs_read"])
 
     types_list = [t.strip() for t in docs_types.split(",") if t.strip()]
     req = _build_doc_search_request(search_key, count, offset, types_list)
@@ -2368,7 +2754,7 @@ async def create_wiki_space_impl(
         return _error("Feishu app not configured. Set PSI_FEISHU_APP_ID / PSI_FEISHU_APP_SECRET.")
     uat = await _get_valid_uat(user_key)
     if uat is None or not uat.access_token:
-        return _error(_AUTH_PROMPT, need_auth=True)
+        return _error(_AUTH_PROMPT, need_auth=True, need_capabilities=["wiki_write"])
 
     sharing = open_sharing.strip()
     if sharing and sharing not in ("open", "closed"):
@@ -2517,7 +2903,7 @@ def _build_create_record_request(app_token: str, table_id: str, fields: dict[str
 
 
 async def create_bitable_record_impl(
-    app_token: str, table_id: str, fields_json: str, user_key: str = ""
+    app_token: str, table_id: str, fields_json: str, user_key: str = "", identity: str = ""
 ) -> dict[str, Any]:
     """Create one record in a bitable table. fields_json is a JSON object of {column: value}."""
     try:
@@ -2526,7 +2912,9 @@ async def create_bitable_record_impl(
         return _error(f"fields_json is not valid JSON: {exc}")
     if not isinstance(fields, dict):
         return _error("fields_json must be a JSON object mapping column names to values.")
-    res = await _invoke(_build_create_record_request(app_token, table_id, fields), user_key=user_key, prefer="user")
+    res = await _invoke(
+        _build_create_record_request(app_token, table_id, fields), user_key=user_key, prefer="user", identity=identity
+    )
     if not res["ok"]:
         return res
     data = res["data"] if isinstance(res["data"], dict) else {}
@@ -2546,7 +2934,7 @@ def _build_batch_delete_records_request(app_token: str, table_id: str, record_id
 
 
 async def delete_bitable_records_impl(
-    app_token: str, table_id: str, record_ids: str, user_key: str = ""
+    app_token: str, table_id: str, record_ids: str, user_key: str = "", identity: str = ""
 ) -> dict[str, Any]:
     """Delete records (rows) by id. record_ids is comma-separated; batches of 500."""
     ids = [r.strip() for r in record_ids.split(",") if r.strip()]
@@ -2556,7 +2944,10 @@ async def delete_bitable_records_impl(
     for i in range(0, len(ids), 500):
         batch = ids[i : i + 500]
         res = await _invoke(
-            _build_batch_delete_records_request(app_token, table_id, batch), user_key=user_key, prefer="user"
+            _build_batch_delete_records_request(app_token, table_id, batch),
+            user_key=user_key,
+            prefer="user",
+            identity=identity,
         )
         if not res["ok"]:
             return {**res, "deleted": deleted}
@@ -2564,7 +2955,12 @@ async def delete_bitable_records_impl(
     return {"ok": True, "deleted": deleted, "record_ids": ids}
 
 
-async def clear_bitable_table_impl(app_token: str, table_id: str, user_key: str = "") -> dict[str, Any]:
+async def clear_bitable_table_impl(
+    app_token: str,
+    table_id: str,
+    user_key: str = "",
+    identity: str = "",
+) -> dict[str, Any]:
     """Delete ALL records (rows) in a table — pages through every record, then batch-deletes."""
     ids: list[str] = []
     page_token = ""
@@ -2588,7 +2984,10 @@ async def clear_bitable_table_impl(app_token: str, table_id: str, user_key: str 
     for i in range(0, len(ids), 500):
         batch = ids[i : i + 500]
         res = await _invoke(
-            _build_batch_delete_records_request(app_token, table_id, batch), user_key=user_key, prefer="user"
+            _build_batch_delete_records_request(app_token, table_id, batch),
+            user_key=user_key,
+            prefer="user",
+            identity=identity,
         )
         if not res["ok"]:
             return {**res, "deleted": deleted}
@@ -2670,7 +3069,7 @@ def _build_delete_field_request(app_token: str, table_id: str, field_id: str) ->
 
 
 async def delete_bitable_fields_impl(
-    app_token: str, table_id: str, field_ids: str, user_key: str = ""
+    app_token: str, table_id: str, field_ids: str, user_key: str = "", identity: str = ""
 ) -> dict[str, Any]:
     """Delete fields (columns) by id. field_ids is comma-separated. Primary field cannot be deleted."""
     ids = [f.strip() for f in field_ids.split(",") if f.strip()]
@@ -2678,7 +3077,9 @@ async def delete_bitable_fields_impl(
         return _error("No field_ids provided (comma-separated field ids from feishu_bitable_list_fields).")
     deleted: list[str] = []
     for fid in ids:
-        res = await _invoke(_build_delete_field_request(app_token, table_id, fid), user_key=user_key, prefer="user")
+        res = await _invoke(
+            _build_delete_field_request(app_token, table_id, fid), user_key=user_key, prefer="user", identity=identity
+        )
         if not res["ok"]:
             return {**res, "deleted": deleted, "failed_field_id": fid}
         deleted.append(fid)
@@ -2721,13 +3122,14 @@ def _build_create_bitable_app_request(name: str, folder_token: str, time_zone: s
 
 
 async def create_bitable_app_impl(
-    name: str, folder_token: str = "", time_zone: str = "", user_key: str = ""
+    name: str, folder_token: str = "", time_zone: str = "", user_key: str = "", identity: str = ""
 ) -> dict[str, Any]:
     """Create a new bitable (多维表格). Returns its app_token, url and default_table_id."""
     res = await _invoke(
         _build_create_bitable_app_request(name.strip(), folder_token.strip(), time_zone.strip()),
         user_key=user_key,
         prefer="user",
+        identity=identity,
     )
     if not res["ok"]:
         return res
@@ -2784,6 +3186,7 @@ async def create_bitable_table_impl(
     fields_json: str = "",
     default_view_name: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> dict[str, Any]:
     """Create a data table in a bitable. fields_json is a JSON array of field objects."""
     if not app_token.strip():
@@ -2805,7 +3208,9 @@ async def create_bitable_table_impl(
             # Feishu rejects default_view_name on its own; say so instead of failing upstream.
             return _error("default_view_name requires fields_json (Feishu only accepts the two together).")
         table["default_view_name"] = default_view_name.strip()
-    res = await _invoke(_build_create_table_request(app_token.strip(), table), user_key=user_key, prefer="user")
+    res = await _invoke(
+        _build_create_table_request(app_token.strip(), table), user_key=user_key, prefer="user", identity=identity
+    )
     if not res["ok"]:
         return res
     data = res["data"] if isinstance(res["data"], dict) else {}
@@ -2838,6 +3243,7 @@ async def create_bitable_field_impl(
     property_json: str = "",
     ui_type: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> dict[str, Any]:
     """Add one field (column) to an existing table. property_json holds type-specific settings."""
     if not app_token.strip():
@@ -2859,7 +3265,10 @@ async def create_bitable_field_impl(
     if ui_type.strip():
         field["ui_type"] = ui_type.strip()
     res = await _invoke(
-        _build_create_field_request(app_token.strip(), table_id.strip(), field), user_key=user_key, prefer="user"
+        _build_create_field_request(app_token.strip(), table_id.strip(), field),
+        user_key=user_key,
+        prefer="user",
+        identity=identity,
     )
     if not res["ok"]:
         return res
@@ -3168,7 +3577,7 @@ def _build_create_task_request(body: dict[str, Any]) -> BaseRequest:
 
 
 async def create_task_impl(
-    summary: str, description: str, due: str, assignees: str, followers: str, user_key: str = ""
+    summary: str, description: str, due: str, assignees: str, followers: str, user_key: str = "", identity: str = ""
 ) -> dict[str, Any]:
     """Create a task, optionally with a due date and assignee/follower open_ids."""
     if not summary.strip():
@@ -3190,7 +3599,7 @@ async def create_task_impl(
         body["due"] = {"timestamp": due_ms, "is_all_day": False}
     if members:
         body["members"] = members
-    res = await _invoke(_build_create_task_request(body), user_key=user_key, prefer="user")
+    res = await _invoke(_build_create_task_request(body), user_key=user_key, prefer="user", identity=identity)
     if not res["ok"]:
         return res
     data = res["data"] if isinstance(res["data"], dict) else {}
@@ -3255,7 +3664,7 @@ def _build_patch_task_request(task_guid: str, task_fields: dict[str, Any], updat
 
 
 async def update_task_impl(
-    task_guid: str, summary: str, description: str, due: str, user_key: str = ""
+    task_guid: str, summary: str, description: str, due: str, user_key: str = "", identity: str = ""
 ) -> dict[str, Any]:
     """Update only the provided (non-empty) fields of a task."""
     task_fields: dict[str, Any] = {}
@@ -3273,20 +3682,26 @@ async def update_task_impl(
     if not update_fields:
         return _error("Nothing to update: provide summary, description, or due.")
     res = await _invoke(
-        _build_patch_task_request(task_guid, task_fields, update_fields), user_key=user_key, prefer="user"
+        _build_patch_task_request(task_guid, task_fields, update_fields),
+        user_key=user_key,
+        prefer="user",
+        identity=identity,
     )
     if not res["ok"]:
         return res
     return {"ok": True, "task_guid": task_guid, "updated": update_fields}
 
 
-async def complete_task_impl(task_guid: str, completed: bool, user_key: str = "") -> dict[str, Any]:
+async def complete_task_impl(task_guid: str, completed: bool, user_key: str = "", identity: str = "") -> dict[str, Any]:
     """Mark a task complete (completed=True) or reopen it (False)."""
     import time  # noqa: PLC0415
 
     ts = str(int(time.time() * 1000)) if completed else "0"
     res = await _invoke(
-        _build_patch_task_request(task_guid, {"completed_at": ts}, ["completed_at"]), user_key=user_key, prefer="user"
+        _build_patch_task_request(task_guid, {"completed_at": ts}, ["completed_at"]),
+        user_key=user_key,
+        prefer="user",
+        identity=identity,
     )
     if not res["ok"]:
         return res
@@ -3810,7 +4225,7 @@ async def search_users_impl(
         return _error("Feishu app not configured. Set PSI_FEISHU_APP_ID / PSI_FEISHU_APP_SECRET.")
     uat = await _get_valid_uat(user_key)
     if uat is None or not uat.access_token:
-        return _error(_AUTH_PROMPT, need_auth=True)
+        return _error(_AUTH_PROMPT, need_auth=True, need_capabilities=["contact_read"])
 
     req = _build_search_user_request(query, page_size, page_token)
     from lark_channel.core.model import RequestOption  # noqa: PLC0415
@@ -4087,7 +4502,7 @@ def _build_delete_file_request(file_token: str, file_type: str) -> BaseRequest:
     return req
 
 
-async def delete_file_impl(file_token: str, file_type: str, user_key: str = "") -> dict[str, Any]:
+async def delete_file_impl(file_token: str, file_type: str, user_key: str = "", identity: str = "") -> dict[str, Any]:
     """Delete a cloud file/document (moves it to the recycle bin — recoverable).
 
     Pass ``user_key`` to delete as that user (required when the file/wiki is owned by
@@ -4099,7 +4514,7 @@ async def delete_file_impl(file_token: str, file_type: str, user_key: str = "") 
     ftype = file_type.strip()
     if ftype not in _DELETABLE_FILE_TYPES:
         return _error(f"file_type must be one of {sorted(_DELETABLE_FILE_TYPES)}, got {ftype!r}.")
-    res = await _invoke(_build_delete_file_request(token, ftype), user_key=user_key, prefer="user")
+    res = await _invoke(_build_delete_file_request(token, ftype), user_key=user_key, prefer="user", identity=identity)
     if not res["ok"]:
         return res
     data = res["data"] if isinstance(res["data"], dict) else {}
@@ -4135,13 +4550,21 @@ def _build_docx_create_request(title: str, folder_token: str) -> BaseRequest:
     return req
 
 
-async def create_docx_impl(title: str, folder_token: str = "", user_key: str = "") -> dict[str, Any]:
+async def create_docx_impl(
+    title: str,
+    folder_token: str = "",
+    user_key: str = "",
+    identity: str = "",
+) -> dict[str, Any]:
     """Create a new standalone docx cloud document. Returns its document_id + URL.
 
     Pass ``user_key`` to create as that user (doc owned by them); empty uses tenant token.
     """
     res = await _invoke(
-        _build_docx_create_request(title.strip(), folder_token.strip()), user_key=user_key, prefer="user"
+        _build_docx_create_request(title.strip(), folder_token.strip()),
+        user_key=user_key,
+        prefer="user",
+        identity=identity,
     )
     if not res["ok"]:
         return res
@@ -4175,7 +4598,12 @@ def _build_wiki_node_create_request(
 
 
 async def create_wiki_node_impl(
-    space_id: str, title: str, obj_type: str = "docx", parent_node_token: str = "", user_key: str = ""
+    space_id: str,
+    title: str,
+    obj_type: str = "docx",
+    parent_node_token: str = "",
+    user_key: str = "",
+    identity: str = "",
 ) -> dict[str, Any]:
     """Create a node (default: a docx doc) in a wiki space. Returns node_token + obj_token(=document_id).
 
@@ -4198,6 +4626,7 @@ async def create_wiki_node_impl(
         ),
         user_key=user_key,
         prefer="user",
+        identity=identity,
     )
     if not res["ok"]:
         return res
@@ -4218,7 +4647,7 @@ async def create_wiki_node_impl(
 
 
 async def create_wiki_doc_with_content_impl(
-    space_id: str, title: str, content: str, parent_node_token: str = "", user_key: str = ""
+    space_id: str, title: str, content: str, parent_node_token: str = "", user_key: str = "", identity: str = ""
 ) -> dict[str, Any]:
     """Create a wiki docx node AND write its body in one call (atomic-ish).
 
@@ -4227,7 +4656,7 @@ async def create_wiki_doc_with_content_impl(
     the node_token/obj_token are returned alongside the error (so the half-created
     node can be found or retried), rather than leaving a silent empty page.
     """
-    node = await create_wiki_node_impl(space_id, title, "docx", parent_node_token, user_key)
+    node = await create_wiki_node_impl(space_id, title, "docx", parent_node_token, user_key, identity)
     if not node["ok"]:
         return node
     obj_token = node.get("obj_token", "")
@@ -4236,7 +4665,7 @@ async def create_wiki_doc_with_content_impl(
         return {**node, "added": 0, "note": "no body content — created an empty doc"}
     if not obj_token:
         return {**node, "ok": False, "message": "node created but obj_token missing — cannot write body"}
-    written = await append_doc_content_impl(obj_token, content, user_key)
+    written = await append_doc_content_impl(obj_token, content, user_key, identity)
     if not written["ok"]:
         # Surface the node so the caller knows a doc exists and can retry the body.
         return {
@@ -4500,7 +4929,13 @@ def _parse_rows(rows_json: str) -> list[list[str]] | dict[str, Any]:
 
 
 async def _append_table_descendants(
-    document_id: str, rows: list[list[str]], *, header_row: bool, column_width: list[int] | None, user_key: str
+    document_id: str,
+    rows: list[list[str]],
+    *,
+    header_row: bool,
+    column_width: list[int] | None,
+    user_key: str,
+    identity: str = "",
 ) -> dict[str, Any]:
     """Send one table (built from ``rows``) to the /descendant endpoint. Shared by
     the table / flowchart / swimlane tools."""
@@ -4510,7 +4945,7 @@ async def _append_table_descendants(
         return _error("no rows to write — the table would be empty.")
     table_id, descendants = _table_descendants(rows, header_row=header_row, column_width=column_width)
     req = _build_descendant_request(document_id.strip(), [table_id], descendants, index=-1)
-    res = await _invoke(req, user_key=user_key, prefer="user")
+    res = await _invoke(req, user_key=user_key, prefer="user", identity=identity)
     if not res["ok"]:
         return res
     return {
@@ -4522,7 +4957,12 @@ async def _append_table_descendants(
 
 
 async def append_doc_table_impl(
-    document_id: str, rows_json: str, header_row: bool = True, column_width_json: str = "", user_key: str = ""
+    document_id: str,
+    rows_json: str,
+    header_row: bool = True,
+    column_width_json: str = "",
+    user_key: str = "",
+    identity: str = "",
 ) -> dict[str, Any]:
     """Append a native Feishu table (block_type 31) to a docx body.
 
@@ -4542,12 +4982,12 @@ async def append_doc_table_impl(
         except json.JSONDecodeError, TypeError:
             column_width = None
     return await _append_table_descendants(
-        document_id, rows, header_row=header_row, column_width=column_width, user_key=user_key
+        document_id, rows, header_row=header_row, column_width=column_width, user_key=user_key, identity=identity
     )
 
 
 async def append_doc_flowchart_impl(
-    document_id: str, steps_json: str, title: str = "", user_key: str = ""
+    document_id: str, steps_json: str, title: str = "", user_key: str = "", identity: str = ""
 ) -> dict[str, Any]:
     """Append a flowchart rendered as a single-column Feishu table (each step a row,
     joined by ↓ arrows). Feishu's API can't draw a real diagram, so this is the
@@ -4566,12 +5006,12 @@ async def append_doc_flowchart_impl(
         if i < len(labels) - 1:
             rows.append(["↓"])
     return await _append_table_descendants(
-        document_id, rows, header_row=bool(title) or True, column_width=None, user_key=user_key
+        document_id, rows, header_row=bool(title) or True, column_width=None, user_key=user_key, identity=identity
     )
 
 
 async def append_doc_swimlane_impl(
-    document_id: str, lanes_json: str, stages_json: str = "", user_key: str = ""
+    document_id: str, lanes_json: str, stages_json: str = "", user_key: str = "", identity: str = ""
 ) -> dict[str, Any]:
     """Append a swimlane diagram rendered as a Feishu table: columns = lanes
     (角色/部门), rows = stages. Feishu's API can't draw a real swimlane diagram, so
@@ -4606,10 +5046,17 @@ async def append_doc_swimlane_impl(
             rows.extend(body)
     else:
         return _error("lanes must be a non-empty JSON array of lane names or an object {lane:[activities]}.")
-    return await _append_table_descendants(document_id, rows, header_row=True, column_width=None, user_key=user_key)
+    return await _append_table_descendants(
+        document_id, rows, header_row=True, column_width=None, user_key=user_key, identity=identity
+    )
 
 
-async def append_doc_content_impl(document_id: str, content: str, user_key: str = "") -> dict[str, Any]:
+async def append_doc_content_impl(
+    document_id: str,
+    content: str,
+    user_key: str = "",
+    identity: str = "",
+) -> dict[str, Any]:
     """Append text/heading blocks (from plain text or light Markdown) to a docx body.
 
     Pass ``user_key`` to write as that user (e.g. into a doc inside a user-owned wiki);
@@ -4623,7 +5070,12 @@ async def append_doc_content_impl(document_id: str, content: str, user_key: str 
     added = 0
     for start in range(0, len(blocks), _BLOCKS_BATCH):
         batch = blocks[start : start + _BLOCKS_BATCH]
-        res = await _invoke(_build_blocks_append_request(document_id.strip(), batch), user_key=user_key, prefer="user")
+        res = await _invoke(
+            _build_blocks_append_request(document_id.strip(), batch),
+            user_key=user_key,
+            prefer="user",
+            identity=identity,
+        )
         if not res["ok"]:
             res["added"] = added
             return res
@@ -4662,6 +5114,7 @@ async def add_permission_member_impl(
     member_kind: str = "user",
     need_notification: bool = False,
     user_key: str = "",
+    identity: str = "",
 ) -> dict[str, Any]:
     """Grant a user/chat/department a permission (view/edit/full_access) on a Feishu file."""
     if not token.strip() or not member_id.strip():
@@ -4673,7 +5126,7 @@ async def add_permission_member_impl(
     req = _build_add_permission_member_request(
         token.strip(), obj_type, member_type, member_id.strip(), member_kind, perm, need_notification
     )
-    res = await _invoke(req, user_key=user_key, prefer="user")
+    res = await _invoke(req, user_key=user_key, prefer="user", identity=identity)
     if not res["ok"]:
         return res
     data = res["data"] if isinstance(res["data"], dict) else {}
@@ -4735,12 +5188,13 @@ async def delete_permission_member_impl(
     member_type: str = "openid",
     member_kind: str = "user",
     user_key: str = "",
+    identity: str = "",
 ) -> dict[str, Any]:
     """Revoke a user/chat/department's permission on a Feishu file."""
     if not token.strip() or not member_id.strip():
         return _error("token and member_id are required.")
     req = _build_delete_permission_member_request(token.strip(), obj_type, member_id.strip(), member_type, member_kind)
-    res = await _invoke(req, user_key=user_key, prefer="user")
+    res = await _invoke(req, user_key=user_key, prefer="user", identity=identity)
     if not res["ok"]:
         return res
     return {"ok": True, "token": token.strip(), "member_id": member_id.strip()}
@@ -4761,7 +5215,7 @@ def _build_create_bitable_role_request(app_token: str, body: dict[str, Any]) -> 
 
 
 async def create_bitable_role_impl(
-    app_token: str, role_name: str, table_roles_json: str, user_key: str = ""
+    app_token: str, role_name: str, table_roles_json: str, user_key: str = "", identity: str = ""
 ) -> dict[str, Any]:
     """Create a custom role on a bitable. table_roles_json is a JSON list of per-table perms."""
     if not app_token.strip() or not role_name.strip():
@@ -4773,7 +5227,9 @@ async def create_bitable_role_impl(
     if not isinstance(table_roles, list):
         return _error("table_roles_json must be a JSON array of per-table permission objects.")
     body = {"role_name": role_name.strip(), "table_roles": table_roles}
-    res = await _invoke(_build_create_bitable_role_request(app_token.strip(), body), user_key=user_key, prefer="user")
+    res = await _invoke(
+        _build_create_bitable_role_request(app_token.strip(), body), user_key=user_key, prefer="user", identity=identity
+    )
     if not res["ok"]:
         return res
     data = res["data"] if isinstance(res["data"], dict) else {}
@@ -4832,13 +5288,18 @@ def _build_add_bitable_role_member_request(
 
 
 async def add_bitable_role_member_impl(
-    app_token: str, role_id: str, member_id: str, member_id_type: str = "open_id", user_key: str = ""
+    app_token: str,
+    role_id: str,
+    member_id: str,
+    member_id_type: str = "open_id",
+    user_key: str = "",
+    identity: str = "",
 ) -> dict[str, Any]:
     """Assign a user to a bitable custom role (that person then sees the role's rows/fields)."""
     if not app_token.strip() or not role_id.strip() or not member_id.strip():
         return _error("app_token, role_id and member_id are required.")
     req = _build_add_bitable_role_member_request(app_token.strip(), role_id.strip(), member_id.strip(), member_id_type)
-    res = await _invoke(req, user_key=user_key, prefer="user")
+    res = await _invoke(req, user_key=user_key, prefer="user", identity=identity)
     if not res["ok"]:
         return res
     return {"ok": True, "role_id": role_id.strip(), "member_id": member_id.strip()}
@@ -4938,6 +5399,7 @@ async def upload_media_impl(
     file_name: str = "",
     extra_json: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> dict[str, Any]:
     """Upload a local file (e.g. a learning video) to Feishu Drive; returns its file_token."""
     p = anyio.Path(file_path)
@@ -4966,6 +5428,7 @@ async def upload_media_impl(
         lambda: _build_media_upload_all_request(name, parent_type, parent_node.strip(), size, data, extra),
         user_key=user_key,
         prefer="user",
+        identity=identity,
     )
     if not res["ok"]:
         return res
@@ -5030,7 +5493,7 @@ def _build_block_delete_request(document_id: str, block_id: str, index: int) -> 
     return req
 
 
-async def _upload_into_image_block(image_path: str, block_id: str, user_key: str) -> dict[str, Any]:
+async def _upload_into_image_block(image_path: str, block_id: str, user_key: str, identity: str = "") -> dict[str, Any]:
     """Upload a local PNG into an existing docx image block; returns its file_token."""
     path = anyio.Path(image_path)
     if not await path.is_file():
@@ -5043,6 +5506,7 @@ async def _upload_into_image_block(image_path: str, block_id: str, user_key: str
         lambda: _build_media_upload_all_request(path.name, "docx_image", block_id, size, data, None),
         user_key=user_key,
         prefer="user",
+        identity=identity,
     )
     if not res["ok"]:
         return res
@@ -5054,7 +5518,7 @@ async def _upload_into_image_block(image_path: str, block_id: str, user_key: str
 
 
 async def append_doc_image_impl(
-    document_id: str, image_path: str, caption: str = "", user_key: str = ""
+    document_id: str, image_path: str, caption: str = "", user_key: str = "", identity: str = ""
 ) -> dict[str, Any]:
     """Append a local image to a docx as a real image block, with an optional caption.
 
@@ -5066,7 +5530,9 @@ async def append_doc_image_impl(
     doc = document_id.strip()
     if not doc:
         return _error("document_id is required.")
-    created = await _invoke(lambda: _build_image_block_create_request(doc, doc, -1), user_key=user_key, prefer="user")
+    created = await _invoke(
+        lambda: _build_image_block_create_request(doc, doc, -1), user_key=user_key, prefer="user", identity=identity
+    )
     if not created["ok"]:
         return created
     cdata = created["data"] if isinstance(created["data"], dict) else {}
@@ -5077,17 +5543,18 @@ async def append_doc_image_impl(
     # Where the placeholder landed, so a later failure can remove exactly that block.
     index = cdata.get("index")
 
-    uploaded = await _upload_into_image_block(image_path, block_id, user_key)
+    uploaded = await _upload_into_image_block(image_path, block_id, user_key, identity)
     if not uploaded["ok"]:
-        await _discard_image_block(doc, block_id, index, user_key)
+        await _discard_image_block(doc, block_id, index, user_key, identity)
         return uploaded
     patched = await _invoke(
         lambda: _build_image_block_patch_request(doc, block_id, uploaded["file_token"]),
         user_key=user_key,
         prefer="user",
+        identity=identity,
     )
     if not patched["ok"]:
-        await _discard_image_block(doc, block_id, index, user_key)
+        await _discard_image_block(doc, block_id, index, user_key, identity)
         return patched
     result: dict[str, Any] = {
         "ok": True,
@@ -5099,7 +5566,7 @@ async def append_doc_image_impl(
     if caption.strip():
         # A failed caption doesn't invalidate the chart itself, so it's reported
         # rather than treated as a failure of the whole append.
-        note = await append_doc_content_impl(doc, caption.strip(), user_key)
+        note = await append_doc_content_impl(doc, caption.strip(), user_key, identity)
         result["caption_written"] = bool(note.get("ok"))
         if not note.get("ok"):
             result["caption_error"] = note.get("message", "")
@@ -5117,7 +5584,7 @@ def _build_block_children_list_request(document_id: str, block_id: str) -> BaseR
     return req
 
 
-async def _discard_image_block(document_id: str, block_id: str, index: Any, user_key: str) -> None:
+async def _discard_image_block(document_id: str, block_id: str, index: Any, user_key: str, identity: str = "") -> None:
     """Best-effort removal of a placeholder image block after a failed upload/patch.
 
     The create response carries no ``index``, so the delete range is found by locating
@@ -5127,7 +5594,7 @@ async def _discard_image_block(document_id: str, block_id: str, index: Any, user
     recoverable.
     """
     if not isinstance(index, int) or index < 0:
-        index = await _locate_child_index(document_id, block_id, user_key)
+        index = await _locate_child_index(document_id, block_id, user_key, identity)
     if not isinstance(index, int) or index < 0:
         return
     with contextlib.suppress(Exception):
@@ -5135,16 +5602,18 @@ async def _discard_image_block(document_id: str, block_id: str, index: Any, user
             lambda: _build_block_delete_request(document_id, document_id, index),
             user_key=user_key,
             prefer="user",
+            identity=identity,
         )
 
 
-async def _locate_child_index(document_id: str, block_id: str, user_key: str) -> int:
+async def _locate_child_index(document_id: str, block_id: str, user_key: str, identity: str = "") -> int:
     """Position of ``block_id`` among the doc root's children, or -1 if not found."""
     with contextlib.suppress(Exception):
         res = await _invoke(
             lambda: _build_block_children_list_request(document_id, document_id),
             user_key=user_key,
             prefer="user",
+            identity=identity,
         )
         if res.get("ok"):
             data = res.get("data")

@@ -50,6 +50,7 @@ async def place(
     document_id: str = "",
     caption: str = "",
     user_key: str = "",
+    identity: str = "",
     extra: dict[str, Any] | None = None,
 ) -> str:
     """Render ``draw`` to a PNG and, when a document is given, append it as an image block.
@@ -75,7 +76,7 @@ async def place(
     if extra:
         result.update(extra)
     if document_id.strip():
-        placed = await _f.append_doc_image_impl(document_id, rendered, caption, user_key)
+        placed = await _f.append_doc_image_impl(document_id, rendered, caption, user_key, identity)
         if not placed.get("ok"):
             # The PNG is still on disk and usable, so say so instead of implying the
             # whole operation produced nothing.
