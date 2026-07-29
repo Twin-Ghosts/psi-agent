@@ -213,16 +213,22 @@ def _socket_path(prefix: str, kind: str, entity_id: str) -> str:
 
 每个 `_AiEntry` 包含：
 - `scope: anyio.CancelScope` — 独立取消
-- `info: AiInfo` — 包含 `id`、`socket`、`provider`、`model`、`api_key`、`base_url`
+- `info: AiInfo` — 包含 `id`、`socket`、`provider`、`model`、`api_key`、`base_url`、`max_context_tokens`
 
 **`_persist` 回调**：构造函数参数，默认 no-op。Gateway.run() 在恢复完成后注入 persist 闭包（快照所有 manager → state.save），每次 create/delete/crash 后调用。
 
-**create(provider, model, api_key, base_url, *, id="") 流程**：
+**create(provider, model, api_key, base_url, *, id="", max_context_tokens=-1) 流程**：
 1. 获取 lock
 2. 若已有 **完全相同** 的配置（`provider`/`model`/`api_key`/`base_url`，base_url 忽略尾部 `/`），先停掉旧实例再创建；无显式 `id` 时复用旧 `ai_id`（避免 session 悬空）。显式 `id` 已存在且配置不同 → `ValueError`
 3. `_socket_path(prefix, "ais", ai_id)` 生成 socket 路径
 4. `_ensure_socket_dir(socket)` 创建父目录（anyio 异步）
-5. 构造 `Ai(...)`（传入 api_key + base_url），创建 `CancelScope`，`task_group.start_soon`
+5. 构造 `Ai(...)`（传入 api_key + base_url + `max_context_tokens`），创建 `CancelScope`，`task_group.start_soon`
+   - `max_context_tokens` 是 compaction 阈值：`-1`（默认）保持 `Ai` 自身的解析
+     （`PSI_MAX_CONTEXT_TOKENS`，否则 100K），`0` 表示禁用。**必须显式透传**——漏传会让
+     该参数永远停在兜底值、Gateway 侧无法配置。阈值应显著小于模型真实上下文窗口，详见
+     `ai/AGENTS.md`
+   - 恢复路径（`Gateway.run()` 读 state 快照）用 `cfg.get("max_context_tokens", -1)`，
+     故本字段出现之前写下的快照无需迁移
 6. 存入 `_entries`
 7. `_wait_socket(socket)` 轮询等待 socket 出现（默认 120s 上限，超时抛 `TimeoutError` 走 rollback）
 8. 成功后调用 `_persist`，返回 `AiInfo`

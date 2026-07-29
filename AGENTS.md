@@ -159,6 +159,8 @@ SSE 流中的特殊字段：
     "psi_compaction": {"needed": true, "prompt_tokens": N, "threshold": M}}
    ```
    `psi_compaction` 和 `finish_reason="compaction_needed"` 均为 psi-agent 内部扩展。
+   其中 `prompt_tokens` / `threshold` **不是纯日志字段**：Session 用它们做压缩冷却判断
+   （`session/AGENTS.md`「压缩冷却」），省略会让冷却退化成 fail-open、退回连续重压。
 
 ## 日志约定
 

@@ -225,6 +225,7 @@ class Gateway:
                             "model": info.model,
                             "api_key": info.api_key,
                             "base_url": info.base_url,
+                            "max_context_tokens": info.max_context_tokens,
                         }
                         for info in await aim.list_all()
                     ],

@@ -9,6 +9,20 @@
 > - `messages_for_ai()` does the system prompt merge + history trimming
 > - `_make_compaction_complete_fn` was inlined per Convention 11
 > - `compact_history` returns summary with recent turns appended (not just summary string)
+>
+> **Follow-up (post-plan), see the design spec for the authoritative description:**
+> - `RECENT_TURNS_KEPT_VERBATIM = 20` (was a literal `4`), with the skip guard
+>   raised to `+ 2` of it — the guard must track the keep count, or a short history
+>   returns a non-empty tail-only string and `messages_for_ai()` then drops every
+>   real message
+> - Summaries **chain**: the latest `compacted` row is fed back as
+>   `<existing-summary>`, capped by `SUMMARY_MAX_CHARS = 8000`
+> - `_maybe_compact()` gained a cooldown gate (`COMPACTION_COOLDOWN_FRACTION = 0.1`)
+>   because compaction cannot shrink the system prompt, so the signal re-fires
+>   every turn when the prompt dominates the threshold
+> - `AiDelta` carries `prompt_tokens` / `compaction_threshold` for that gate
+> - `max_context_tokens` is settable per AI backend via Gateway `POST /ais`, and is
+>   persisted in the state snapshot (`save()` whitelists fields explicitly)
 
 **Goal:** Add automatic context compaction when token count exceeds threshold — AI layer signals, Session layer compacts via system.py.
 

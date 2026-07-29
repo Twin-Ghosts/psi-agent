@@ -270,14 +270,17 @@ Session 支持将对话历史持久化到 AppData `histories/{session_id}.jsonl`
 
 当 AI 层返回 `psi_compaction` 信号时，Session 触发上下文压缩。流程：
 
-1. `AiClient.stream()` 解析 `psi_compaction` → `AiDelta.compaction_needed=True`
-2. Agent loop 在 `finish_reason="stop"` 后调用 `_maybe_compact()`
+1. `AiClient.stream()` 解析 `psi_compaction` → `AiDelta.compaction_needed=True`，并把
+   `prompt_tokens` / `threshold` 一并透出（经 `AiClient._as_int`，缺失或非法为 0）
+2. Agent loop 在 `finish_reason="stop"` 后调用 `_maybe_compact(prompt_tokens, threshold)`
 3. 从 `{agent}/systems/system.py` 提取 `compact_history()` 函数
-4. 构造 `complete_fn`（使用现有 `AiClient` 做流式调用并收集全部 content 的闭包）
-5. `summary = await compact_history(conversation.messages, complete_fn)`
-6. 插入独立的 `compacted` 消息（`role="compacted"`, `kind="compacted"`）到 conversation
-7. `commit()` 落盘——历史消息**保留**，不删除
-8. 下次发送 AI 请求时，`messages_for_ai()` 负责：找到 system prompt 和最后一个 compacted，删除中间消息，将 compacted 内容合并到 system prompt
+4. **冷却门槛**：`_compaction_cooldown_elapsed()` 不过则直接返回（见下）
+5. 构造 `complete_fn`（使用现有 `AiClient` 做流式调用并收集全部 content 的闭包）
+6. `summary = await compact_history(conversation.messages, complete_fn)`
+7. 插入独立的 `compacted` 消息（`role="compacted"`, `kind="compacted"`）到 conversation
+8. `commit()` 落盘——历史消息**保留**，不删除；随后记录水位线
+   `_tokens_at_last_compaction`（**仅成功时**记，失败没缩小任何东西，下次信号仍应放行）
+9. 下次发送 AI 请求时，`messages_for_ai()` 负责：找到 system prompt 和最后一个 compacted，删除中间消息，将 compacted 内容合并到 system prompt
 
 JSONL 留存：``system, u1, a1, u2, a2, compacted(summary), u3, a3, ...``
 发给 AI：``[system+summary, u3, a3, ...]``
@@ -293,6 +296,23 @@ async def compact_history(
 
 未定义时 → 记录 warning，跳过压缩，history 持续增长。
 多次 compaction → 每次插入独立的 `compacted` 消息；`messages_for_ai()` 仅取最后一条合并到 system prompt。
+这一步安全的前提是默认实现**链式累积**（新摘要在上一份之上更新，故包含而非丢弃更早
+上下文）；若自定义的 `compact_history` 忽略传入的 `compacted` 行，则每压一次就少一层
+历史——这正是「时不时压缩就忘记前面对话」的成因。
+
+### 压缩冷却（`COMPACTION_COOLDOWN_FRACTION = 0.1`，刻意为之，勿"修掉"）
+
+信号只表示 `prompt_tokens` 超了阈值，而压缩**改不了 system prompt 的体积**。当提示词
+本身占阈值很大比例时（实测 `haitun-workspace` 提示词约 45.4K token = 100K 默认阈值的
+45%），信号会每回合复发；没有门槛的话 Session 就会连续重压，每次白付一次 LLM 调用还
+削掉一层更早的上下文。故要求自上次**成功**压缩起 `prompt_tokens` 增长达
+`threshold * COMPACTION_COOLDOWN_FRACTION` 才允许再压。
+
+- **按 token 而非消息条数计量**：单条 tool 结果可达数万 token，而两条聊天消息只有几百，
+  条数门槛对重工具场景毫无意义
+- 信号缺数字时 **fail open**，保持改动前行为
+- 水位线存 `SessionAgent` 实例属性——该对象每 session 进程建一次，跨回合有效；进程重启
+  归零（可接受：重启后最多多压一次）
 
 ### peek_pending / clear_pending 安全机制
 
