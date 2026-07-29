@@ -17,6 +17,10 @@ feishu_drive_* tools to read or leave comments.
 from __future__ import annotations
 
 # ruff: noqa: E402
+# RUF002: these docstrings are read by the agent as prose, and the caption examples quote
+# the exact characters it has to write, so the full-width CJK punctuation in them is
+# correct typography here rather than an ASCII typo.
+# ruff: noqa: RUF002
 import sys
 from pathlib import Path
 
@@ -92,6 +96,8 @@ async def feishu_doc_append_table(
     column_width_json: str = "",
     user_key: str = "",
     identity: str = "",
+    caption: str = "",
+    auto_number: bool = True,
 ) -> str:
     """Append a native, editable Feishu table to a docx document.
 
@@ -114,14 +120,35 @@ async def feishu_doc_append_table(
             authorization) or ``"bot"`` (the bot). Omit to use the choice remembered
             for this ``user_key``; if they have never been asked, the tool does
             nothing and returns ``need_identity_choice`` so you can ask them.
+        caption: Optional table title, written as a numbered "表 N：…" line **above** the
+            table (that's where a table's title belongs; figures caption below). Write
+            the text only — "客户明细", not "表2：客户明细" — the number is added
+            automatically, continuing the document's own 表 sequence.
+        auto_number: Number the caption from the document's existing 表 captions
+            (default true). Set false only when the caller manages numbering itself.
     """
     return _f.dumps_result(
-        await _f.append_doc_table_impl(document_id, rows_json, header_row, column_width_json, user_key, identity)
+        await _f.append_doc_table_impl(
+            document_id,
+            rows_json,
+            header_row,
+            column_width_json,
+            user_key,
+            identity,
+            caption=caption,
+            auto_number=auto_number,
+        )
     )
 
 
 async def feishu_doc_append_flowchart(
-    document_id: str, steps_json: str, title: str = "", user_key: str = "", identity: str = ""
+    document_id: str,
+    steps_json: str,
+    title: str = "",
+    user_key: str = "",
+    identity: str = "",
+    caption: str = "",
+    auto_number: bool = True,
 ) -> str:
     """Append a flowchart to a docx — rendered as a single-column table of steps.
 
@@ -137,12 +164,24 @@ async def feishu_doc_append_flowchart(
         title: Optional heading cell shown at the top of the flowchart.
         user_key: The sender's open_id (from ``<feishu_context>``).
         identity: ``"user"`` / ``"bot"`` — who owns the result (see append_content).
+        caption: Optional numbered "表 N：…" line above it — text only, no "表N：" prefix.
+        auto_number: Number the caption from the document's existing 表 captions (default true).
     """
-    return _f.dumps_result(await _f.append_doc_flowchart_impl(document_id, steps_json, title, user_key, identity))
+    return _f.dumps_result(
+        await _f.append_doc_flowchart_impl(
+            document_id, steps_json, title, user_key, identity, caption=caption, auto_number=auto_number
+        )
+    )
 
 
 async def feishu_doc_append_swimlane(
-    document_id: str, lanes_json: str, stages_json: str = "", user_key: str = "", identity: str = ""
+    document_id: str,
+    lanes_json: str,
+    stages_json: str = "",
+    user_key: str = "",
+    identity: str = "",
+    caption: str = "",
+    auto_number: bool = True,
 ) -> str:
     """Append a swimlane / cross-functional diagram to a docx — rendered as a table.
 
@@ -160,5 +199,11 @@ async def feishu_doc_append_swimlane(
             (each row aligns to the lane columns), e.g. '[["下单","接单","发货"]]'.
         user_key: The sender's open_id (from ``<feishu_context>``).
         identity: ``"user"`` / ``"bot"`` — who owns the result (see append_content).
+        caption: Optional numbered "表 N：…" line above it — text only, no "表N：" prefix.
+        auto_number: Number the caption from the document's existing 表 captions (default true).
     """
-    return _f.dumps_result(await _f.append_doc_swimlane_impl(document_id, lanes_json, stages_json, user_key, identity))
+    return _f.dumps_result(
+        await _f.append_doc_swimlane_impl(
+            document_id, lanes_json, stages_json, user_key, identity, caption=caption, auto_number=auto_number
+        )
+    )

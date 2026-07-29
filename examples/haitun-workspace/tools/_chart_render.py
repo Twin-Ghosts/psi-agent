@@ -31,8 +31,9 @@ from __future__ import annotations
 
 import json
 import os
+from contextvars import ContextVar
 from itertools import pairwise
-from math import ceil, radians, sin
+from math import ceil, radians, sin, sqrt
 from typing import Any
 
 import anyio
@@ -181,16 +182,42 @@ class ChartDataError(ValueError):
     """
 
 
-def _source_note(fig: Any, source: str) -> None:
+# ── Panel mode ─────────────────────────────────────────────────────────────────
+# A combined figure (see ``render_panels_to_png``) draws several charts as subplots of
+# one canvas. The 20 ``draw_*`` closures work unchanged in a subplot — except for the
+# two annotations they place at *figure* level: ``_set_title`` promotes a title to
+# ``fig.suptitle`` when a legend is present, and ``_source_note`` uses ``fig.supxlabel``.
+# A figure has exactly one of each, so in a 2-panel figure the second panel's title and
+# source silently overwrite the first panel's (verified: two panels with sources "S1"
+# and "S2" leave only "S2" on the canvas).
+#
+# This flag tells those two helpers to stay axes-local. It's a ContextVar rather than a
+# plain global because ``render_to_png`` renders under a lock but the flag is read from
+# inside the draw closures, and a ContextVar keeps that state tied to the render that
+# set it instead of leaking to whatever renders next after an exception.
+_panel_mode: ContextVar[bool] = ContextVar("psi_chart_panel_mode", default=False)
+
+
+def _source_note(ax: Any, source: str) -> None:
     """Footnote the data provenance, bottom-left, in muted small type.
 
     Every chart that makes a claim should say where the numbers came from; keeping it
     in one helper means the wording and placement stay identical across chart types.
     Registered as the figure's supxlabel rather than free-floating ``fig.text`` so
     constrained layout reserves a strip for it instead of letting the axes draw over it.
+
+    Takes the *axes* rather than the figure because in panel mode the note has to land on
+    the panel it describes: one ``supxlabel`` can't hold several panels' provenance, so
+    a per-panel source becomes that panel's own xlabel and the figure-level slot is left
+    for the figure's shared source.
     """
-    if source:
-        fig.supxlabel(f"数据来源：{source}", fontsize=10, color=_MUTED, ha="left", x=0.01)  # noqa: RUF001
+    if not source:
+        return
+    text = f"数据来源：{source}"  # noqa: RUF001
+    if _panel_mode.get():
+        ax.set_xlabel(text, fontsize=9, color=_MUTED, loc="left")
+        return
+    ax.figure.supxlabel(text, fontsize=10, color=_MUTED, ha="left", x=0.01)
 
 
 def _set_title(ax: Any, title: str, *, has_legend: bool) -> None:
@@ -205,10 +232,17 @@ def _set_title(ax: Any, title: str, *, has_legend: bool) -> None:
     then stacks title row → legend row → axes and no two of them can occupy the same
     band. Without a legend, the plain axes title is still the right thing — it stays
     tied to the axes and needs no extra reserved space.
+
+    Panel mode never promotes: ``suptitle`` belongs to the figure, and in a combined
+    figure that slot holds the figure's own title (or nothing) — a panel writing there
+    would erase its neighbour's. Inside a panel the legend is anchored to that panel's
+    axes, so an axes title placed above it with extra pad clears it just as well.
     """
     if not title:
         return
-    if has_legend:
+    if _panel_mode.get():
+        ax.set_title(title, loc="left", fontsize=13, pad=24 if has_legend else 10)
+    elif has_legend:
         ax.figure.suptitle(title, x=0.01, ha="left", fontsize=17, fontweight="bold", color=_INK)
     else:
         ax.set_title(title, loc="left")
@@ -458,7 +492,7 @@ def _finish_axes(
     # After the tick work: the note is placed clear of the x labels, so it has to know
     # their final tilt and count.
     _legend_note(ax, note)
-    _source_note(ax.figure, source)
+    _source_note(ax, source)
 
 
 def _finish_bare_axes(ax: Any, *, title: str = "", source: str = "") -> None:
@@ -469,11 +503,11 @@ def _finish_bare_axes(ax: Any, *, title: str = "", source: str = "") -> None:
     Without this they were the only charts left overlapping at high category counts,
     because the tick work lived solely in `_finish_axes`.
     """
-    if title:
-        ax.set_title(title, loc="left")
+    # Through _set_title (not ax.set_title) so panel mode gets its smaller panel type.
+    _set_title(ax, title, has_legend=False)
     _clip_ticks_to_view(ax)
     _thin_tick_labels(ax)
-    _source_note(ax.figure, source)
+    _source_note(ax, source)
 
 
 def _fmt_number(value: float, unit: str = "", decimals: int | None = None) -> str:
@@ -818,6 +852,148 @@ def _render_sync(draw: Any, out_path: str) -> None:
         plt.close(fig)
 
 
+# ── Combined figures: several panels, one caption ───────────────────────────────
+# The academic-paper convention: related views share one numbered figure, each panel
+# tagged (a) (b) (c) and named in the caption, e.g. 图 3 followed by the panel names.
+# One PNG means one image block in the doc, so the panels can't drift apart from each
+# other or from their caption the way separate charts do.
+_PANEL_MIN, _PANEL_MAX = 2, 6
+# Feishu renders an image block at the PNG's own pixel size, so a canvas that grows
+# without limit comes back *smaller* on the page (scaled to column width) — the exact
+# failure the fixed single-chart canvas exists to avoid. These caps keep a combined
+# figure within a shape a doc column can still show legibly.
+_FIGURE_MAX_W, _FIGURE_MAX_H = 20.0, 14.0
+_PANEL_TAGS = "abcdefgh"
+
+
+def panel_grid(count: int, layout: str) -> tuple[int, int]:
+    """(rows, cols) for ``count`` panels under ``layout``.
+
+    ``horizontal`` is one row (side-by-side, for comparing across panels), ``vertical``
+    one column (stacked, for a sequence), ``grid`` a near-square block that keeps four
+    or more panels from stretching the canvas past what a doc column can show.
+    """
+    mode = (layout or "horizontal").strip().lower()
+    if mode in ("horizontal", "h", "row"):
+        return 1, count
+    if mode in ("vertical", "v", "column", "col"):
+        return count, 1
+    if mode in ("grid", "auto", "matrix"):
+        cols = ceil(sqrt(count))
+        return ceil(count / cols), cols
+    raise ChartDataError(f"unknown layout {layout!r} — use 'horizontal', 'vertical' or 'grid'.")
+
+
+def figure_size(rows: int, cols: int) -> tuple[float, float]:
+    """Canvas inches for a rows x cols panel grid, each panel the standard chart size.
+
+    Every panel keeps the full single-chart footprint rather than being squeezed into a
+    shared canvas: shrinking panels is what turns a combined figure into six unreadable
+    thumbnails. Raises when the result would exceed what a doc column can display.
+    """
+    width, height = _FIG_W * cols, _FIG_H * rows
+    if width > _FIGURE_MAX_W or height > _FIGURE_MAX_H:
+        raise ChartDataError(
+            f"{rows}x{cols} panels at this layout need a {width:.0f}x{height:.0f}in canvas, "
+            f"over the {_FIGURE_MAX_W:.0f}x{_FIGURE_MAX_H:.0f}in limit a Feishu doc can show legibly — "
+            "use fewer panels, layout='grid', or split into two figures."
+        )
+    return width, height
+
+
+def _tag_panel(ax: Any, index: int) -> None:
+    """Prefix the panel's title with its ``(a)`` / ``(b)`` tag.
+
+    The tag goes *into* the title rather than beside it. A separately-placed label has to
+    be positioned relative to a title whose length, wrapping and presence vary per panel,
+    and it collided with the title text whenever the two were both left-aligned above the
+    axes. Prefixing is also how a paper writes it — "(a) 营收趋势" reads as one label, and
+    the caption's panel key uses the same form.
+
+    A panel with no title still gets its bare tag, since the caption refers to it by tag.
+    """
+    tag = f"({_PANEL_TAGS[index]})" if index < len(_PANEL_TAGS) else f"({index + 1})"
+    title = ax.get_title(loc="left") or ax.get_title()
+    if title:
+        ax.set_title(f"{tag} {title}", loc="left", fontsize=13)
+    else:
+        ax.set_title(tag, loc="left", fontsize=13, fontweight="bold")
+
+
+async def render_panels_to_png(
+    draws: list[Any],
+    out_path: str,
+    *,
+    layout: str = "horizontal",
+    figure_title: str = "",
+    source: str = "",
+) -> str:
+    """Render several ``draw(fig, ax)`` closures as panels of one PNG.
+
+    Same locking and threading contract as ``render_to_png`` — see that docstring for
+    why matplotlib work is serialised off the event loop.
+    """
+    if len(draws) < _PANEL_MIN:
+        raise ChartDataError(f"a combined figure needs at least {_PANEL_MIN} panels; use a single chart tool for one.")
+    if len(draws) > _PANEL_MAX:
+        raise ChartDataError(
+            f"got {len(draws)} panels — more than {_PANEL_MAX} in one figure leaves each too small to read. "
+            "Split them into separate figures."
+        )
+    rows, cols = panel_grid(len(draws), layout)
+    size = figure_size(rows, cols)
+    target = anyio.Path(out_path)
+    await target.parent.mkdir(parents=True, exist_ok=True)
+    async with _style_lock:
+        await anyio.to_thread.run_sync(  # ty: ignore
+            _render_panels_sync, draws, os.fspath(target), rows, cols, size, figure_title, source
+        )
+    return os.fspath(target)
+
+
+def _render_panels_sync(
+    draws: list[Any],
+    out_path: str,
+    rows: int,
+    cols: int,
+    size: tuple[float, float],
+    figure_title: str,
+    source: str,
+) -> None:
+    """Thread body for a combined figure: one subplot per draw, then the shared frame.
+
+    ``_panel_mode`` is set for the whole draw pass so the per-chart helpers keep their
+    titles and source notes axes-local; the figure's own title and source are written
+    after, when they are the only claimants on those figure-level slots.
+    """
+    _apply_style()
+    import matplotlib.pyplot as plt  # noqa: PLC0415
+
+    token = _panel_mode.set(True)
+    fig, axes = plt.subplots(rows, cols, figsize=size, layout="constrained", squeeze=False)
+    flat = [ax for row in axes for ax in row]
+    try:
+        for index, (draw, ax) in enumerate(zip(draws, flat, strict=False)):
+            before = set(fig.get_axes())
+            draw(fig, ax)
+            # A radar removes the axes it was handed and adds a polar one in the same
+            # cell, so the tag belongs on whichever axes now holds that panel — tagging
+            # the original would attach the label to a detached object that never draws.
+            live = ax if ax in fig.get_axes() else next(iter(set(fig.get_axes()) - before), ax)
+            _tag_panel(live, index)
+        # Unused cells in a grid (5 panels in a 2x3) would otherwise draw empty frames.
+        for ax in flat[len(draws) :]:
+            ax.set_visible(False)
+        if figure_title:
+            fig.suptitle(figure_title, x=0.01, ha="left", fontsize=18, fontweight="bold", color=_INK)
+        if source:
+            fig.supxlabel(f"数据来源：{source}", fontsize=10, color=_MUTED, ha="left", x=0.01)  # noqa: RUF001
+        fig.savefig(out_path, format="png", facecolor="white")
+    finally:
+        _panel_mode.reset(token)
+        plt.close(fig)
+
+
 def _colors(n: int) -> list[str]:
     """``n`` palette colours, cycling if a chart has more series than the palette."""
     return [PALETTE[i % len(PALETTE)] for i in range(n)]
@@ -948,7 +1124,7 @@ def draw_pie(
         if title:
             ax.set_title(title, loc="left")
         _fit_pie_pcts(ax, list(autotexts))
-        _source_note(fig, source)
+        _source_note(ax, source)
 
     return draw, folded
 
@@ -1643,9 +1819,13 @@ def draw_radar(
     def draw(fig: Any, ax: Any) -> None:
         import math  # noqa: PLC0415
 
-        # A radar needs polar axes; the caller's cartesian ax is replaced in place.
+        # A radar needs polar axes, so the caller's cartesian ax is swapped for one.
+        # The replacement is built from the original's own subplot slot, not `111`:
+        # inside a combined figure `111` means "the whole canvas", so a radar panel
+        # would cover every other panel instead of taking its own cell.
+        spec = ax.get_subplotspec()
         ax.remove()
-        polar = fig.add_subplot(111, polar=True)
+        polar = fig.add_subplot(spec, polar=True) if spec is not None else fig.add_subplot(111, polar=True)
         count = len(axes_labels)
         angles = [n / count * 2 * math.pi for n in range(count)]
         closed = [*angles, angles[0]]
@@ -1659,11 +1839,15 @@ def draw_radar(
         polar.tick_params(colors=_MUTED, labelsize=12)
         polar.spines["polar"].set_color(_GRID)
         polar.grid(color=_GRID)
-        if title:
+        if title and _panel_mode.get():
+            polar.set_title(title, loc="left", pad=24, fontsize=13)
+        elif title:
             polar.set_title(title, loc="left", pad=24)
         if len(series) > 1:
             polar.legend(loc="lower left", bbox_to_anchor=(1.02, 0), frameon=False)
-        _source_note(fig, source)
+        # On `polar`, not the original `ax`: that one was removed above, and a note set
+        # on a detached axes never reaches the canvas.
+        _source_note(polar, source)
 
     return draw
 
@@ -1945,3 +2129,325 @@ def draw_progress(
         _finish_bare_axes(ax, title=title, source=source)
 
     return draw
+
+
+# ── Panel specs: one dict per panel of a combined figure ────────────────────────
+# A combined figure can't take 21 tools' worth of flat arguments, so a panel is a dict:
+# ``{"chart": "line", "title": …, "labels": [...], "series": {...}}``. The field names are
+# the single-chart tools' argument names minus the ``_json`` suffix, so an agent that
+# knows ``feishu_chart_line(labels_json=…, series_json=…)`` already knows the panel form.
+#
+# Values arrive already decoded (the whole ``panels_json`` was one JSON document), but
+# validation still goes through the same ``parse_*`` helpers by re-encoding each field.
+# That costs a trivial round-trip and buys identical validation and identical error
+# wording between a panel and the equivalent standalone tool — two code paths that
+# disagree about what "series" means is exactly how a combined figure would start
+# silently drawing something other than what the tools draw.
+
+# What each chart kind needs from a panel dict, for the "you're missing a field" message.
+_PANEL_REQUIRED: dict[str, tuple[str, ...]] = {
+    "pie": ("labels", "values"),
+    "donut": ("labels", "values"),
+    "funnel": ("stages", "values"),
+    "line": ("labels", "series"),
+    "area": ("labels", "series"),
+    "stacked_area": ("labels", "series"),
+    "column": ("labels", "values"),
+    "bar": ("labels", "values"),
+    "grouped_column": ("labels", "series"),
+    "stacked_column": ("labels", "series"),
+    "waterfall": ("labels", "deltas"),
+    "histogram": ("values",),
+    "box": ("groups",),
+    "scatter": ("points",),
+    "bubble": ("points",),
+    "heatmap": ("row_labels", "col_labels", "values"),
+    "radar": ("axes", "series"),
+    "pareto": ("labels", "values"),
+    "combo": ("labels", "bar_series", "line_series"),
+    "gantt": ("tasks",),
+    "progress": ("items",),
+}
+
+PANEL_CHARTS = tuple(_PANEL_REQUIRED)
+
+
+class _Panel:
+    """Typed reads off one panel dict, with the panel's index in every error message.
+
+    An agent sending six panels needs to know *which* one it got wrong; "panel 3
+    (chart='pie')" is actionable where a bare "values must be an array" is not.
+    """
+
+    def __init__(self, spec: Any, index: int) -> None:
+        if not isinstance(spec, dict):
+            raise ChartDataError(f"panel {index + 1} must be a JSON object, got {type(spec).__name__}.")
+        self.index = index
+        self.spec = spec
+        kind = str(spec.get("chart", "")).strip().lower()
+        if not kind:
+            raise ChartDataError(f'panel {index + 1} has no "chart" field — one of: {", ".join(PANEL_CHARTS)}.')
+        if kind not in _PANEL_REQUIRED:
+            raise ChartDataError(f"panel {index + 1}: unknown chart {kind!r} — use one of: {', '.join(PANEL_CHARTS)}.")
+        self.kind = kind
+        missing = [f for f in _PANEL_REQUIRED[kind] if spec.get(f) in (None, "", [], {})]
+        if missing:
+            raise ChartDataError(f"panel {index + 1} (chart={kind!r}) is missing: {', '.join(missing)}.")
+
+    @property
+    def where(self) -> str:
+        return f"panel {self.index + 1} ({self.kind})"
+
+    def raw(self, field: str) -> str:
+        """A panel field re-encoded as JSON, so the shared ``parse_*`` helpers can read it."""
+        return json.dumps(self.spec.get(field), ensure_ascii=False)
+
+    def text(self, field: str, default: str = "") -> str:
+        value = self.spec.get(field, default)
+        return default if value is None else str(value)
+
+    def number(self, field: str, default: float) -> float:
+        value = self.spec.get(field)
+        return default if value in (None, "") else _as_float(value, f"{self.where}.{field}")
+
+    def flag(self, field: str, default: bool = False) -> bool:
+        value = self.spec.get(field, default)
+        return bool(default if value is None else value)
+
+    def labels(self, field: str, what: str = "") -> list[str]:
+        return parse_labels(self.raw(field), f"{self.where}.{what or field}")
+
+    def values(self, field: str, what: str = "") -> list[float]:
+        return parse_values(self.raw(field), f"{self.where}.{what or field}")
+
+    def series(self, field: str, what: str = "") -> list[tuple[str, list[float]]]:
+        return parse_series(self.raw(field), f"{self.where}.{what or field}")
+
+    def matched(self, labels: list[str], values: list[float], what: str = "values") -> None:
+        if len(labels) != len(values):
+            raise ChartDataError(f"{self.where}: got {len(labels)} labels but {len(values)} {what} — they must match.")
+
+
+def _panel_part_of_whole(p: _Panel, title: str, source: str) -> Any:
+    """pie / donut / funnel."""
+    if p.kind in ("pie", "donut"):
+        labels, values = p.labels("labels"), p.values("values")
+        p.matched(labels, values)
+        draw, _folded = draw_pie(
+            labels,
+            values,
+            title=title,
+            donut=p.kind == "donut",
+            unit=p.text("unit"),
+            show_values=p.flag("show_values"),
+            highlight=int(p.number("highlight", -1)),
+            source=source,
+        )
+        return draw
+    return draw_funnel(p.labels("stages"), p.values("values"), title=title, unit=p.text("unit"), source=source)
+
+
+def _panel_trend(p: _Panel, title: str, source: str) -> Any:
+    """line / area / stacked_area."""
+    labels, series = p.labels("labels"), p.series("series")
+    shared = {
+        "title": title,
+        "x_label": p.text("x_label"),
+        "y_label": p.text("y_label"),
+        "unit": p.text("unit"),
+        "source": source,
+    }
+    if p.kind == "stacked_area":
+        return draw_stacked_area(labels, series, percent=p.flag("percent"), **shared)
+    if p.kind == "area":
+        # Same builder as `line`, with the fill and a zero baseline the area implies.
+        return draw_line(labels, series, smooth_area=True, zero_baseline=True, **shared)
+    return draw_line(labels, series, zero_baseline=p.flag("zero_baseline"), **shared)
+
+
+def _panel_comparison(p: _Panel, title: str, source: str) -> Any:
+    """column / bar / grouped_column / stacked_column / waterfall."""
+    if p.kind == "waterfall":
+        return draw_waterfall(
+            p.labels("labels"),
+            p.values("deltas"),
+            title=title,
+            y_label=p.text("y_label"),
+            unit=p.text("unit"),
+            total_label=p.text("total_label", "合计"),
+            source=source,
+        )
+    labels = p.labels("labels")
+    x_label, y_label = p.text("x_label"), p.text("y_label")
+    shared = {
+        "title": title,
+        "x_label": x_label,
+        "y_label": y_label,
+        "unit": p.text("unit"),
+        "source": source,
+    }
+    if p.kind in ("column", "bar"):
+        values = p.values("values")
+        p.matched(labels, values)
+        horizontal = p.kind == "bar"
+        # Single-series: the axis label doubles as the series name, matching the
+        # standalone column/bar tools.
+        name = (x_label if horizontal else y_label) or "数值"
+        return draw_bar(
+            labels,
+            [(name, values)],
+            horizontal=horizontal,
+            sort_desc=p.flag("sort_desc"),
+            highlight=int(p.number("highlight", -1)),
+            **shared,
+        )
+    series = p.series("series")
+    return draw_bar(
+        labels,
+        series,
+        horizontal=p.flag("horizontal"),
+        stacked=p.kind == "stacked_column",
+        percent=p.flag("percent") if p.kind == "stacked_column" else False,
+        **shared,
+    )
+
+
+def _panel_distribution(p: _Panel, title: str, source: str) -> Any:
+    """histogram / box / scatter / bubble / heatmap."""
+    if p.kind == "histogram":
+        return draw_histogram(
+            p.values("values"),
+            bins=int(p.number("bins", 0)),
+            title=title,
+            x_label=p.text("x_label"),
+            y_label=p.text("y_label", "频数"),
+            unit=p.text("unit"),
+            source=source,
+        )
+    if p.kind == "box":
+        return draw_box(
+            p.series("groups"),
+            title=title,
+            x_label=p.text("x_label"),
+            y_label=p.text("y_label"),
+            unit=p.text("unit"),
+            source=source,
+        )
+    if p.kind == "scatter":
+        point_labels = p.labels("point_labels") if p.spec.get("point_labels") else None
+        return draw_scatter(
+            parse_point_groups(p.raw("points"), f"{p.where}.points"),
+            title=title,
+            x_label=p.text("x_label"),
+            y_label=p.text("y_label"),
+            trend=p.flag("trend"),
+            point_labels=point_labels,
+            source=source,
+        )
+    if p.kind == "bubble":
+        points = parse_points(p.raw("points"), f"{p.where}.points", dims=3)
+        labels = p.labels("labels") if p.spec.get("labels") else None
+        if labels and len(labels) != len(points):
+            raise ChartDataError(f"{p.where}: got {len(labels)} labels but {len(points)} bubbles — they must match.")
+        return draw_bubble(
+            points,
+            labels=labels,
+            title=title,
+            x_label=p.text("x_label"),
+            y_label=p.text("y_label"),
+            size_label=p.text("size_label"),
+            source=source,
+        )
+    rows, cols = p.labels("row_labels"), p.labels("col_labels")
+    return draw_heatmap(
+        rows,
+        cols,
+        parse_matrix(p.raw("values"), len(rows), len(cols), f"{p.where}.values"),
+        title=title,
+        unit=p.text("unit"),
+        show_values=p.flag("show_values", True),
+        color_label=p.text("color_label"),
+        source=source,
+    )
+
+
+def _panel_purpose_built(p: _Panel, title: str, source: str) -> Any:
+    """radar / pareto / combo / gantt / progress."""
+    if p.kind == "radar":
+        return draw_radar(
+            p.labels("axes"), p.series("series"), title=title, max_value=p.number("max_value", 0), source=source
+        )
+    if p.kind == "pareto":
+        labels, values = p.labels("labels"), p.values("values")
+        p.matched(labels, values)
+        return draw_pareto(
+            labels,
+            values,
+            title=title,
+            y_label=p.text("y_label"),
+            unit=p.text("unit"),
+            threshold=p.number("threshold", 80.0),
+            source=source,
+        )
+    if p.kind == "combo":
+        return draw_combo(
+            p.labels("labels"),
+            p.series("bar_series"),
+            p.series("line_series"),
+            title=title,
+            y_label=p.text("y_label"),
+            y2_label=p.text("y2_label"),
+            unit=p.text("unit"),
+            line_unit=p.text("line_unit"),
+            line_percent=p.flag("line_percent"),
+            source=source,
+        )
+    if p.kind == "gantt":
+        tasks, tick_labels, today_offset = parse_gantt_tasks(p.raw("tasks"), p.text("start_date"), p.text("today"))
+        return draw_gantt(tasks, title=title, tick_labels=tick_labels, today=today_offset, source=source)
+    return draw_progress(
+        parse_pairs(p.raw("items"), f"{p.where}.items"),
+        title=title,
+        target=p.number("target", 100.0),
+        unit=p.text("unit", "%"),
+        source=source,
+    )
+
+
+_PANEL_FAMILIES = (
+    (("pie", "donut", "funnel"), _panel_part_of_whole),
+    (("line", "area", "stacked_area"), _panel_trend),
+    (("column", "bar", "grouped_column", "stacked_column", "waterfall"), _panel_comparison),
+    (("histogram", "box", "scatter", "bubble", "heatmap"), _panel_distribution),
+    (("radar", "pareto", "combo", "gantt", "progress"), _panel_purpose_built),
+)
+
+
+def build_panel_draw(spec: Any, index: int, *, panel_source: bool = False) -> tuple[Any, str]:
+    """One panel dict → (draw closure, panel title) for ``render_panels_to_png``.
+
+    ``panel_source`` decides whether a panel's own ``source`` is drawn under that panel.
+    It is off by default because a combined figure normally shares one provenance line
+    for the whole figure; repeating it under every panel is noise.
+    """
+    panel = _Panel(spec, index)
+    title = panel.text("title")
+    source = panel.text("source") if panel_source else ""
+    for kinds, builder in _PANEL_FAMILIES:
+        if panel.kind in kinds:
+            return builder(panel, title, source), title
+    raise ChartDataError(f"panel {index + 1}: unknown chart {panel.kind!r}.")  # unreachable; _Panel validated it
+
+
+def parse_panels(raw: str, *, panel_source: bool = False) -> tuple[list[Any], list[str]]:
+    """``panels_json`` → (draw closures, panel titles), validated panel by panel."""
+    data = _loads(raw, "panels", '\'[{"chart":"line","labels":["1月"],"series":{"营收":[10]}}]\'')
+    if not isinstance(data, list) or not data:
+        raise ChartDataError('panels must be a non-empty JSON array of panel objects, e.g. [{"chart":"pie",…}].')
+    draws: list[Any] = []
+    titles: list[str] = []
+    for index, spec in enumerate(data):
+        draw, title = build_panel_draw(spec, index, panel_source=panel_source)
+        draws.append(draw)
+        titles.append(title)
+    return draws, titles

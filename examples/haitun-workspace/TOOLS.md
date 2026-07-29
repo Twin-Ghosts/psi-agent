@@ -145,14 +145,16 @@ message_id / sender_open_id）。需要群里之前的上下文时：
 - **在文档里放表格 / 流程图 / 泳道图**：`feishu_doc_append_content` 只能写标题和段落，
   **写不出真正的表格**，更画不了图。要真正的表格/图，用下面三个专门工具（都吃 docx 的
   `document_id`，也就是 `feishu_doc_create` 返回的 id，或 wiki 节点的 `obj_token`；带 `user_key`）：
-  - 表格：`feishu_doc_append_table(document_id, rows_json, header_row, column_width_json, user_key)`——
+  - 表格：`feishu_doc_append_table(document_id, rows_json, header_row, column_width_json, user_key, caption)`——
     `rows_json` 是二维 JSON 数组，如 `[["姓名","部门"],["张三","研发"]]`，会生成飞书原生表格块。
-  - 流程图：`feishu_doc_append_flowchart(document_id, steps_json, title, user_key)`——
+  - 流程图：`feishu_doc_append_flowchart(document_id, steps_json, title, user_key, caption)`——
     `steps_json` 是步骤数组 `["提交","审批","归档"]`。**飞书开放接口画不了真正的流程图块**
     （block_type 21 是空画布，API 填不进节点），所以用「单列表格 + ↓ 箭头」如实呈现，可编辑。
-  - 泳道图：`feishu_doc_append_swimlane(document_id, lanes_json, stages_json, user_key)`——
+  - 泳道图：`feishu_doc_append_swimlane(document_id, lanes_json, stages_json, user_key, caption)`——
     `lanes_json` 可传对象 `{"客户":["下单","付款"],"仓库":["发货"]}`（列=泳道，自动排格），
     或传泳道名数组 `["客户","客服","仓库"]` 再用 `stages_json` 给二维正文行。同样用表格如实呈现。
+  三个都收 `caption`（表题）：**只写内容不写「表N：」**，工具读文档已有的「表 N」自动续号，
+  按学术体例写在**表格上方**（图注在下、表题在上），且「表」和「图」是两条互不干扰的序列。
   一句话：用户要「表格/流程图/泳道图」时别再往正文里塞纯文本，改用这三个工具。
 - **列出电子表格的工作表**：`feishu_sheet_tabs(token)` 返回每个工作表的
   `sheet_id`/`title`/行列数。**`SHEET_ID` 不在表格 URL 里**，而所有区域都写成

@@ -4936,24 +4936,67 @@ async def _append_table_descendants(
     column_width: list[int] | None,
     user_key: str,
     identity: str = "",
+    caption: str = "",
+    auto_number: bool = True,
 ) -> dict[str, Any]:
     """Send one table (built from ``rows``) to the /descendant endpoint. Shared by
-    the table / flowchart / swimlane tools."""
+    the table / flowchart / swimlane tools.
+
+    A caption is written *before* the table, not after: the academic convention places a
+    table's title above it and a figure's below, and these three tools produce tables.
+    Its "表 N" is numbered off the document's existing captions, so tables and figures
+    keep independent, gap-free sequences.
+    """
     if not document_id.strip():
         return _error("document_id is required.")
     if not rows:
         return _error("no rows to write — the table would be empty.")
+    doc = document_id.strip()
+    result_extra: dict[str, Any] = {}
+    if caption.strip():
+        # Before the table, and before the table's own request, so a caption that fails
+        # doesn't leave a numbered heading pointing at nothing.
+        text, fields = await _resolve_table_caption(doc, caption, auto_number, user_key, identity)
+        result_extra.update(fields)
+        note = await append_doc_content_impl(doc, text, user_key, identity)
+        result_extra["caption_written"] = bool(note.get("ok"))
+        if not note.get("ok"):
+            result_extra["caption_error"] = note.get("message", "")
     table_id, descendants = _table_descendants(rows, header_row=header_row, column_width=column_width)
-    req = _build_descendant_request(document_id.strip(), [table_id], descendants, index=-1)
+    req = _build_descendant_request(doc, [table_id], descendants, index=-1)
     res = await _invoke(req, user_key=user_key, prefer="user", identity=identity)
     if not res["ok"]:
         return res
     return {
         "ok": True,
-        "document_id": document_id.strip(),
+        "document_id": doc,
         "rows": len(rows),
         "columns": max((len(r) for r in rows), default=0),
+        **result_extra,
     }
+
+
+async def _resolve_table_caption(
+    document_id: str, caption: str, auto_number: bool, user_key: str, identity: str
+) -> tuple[str, dict[str, Any]]:
+    """A caption body becomes a numbered 表 caption, counted off the document's existing ones.
+
+    Imported lazily because ``_chart_caption`` imports this module: at module scope the
+    two would form an import cycle.
+    """
+    import _chart_caption as _cap  # noqa: PLC0415
+
+    body = _cap.strip_own_number(caption, _cap.TABLE)
+    if not auto_number:
+        return _cap.format_caption(_cap.TABLE, 0, body), {}
+    numbered = await _cap.next_number(document_id, _cap.TABLE, user_key, identity)
+    if not numbered.get("ok"):
+        return (
+            _cap.format_caption(_cap.TABLE, 0, body),
+            {"caption_number_skipped": numbered.get("reason", "could not read the document")},
+        )
+    number = int(numbered["number"])
+    return _cap.format_caption(_cap.TABLE, number, body), {"caption_number": number}
 
 
 async def append_doc_table_impl(
@@ -4963,12 +5006,14 @@ async def append_doc_table_impl(
     column_width_json: str = "",
     user_key: str = "",
     identity: str = "",
+    caption: str = "",
+    auto_number: bool = True,
 ) -> dict[str, Any]:
     """Append a native Feishu table (block_type 31) to a docx body.
 
     ``rows_json`` is a JSON 2-D array; the first row is styled as a header when
     ``header_row`` is true. ``column_width_json`` optionally sets per-column pixel
-    widths (JSON array of ints).
+    widths (JSON array of ints). ``caption`` writes a numbered 表 caption line above it.
     """
     rows = _parse_rows(rows_json)
     if isinstance(rows, dict):  # parse error
@@ -4982,12 +5027,25 @@ async def append_doc_table_impl(
         except json.JSONDecodeError, TypeError:
             column_width = None
     return await _append_table_descendants(
-        document_id, rows, header_row=header_row, column_width=column_width, user_key=user_key, identity=identity
+        document_id,
+        rows,
+        header_row=header_row,
+        column_width=column_width,
+        user_key=user_key,
+        identity=identity,
+        caption=caption,
+        auto_number=auto_number,
     )
 
 
 async def append_doc_flowchart_impl(
-    document_id: str, steps_json: str, title: str = "", user_key: str = "", identity: str = ""
+    document_id: str,
+    steps_json: str,
+    title: str = "",
+    user_key: str = "",
+    identity: str = "",
+    caption: str = "",
+    auto_number: bool = True,
 ) -> dict[str, Any]:
     """Append a flowchart rendered as a single-column Feishu table (each step a row,
     joined by ↓ arrows). Feishu's API can't draw a real diagram, so this is the
@@ -5006,12 +5064,25 @@ async def append_doc_flowchart_impl(
         if i < len(labels) - 1:
             rows.append(["↓"])
     return await _append_table_descendants(
-        document_id, rows, header_row=bool(title) or True, column_width=None, user_key=user_key, identity=identity
+        document_id,
+        rows,
+        header_row=bool(title) or True,
+        column_width=None,
+        user_key=user_key,
+        identity=identity,
+        caption=caption,
+        auto_number=auto_number,
     )
 
 
 async def append_doc_swimlane_impl(
-    document_id: str, lanes_json: str, stages_json: str = "", user_key: str = "", identity: str = ""
+    document_id: str,
+    lanes_json: str,
+    stages_json: str = "",
+    user_key: str = "",
+    identity: str = "",
+    caption: str = "",
+    auto_number: bool = True,
 ) -> dict[str, Any]:
     """Append a swimlane diagram rendered as a Feishu table: columns = lanes
     (角色/部门), rows = stages. Feishu's API can't draw a real swimlane diagram, so
@@ -5047,7 +5118,14 @@ async def append_doc_swimlane_impl(
     else:
         return _error("lanes must be a non-empty JSON array of lane names or an object {lane:[activities]}.")
     return await _append_table_descendants(
-        document_id, rows, header_row=True, column_width=None, user_key=user_key, identity=identity
+        document_id,
+        rows,
+        header_row=True,
+        column_width=None,
+        user_key=user_key,
+        identity=identity,
+        caption=caption,
+        auto_number=auto_number,
     )
 
 
@@ -5515,6 +5593,30 @@ async def _upload_into_image_block(image_path: str, block_id: str, user_key: str
     if not token:
         return _error("upload succeeded but returned no file_token.")
     return {"ok": True, "file_token": token, "size": size}
+
+
+async def read_doc_for_captions(document_id: str, user_key: str = "", identity: str = "") -> dict[str, Any]:
+    """A docx's plain text, for counting the 图/表 captions already in it.
+
+    Separate from ``read_doc_impl`` because that one is a user-facing reader with no
+    identity plumbing (tenant token only): a chart being written into someone's own doc
+    has to be counted with the same credentials that will do the writing, or the read
+    fails on exactly the user-owned docs where captions matter most. ``prefer="tenant"``
+    since this is a read — a doc the bot can see needs no user authorization.
+    """
+    doc = document_id.strip()
+    if not doc:
+        return _error("document_id is required.")
+    res = await _invoke(
+        lambda: _build_docx_raw_request(doc),
+        user_key=user_key,
+        prefer="tenant",
+        identity=identity,
+    )
+    if not res["ok"]:
+        return res
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    return {"ok": True, "content": data.get("content", "")}
 
 
 async def append_doc_image_impl(
