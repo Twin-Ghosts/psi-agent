@@ -1,9 +1,10 @@
-"""Feishu/Lark messaging tools — send, reply-in-thread, and list messages.
+"""Feishu/Lark messaging tools — send, reply-in-thread, recall, and list messages.
 
 These let the bot proactively post to a group/user, form a native Feishu
-**thread** (topic) by replying in-thread, and read the messages under a chat or
-thread. For example: post a topic root message, then read the thread's replies
-and post per-reply feedback back into the same thread.
+**thread** (topic) by replying in-thread, take back a message that shouldn't have
+been sent, and read the messages under a chat or thread. For example: post a topic
+root message, then read the thread's replies and post per-reply feedback back into
+the same thread.
 
 To @-mention someone, embed ``<at user_id="ou_xxx"></at>`` in the ``text`` (the
 value is the person's open_id). ``feishu_message_send`` auto-detects such tags and
@@ -199,6 +200,33 @@ async def feishu_message_reply(message_id: str, text: str, reply_in_thread: bool
         reply_in_thread: True (default) keeps replies in one Feishu thread/topic.
     """
     return _f.dumps_result(await _f.reply_message_impl(message_id, text, reply_in_thread))
+
+
+async def feishu_message_recall(message_id: str, user_key: str = "") -> str:
+    """Recall (unsend) a message — it disappears for everyone in the chat.
+
+    Use this when a message the bot sent was wrong, premature, or went to the wrong
+    place ("把刚才那条撤回", "刚发错了, 撤销一下"). Recalling is not editing: to correct
+    the content, recall the bad message and send a new one.
+
+    The bot can always recall **its own** messages. Recalling *someone else's* message
+    requires the bot (or the identity you pass via ``user_key``) to be that group's
+    owner/admin — otherwise Feishu refuses with code 230026. Recall also expires:
+    beyond the tenant's admin-configured recall window it fails with 230009. In both
+    cases the result carries a ``hint`` saying which limit was hit.
+
+    Args:
+        message_id: The message to recall (``om_...``). Take it from the ``message_id``
+            returned by ``feishu_message_send`` / ``feishu_message_send_card`` /
+            ``feishu_message_reply``, from ``<feishu_context>``, or from a
+            ``feishu_message_list`` / ``feishu_thread_read`` item. A chat_id (``oc_...``)
+            or open_id (``ou_...``) is not a message id and is rejected.
+        user_key: The sender's open_id (from ``<feishu_context>``). Pass it to recall as
+            that user, which is what makes recalling *another* person's message possible
+            when they are the group owner/admin; empty uses the bot's own tenant identity
+            (tenant is always tried first regardless).
+    """
+    return _f.dumps_result(await _f.recall_message_impl(message_id, user_key))
 
 
 async def feishu_message_list(

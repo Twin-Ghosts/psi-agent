@@ -252,3 +252,11 @@ message_id / sender_open_id）。需要群里之前的上下文时：
     事后要加列用 `feishu_bitable_create_field(app_token, table_id, field_name, field_type, property_json)`；
     要"同一张表不同人看到不同内容"用 `feishu_bitable_create_role` + `feishu_bitable_add_role_member`（需在表上
     开高级权限）。表名/列名一律**按用户说的建，缺信息就问**，别自己编一套字段糊上去。
+18. **撤回发错的消息**：用户说"把刚才那条撤回/撤销/删掉""发错了"时，用
+    `feishu_message_recall(message_id=<om_...>, user_key=<sender_open_id>)`。`message_id` 只能是**消息 id**
+    （`om_` 开头）——来自 `feishu_message_send`/`_send_card`/`_reply` 的返回、`<feishu_context>`，或
+    `feishu_message_list`/`feishu_thread_read` 里的条目；传 chat_id（`oc_`）/open_id（`ou_`）会被直接拒掉。
+    机器人**自己发的消息随时能撤**；撤**别人**的消息要求操作身份是该群群主/管理员，否则飞书报 230026，
+    此时传群主的 `user_key` 并让其授权才行。撤回还有**时限**（企业管理员配置），超时报 230009。
+    这两类失败工具都会在结果里带一句 `hint` 说明卡在哪，**如实转告用户**，别反复重试或谎称已撤回。
+    撤回不是编辑：内容写错就"撤回旧的 + 重发一条新的"。

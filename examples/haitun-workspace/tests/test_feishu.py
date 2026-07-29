@@ -359,6 +359,78 @@ async def test_list_messages_thread_container(monkeypatch: pytest.MonkeyPatch) -
     assert result["items"][0]["message_id"] == "om_x"
 
 
+@pytest.mark.asyncio
+async def test_recall_message_builds_delete_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.recall_message_impl("om_abc", user_key="ou_owner")
+    req = cap.request
+    assert req.http_method.name == "DELETE"
+    assert req.uri == "/open-apis/im/v1/messages/:message_id"
+    assert req.paths["message_id"] == "om_abc"
+    # tenant first: the bot's own messages need no user authorization at all
+    assert cap.prefer == "tenant"
+    assert cap.user_key == "ou_owner"
+    # Feishu returns an empty data object on success, so success must be explicit
+    assert result == {"ok": True, "message_id": "om_abc", "recalled": True}
+
+
+@pytest.mark.asyncio
+async def test_recall_message_trims_and_requires_message_id() -> None:
+    for bad in ("", "   "):
+        result = await _impl.recall_message_impl(bad)
+        assert result["ok"] is False
+        assert "message_id is required" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_recall_message_rejects_chat_or_open_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    for bad in ("oc_group", "ou_person"):
+        result = await _impl.recall_message_impl(bad)
+        assert result["ok"] is False
+        assert "must be a message id" in result["message"]
+    assert cap.request is None  # rejected before spending a request
+
+
+@pytest.mark.asyncio
+async def test_recall_message_adds_hint_for_known_error_codes(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake(*a: Any, **k: Any) -> dict[str, Any]:
+        return {"ok": False, "code": 230026, "msg": "No permission to recall this message.", "message": "err"}
+
+    monkeypatch.setattr(_impl, "_invoke", _fake)
+    result = await _impl.recall_message_impl("om_other")
+    assert result["ok"] is False
+    assert result["code"] == 230026
+    assert "群主" in result["hint"]  # names the real blocker, not a bare "error 230026"
+
+
+@pytest.mark.asyncio
+async def test_recall_message_keeps_unknown_error_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake(*a: Any, **k: Any) -> dict[str, Any]:
+        return {"ok": False, "code": 99999, "msg": "boom", "message": "err"}
+
+    monkeypatch.setattr(_impl, "_invoke", _fake)
+    result = await _impl.recall_message_impl("om_x")
+    assert "hint" not in result
+
+
+@pytest.mark.asyncio
+async def test_recall_tool_returns_json_and_passes_user_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = importlib.import_module("feishu_message")
+    captured: dict[str, Any] = {}
+
+    async def _fake(message_id: str, user_key: str = "") -> dict[str, Any]:
+        captured.update(message_id=message_id, user_key=user_key)
+        return {"ok": True, "message_id": message_id, "recalled": True}
+
+    monkeypatch.setattr(_impl, "recall_message_impl", _fake)
+    out = await mod.feishu_message_recall(message_id="om_9", user_key="ou_a")
+    assert json.loads(out)["recalled"] is True
+    assert captured == {"message_id": "om_9", "user_key": "ou_a"}
+
+
 def test_im_tools_are_async_with_docstrings() -> None:
     chat_mod = importlib.import_module("feishu_chat")
     msg_mod = importlib.import_module("feishu_message")
@@ -368,6 +440,7 @@ def test_im_tools_are_async_with_docstrings() -> None:
         msg_mod.feishu_message_send,
         msg_mod.feishu_message_send_card,
         msg_mod.feishu_message_reply,
+        msg_mod.feishu_message_recall,
         msg_mod.feishu_message_list,
     ]
     for fn in fns:

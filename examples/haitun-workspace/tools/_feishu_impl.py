@@ -1083,6 +1083,65 @@ async def reply_message_impl(message_id: str, text: str, reply_in_thread: bool) 
     }
 
 
+# ── Recall (unsend) a message ─────────────────────────────────────────────────
+#
+# DELETE /open-apis/im/v1/messages/:message_id removes a message from everyone's
+# view. The bot can always recall what the bot itself sent (tenant token); recalling
+# *someone else's* message additionally requires acting as a group owner/admin, i.e.
+# that person's UAT — hence the tenant-first, UAT-on-permission-failure strategy.
+# Messages sent through the batch-send API need the separate batch-recall endpoint.
+
+_RECALL_ERROR_HINTS = {
+    230002: "机器人不在该群里, 先把机器人加入群再撤回。",
+    230006: "应用未启用机器人能力, 到开发者后台开启后再试。",
+    230009: "该消息已超出可撤回时限 (受企业管理员的撤回时限设置约束)。",
+    230013: "机器人对该用户不可用 (不在应用可用范围, 或该用户已离职)。",
+    230026: "只能撤回机器人自己发的消息; 撤回别人的消息需以群主/管理员身份操作 (传该管理员的 user_key 并完成授权)。",
+    230027: "缺少撤回所需权限 (im:message 或 im:message:recall), 外部群还需开启对外共享。",
+    230050: "该消息对当前操作身份不可见, 无法撤回。",
+    230054: "该消息类型不支持撤回。",
+    230110: "该消息已被撤回或删除, 无需再撤回。",
+    232009: "群组已解散, 无法撤回。",
+}
+
+
+def _build_recall_message_request(message_id: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.DELETE
+    req.uri = "/open-apis/im/v1/messages/:message_id"
+    req.paths["message_id"] = message_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    return req
+
+
+async def recall_message_impl(message_id: str, user_key: str = "") -> dict[str, Any]:
+    """Recall (unsend) a message so it disappears for everyone in the chat.
+
+    ``message_id`` must be a message id (``om_...``) — a chat_id/open_id is the
+    common mix-up and is rejected up front rather than spending a request on
+    ``230001 invalid param``.
+
+    Feishu returns an empty ``data`` on success, so success is reported explicitly.
+    Failures keep the raw ``code``/``msg`` and gain a ``hint`` naming the actual
+    blocker (not the bot's own message, past the recall window, already recalled…),
+    because those are indistinguishable from a bare "Feishu API error 2300xx".
+    """
+    mid = message_id.strip()
+    if not mid:
+        return _error("message_id is required (the om_... id of the message to recall).")
+    if not mid.startswith("om_"):
+        return _error(
+            f"message_id must be a message id starting with 'om_', got {mid!r}. "
+            "chat_id (oc_...) / open_id (ou_...) 不是消息 id; "
+            "消息 id 来自 feishu_message_send 的返回、<feishu_context>, 或 feishu_message_list。",
+        )
+    res = await _invoke(_build_recall_message_request(mid), user_key=user_key, prefer="tenant")
+    if not res["ok"]:
+        hint = _RECALL_ERROR_HINTS.get(res.get("code"))
+        return {**res, "hint": hint} if hint else res
+    return {"ok": True, "message_id": mid, "recalled": True}
+
+
 def _build_list_messages_request(
     container_id: str, container_id_type: str, sort_type: str, page_size: int, page_token: str
 ) -> BaseRequest:
