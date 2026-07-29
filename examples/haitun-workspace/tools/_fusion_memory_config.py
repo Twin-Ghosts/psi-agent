@@ -129,12 +129,12 @@ def build_memory_config(env: Mapping[str, str] | None = None) -> MemoryMcpConfig
         ),
         auto_register_feishu=_bool_env(values.get("FUSION_MEMORY_AUTO_REGISTER_FEISHU")),
         organization_id=(values.get("FUSION_MEMORY_ORGANIZATION_ID") or "").strip() or None,
-        feishu_app_id=(
-            values.get("PSI_FEISHU_APP_ID") or values.get("FUSION_MEMORY_FEISHU_APP_ID") or ""
-        ).strip() or None,
+        feishu_app_id=(values.get("PSI_FEISHU_APP_ID") or values.get("FUSION_MEMORY_FEISHU_APP_ID") or "").strip()
+        or None,
         feishu_app_secret=(
             values.get("PSI_FEISHU_APP_SECRET") or values.get("FUSION_MEMORY_FEISHU_APP_SECRET") or ""
-        ).strip() or None,
+        ).strip()
+        or None,
     )
 
 
