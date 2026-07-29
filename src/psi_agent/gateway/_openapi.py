@@ -510,7 +510,9 @@ OPENAPI_SPEC = {
             },
             "FeishuRouteRequest": {
                 "type": "object",
-                "required": ["open_id"],
+                "description": (
+                    "Needs at least one routing key: open_id (DM) or chat_id with a group/topic chat_type."
+                ),
                 "properties": {
                     "open_id": {
                         "type": "string",

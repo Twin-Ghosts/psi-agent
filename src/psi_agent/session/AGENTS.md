@@ -20,7 +20,7 @@ Session 层是 psi-agent 的核心——负责 workspace 解析、agent loop、t
 
 | | |
 |--|--|
-| **为什么** | Gateway 一个进程跑多个 Session；飞书 channel 更是**按 open_id 给每个用户 spawn 独立 Session**（`gateway/_feishu_manager.py`），多 Session 共用同一个 agent 包。旧行为「每个 Session 为自己加载到的每条 schedule 各起一个 runner」会让一条定时任务被在线会话数乘一遍 → 飞书上一条提醒推 N 次 |
+| **为什么** | Gateway 一个进程跑多个 Session；飞书 channel 更是**按会话 spawn 独立 Session**（`gateway/_feishu_manager.py`：私聊按 `open_id` 每人一个、群聊按 `chat_id` 每群一个），多 Session 共用同一个 agent 包。旧行为「每个 Session 为自己加载到的每条 schedule 各起一个 runner」会让一条定时任务被在线会话数乘一遍 → 飞书上一条提醒推 N 次 |
 | **为什么按条而非按 Session 一个布尔** | 触发权本质是「**这一条**任务归哪个 Session」。整个 Session 一个开关只能表达「全触发 / 全不触发」，表达不了「A 条归调度 Session、B 条归某个用户会话」。名单模型下的不变式是：一条 schedule 必须**恰好**被一个 Session 激活 |
 | **加载源** | `workspace_path / "schedules"`。单根模式（`agent=""` → agent≡workspace）行为不变 |
 | **激活名单语义** | 白名单 `active_names`：`None` / 空集 → 一条都不激活（用户会话默认）；`{"*"}`（`ACTIVATE_ALL`）→ 全部；具名集合 → 仅这些 `schedule.name`。黑名单 `deactive_names` **优先**做减法 |
