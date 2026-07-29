@@ -40,6 +40,8 @@ them. Haitun consumes this MCP service only and must not use legacy REST routes.
 |---|---|
 | `FUSION_MEMORY_MCP_URL` | Remote Fusion Memory MCP Streamable HTTP endpoint; TLS is terminated by its reverse proxy. |
 | `FUSION_MEMORY_TOKEN_MAP_FILE` | Absolute path to the operator-owned JSON map keyed by Feishu `open_id`; each entry requires `token`, while empty or omitted `workspace_id` defaults to `haitun`. |
+| `FUSION_MEMORY_AUTO_REGISTER_FEISHU` | Optional first-use Feishu private-chat registration. When true and a `feishu-<open_id>` Session is missing from the token map, the workspace signs a short-lived registration assertion with the Feishu app secret, asks Memory to register that `open_id`, and writes the returned bearer token into the token map. |
+| `FUSION_MEMORY_ORGANIZATION_ID` | Required with automatic registration; identifies the organization selected for this deployment. |
 | `FUSION_MEMORY_TOKEN` | Legacy single-user bearer token, used only when no token-map path is configured. |
 | `FUSION_MEMORY_WORKSPACE_ID` | Legacy single-user workspace provenance (defaults to `haitun`). |
 | `FUSION_MEMORY_SESSION_ID` | Optional legacy single-user Session provenance. |
@@ -47,8 +49,10 @@ them. Haitun consumes this MCP service only and must not use legacy REST routes.
 Token-map membership enables automatic durable memory. On each mapped user's first message after
 process startup, `system_prompt_builder()` or `system_prompt_rebuild_checker()` idempotently starts
 authenticated MCP health checking and that Session's passive JSONL writer. Unknown users can chat
-but receive no bearer token, connector, writer, checkpoint, or durable memory. Map mode never falls
-back to the legacy shared token. Duplicate token assignments reject the map. Removing an entry
+but receive no bearer token, connector, writer, checkpoint, or durable memory unless Feishu auto-registration
+is explicitly enabled and the Memory service accepts the signed assertion. Auto-registration uses the
+runtime-observed private Feishu `open_id`; it does not let model-visible text choose an identity.
+Map mode never falls back to the legacy shared token. Duplicate token assignments reject the map. Removing an entry
 stops that Session's watcher and closes its cached client. Passive persistence accepts only completed
 ordinary chat turns, excludes schedule/heartbeat/compaction rows, and skips unchanged history files.
 Validated maps are cached by file signature. Each active turn renews a five-minute watcher lease;
