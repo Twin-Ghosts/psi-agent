@@ -1,4 +1,4 @@
-import { Check, Copy, FolderOpen, RefreshCw, ThumbsDown, ThumbsUp } from "lucide-react";
+import { Check, Copy, FolderOpen, RefreshCw, RotateCcw, ThumbsDown, ThumbsUp } from "lucide-react";
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import type { ChatFile, ChatMessage, MessageFeedback } from "./model";
 import { BrandLogo } from "./primitives";
@@ -322,12 +322,12 @@ export function FocusChatThread({
                     <button
                       type="button"
                       className="focus-chat-retry-btn"
-                      aria-label="重新发送"
-                      title={failedLabel}
+                      aria-label="拉回输入框重发"
+                      title={`${failedLabel} · 点击拉回输入框`}
                       disabled={typing}
                       onClick={() => onRetry?.(index)}
                     >
-                      <RefreshCw size={16} aria-hidden />
+                      <RotateCcw size={16} aria-hidden />
                     </button>
                   )}
                 </div>
