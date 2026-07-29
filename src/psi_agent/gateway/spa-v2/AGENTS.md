@@ -82,6 +82,22 @@
   - **`preferResultBelowRule`（刻意为之）**：仅展示层——短计划在 `---` 之上时偏好渲染下半段结果；**不改** JSONL / 复制源可选策略以实现为准。
   - **任务上下文 / 历史 / 卡片 `summary`**：写入经 `plainTextPreview`（`assistantDisplay`）剥掉 `##` / `**` / `` ` `` 等 MD 分隔符；展示侧再 `plainTextFromMarkdown` 兜底。对话气泡仍走完整 Markdown。
 
+### 左栏摘要冗余（现状备档 · 待重设计，勿顺手「修掉」）
+
+三处文案目前**共用同一字段** `task.summary`（前端内存态，非 Gateway 资源）：
+
+| UI | 读法 |
+|----|------|
+| 首页任务卡正文 | `task.summary` |
+| 聚焦左栏「当前任务上下文」`<p>` | `task.summary` |
+| 聚焦左栏「任务历史」首条 `detail` | 同样 `task.summary`（`historyItems` 仅合成一条 `kind=status`，**不是** `/history` 多轮时间线） |
+
+**写入时机**：回合结束 `withCompletedTurn({ summary: 本轮 assistant 全文 })`；加载历史取最后一条完整 agent 回复。经 `plainTextPreview` 截到 ~120 字。
+
+**为何看起来重复**：设计包占位——「上下文」本意当前摘要、「任务历史」本意事件流，但实现只塞了同一摘要，未接多轮对话 / 交付事件列表。右侧聊天才是真实 transcript。
+
+**重设计方向（未开工）**：拆字段或分源——例如上下文用短标题/阶段一句话，历史用真实事件（user 轮次、交付物、状态变更）；任务卡可只留短摘要或阶段，避免三处同文。改前先定信息架构，不要只删一块留空壳。
+
 - 流式进行中不显示助手操作栏。
 
 ### 历史展示隔离（对齐敲定协议 / spa v1）
