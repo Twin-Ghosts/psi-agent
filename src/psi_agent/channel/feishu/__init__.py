@@ -20,14 +20,24 @@ class ChannelFeishu:
     """Session socket path (Unix/TCP/Named Pipe). 无 gateway_url 时全体共用, 有 gateway_url 时作兜底。"""
 
     gateway_url: str | None = None
-    """Gateway REST 基址 (如 ``http://127.0.0.1:8080``), 面向**动态任意用户**场景。
+    """Gateway REST 基址 (如 ``http://127.0.0.1:8080``), 面向**动态任意用户/群**场景。
 
-    设置后, 任意飞书用户首次发消息时 channel 按其 open_id 经 Gateway ``POST /feishu/route`` 幂等地
-    拿到其独立 session 的 ``channel_socket`` 再连——路由/spawn 决策全在 Gateway (``FeishuManager``),
-    channel 只连接不 spawn、退出时也不删。每人由此获得隔离的会话/历史 (独立 workspace 子目录)。
-    Gateway 不可达或路由失败时回退共享 ``session_socket`` (用户总能得到回复, 只是不隔离)。
-    None(默认)=不启用, 行为与今天完全一致 (全体共用 ``session_socket``)。所挂 AI 及 workspace 由
-    Gateway 侧 ``--feishu-ai-id`` / ``--feishu-workspace-root`` 决定, channel 无需关心。"""
+    设置后, channel 把每条消息的 ``open_id``/``chat_id``/``chat_type`` 经 Gateway
+    ``POST /feishu/route`` 幂等地换成对应 session 的 ``channel_socket`` 再连——路由/spawn 决策
+    全在 Gateway (``FeishuManager``), channel 只连接不 spawn、退出时也不删。路由键分两类:
+    **私聊按发送者 open_id** (一人一个独立会话/历史), **群聊按 chat_id** (``chat_type`` 为
+    group/topic 时整群共用一个 session, 于是机器人在群里对全体成员有连贯上下文, 且群与群、群与
+    私聊互不串味)。每个键各有独立 workspace 子目录。Gateway 不可达或路由失败时回退共享
+    ``session_socket`` (用户总能得到回复, 只是不隔离)。None(默认)=不启用, 全体共用
+    ``session_socket``。所挂 AI 及 workspace 由 Gateway 侧 ``--feishu-ai-id`` /
+    ``--feishu-workspace-root`` 决定, channel 无需关心。"""
+
+    agent: str = ""
+    """Agent package root containing ``channel_events/`` (event defs for this Channel).
+
+    Empty → ``PSI_AGENT`` env, else cwd. Same package as Session ``--agent`` when
+    Feishu shares haitun-workspace. Event defs live here (not under ``src/psi_agent/channel``).
+    """
 
     app_id: str = ""
     """Feishu app ID (CLI arg > PSI_FEISHU_APP_ID env)."""
@@ -66,6 +76,7 @@ class ChannelFeishu:
             raise ValueError("No Feishu app_secret. Set --app-secret or PSI_FEISHU_APP_SECRET.")
 
         logger.info(f"Starting Feishu bot, connecting to {self.session_socket}")
+        agent_root = self.agent or os.environ.get("PSI_AGENT", "") or ""
         await run_feishu(
             session_socket=self.session_socket,
             app_id=app_id,
@@ -77,4 +88,5 @@ class ChannelFeishu:
             respond_to_comments=self.respond_to_comments,
             gateway_url=self.gateway_url,
             appdata=self.appdata,
+            agent_root=agent_root,
         )

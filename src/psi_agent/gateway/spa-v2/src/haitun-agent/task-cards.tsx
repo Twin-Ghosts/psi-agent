@@ -6,6 +6,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { type CSSProperties, useEffect, useState } from "react";
+import { plainTextFromMarkdown } from "../services/assistantDisplay";
 import { DELIVERY_LABEL, OVERVIEW_LABEL, PENDING_LABEL, type Task, type TaskStep } from "./model";
 import { ProgressRing, TreasureButton, TreasureVisual } from "./primitives";
 
@@ -304,7 +305,7 @@ export function TaskCard({
             </button>
           )}
         </div>
-        <p>{task.summary}</p>
+        <p>{plainTextFromMarkdown(task.summary)}</p>
       </div>
 
       <TaskStepsPanel task={task} />

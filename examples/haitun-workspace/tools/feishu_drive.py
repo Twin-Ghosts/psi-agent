@@ -18,17 +18,23 @@ if str(TOOLS_DIR) not in sys.path:
 import _feishu_impl as _f
 
 
-async def feishu_drive_add_comment(file_token: str, file_type: str, content: str, user_key: str = "") -> str:
+async def feishu_drive_add_comment(
+    file_token: str, file_type: str, content: str, user_key: str = "", identity: str = ""
+) -> str:
     """Add a top-level (whole-document) comment on a Feishu/Lark document or file.
 
     Args:
         file_token: The file's token (from its URL).
         file_type: File type — one of docx, doc, sheet, bitable, file.
         content: The comment text to post.
-        user_key: The sender's open_id (from ``<feishu_context>``). Pass it to comment
-            as that user when the file is user-owned; empty uses the bot's tenant token.
+        user_key: The sender's open_id (from ``<feishu_context>``), identifying whose
+            authorization and remembered ownership choice apply.
+        identity: Who owns the result: ``"user"`` (this person — needs their
+            authorization) or ``"bot"`` (the bot). Omit to use the choice remembered
+            for this ``user_key``; if they have never been asked, the tool does
+            nothing and returns ``need_identity_choice`` so you can ask them.
     """
-    return _f.dumps_result(await _f.add_comment_impl(file_token, file_type, content, user_key))
+    return _f.dumps_result(await _f.add_comment_impl(file_token, file_type, content, user_key, identity))
 
 
 async def feishu_drive_list_comments(file_token: str, file_type: str, page_size: int = 50, page_token: str = "") -> str:
@@ -59,7 +65,13 @@ async def feishu_drive_list_comment_replies(
 
 
 async def feishu_drive_reply_comment(
-    file_token: str, file_type: str, comment_id: str, content: str, at_user_id: str = "", user_key: str = ""
+    file_token: str,
+    file_type: str,
+    comment_id: str,
+    content: str,
+    at_user_id: str = "",
+    user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Post a reply on a Feishu comment thread, with an optional @-mention.
 
@@ -69,10 +81,11 @@ async def feishu_drive_reply_comment(
         comment_id: The comment thread's ID to reply under.
         content: The reply text.
         at_user_id: open_id/user_id to @-mention at the start of the reply (optional).
-        user_key: The sender's open_id; pass it to reply as that user (see add_comment).
+        user_key: The sender's open_id (from ``<feishu_context>``).
+        identity: ``"user"`` / ``"bot"`` — who owns the result (see add_comment).
     """
     return _f.dumps_result(
-        await _f.reply_comment_impl(file_token, file_type, comment_id, content, at_user_id, user_key)
+        await _f.reply_comment_impl(file_token, file_type, comment_id, content, at_user_id, user_key, identity)
     )
 
 
@@ -102,7 +115,7 @@ async def feishu_file_download(source: str, save_path: str, is_url: bool = False
     return _f.dumps_result(await _f.download_file_impl(source, save_path, is_url, user_key))
 
 
-async def feishu_drive_delete_file(file_token: str, file_type: str, user_key: str = "") -> str:
+async def feishu_drive_delete_file(file_token: str, file_type: str, user_key: str = "", identity: str = "") -> str:
     """Delete a Feishu/Lark cloud file or document (moves it to the recycle bin).
 
     The delete is recoverable (goes to trash, not permanent). The caller must be the
@@ -118,10 +131,14 @@ async def feishu_drive_delete_file(file_token: str, file_type: str, user_key: st
         file_token: The file/document token (from its URL), or a wiki node's obj_token.
         file_type: One of file, docx, doc, sheet, bitable, mindnote, slides, folder,
             shortcut. Deleting a folder is async and returns a task_id.
-        user_key: The sender's open_id (from ``<feishu_context>``). Pass it to delete as
-            that user (needed for user-owned files/wikis); empty uses the bot's tenant token.
+        user_key: The sender's open_id (from ``<feishu_context>``). Deleting a user-owned
+            file/wiki generally needs that user's identity.
+        identity: Who owns the result: ``"user"`` (this person — needs their
+            authorization) or ``"bot"`` (the bot). Omit to use the choice remembered
+            for this ``user_key``; if they have never been asked, the tool does
+            nothing and returns ``need_identity_choice`` so you can ask them.
     """
-    return _f.dumps_result(await _f.delete_file_impl(file_token, file_type, user_key))
+    return _f.dumps_result(await _f.delete_file_impl(file_token, file_type, user_key, identity))
 
 
 async def feishu_drive_upload(
@@ -131,6 +148,7 @@ async def feishu_drive_upload(
     file_name: str = "",
     extra_json: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Upload a local file (e.g. a learning video or a signed-proof image) to Feishu Drive.
 
@@ -148,9 +166,10 @@ async def feishu_drive_upload(
         file_name: Name to store it as (defaults to the local file's name).
         extra_json: Optional JSON string for the endpoint's ``extra`` field (e.g. the target
             drive_route_token when attaching into a doc). Empty for a plain folder upload.
-        user_key: The sender's open_id; pass it to upload as that user (needed when the
-            target folder is user-owned). Empty uses the bot's tenant token.
+        user_key: The sender's open_id (from ``<feishu_context>``). A user-owned target
+            folder generally needs that user's identity.
+        identity: ``"user"`` / ``"bot"`` — who owns the result (see add_comment).
     """
     return _f.dumps_result(
-        await _f.upload_media_impl(file_path, parent_type, parent_node, file_name, extra_json, user_key)
+        await _f.upload_media_impl(file_path, parent_type, parent_node, file_name, extra_json, user_key, identity)
     )

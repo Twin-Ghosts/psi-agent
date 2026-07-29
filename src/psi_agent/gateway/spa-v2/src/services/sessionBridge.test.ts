@@ -78,6 +78,41 @@ describe('historyToChat', () => {
       { role: 'user', text: '你好' },
     ])
   })
+
+  it('coalesces consecutive assistant rows from tool rounds into one bubble', () => {
+    expect(
+      historyToChat([
+        { role: 'user', text: '做剧本杀包' },
+        { role: 'assistant', text: 'Step 2 ✅ 开场与规则说明' },
+        { role: 'assistant', text: 'Step 3 ✅ 角色卡对照表' },
+        {
+          role: 'assistant',
+          text: 'Step 4 ✅ 生成 .docx 并交付',
+          sends: ['/ws/pack.docx'],
+        },
+        {
+          role: 'assistant',
+          text: 'write_word 的工具结果和实际写入不一致，我直接用 Python 生成文件。',
+        },
+        { role: 'user', text: '再改一版' },
+        { role: 'assistant', text: '好的' },
+      ]),
+    ).toEqual([
+      { role: 'user', text: '做剧本杀包' },
+      {
+        role: 'agent',
+        text: [
+          'Step 2 ✅ 开场与规则说明',
+          'Step 3 ✅ 角色卡对照表',
+          'Step 4 ✅ 生成 .docx 并交付',
+          'write_word 的工具结果和实际写入不一致，我直接用 Python 生成文件。',
+        ].join('\n\n'),
+        files: [{ name: 'pack.docx', data: '', path: '/ws/pack.docx' }],
+      },
+      { role: 'user', text: '再改一版' },
+      { role: 'agent', text: '好的' },
+    ])
+  })
 })
 
 describe('historyToDeliverables', () => {

@@ -24,6 +24,24 @@ class AiClient:
     def _build_connector_and_endpoint(self) -> tuple[aiohttp.BaseConnector, str]:
         return resolve_connector_and_endpoint(self.ai_socket)
 
+    @staticmethod
+    def _as_int(value: object) -> int:
+        """Coerce an untrusted SSE field to int; 0 when absent or malformed.
+
+        ``bool`` is rejected explicitly: it is a subclass of ``int``, so a JSON
+        ``true`` would otherwise silently become ``1`` token.
+        """
+        if isinstance(value, bool):
+            return 0
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            try:
+                return int(value)
+            except ValueError:
+                return 0
+        return 0
+
     async def stream(self, request_body: dict) -> AsyncGenerator[AiDelta]:
         connector, endpoint = self._build_connector_and_endpoint()
         async with (
@@ -81,5 +99,11 @@ class AiClient:
                     tool_calls=delta_data.get("tool_calls"),
                     finish_reason=c.get("finish_reason"),
                     compaction_needed=compaction_needed,
+                    prompt_tokens=self._as_int(compaction_signal.get("prompt_tokens"))
+                    if isinstance(compaction_signal, dict)
+                    else 0,
+                    compaction_threshold=self._as_int(compaction_signal.get("threshold"))
+                    if isinstance(compaction_signal, dict)
+                    else 0,
                 )
             logger.debug("SSE stream consumed successfully")

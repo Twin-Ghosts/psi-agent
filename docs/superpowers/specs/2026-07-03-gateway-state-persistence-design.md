@@ -33,7 +33,8 @@ Gateway.run():
 ```json
 {
   "ais": [
-    {"id": "<ai_id>", "provider": "openai", "model": "gpt-4o", "api_key": "sk-...", "base_url": "http://..."}
+    {"id": "<ai_id>", "provider": "openai", "model": "gpt-4o", "api_key": "sk-...", "base_url": "http://...",
+     "max_context_tokens": -1}
   ],
   "sessions": [
     {"id": "<session_id>", "ai_id": "<ai_id>", "workspace": "/home/..."}
@@ -46,6 +47,9 @@ Gateway.run():
 
 - API key 明文存储（设计决策：Gateway 仅 listen 127.0.0.1，文件权限由用户自行控制）
 - 不存 `verbose`、`max_tool_rounds` 等调试/调优参数
+- **`max_context_tokens` 例外地要存**：它是 per-AI 的能力配置（compaction 阈值），不是
+  进程级调试开关。`save()` 是显式白名单，漏列会让用户配好的阈值每次 Gateway 重启就悄悄
+  回到默认值。缺失时读为 `-1`（沿用 `Ai` 自身解析），故本字段出现之前的快照无需迁移
 
 ## Changes per File
 
@@ -61,8 +65,11 @@ class GatewayState:
     async def load(self) -> dict[str, list[dict[str, Any]]]:
         """读取 JSON，文件不存在返回 {"ais": [], "sessions": [], "titles": []}"""
 
-    async def save(self, ais: list[dict[str, str]], sessions: list[dict[str, str]], titles: list[dict[str, str]]) -> None:
-        """写入 JSON。失败 log warning，不抛异常"""
+    async def save(self, ais: list[dict[str, Any]], sessions: list[dict[str, str]], titles: list[dict[str, str]]) -> None:
+        """写入 JSON。失败 log warning，不抛异常
+
+        ``ais`` 的值类型是 ``Any`` 而非 ``str``——``max_context_tokens`` 是 int。
+        """
 ```
 
 ### `_ai_manager.py`

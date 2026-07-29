@@ -100,6 +100,9 @@ src/
         ├── _ai_manager.py         # AIManager
         ├── _session_manager.py    # SessionManager
         ├── _scheduler_manager.py  # SchedulerManager — 每 workspace 一个全量激活的调度 Session（触发其 schedules/）
+        ├── _router_manager.py      # RouterManager — 内部语义路由服务注册表
+        ├── _feishu_manager.py      # FeishuManager — 飞书 open_id → Session 路由
+        ├── _oauth_manager.py       # OAuthRelay — OAuth 回调中继（免手抄授权码）
         ├── _title_manager.py       # 会话标题 CRUD + AI 生成
         ├── _state.py               # GatewayState — 状态持久化 (state/latest.json)
         ├── server.py               # aiohttp REST handlers
@@ -107,6 +110,7 @@ src/
         ├── _history_manager.py     # JSONL 历史读取
         ├── _workspace_manager.py   # 目录浏览
         ├── _openapi.py             # OpenAPI schema 生成
+        ├── _attention.py           # AttentionHub — tray/webview 注意力提示
         ├── _tray.py                # 系统托盘图标 (pystray)
         ├── _webview.py            # 原生 webview 窗口 (pywebview)
         ├── spa/                    # Vue 3 SPA v1（Vite + SFC）
@@ -155,6 +159,8 @@ SSE 流中的特殊字段：
     "psi_compaction": {"needed": true, "prompt_tokens": N, "threshold": M}}
    ```
    `psi_compaction` 和 `finish_reason="compaction_needed"` 均为 psi-agent 内部扩展。
+   其中 `prompt_tokens` / `threshold` **不是纯日志字段**：Session 用它们做压缩冷却判断
+   （`session/AGENTS.md`「压缩冷却」），省略会让冷却退化成 fail-open、退回连续重压。
 
 ## 日志约定
 
@@ -209,12 +215,19 @@ SSE 流中的特殊字段：
 
 17. **Windows 上裸路径地址直接拒绝（刻意为之，勿"修掉"）**：`_sockets.py` 的 `resolve_connector_and_endpoint` / `create_site` 在 `sys.platform == "win32"` 且地址落到 Unix 分支时**主动 `raise ValueError`**。因为 Windows 的 asyncio 没有 `create_unix_connection` / `create_unix_server`，若继续走 `UnixConnector` / `UnixSite`，aiohttp 会在 connect/listen 深处抛一个**不带任何上下文的 `NotImplementedError`**，极难定位（曾导致飞书 channel 每条消息崩、只显示 `generation interrupted`）。真实诱因：`channel feishu --session-socket \\.\pipe\...` 经 POSIX shell 传参时反斜杠被吞成单反斜杠 `\.\pipe\...`，匹配不上命名管道前缀而落到裸路径分支。**这是 fail-fast 前置校验，不是可删的多余检查**——非 Windows（POSIX）行为完全不变，Unix socket 照常工作。Windows/bash 下传管道地址需用四反斜杠 `'\\\\.\\pipe\\...'` 才能让程序收到两根反斜杠开头的 `\\.\pipe\...`。反方向同样门控：非 Windows 上传 `\\.\pipe\name` 也**主动 `raise ValueError`**，因为命名管道要 `ProactorEventLoop`，而 asyncio 在非 win32 平台根本不导出 `ProactorEventLoop`（`asyncio/__init__.py` 只在 `sys.platform == 'win32'` 时 `from .windows_events import *`），aiohttp 那句 `isinstance(loop, asyncio.ProactorEventLoop)` 门控自己会先抛裸 `AttributeError`。两个方向都是 fail-fast 前置校验。
 
-18. **定时任务归 workspace，触发权归 (session × schedule)（刻意为之，勿"修"回每个 Session 都触发、也勿退回单个布尔）**：`schedules/` 从 **workspace** 加载（不是 agent 包）；每个 Session 都读到全部条目，但**是否起 runner 逐条决定**——`ScheduleRegistry(active_names=…, deactive_names=…)`：白名单 `None`/空 → 一条都不触发（所有用户会话的默认），`{"*"}` → 全部，具名集合 → 仅这些；黑名单**优先**做减法。两个名单都要，因为白名单是枚举、覆盖不到启动后新建的 `TASK.md`——「除某几条以外全归我」只能写成 `*` + 黑名单。未激活的条目照旧被加载进 `ScheduleRegistry.schedules` 并计入 `refresh()` 的 added/updated/removed 统计，只是 `_start_runner` no-op（想只看会触发的用 `active_schedules` property）。因为 Gateway 一进程多 Session、飞书按 `open_id` 给每个用户各 spawn 一个，若同一条被多个 Session 激活，一条定时提醒会被在线会话数乘一遍；不变式是**一条 schedule 恰好被一个 Session 激活**。粒度是逐条而非整个 Session 一个布尔：布尔只能表达「全触发 / 全不触发」，表达不了「A 条归调度 Session、B 条归某个用户会话」。Gateway 侧 `SchedulerManager.ensure()` 为每个 workspace 维护唯一一个全量激活（`("*",)`）的调度 Session——去重发生在**构造期**，因此没有租约 / 选主 / 接管这类运行时协调。详见 `session/AGENTS.md`「调度归属 workspace，触发权归属 (session × schedule)」与 `gateway/AGENTS.md`「SchedulerManager」。
+18. **定时任务归 workspace，触发权归 (session × schedule)（刻意为之，勿"修"回每个 Session 都触发、也勿退回单个布尔）**：`schedules/` 从 **workspace** 加载（不是 agent 包）；每个 Session 都读到全部条目，但**是否起 runner 逐条决定**——`ScheduleRegistry(active_names=…, deactive_names=…)`：白名单 `None`/空 → 一条都不触发（所有用户会话的默认），`{"*"}` → 全部，具名集合 → 仅这些；黑名单**优先**做减法。两个名单都要，因为白名单是枚举、覆盖不到启动后新建的 `TASK.md`——「除某几条以外全归我」只能写成 `*` + 黑名单。未激活的条目照旧被加载进 `ScheduleRegistry.schedules` 并计入 `refresh()` 的 added/updated/removed 统计，只是 `_start_runner` no-op（想只看会触发的用 `active_schedules` property）。因为 Gateway 一进程多 Session、飞书按会话各 spawn 一个（私聊按 `open_id` 每人一个、群聊按 `chat_id` 每群一个），若同一条被多个 Session 激活，一条定时提醒会被在线会话数乘一遍；不变式是**一条 schedule 恰好被一个 Session 激活**。粒度是逐条而非整个 Session 一个布尔：布尔只能表达「全触发 / 全不触发」，表达不了「A 条归调度 Session、B 条归某个用户会话」。Gateway 侧 `SchedulerManager.ensure()` 为每个 workspace 维护唯一一个全量激活（`("*",)`）的调度 Session——去重发生在**构造期**，因此没有租约 / 选主 / 接管这类运行时协调。详见 `session/AGENTS.md`「调度归属 workspace，触发权归属 (session × schedule)」与 `gateway/AGENTS.md`「SchedulerManager」。
+
+19. **飞书群聊整群共用一个 Session，且私聊 session_id 里的 `-` 必须转义（两条都刻意为之，勿"修掉"）**：飞书路由键分两支——私聊按发送者 `open_id`（`feishu-<open_id>`，一人一份上下文），**群聊按 `chat_id`**（`feishu-chat-<chat_id>`，**整群共用一份**）。群聊不按发言者拆，因为群里的对话本就是共享的：A 问完 B 追问「那第二点呢」，机器人必须看得见 A 那轮；要区分谁在说话靠 `_context_header` 每条消息注入的 `sender_open_id`（已有机制），不靠拆 session。第二条：`_sanitize_open_id` 的白名单 `[^A-Za-z0-9._-]` **允许** `-` 通过，所以私聊侧派生 session_id / workspace 时必须额外把 `-` 换成 `_`——否则某人 open_id 恰为 `chat-oc_x` 时派生出的 `feishu-chat-oc_x` 与群 `oc_x` 的 session id **逐字节相同**，两个陌生人共享同一份上下文与 workspace，是**隐私事故**而非美观问题。`_session_id` 与 `_workspace_for` 两处必须同步转义，只改一处会「session 分开了、workspace 还是同一个目录」。同理 `chat_id` 为空时**不**按群路由（否则建出 `feishu-chat-` 无主 session），宁可这条消息不隔离。channel 侧 `_GatewayRouteProvider._cache_key` 复制了同款群聊判定（同群不同发言者须命中同一条缓存，否则每人各打一次 Gateway），**两处判定改动时必须同步**。详见 `gateway/AGENTS.md`「FeishuManager」与 `channel/AGENTS.md`「按会话独立渠道」。
+
+19. **`tg.__aexit__(None, None, None)` 不取消子任务——常驻任务会把它挂死**：传三个 `None` 是「正常退出」语义，anyio 于是**等**子任务自己结束。若任务组里有 `start_soon` 起的常驻 server（Gateway 的 AI / Session、channel core），它们永不返回，`__aexit__` 就永久阻塞。在测试里这最阴：`finally: await tg.__aexit__(None, None, None)` 会把测试体内**任何**断言失败从「失败」放大成「挂死」，traceback 都看不到（曾让 `test_manager.py` 在 Windows 上整个文件跑不完，且因 CI 只跑 Linux 而长期隐身）。退组前必须先 `tg.cancel_scope.cancel()`，或显式 `delete()` 掉每个 spawn 出来的实体。参见 `tests/psi_agent/gateway/test_manager.py` 的 `_close()` 与 `test_feishu_manager.py` 的 `_drain()`。
+
+20. **测试断言跨平台路径不能写死后缀**：`_socket_path()` 在 POSIX 上给 `/tmp/.../{id}.sock`、在 Windows 上给 `\\.\pipe\...`（无后缀）。断言 `.endswith(".sock")` 在 `ubuntu-latest` 的 CI 里永远通过，却在每台 Windows 开发机上必然失败——叠加上一条就是挂死。用平台判定函数（`test_manager.py` 的 `_is_socket_path`）。
+
+21. **重定向家目录必须 patch `Path.home()` 本身，不能只 `setenv("HOME")`**：`Path.home()` 在 Windows 上读 `USERPROFILE`、在 POSIX 上才读 `HOME`，所以 `monkeypatch.setenv("HOME", str(tmp_path))` 在 Windows 上**完全不生效**。后果是双重的：断言落点的用例直接失败，而**没有**断言落点的用例会「安静地通过」并往开发者真实目录里写文件（`~/Downloads/.psi/` 曾被测试污染）。CI 三个 job 全是 `ubuntu-latest`，这类差异永远照不出来。正确写法 `monkeypatch.setattr(Path, "home", lambda: tmp_path)`，见 `tests/psi_agent/gateway/test_chat_manager.py` 的 `fake_home` fixture。凡测试碰到会往家目录写盘的代码（目前是 `_chat_manager._downloads_path`），都要先重定向，且**顺手补一条落点断言**——没有断言就等于没有防线。
 
 19. **易变内容挂在请求尾部、不进 system prompt（刻意为之，勿"优化"成写进提示词、也勿删掉那几个 no-op 分支）**：`SystemPrompt.ensure()` 每回合都跑，但只有两条路径——history 空则整段构建；`system_prompt_rebuild_checker()` 返回 True 则整段重建；否则提示词**一字不改**。所有描述「现在」的内容改由 `SystemPrompt.turn_context()` 每回合渲染，挂到**本回合 user 消息**的 `turn_context` 键上（`history_display.TURN_CONTEXT_KEY`），只在 `messages_for_ai()` 投影时折进 `content`。缺了这套机制，提示词就是「首个回合建一次、整段沿用到会话结束」，里面**所有描述「现在」的内容全部冻结**：7月24日建的会话连着几天说今天是 7月24日；构建那刻算错的时区标签（容器 `TZ` 未生效 → `Asia/Shanghai` 记成 `UTC`）活到会话结束；agent 照读陈旧时间作答、被追问时还会编一套时区换算圆场（真实事故）。**为什么不重渲染提示词（哪怕只渲染它的尾部）**：一是整段构建要重扫 skills/tools/bootstrap，实测 haitun 约 110ms、150KB 提示词，这笔是**当下就在付**的；二是它会永久堵死提示缓存这条路——上游按**前缀**缓存，而 system prompt 是**整个请求的最前面**（`any_llm` 的 Anthropic 转换器把所有 `role=system` 抽成顶层 `system` 参数、排在 `messages` 之前），每回合改它就意味着无论怎么配缓存都不可能命中。**注意时态：本仓当前并未开启缓存**——Anthropic 的 prompt caching 是 opt-in 的，文档里那个叫 "automatic caching" 的选项指的是断点自动前移、**仍然要在请求顶层放一个 `cache_control`**，而 `src/` 里没有任何 `cache_control`/`ephemeral`（可 grep 复核）。所以现在不存在「击穿」，改动的收益是**让前缀真正稳定下来、把开启缓存变成一个可行选项**；开启本身是独立的事（会动计费行为，还要先确认提示词长度过得了 512/1024 token 门槛、会话节奏跟得上 5 分钟 TTL）。切 `stable_prefix + 边界 + dynamic_suffix` 并不解决这件事：省下的只是重扫开销，前缀照样每回合变，所以那套边界常量已随此设计一并删除。挂到请求尾部则变动只落在这一个回合。**折在正文之后而非之前**：前置会移动这一回合的每个 byte，正好抵掉带外存储想省的东西。**几个 no-op 分支都是刻意的容错，别当冗余删掉**——未定义 `turn_context_builder`（老 workspace 行为不变）、builder 抛异常、返回非 `str`/空串/纯空白（一律当没有这个块）、`content` 是多模态 block 列表（原样返回并丢块，没有唯一可追加位置，丢一行时钟远好过写坏 block 结构）。**不单独发一条尾部消息**：不是发不出去（Anthropic 明确会把连续同角色轮次合并成一条，不报错），而是那条消息得先落进 history 才能发出去，于是每回合往历史里多塞一条一次性的时钟消息——历史被噪音撑大、压缩时还要判断哪些该丢；挂在本回合 user 消息上则一行不多，且随该回合一起过期。`turn_context` 属于非上线键（与 `kind`/`chat_type` 同在 `_DISPLAY_ONLY_KEYS`），**不写回 history 行**，这样之前每个回合投影出来逐字节相同、前缀才真能复用（实测两回合请求只在末尾分叉，第一回合那行至今仍带着它当时的时钟）。`turn_context_fn` 保持 `None` 默认而不套用坑 8 的「Default over None」：默认函数只能返回空串，与 `None` 语义重合却多一次无谓 await，且 `None` 本身承载「这个 workspace 没有易变块」的语义。**`USER.md`/`HEARTBEAT.md` 留在提示词里**（它们是当作长期上下文读的散文，不是本回合的新闻），文档承诺的「re-read every turn」由 rebuild checker 按**内容哈希**兑现——字节真变了才重建，改一次付一次。详见 `session/AGENTS.md`「每回合易变上下文」。
 
 ## 测试约定
-
 - **框架**: `pytest` + `pytest-asyncio`（`asyncio_mode = "auto"`，anyio backend）
 - **异步测试**: `@pytest.mark.anyio`
 - **测试目录结构**: 镜像 `src/psi_agent/`（如 `ai/server.py` → `tests/psi_agent/ai/test_server.py`）

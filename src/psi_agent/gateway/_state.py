@@ -82,7 +82,7 @@ class GatewayState:
 
     async def save(
         self,
-        ais: list[dict[str, str]],
+        ais: list[dict[str, Any]],
         sessions: list[dict[str, str]],
         titles: list[dict[str, str]],
         routers: list[dict[str, Any]] | None = None,
@@ -96,6 +96,10 @@ class GatewayState:
                     "model": a["model"],
                     "api_key": a["api_key"],
                     "base_url": a["base_url"],
+                    # Compaction threshold. Whitelisted explicitly like the rest:
+                    # omitting it here would silently reset a configured threshold
+                    # to the default on every Gateway restart.
+                    "max_context_tokens": a.get("max_context_tokens", -1),
                 }
                 for a in ais
             ],

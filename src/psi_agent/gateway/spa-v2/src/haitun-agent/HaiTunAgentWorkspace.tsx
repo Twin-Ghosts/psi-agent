@@ -73,6 +73,7 @@ import {
   withCompletedTurn,
   withTodoProgress,
 } from "../services/sessionBridge";
+import { normalizeFailedTurns } from "../services/messageTurn";
 
 const OVERVIEW_WELCOME: ChatMessage = {
   role: "agent",
@@ -209,7 +210,7 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
     historyLoadedRef.current.add(taskId);
     try {
       const hist = await fetchHistory(taskId);
-      const chat = historyToChat(hist);
+      const chat = normalizeFailedTurns(historyToChat(hist));
       const { names, paths } = historyToDeliverables(hist);
       setMessages((current) => ({
         ...current,
@@ -220,14 +221,14 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
           if (task.id !== taskId) return task;
           let next = names.length ? withHistoricalDeliverables(task, names, paths) : task;
           if (chat.length) {
-            const lastAgent = [...chat].reverse().find((m) => m.role === "agent");
+            const lastAgent = [...chat].reverse().find((m) => m.role === "agent" && !m.failed);
             if (lastAgent) {
               next = withCompletedTurn(
                 {
                   ...next,
-                  summary: lastAgent.text.slice(0, 120) + (lastAgent.text.length > 120 ? "…" : ""),
                   updated: names.length ? "已从历史同步交付物" : "已从历史同步",
                 },
+                { summary: lastAgent.text },
               );
             }
           }
@@ -273,18 +274,19 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
       try {
         // Empty pool → open models panel. Do NOT POST free defaults on boot.
         // Drop leftover haitun-default entries when the user already has a real key.
-        let ais = await purgePlaceholderAis();
+        // **刻意为之**：无论 AI 池是否为空都加载 sessions——「使用免费模型」会清空池，
+        // 若提前 return 会把已有任务卡整表丢掉，刷新后像「记录没了」（Session 仍在 Gateway）。
+        const ais = await purgePlaceholderAis();
         if (cancelled) return;
         if (!Array.isArray(ais) || ais.length === 0) {
           setAiId(null);
           writeStoredAiId(null);
           setOpenModelsOnce(true);
-          setBootReady(true);
-          return;
+        } else {
+          const preferred = pickPreferredAi(ais, null);
+          setAiId(preferred?.id ?? null);
+          if (preferred?.id) writeStoredAiId(preferred.id);
         }
-        const preferred = pickPreferredAi(ais, null);
-        setAiId(preferred?.id ?? null);
-        if (preferred?.id) writeStoredAiId(preferred.id);
         const [sessions, titles] = await Promise.all([listSessions(), listTitles()]);
         if (cancelled) return;
         const inWs = sessions.filter((s) => {
@@ -556,12 +558,21 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
       }
       turnOk = true;
       replySummary = full.trim();
-      if (!full.trim()) {
+      const hasBlob = blobs.length > 0;
+      if (!full.trim() && !hasBlob) {
+        // No displayable reply — mark orphan user failed (same as history normalize).
+        turnOk = false;
         setMessages((current) => {
           const list = [...(current[cardId] ?? [])];
           const last = list[list.length - 1];
           if (last?.role === "agent" && !last.text.trim() && !(last.files?.length)) {
-            list[list.length - 1] = { ...last, text: "（本轮无文本回复；若正在跑工具，请稍候在历史中查看。）" };
+            list.pop();
+          }
+          for (let i = list.length - 1; i >= 0; i--) {
+            if (list[i]?.role === "user") {
+              list[i] = { ...list[i]!, failed: true, failedReason: "incomplete" };
+              break;
+            }
           }
           return { ...current, [cardId]: list };
         });
@@ -720,7 +731,11 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
     await runChatTurn(cardId, text, files, text);
   };
 
-  const retryFailedMessage = async (cardId: string, userIndex: number) => {
+  /**
+   * Orphan / failed user turn → same as Stop: pull text+files back into the composer
+   * (replacing any half-typed draft) and remove the bubble(s) from the thread.
+   */
+  const retryFailedMessage = (cardId: string, userIndex: number) => {
     if (typingCard === cardId || cardId === "overview") return;
     const list = messages[cardId] ?? [];
     const userMsg = list[userIndex];
@@ -731,10 +746,22 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
       const next = [...(current[cardId] ?? [])];
       const after = next[userIndex + 1];
       const removeCount = after?.role === "agent" ? 2 : 1;
-      next.splice(userIndex, removeCount, { role: "user", text, files }, { role: "agent", text: "" });
+      next.splice(userIndex, removeCount);
       return { ...current, [cardId]: next };
     });
-    await runChatTurn(cardId, text, files, text);
+    const fileNames = files.map((f) => f.name).join("、");
+    const uploadOnly =
+      files.length > 0 && (!text.trim() || text === `已上传：${fileNames}`);
+    setChatDrafts((current) => ({
+      ...current,
+      [cardId]: uploadOnly ? "" : text,
+    }));
+    setChatAttachments((current) => ({
+      ...current,
+      [cardId]: files.map((f) => (f instanceof File ? f : chatFileToFile(f))),
+    }));
+    if (!chatExpanded) setChatExpanded(true);
+    queueMicrotask(() => activeChatInputRef.current?.focus());
   };
 
   const handleChatSubmit = (event: FormEvent) => {

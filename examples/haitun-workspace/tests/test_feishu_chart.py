@@ -598,7 +598,9 @@ class _FakeFeishu:
         self.calls: list[Any] = []
         self.fail_at = fail_at
 
-    async def __call__(self, request: Any, user_key: str | None = None, prefer: str = "tenant") -> dict[str, Any]:
+    async def __call__(
+        self, request: Any, user_key: str | None = None, prefer: str = "tenant", **_kw: Any
+    ) -> dict[str, Any]:
         request = request() if callable(request) else request
         self.calls.append(request)
         uri = getattr(request, "uri", "")
@@ -777,7 +779,7 @@ async def test_invoke_falls_back_to_tenant_when_the_user_token_is_denied(
 
     monkeypatch.setattr(_impl, "_send_as_user", as_user)
     monkeypatch.setattr(_impl, "_send_as_tenant", as_tenant)
-    res = await _impl._invoke(lambda: object(), user_key="ou_x", prefer="user")
+    res = await _impl._invoke(lambda: object(), user_key="ou_x", prefer="user", identity="user", capabilities=[])
     assert sent == ["user", "tenant"]
     assert res["ok"] is True
 
@@ -797,7 +799,7 @@ async def test_invoke_reports_the_denial_when_neither_identity_may_write(
 
     monkeypatch.setattr(_impl, "_send_as_user", as_user)
     monkeypatch.setattr(_impl, "_send_as_tenant", as_tenant)
-    res = await _impl._invoke(lambda: object(), user_key="ou_x", prefer="user")
+    res = await _impl._invoke(lambda: object(), user_key="ou_x", prefer="user", identity="user", capabilities=[])
     assert res["ok"] is False
     assert res.get("need_auth") is not True
     assert res["code"] == 1770032
@@ -832,7 +834,7 @@ async def test_invoke_sends_a_fresh_request_per_identity(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(_impl, "_send_as_user", as_user)
     monkeypatch.setattr(_impl, "_send_as_tenant", as_tenant)
-    await _impl._invoke(build, user_key="ou_x", prefer="user")
+    await _impl._invoke(build, user_key="ou_x", prefer="user", identity="user", capabilities=[])
     assert len(seen) == 2
     assert seen[0] is not seen[1]
     assert len(built) == 2
@@ -864,7 +866,7 @@ async def test_plain_requests_survive_the_tenant_retry(monkeypatch: pytest.Monke
     monkeypatch.setattr(_impl, "_send_as_tenant", as_tenant)
 
     req = _impl._build_media_upload_all_request("c.png", "docx_image", "blk1", 3, b"png", None)
-    res = await _impl._invoke(req, user_key="ou_x", prefer="user")
+    res = await _impl._invoke(req, user_key="ou_x", prefer="user", identity="user", capabilities=[])
     assert res["ok"] is True
     # The tenant attempt must see both token types again, not the narrowed {USER}.
     assert AccessTokenType.TENANT in seen[1]
@@ -886,7 +888,7 @@ async def test_failed_upload_deletes_the_placeholder_without_an_index(
     png.write_bytes(_PNG_MAGIC + b"0" * 100)
     deleted: list[dict[str, Any]] = []
 
-    async def fake(request: Any, user_key: str | None = None, prefer: str = "tenant") -> dict[str, Any]:
+    async def fake(request: Any, user_key: str | None = None, prefer: str = "tenant", **_kw: Any) -> dict[str, Any]:
         req = request() if callable(request) else request
         uri, method = getattr(req, "uri", ""), req.http_method.name
         if "medias/upload_all" in uri:

@@ -33,6 +33,7 @@ async def feishu_permission_add_member(
     member_kind: str = "user",
     need_notification: bool = False,
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Grant a user/chat/department a permission level on a Feishu file (make it visible/editable).
 
@@ -49,12 +50,15 @@ async def feishu_permission_add_member(
             email, groupid, wikispaceid.
         member_kind: Member kind — user (default), chat, department, or group.
         need_notification: If true, notify the member they were granted access (default false).
-        user_key: The sender's open_id; pass it to act as that user (needed when the file
-            is user-owned and the bot isn't a collaborator). Empty uses the bot's tenant token.
+        user_key: The sender's open_id (from ``<feishu_context>``). A user-owned file
+            generally needs that user's identity, since the bot isn't a collaborator.
+        identity: Whose permissions perform the change: ``"user"`` (this person — needs
+            their authorization) or ``"bot"``. Omit to use their remembered choice; if
+            never asked, returns ``need_identity_choice`` instead of acting.
     """
     return _f.dumps_result(
         await _f.add_permission_member_impl(
-            token, obj_type, member_id, perm, member_type, member_kind, need_notification, user_key
+            token, obj_type, member_id, perm, member_type, member_kind, need_notification, user_key, identity
         )
     )
 
@@ -77,6 +81,7 @@ async def feishu_permission_remove_member(
     member_type: str = "openid",
     member_kind: str = "user",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Revoke a user/chat/department's permission on a Feishu file.
 
@@ -87,8 +92,10 @@ async def feishu_permission_remove_member(
         member_type: Id form — openid (default), userid, unionid, openchat, opendepartmentid,
             email, groupid, wikispaceid.
         member_kind: Member kind — user (default), chat, department, or group.
-        user_key: The sender's open_id; pass it to act as that user. Empty uses tenant token.
+        user_key: The sender's open_id (from ``<feishu_context>``).
+        identity: ``"user"`` / ``"bot"`` — whose permissions perform the change
+            (see feishu_permission_add_member).
     """
     return _f.dumps_result(
-        await _f.delete_permission_member_impl(token, obj_type, member_id, member_type, member_kind, user_key)
+        await _f.delete_permission_member_impl(token, obj_type, member_id, member_type, member_kind, user_key, identity)
     )

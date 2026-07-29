@@ -148,3 +148,7 @@ class AiDelta:
     tool_calls: list[dict[str, Any]] | None = None
     finish_reason: str | None = None
     compaction_needed: bool = False
+    prompt_tokens: int = 0
+    """Upstream-reported prompt tokens carried by the compaction signal (0 = unknown)."""
+    compaction_threshold: int = 0
+    """The threshold the signal was raised against (0 = unknown)."""

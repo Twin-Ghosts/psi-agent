@@ -47,7 +47,7 @@
 ```
 
 **新建任务输入**：单个大框（对齐总览 `context-chat`）——框内上部是预设快捷按钮（单行），底部是细条真输入（回形针 + 文本框 + 发送）；附件 chip 在细条上方。发送时随首轮 `streamSessionChat` 上传；可纯附件无文案。页内「返回任务总览」始终回总览（`goHome`）；顶栏在从模板进入时可显示「返回模板库」（`newTaskReturnView`）。
-**模型选择（防踩坑）**：启动 / 新建任务不盲选 `ais[0]`。池里若已有真实 key，会清掉残留的 `haitun-default` 占位项，并优先用户选中（localStorage）的 AI；仅空池才走免费远程。Session 创建时固定 `ai_id`——已绑坏 AI 的旧任务需新建。
+**模型选择（防踩坑）**：启动 / 新建任务不盲选 `ais[0]`。池里若已有真实 key，会清掉残留的 `haitun-default` 占位项，并优先用户选中（localStorage）的 AI；仅空池才走免费远程。Session 创建时固定 `ai_id`——已绑坏 AI 的旧任务需新建。**刻意为之**：空池（「使用免费模型」）只弹模型面板、不选 AI，**仍加载** `GET /sessions`——勿在空池分支提前 return，否则刷新后任务卡全空、像「记录没了」（服务端 Session/JSONL 仍在）。
 
 ### 任务卡三步进度（分层）
 
@@ -70,7 +70,7 @@
 
 ### 对话气泡操作（对齐 spa v1）
 
-- **用户消息**：悬停显示复制；发送失败（`failed`）时显示重试（重新 POST 该轮）。
+- **用户消息**：悬停显示复制；发送失败（`failed`）时显示**红色回退箭头**（`RotateCcw`）。加载 `/history` 后经 `normalizeFailedTurns` 把「有 user、无完整 agent 回复」标成 `failed`/`incomplete`（与 spa v1 同款）。**点击箭头 ≠ 立刻重发**：效果对齐 Stop——撤回该 user（及空 agent stub），文案与附件**顶掉**输入框里半成品草稿并 focus，由用户再按发送。
 - **助手消息**：完整回复结束后显示操作栏——点赞 / 点踩（互斥切换）、重新生成（丢掉该助手气泡并用上一条用户消息重跑 SSE）、复制。
 - **停止生成**：流式进行中输入栏右侧为红色停止键（替换发送）。中止后撤回本轮乐观 user+agent，把原文案与附件还原到输入框（对齐 Cursor）。**刻意为之**：停止键用 `pointerdown` + 短时 `suppressSubmit`，避免 Stop 变回 Send 后同一次点击误触重发（旧逻辑清空输入框，误触 submit 是空操作所以「一点就停」；回填草稿后误触会立刻再跑一轮，看起来像打断后又在气泡里重出）。另用 `streamEpoch` / `signal.aborted` 丢掉中止后的迟到 SSE。网络等非 Abort 失败仍标记 `failed` / 可重试。
 - **粘贴附件**：对话栏 / 新建任务输入 `Ctrl/Cmd+V` 时，剪贴板中的**任意文件**（含截图）等价于回形针选文件，进入同一附件 chip 再走 multipart；纯文字粘贴不拦截。识图等由 workspace tool 处理。
@@ -80,6 +80,7 @@
   - **尾行**：只活「规划下一步…」/「撰写回复…」；**刻意**永不把「规划下一步」推进 `lines`。
   - **`hideAgentProse`（刻意为之，对标 Cursor）**：仅在过程轴仍为「规划下一步…」（工具 / thinking）时藏正文，避免半截计划与过程轴抢戏；一旦 SSE `content` 到达、尾行切到「撰写回复…」，**正文必须边到边显示**（过程轴仍可挂在上方）。回合结束再收起过程轴。
   - **`preferResultBelowRule`（刻意为之）**：仅展示层——短计划在 `---` 之上时偏好渲染下半段结果；**不改** JSONL / 复制源可选策略以实现为准。
+  - **任务上下文 / 历史 / 卡片 `summary`**：写入经 `plainTextPreview`（`assistantDisplay`）剥掉 `##` / `**` / `` ` `` 等 MD 分隔符；展示侧再 `plainTextFromMarkdown` 兜底。对话气泡仍走完整 Markdown。
 
 - 流式进行中不显示助手操作栏。
 
@@ -87,6 +88,7 @@
 
 - Gateway `/history` 按 Session ``kind`` **白名单**过滤：只返回 `chat` 气泡，以及 `schedule.display` 的 assistant；`schedule.silent`（含 heartbeat）不返回。
 - `historyToChat` 再剥 `[SEND:]`/`[RECV:]`，并丢弃空行 / 泄漏的 `schedule.silent`（防御）。
+- **`historyToChat` 合并连续 assistant（刻意为之）**：Session 每轮 `tool_calls` 会把带正文的 assistant 落盘（todo 多步常见「Step N ✅ …」或短计划各占一行）。流式时 `appendStreamingAgent` 累进同一气泡；刷新若不合并会拆成多个气泡并各挂操作栏。合并只发生在相邻 assistant 之间，遇 `user` 切断；files/`sends` stub 按 basename 去重合并。
 - 气泡渲染同样 `stripTransferMarkers`（与 v1 一致）。
 
 任务 `status` / `deliveryState` 仍是前端展示字段（Gateway 尚无 Task/Delivery 资源）。交付物分两轨：

@@ -107,7 +107,7 @@ class _AiEntry:
 4. 构造 `Ai(session_socket=socket, provider=..., model=..., api_key=..., base_url=...)`
 5. 创建 `anyio.CancelScope`，`task_group.start_soon(ai.run)`
 6. 存入 `_entries[ai_id]`
-7. `_wait_socket(socket)` 轮询等待 socket 就绪（无限等待直到成功）
+7. `_wait_socket(socket)` 轮询等待 socket 就绪（默认 120s 上限，超时抛 `TimeoutError` 走 rollback）
 8. 返回 `AiInfo(id, socket, provider, model, api_key, base_url)`
 
 ### 4.2 `delete(ai_id) -> None`
@@ -145,7 +145,7 @@ class _SessionEntry:
 5. 构造 `Session(workspace=..., channel_socket=..., ai_socket=..., session_id=session_id)`
 6. 创建 `CancelScope`，`task_group.start_soon(session.run)`
 7. 存入 `_entries[session_id]`
-8. `_wait_socket(channel_socket)` 轮询等待 channel socket 就绪
+8. `_wait_socket(channel_socket)` 轮询等待 channel socket 就绪（默认 120s 上限，超时抛 `TimeoutError` 走 rollback）
 9. 返回 `SessionInfo(id, ai_id, workspace, channel_socket)`
 
 ### 5.2 `delete(session_id) -> None`

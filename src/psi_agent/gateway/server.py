@@ -21,6 +21,7 @@ from psi_agent.gateway._defaults import (
 )
 from psi_agent.gateway._feishu_manager import FeishuManager
 from psi_agent.gateway._history_manager import HistoryManager
+from psi_agent.gateway._oauth_manager import OAuthRelay
 from psi_agent.gateway._openapi import render_openapi
 from psi_agent.gateway._router_manager import RouterManager, RouterUpstreamInfo
 from psi_agent.gateway._scheduler_manager import SchedulerManager
@@ -174,6 +175,7 @@ async def create_app(
     # startup restore); standalone tests may omit it.
     app["schedm"] = schedm or SchedulerManager(_sm=sm, _ai_id=scheduler_ai_id or feishu_ai_id)
     app["fm"] = FeishuManager(_sm=sm, _ai_id=feishu_ai_id, _workspace_root=feishu_workspace_root)
+    app["oauth"] = OAuthRelay()
     app["wm"] = WorkspaceManager()
     app["cm"] = ChatManager()
     app["hm"] = HistoryManager()
@@ -230,6 +232,8 @@ async def create_app(
     app.router.add_post("/sessions/{session_id}/chat", _handle_chat)
     app.router.add_post("/feishu/route", _feishu_route)
     app.router.add_get("/feishu/routes", _list_feishu_routes)
+    app.router.add_get("/oauth/callback", _oauth_callback)
+    app.router.add_get("/oauth/code", _oauth_take_code)
 
     return app
 
@@ -244,6 +248,7 @@ async def _create_ai(request: web.Request) -> web.Response:
             api_key=body["api_key"],
             base_url=body["base_url"],
             id=body.get("id", ""),
+            max_context_tokens=int(body.get("max_context_tokens", -1)),
         )
         return _json(asdict(info), status=201)
     except (TypeError, ValueError, KeyError) as e:
@@ -369,10 +374,12 @@ async def _list_sessions(request: web.Request) -> web.Response:
 
 
 async def _feishu_route(request: web.Request) -> web.Response:
-    """按飞书 ``open_id`` 幂等地路由到其独立 Session, 首次见到时按需 spawn。
+    """幂等地把一次飞书会话路由到其 Session, 首次见到时按需 spawn。
 
-    body: ``{open_id, ai_id?, workspace?}`` → ``201 {open_id, session_id, channel_socket}``。
-    channel 拿回 ``channel_socket`` 连接即得该用户隔离的会话。
+    body: ``{open_id, chat_id?, chat_type?, ai_id?, workspace?}`` →
+    ``201 {open_id, chat_id, session_id, channel_socket}``。群聊 (``chat_type`` 为 group/topic
+    且 ``chat_id`` 非空) 整群共用一个 Session, 其余按 ``open_id`` 一人一个。channel 拿回
+    ``channel_socket`` 连接即得对应会话。
     """
     fm: FeishuManager = request.app["fm"]
     schedm: SchedulerManager = request.app["schedm"]
@@ -380,20 +387,33 @@ async def _feishu_route(request: web.Request) -> web.Response:
         body = await request.json()
         if not isinstance(body, dict):
             return _error("Request body must be a JSON object", status=400)
+        open_id = body.get("open_id") or ""
+        chat_id = body.get("chat_id") or ""
+        chat_type = body.get("chat_type") or ""
         socket, session_id = await fm.route(
-            body["open_id"],
+            open_id,
+            chat_id=chat_id,
+            chat_type=chat_type,
             ai_id=body.get("ai_id"),
             workspace=body.get("workspace"),
         )
-        # Schedules under this user's workspace belong to its dedicated scheduler
-        # Session, not to the user session.
+        # Schedules under this session's workspace belong to its dedicated scheduler
+        # Session, not to the user/group session.
         sm: SessionManager = request.app["sm"]
         await schedm.ensure(
             sm.get_workspace(session_id),
             ai_id=sm.get_backend_id(session_id),
             agent=sm.get_agent(session_id),
         )
-        return _json({"open_id": body["open_id"], "session_id": session_id, "channel_socket": socket}, status=201)
+        return _json(
+            {
+                "open_id": open_id,
+                "chat_id": chat_id,
+                "session_id": session_id,
+                "channel_socket": socket,
+            },
+            status=201,
+        )
     except (TypeError, ValueError, KeyError) as e:
         return _error(str(e), status=400)
     except LookupError as e:
@@ -406,6 +426,56 @@ async def _feishu_route(request: web.Request) -> web.Response:
 async def _list_feishu_routes(request: web.Request) -> web.Response:
     fm: FeishuManager = request.app["fm"]
     return _json([asdict(r) for r in fm.list_routes()])
+
+
+_OAUTH_DONE_HTML = (
+    "<!doctype html><meta charset=utf-8><title>授权完成</title>"
+    "<body style='font:16px/1.7 system-ui;padding:3rem;text-align:center'>"
+    "<h2>{title}</h2><p style='color:#666'>{note}</p></body>"
+)
+
+
+def _oauth_html(title: str, note: str, status: int = 200) -> web.Response:
+    return web.Response(
+        text=_OAUTH_DONE_HTML.format(title=title, note=note),
+        content_type="text/html",
+        charset="utf-8",
+        status=status,
+    )
+
+
+async def _oauth_callback(request: web.Request) -> web.Response:
+    """OAuth 重定向落地点: 收下 ``?code=&state=`` 交给中继, 给用户一个成功页。
+
+    发起方(workspace 工具)随后用同一个 ``state`` 去 ``/oauth/code`` 取回 —— 用户
+    因此**不需要**再从地址栏手工复制 code。
+    """
+    relay: OAuthRelay = request.app["oauth"]
+    state = request.query.get("state", "")
+    code = request.query.get("code", "")
+    error = request.query.get("error", "") or request.query.get("error_description", "")
+    if not state:
+        return _oauth_html("授权链接不完整", "回调缺少 state 参数, 请回到对话里重新发起授权。", status=400)
+    if not code and not error:
+        error = "callback carried neither code nor error"
+    await relay.deliver(state, code=code, error=error)
+    if error:
+        return _oauth_html("授权未完成", "可以回到对话里重新发起授权。", status=400)
+    return _oauth_html("授权成功 ✅", "可以关掉这个页面, 回到对话继续 —— 不用复制任何东西。")
+
+
+async def _oauth_take_code(request: web.Request) -> web.Response:
+    """发起方取件: ``?state=`` 命中则返回 ``{code}`` 并作废, 未到达返回 404。"""
+    relay: OAuthRelay = request.app["oauth"]
+    state = request.query.get("state", "")
+    if not state:
+        return _error("state query parameter is required", status=400)
+    pending = await relay.take(state)
+    if pending is None:
+        return _error("no callback received for this state yet", status=404)
+    if pending.error:
+        return _json({"state": state, "error": pending.error}, status=200)
+    return _json({"state": state, "code": pending.code}, status=200)
 
 
 async def _list_titles(request: web.Request) -> web.Response:

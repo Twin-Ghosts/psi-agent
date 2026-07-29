@@ -13,6 +13,7 @@ from loguru import logger
 from psi_agent.session.ai_client import AiClient
 from psi_agent.session.channel_adapter import ChannelAdapter
 from psi_agent.session.conversation import Conversation
+from psi_agent.session.event_protocol import EventProtocolError, parse_event_envelope
 from psi_agent.session.history_display import (
     KIND_COMPACTED,
     TURN_CONTEXT_KEY,
@@ -31,6 +32,16 @@ from psi_agent.session.runtime_context import runtime_scope
 from psi_agent.session.schedule_registry import ScheduleRegistry
 from psi_agent.session.system_prompt import SystemPrompt
 from psi_agent.session.tool_registry import ToolRegistry
+from psi_agent.session.trigger_registry import TriggerRegistry
+
+COMPACTION_COOLDOWN_FRACTION = 0.1
+"""Share of the threshold that must accrue before compaction may run again.
+
+Guards against back-to-back compactions when the system prompt itself is a large
+fraction of the threshold — in that regime the signal re-fires every turn but
+compaction cannot shrink the system prompt, so each pass costs an LLM call and
+erodes older context without lowering ``prompt_tokens``.
+"""
 
 
 class SessionAgent:
@@ -56,6 +67,7 @@ class SessionAgent:
         conversation: Conversation | None = None,
         tool_registry: ToolRegistry | None = None,
         schedule_registry: ScheduleRegistry | None = None,
+        trigger_registry: TriggerRegistry | None = None,
         system_prompt: SystemPrompt | None = None,
         max_tool_rounds: int = 128,
         workspace_path: Path | None = None,
@@ -66,11 +78,13 @@ class SessionAgent:
         self._conversation = conversation or Conversation()
         self._tool_registry = tool_registry or ToolRegistry()
         self._schedule_registry = schedule_registry or ScheduleRegistry()
+        self._trigger_registry = trigger_registry or TriggerRegistry()
         self._system_prompt = system_prompt or SystemPrompt()
         self._max_tool_rounds = max_tool_rounds
         self._lock = anyio.Lock()
         self._workspace_path = workspace_path
         self._agent_path = agent_path
+        self._tokens_at_last_compaction: int | None = None
 
     # -- factory --------------------------------------------------------------
 
@@ -91,7 +105,7 @@ class SessionAgent:
 
         *workspace_path* is the user open-folder (relative file tools) and owns
         **schedules** (``schedules/``).
-        *agent_path* loads tools / system; when omitted, falls
+        *agent_path* loads tools / system / **triggers** (``triggers/``); when omitted, falls
         back to *workspace_path* (single-root compatibility).
         *appdata_root* holds history JSONL (Step 4C); empty → resolve via
         ``PSI_APPDATA`` / platformdirs.
@@ -125,6 +139,7 @@ class SessionAgent:
             active_names=active_schedules,
             deactive_names=deactive_schedules,
         )
+        trigger_registry = await TriggerRegistry.load(agent_root / "triggers")
         system_prompt = await SystemPrompt.from_workspace(agent_root, conversation.session_id)
 
         return cls(
@@ -132,6 +147,7 @@ class SessionAgent:
             conversation=conversation,
             tool_registry=tool_registry,
             schedule_registry=schedule_registry,
+            trigger_registry=trigger_registry,
             system_prompt=system_prompt,
             max_tool_rounds=max_tool_rounds,
             workspace_path=workspace_path,
@@ -157,6 +173,9 @@ class SessionAgent:
 
     async def reload_schedules(self) -> dict[str, str]:
         return await self._schedule_registry.refresh()
+
+    async def reload_triggers(self) -> dict[str, str]:
+        return await self._trigger_registry.refresh()
 
     # -- channel request lifecycle --------------------------------------------
 
@@ -193,6 +212,32 @@ class SessionAgent:
 
         logger.info("Session request completed")
         return response
+
+    async def handle_event(self, request: web.Request) -> web.Response:
+        """aiohttp handler for ``POST /events`` (Channel → Session envelopes)."""
+        try:
+            body = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"invalid JSON: {e}"}, status=400)
+        try:
+            envelope = parse_event_envelope(body)
+        except EventProtocolError as e:
+            logger.warning(f"POST /events rejected: {e}")
+            return web.json_response({"error": str(e)}, status=400)
+
+        async with self._lock:
+            matched = self._trigger_registry.match(envelope)
+            fired = await self._trigger_registry.dispatch(envelope, self)
+
+        logger.info(f"POST /events ok event={envelope.event!r} matched={len(matched)} fired={fired!r}")
+        return web.json_response(
+            {
+                "ok": True,
+                "event": envelope.event,
+                "matched": len(matched),
+                "fired": fired,
+            }
+        )
 
     # -- agent loop -----------------------------------------------------------
 
@@ -291,6 +336,8 @@ class SessionAgent:
                     accumulated_content: str = ""
                     accumulated_reasoning: str = ""
                     _compaction_needed = False
+                    _compaction_prompt_tokens = 0
+                    _compaction_threshold = 0
 
                     async with aclosing(self._ai_client.stream(request_body)) as stream:
                         async for delta in stream:
@@ -311,6 +358,8 @@ class SessionAgent:
 
                             if delta.compaction_needed:
                                 _compaction_needed = True
+                                _compaction_prompt_tokens = delta.prompt_tokens
+                                _compaction_threshold = delta.compaction_threshold
 
                             if delta.finish_reason and not finish_reason:
                                 finish_reason = delta.finish_reason
@@ -433,7 +482,7 @@ class SessionAgent:
                         await self._conversation.commit()
                         await self._schedule_registry.refresh()
                         if _compaction_needed:
-                            await self._maybe_compact()
+                            await self._maybe_compact(_compaction_prompt_tokens, _compaction_threshold)
                         return
 
                     if finish_reason not in ("error", "stop", "tool_calls", "compaction_needed"):
@@ -462,13 +511,24 @@ class SessionAgent:
                     await self._conversation.commit()
                     yield AgentChunk(content="[Max tool rounds reached]")
 
-    async def _maybe_compact(self) -> None:
+    async def _maybe_compact(self, prompt_tokens: int = 0, threshold: int = 0) -> None:
         """Invoke compact_history from system.py, insert compaction message
         into conversation.  system prompt merge + old-message trimming is
-        deferred to ``messages_for_ai()``."""
+        deferred to ``messages_for_ai()``.
+
+        A cooldown guards against back-to-back compactions: the signal only says
+        "prompt_tokens exceeded the threshold", and compaction cannot shrink the
+        system prompt itself.  When the system prompt alone is a large fraction of
+        the threshold, every subsequent turn re-raises the signal, so without this
+        gate the session would re-summarize constantly — each pass paying an LLM
+        call and eroding older context.
+        """
         compaction_fn = self._system_prompt.compaction_fn
         if compaction_fn is None:
             logger.warning("No compact_history function in system.py, skipping compaction")
+            return
+
+        if not self._compaction_cooldown_elapsed(prompt_tokens, threshold):
             return
 
         async def complete_fn(messages: list[dict[str, Any]]) -> str:
@@ -491,6 +551,36 @@ class SessionAgent:
 
             self._conversation.add({"role": "compacted", "content": summary, "kind": KIND_COMPACTED})
             await self._conversation.commit()
+            # Watermark only on success: a failed compaction did not shrink
+            # anything, so the next signal should still be allowed through.
+            self._tokens_at_last_compaction = prompt_tokens or None
             logger.info("Compaction completed")
         except Exception as e:
             logger.error(f"Compaction failed: {e!r}")
+
+    def _compaction_cooldown_elapsed(self, prompt_tokens: int, threshold: int) -> bool:
+        """Whether enough new context accrued since the last compaction.
+
+        Requires growth of at least ``COMPACTION_COOLDOWN_FRACTION`` of the
+        threshold.  Measured in upstream-reported ``prompt_tokens`` rather than
+        message count, because a single tool result can be tens of thousands of
+        tokens while two chat messages are a few hundred — a count-based gate
+        would be meaningless for tool-heavy turns.
+
+        Fails open: when the signal carries no usable numbers (older AI layer,
+        malformed field) compaction proceeds as before.
+        """
+        last = self._tokens_at_last_compaction
+        if last is None or prompt_tokens <= 0 or threshold <= 0:
+            return True
+
+        required = int(threshold * COMPACTION_COOLDOWN_FRACTION)
+        grown = prompt_tokens - last
+        if grown >= required:
+            return True
+        logger.info(
+            f"Compaction skipped by cooldown: prompt_tokens grew {grown} since last "
+            f"compaction (need {required}; threshold={threshold}). The system prompt "
+            f"likely dominates the budget, so re-summarizing would not shrink it."
+        )
+        return False

@@ -32,6 +32,11 @@ export function basenameOf(path: string): string {
  * (parity with spa v1 useSession / historyReconcile).
  * Assistant ``sends`` become file stubs (name + path, empty data) so chat chips
  * survive refresh and can lazy-load via ``GET /workspace/file``.
+ *
+ * **刻意为之**：连续 `assistant` 行合并成一个 agent 气泡（文案 `\n\n` 拼接、files 去重合并）。
+ * Session 在每轮 `tool_calls` 都会把带正文的 assistant 落盘，todo 多步时 JSONL 常有
+ * 「Step N ✅ …」+ 短计划各占一行；流式 UI 经 `appendStreamingAgent` 累进同一气泡，
+ * 若不合并，刷新后会拆成多个气泡并各挂一套操作栏。
  */
 export function historyToChat(messages: HistoryMessage[]): ChatMessage[] {
   const out: ChatMessage[] = []
@@ -44,13 +49,38 @@ export function historyToChat(messages: HistoryMessage[]): ChatMessage[] {
     if (!text.trim() && !files.length) continue
     // Pure SEND bubble (no prose): still skip chat row; chest owns those files.
     if (!text.trim()) continue
+    const role = m.role === 'assistant' ? 'agent' : 'user'
+    const last = out[out.length - 1]
+    if (role === 'agent' && last?.role === 'agent') {
+      const mergedText = [last.text, text].filter((t) => t.trim()).join('\n\n')
+      const mergedFiles = mergeChatFiles(last.files, files)
+      out[out.length - 1] = {
+        ...last,
+        text: mergedText,
+        ...(mergedFiles.length ? { files: mergedFiles } : {}),
+      }
+      continue
+    }
     out.push({
-      role: m.role === 'assistant' ? 'agent' : 'user',
+      role,
       text,
       ...(files.length ? { files } : {}),
     })
   }
   return out
+}
+
+/** Merge history file stubs by basename (later path wins). */
+function mergeChatFiles(
+  a: ChatFile[] | undefined,
+  b: ChatFile[] | undefined,
+): ChatFile[] {
+  const map = new Map<string, ChatFile>()
+  for (const f of [...(a ?? []), ...(b ?? [])]) {
+    if (!f?.name) continue
+    map.set(f.name, f)
+  }
+  return [...map.values()]
 }
 
 /** Build chat file stubs from history ``sends`` (no base64 until preview load). */

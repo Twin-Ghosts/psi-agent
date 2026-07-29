@@ -20,7 +20,7 @@ Session 层是 psi-agent 的核心——负责 workspace 解析、agent loop、t
 
 | | |
 |--|--|
-| **为什么** | Gateway 一个进程跑多个 Session；飞书 channel 更是**按 open_id 给每个用户 spawn 独立 Session**（`gateway/_feishu_manager.py`），多 Session 共用同一个 agent 包。旧行为「每个 Session 为自己加载到的每条 schedule 各起一个 runner」会让一条定时任务被在线会话数乘一遍 → 飞书上一条提醒推 N 次 |
+| **为什么** | Gateway 一个进程跑多个 Session；飞书 channel 更是**按会话 spawn 独立 Session**（`gateway/_feishu_manager.py`：私聊按 `open_id` 每人一个、群聊按 `chat_id` 每群一个），多 Session 共用同一个 agent 包。旧行为「每个 Session 为自己加载到的每条 schedule 各起一个 runner」会让一条定时任务被在线会话数乘一遍 → 飞书上一条提醒推 N 次 |
 | **为什么按条而非按 Session 一个布尔** | 触发权本质是「**这一条**任务归哪个 Session」。整个 Session 一个开关只能表达「全触发 / 全不触发」，表达不了「A 条归调度 Session、B 条归某个用户会话」。名单模型下的不变式是：一条 schedule 必须**恰好**被一个 Session 激活 |
 | **加载源** | `workspace_path / "schedules"`。单根模式（`agent=""` → agent≡workspace）行为不变 |
 | **激活名单语义** | 白名单 `active_names`：`None` / 空集 → 一条都不激活（用户会话默认）；`{"*"}`（`ACTIVATE_ALL`）→ 全部；具名集合 → 仅这些 `schedule.name`。黑名单 `deactive_names` **优先**做减法 |
@@ -284,13 +284,39 @@ AI 的 tool_calls 通过 SSE 流式传输——多个 chunk 中的 `delta.tool_c
 - 多个 schedule 可以并发 sleep，但通过 lock 串行触发
 - 每个 schedule 在加载时独立处理——IO 错误、YAML 解析问题、cron 验证失败都只跳过该 schedule
 
+## Event / Trigger 协议（定事）
+
+与 schedule 平行：外部推送经 Channel → Session **通用事件管道** → ``TriggerRegistry`` 匹配 agent 包 ``triggers/*/TRIGGER.md`` → ``fire=tool|prompt``。
+
+### 通用转发接口（Session 只需这些）
+
+**业务事件注册不在 Session。** Session 只做统一收件与按 TRIGGER 发放。
+
+| 角色 | 位置 | 说明 |
+|------|------|------|
+| **统一接收** | ``session/server.py`` ``POST /events`` → ``SessionAgent.handle_event`` | 与 ``POST /chat/completions`` 并列；官方映射与合成事件**同一入口** |
+| **薄信封** | ``session/event_protocol.py`` | 校验形状（``source``/``event``/``payload``…），**无**业务事件 catalog 硬门槛 |
+| **发放（挂钩）** | ``session/trigger_registry.py`` | 匹配 TRIGGER → ``fire`` |
+
+事件从哪来、叫什么业务名：见 agent 包 ``channel_events/`` + Channel 加载（``docs/superpowers/specs/2026-07-29-channel-events-in-agent-package.md``）。
+
+| 概念 | 说明 |
+|------|------|
+| **channel_events** | Agent 包内按 Channel 维护的事件定义（≈ 加 tool）；含官方 ``platform_map`` 与预留 ``synthetic`` |
+| **信封** | ``event`` + ``payload``；可选 ``raw_event`` / ``raw_payload`` |
+| **匹配（刻意为之）** | 先 ``event``+``filter``；未命中再 ``raw_event``+``raw_filter`` |
+| **落盘挂钩** | ``{Session.agent}/triggers/``；haitun ``trigger_manage`` |
+| **kind** | ``trigger.silent`` / ``trigger.display`` |
+
+无 TRIGGER 时事件仍可进门，matched/fired 为空（能力开、钩子关）。
+
 ### History 展示白名单（``history_display.py``）
 
 | kind | 展示 |
 |------|------|
 | `chat` | user/assistant 非空 content |
-| `schedule.display` | 仅 assistant |
-| `schedule.silent` / `compacted` | 否 |
+| `schedule.display` / `trigger.display` | 仅 assistant |
+| `schedule.silent` / `trigger.silent` / `compacted` | 否 |
 | 遗留 `chat_type=schedule` / `*_schedule` role | 视为 silent |
 
 Gateway ``HistoryManager`` 同时投影剥掉 ``[SEND:]``/``[RECV:]`` 标记。
@@ -317,14 +343,17 @@ Session 支持将对话历史持久化到 AppData `histories/{session_id}.jsonl`
 
 当 AI 层返回 `psi_compaction` 信号时，Session 触发上下文压缩。流程：
 
-1. `AiClient.stream()` 解析 `psi_compaction` → `AiDelta.compaction_needed=True`
-2. Agent loop 在 `finish_reason="stop"` 后调用 `_maybe_compact()`
+1. `AiClient.stream()` 解析 `psi_compaction` → `AiDelta.compaction_needed=True`，并把
+   `prompt_tokens` / `threshold` 一并透出（经 `AiClient._as_int`，缺失或非法为 0）
+2. Agent loop 在 `finish_reason="stop"` 后调用 `_maybe_compact(prompt_tokens, threshold)`
 3. 从 `{agent}/systems/system.py` 提取 `compact_history()` 函数
-4. 构造 `complete_fn`（使用现有 `AiClient` 做流式调用并收集全部 content 的闭包）
-5. `summary = await compact_history(conversation.messages, complete_fn)`
-6. 插入独立的 `compacted` 消息（`role="compacted"`, `kind="compacted"`）到 conversation
-7. `commit()` 落盘——历史消息**保留**，不删除
-8. 下次发送 AI 请求时，`messages_for_ai()` 负责：找到 system prompt 和最后一个 compacted，删除中间消息，将 compacted 内容合并到 system prompt
+4. **冷却门槛**：`_compaction_cooldown_elapsed()` 不过则直接返回（见下）
+5. 构造 `complete_fn`（使用现有 `AiClient` 做流式调用并收集全部 content 的闭包）
+6. `summary = await compact_history(conversation.messages, complete_fn)`
+7. 插入独立的 `compacted` 消息（`role="compacted"`, `kind="compacted"`）到 conversation
+8. `commit()` 落盘——历史消息**保留**，不删除；随后记录水位线
+   `_tokens_at_last_compaction`（**仅成功时**记，失败没缩小任何东西，下次信号仍应放行）
+9. 下次发送 AI 请求时，`messages_for_ai()` 负责：找到 system prompt 和最后一个 compacted，删除中间消息，将 compacted 内容合并到 system prompt
 
 JSONL 留存：``system, u1, a1, u2, a2, compacted(summary), u3, a3, ...``
 发给 AI：``[system+summary, u3, a3, ...]``
@@ -340,6 +369,23 @@ async def compact_history(
 
 未定义时 → 记录 warning，跳过压缩，history 持续增长。
 多次 compaction → 每次插入独立的 `compacted` 消息；`messages_for_ai()` 仅取最后一条合并到 system prompt。
+这一步安全的前提是默认实现**链式累积**（新摘要在上一份之上更新，故包含而非丢弃更早
+上下文）；若自定义的 `compact_history` 忽略传入的 `compacted` 行，则每压一次就少一层
+历史——这正是「时不时压缩就忘记前面对话」的成因。
+
+### 压缩冷却（`COMPACTION_COOLDOWN_FRACTION = 0.1`，刻意为之，勿"修掉"）
+
+信号只表示 `prompt_tokens` 超了阈值，而压缩**改不了 system prompt 的体积**。当提示词
+本身占阈值很大比例时（实测 `haitun-workspace` 提示词约 45.4K token = 100K 默认阈值的
+45%），信号会每回合复发；没有门槛的话 Session 就会连续重压，每次白付一次 LLM 调用还
+削掉一层更早的上下文。故要求自上次**成功**压缩起 `prompt_tokens` 增长达
+`threshold * COMPACTION_COOLDOWN_FRACTION` 才允许再压。
+
+- **按 token 而非消息条数计量**：单条 tool 结果可达数万 token，而两条聊天消息只有几百，
+  条数门槛对重工具场景毫无意义
+- 信号缺数字时 **fail open**，保持改动前行为
+- 水位线存 `SessionAgent` 实例属性——该对象每 session 进程建一次，跨回合有效；进程重启
+  归零（可接受：重启后最多多压一次）
 
 ### peek_pending / clear_pending 安全机制
 

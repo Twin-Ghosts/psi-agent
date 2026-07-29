@@ -181,7 +181,7 @@ OPENAPI_SPEC = {
         },
         "/feishu/route": {
             "post": {
-                "summary": "Route a Feishu open_id to its dedicated Session (spawn on first use)",
+                "summary": "Route a Feishu chat to its Session (per-chat for groups, per-user for DMs)",
                 "operationId": "feishuRoute",
                 "requestBody": {
                     "required": True,
@@ -200,7 +200,7 @@ OPENAPI_SPEC = {
         },
         "/feishu/routes": {
             "get": {
-                "summary": "List all Feishu open_id -> Session routes",
+                "summary": "List all Feishu chat -> Session routes",
                 "operationId": "listFeishuRoutes",
                 "responses": {
                     "200": {
@@ -214,6 +214,35 @@ OPENAPI_SPEC = {
                             }
                         },
                     },
+                },
+            },
+        },
+        "/oauth/callback": {
+            "get": {
+                "summary": "OAuth redirect landing point (relays the code, no manual copy)",
+                "operationId": "oauthCallback",
+                "parameters": [
+                    {"name": "state", "in": "query", "required": True, "schema": {"type": "string"}},
+                    {"name": "code", "in": "query", "schema": {"type": "string"}},
+                    {"name": "error", "in": "query", "schema": {"type": "string"}},
+                ],
+                "responses": {
+                    "200": {"description": "HTML success page; the code is held for the initiator"},
+                    "400": {"description": "HTML failure page (missing state, or provider error)"},
+                },
+            },
+        },
+        "/oauth/code": {
+            "get": {
+                "summary": "Take the relayed authorization code once, by state",
+                "operationId": "oauthTakeCode",
+                "parameters": [
+                    {"name": "state", "in": "query", "required": True, "schema": {"type": "string"}},
+                ],
+                "responses": {
+                    "200": {"description": "{state, code} — or {state, error}; consumed on read"},
+                    "400": {"$ref": "#/components/responses/Error"},
+                    "404": {"$ref": "#/components/responses/Error"},
                 },
             },
         },
@@ -424,6 +453,17 @@ OPENAPI_SPEC = {
                     "model": {"type": "string"},
                     "api_key": {"type": "string"},
                     "base_url": {"type": "string"},
+                    "max_context_tokens": {
+                        "type": "integer",
+                        "default": -1,
+                        "description": (
+                            "Prompt token threshold that triggers history compaction. "
+                            "-1 = resolve from PSI_MAX_CONTEXT_TOKENS env var, else 100000. "
+                            "0 = disable compaction. Keep it well below the model's real "
+                            "context window so compaction runs before the upstream rejects "
+                            "the request."
+                        ),
+                    },
                 },
             },
             "AiInfo": {
@@ -433,6 +473,7 @@ OPENAPI_SPEC = {
                     "socket": {"type": "string"},
                     "provider": {"type": "string"},
                     "model": {"type": "string"},
+                    "max_context_tokens": {"type": "integer"},
                 },
             },
             "SessionCreateRequest": {
@@ -510,16 +551,32 @@ OPENAPI_SPEC = {
             },
             "FeishuRouteRequest": {
                 "type": "object",
-                "required": ["open_id"],
+                "description": (
+                    "Needs at least one routing key: open_id (DM) or chat_id with a group/topic chat_type."
+                ),
                 "properties": {
-                    "open_id": {"type": "string"},
+                    "open_id": {
+                        "type": "string",
+                        "description": "Sender's open_id. Required unless routing a group chat by chat_id.",
+                    },
+                    "chat_id": {
+                        "type": "string",
+                        "description": "Feishu chat id. With chat_type group/topic, the whole chat shares one Session.",
+                    },
+                    "chat_type": {
+                        "type": "string",
+                        "description": "p2p | group | topic. group/topic routes by chat_id, anything else by open_id.",
+                    },
                     "ai_id": {
                         "type": "string",
                         "description": "Optional, overrides Gateway --feishu-ai-id",
                     },
                     "workspace": {
                         "type": "string",
-                        "description": "Optional, defaults to <feishu_workspace_root>/<open_id>",
+                        "description": (
+                            "Optional, defaults to <feishu_workspace_root>/<open_id> "
+                            "(or /chat-<chat_id> for group chats)"
+                        ),
                     },
                 },
             },
@@ -527,14 +584,17 @@ OPENAPI_SPEC = {
                 "type": "object",
                 "properties": {
                     "open_id": {"type": "string"},
+                    "chat_id": {"type": "string"},
                     "session_id": {"type": "string"},
                     "channel_socket": {"type": "string"},
                 },
             },
             "FeishuRouteEntry": {
                 "type": "object",
+                "description": "One route. Group entries carry chat_id with an empty open_id; DMs the reverse.",
                 "properties": {
                     "open_id": {"type": "string"},
+                    "chat_id": {"type": "string"},
                     "session_id": {"type": "string"},
                 },
             },

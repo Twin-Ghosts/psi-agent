@@ -71,7 +71,7 @@ async def feishu_sheet_read(token: str, range: str, max_chars: int = 20000, user
     return _f.dumps_result(await _f.read_sheet_range_impl(token, range, max_chars, user_key))
 
 
-async def feishu_sheet_write(token: str, range: str, values_json: str, user_key: str = "") -> str:
+async def feishu_sheet_write(token: str, range: str, values_json: str, user_key: str = "", identity: str = "") -> str:
     """Write (overwrite) a grid of values or formulas into a spreadsheet range.
 
     Existing cells in the range are overwritten. A cell whose value is a string
@@ -84,15 +84,23 @@ async def feishu_sheet_write(token: str, range: str, values_json: str, user_key:
         range: Target range, e.g. ``"SHEET_ID!A1:C3"`` or just ``"SHEET_ID"``.
         values_json: A JSON array of rows, each row a JSON array of cells —
             e.g. ``'[["Name","Score"],["Alice",95],["Total","=SUM(B2:B2)"]]'``.
-        user_key: The sender's open_id (from ``<feishu_context>``). Pass it to write
-            as that user (needed when the sheet is user-owned and the bot isn't a
-            collaborator); empty uses the bot's tenant token.
+        user_key: The sender's open_id (from ``<feishu_context>``). A user-owned sheet
+            generally needs that user's identity, since the bot isn't a collaborator.
+        identity: Who owns the result: ``"user"`` (this person — needs their
+            authorization) or ``"bot"`` (the bot). Omit to use the choice remembered
+            for this ``user_key``; if they have never been asked, the tool does
+            nothing and returns ``need_identity_choice`` so you can ask them.
     """
-    return _f.dumps_result(await _f.write_sheet_impl(token, range, values_json, user_key))
+    return _f.dumps_result(await _f.write_sheet_impl(token, range, values_json, user_key, identity))
 
 
 async def feishu_sheet_append(
-    token: str, range: str, values_json: str, insert_data_option: str = "OVERWRITE", user_key: str = ""
+    token: str,
+    range: str,
+    values_json: str,
+    insert_data_option: str = "OVERWRITE",
+    user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append rows of values/formulas after the last used row of a spreadsheet range.
 
@@ -106,12 +114,18 @@ async def feishu_sheet_append(
         values_json: A JSON array of rows (list of lists) to append.
         insert_data_option: ``"OVERWRITE"`` (default; overwrite following rows if not
             enough blank rows) or ``"INSERT_ROWS"`` (insert new rows first).
-        user_key: The sender's open_id. Pass it to write as that user; empty uses tenant token.
+        user_key: The sender's open_id (from ``<feishu_context>``).
+        identity: Who owns the result: ``"user"`` (this person — needs their
+            authorization) or ``"bot"`` (the bot). Omit to use the choice remembered
+            for this ``user_key``; if they have never been asked, the tool does
+            nothing and returns ``need_identity_choice`` so you can ask them.
     """
-    return _f.dumps_result(await _f.append_sheet_impl(token, range, values_json, insert_data_option, user_key))
+    return _f.dumps_result(
+        await _f.append_sheet_impl(token, range, values_json, insert_data_option, user_key, identity)
+    )
 
 
-async def feishu_sheet_format(token: str, range: str, style_json: str, user_key: str = "") -> str:
+async def feishu_sheet_format(token: str, range: str, style_json: str, user_key: str = "", identity: str = "") -> str:
     """Apply a cell style (font, color, border, alignment, number format) to a range.
 
     ``style_json`` is a JSON object of Feishu style fields, e.g.::
@@ -132,6 +146,10 @@ async def feishu_sheet_format(token: str, range: str, style_json: str, user_key:
         token: The spreadsheet_token (from the sheet URL).
         range: Target range, e.g. ``"SHEET_ID!A1:C3"``.
         style_json: A JSON object of the style fields to apply.
-        user_key: The sender's open_id. Pass it to write as that user; empty uses tenant token.
+        user_key: The sender's open_id (from ``<feishu_context>``).
+        identity: Who owns the result: ``"user"`` (this person — needs their
+            authorization) or ``"bot"`` (the bot). Omit to use the choice remembered
+            for this ``user_key``; if they have never been asked, the tool does
+            nothing and returns ``need_identity_choice`` so you can ask them.
     """
-    return _f.dumps_result(await _f.format_sheet_impl(token, range, style_json, user_key))
+    return _f.dumps_result(await _f.format_sheet_impl(token, range, style_json, user_key, identity))

@@ -80,6 +80,15 @@ AI 层强制 `stream_options={"include_usage": True}` 获取上游 token 用量�
 
 `psi_compaction` 是 psi-agent 内部扩展字段，非 OpenAI 标准。仅 OpenAI / Anthropic / Gemini 及兼容 provider 支持 `usage` 返回；Groq / Mistral / Ollama 等 strip `stream_options`，compaction 不触发。
 
+Session 侧会读取信号里的 `prompt_tokens` / `threshold` 做压缩冷却判断（见
+`session/AGENTS.md`），所以这两个字段**不是纯日志用途**，改动或省略会让冷却退化成
+fail-open。
+
+`max_context_tokens` 除 CLI / 环境变量外，也可经 Gateway `POST /ais` 的同名 body 字段
+按 AI 后端配置（见 `gateway/AGENTS.md`）。**阈值应显著小于模型真实上下文窗口**：压缩
+改不了 system prompt 体积，压缩本身也要发一次请求，阈值贴太近会从「压得太频繁」变成
+「上游直接拒绝」。
+
 ## 依赖
 
 - `any-llm-sdk`：多 provider 客户端

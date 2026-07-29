@@ -180,7 +180,8 @@ scope（如 `drive:drive:drive:readonly`），飞书拒绝整个授权页。
 - [x] Commit `feat(haitun/feishu): 飞书全局搜索 UAT 按用户隔离`（`c1c44e9f`）；scope 修复 `721b9fe0`；
   建库工具 `0a76240f`；写入类以用户身份调用 `afbc9ea8`；一步建带内容文档（本次）
 
-**仍未做（诚实边界）**：OAuth 回调仍手动回传 code；UAT 仍明文存；`auth_complete` 不校验 CSRF state。
+**仍未做（诚实边界）**：UAT 仍明文存。（OAuth 回调手动回传 code、`auth_complete` 不校验 CSRF
+state 两条已在第十二节解决。）
 
 ## 八、后续增强：删除云文档/文件（2026-07-21，已完成）
 
@@ -282,4 +283,55 @@ token，用户知识库里的文件机器人无权限。读类工具没接 user_
 - [x] 真实文档只读端到端演练：自动查出 `sheet_id`、认出表头第 1 行·人名 B 列·22 人、
   「7.27」→E 列、探明目标格已占（未写入任何数据）
 - [x] 门禁：`ruff check` + `ruff format --check` + `ty check` + pytest（feishu 相关 272 passed）
+
+## 十二、后续增强：授权免手抄 code（回调自动落地 + PKCE + state 校验，2026-07-28，已完成）
+
+分支 `fix-oauth-easy-auth`。设计规格见 spec 第 14 节。补掉 spec §9.3 挂着的两条诚实边界。
+
+**根因**：`redirect_uri` 默认指向 `http://localhost/` 这个**没人监听**的地址——第三方只把
+`code` 拼在它上面跳一次浏览器，落地无人接收，于是**用户成了传输层**，得自己盯地址栏抄 code。
+
+**先排除**：飞书中国区**没有** device flow —— `authen/v2/oauth/device_authorization` 在
+`open.feishu.cn` / `passport.feishu.cn` / `accounts.feishu.cn` 实测全 404，别再试。
+故走 RFC 8252 回调落地（`gh` / `gcloud` / `aws sso` 同款）。
+
+**Files:**
+- Add: `src/psi_agent/gateway/_oauth_manager.py`
+- Modify: `src/psi_agent/gateway/server.py`
+- Modify: `src/psi_agent/gateway/_openapi.py`
+- Modify: `src/psi_agent/gateway/AGENTS.md`
+- Modify: `AGENTS.md`（目录树）
+- Add: `examples/haitun-workspace/tools/_oauth_receiver.py`
+- Modify: `examples/haitun-workspace/tools/_feishu_impl.py`
+- Modify: `examples/haitun-workspace/tools/feishu_auth.py`
+- Modify: `examples/haitun-workspace/TOOLS.md`
+- Modify: `examples/haitun-workspace/AGENTS.md`（工具表 + 环境变量表）
+- Add: `tests/psi_agent/gateway/test_oauth_manager.py`
+- Add: `tests/psi_agent/gateway/test_oauth_endpoints.py`
+- Add: `examples/haitun-workspace/tests/test_oauth_receiver.py`
+- Modify: `examples/haitun-workspace/tests/test_feishu.py`
+- Modify: `docs/superpowers/specs/2026-07-17-feishu-tools-extended-design.md`（第 9、14 节）
+
+- [x] `OAuthRelay`：`state → {code, error}` 一次性信箱，TTL 600s、上限 256、进程内存不落盘。
+  **Gateway 刻意不做 token 交换**（无 app_secret / 无 verifier / 不知用户），只搬运一次性 code
+- [x] `GET /oauth/callback`（收 `?code=&state=`，回「授权成功·不用复制任何东西」页；缺 state → 400）
+  + `GET /oauth/code`（发起方按 state 取件，命中即作废；未到达 → 404）；补 OpenAPI schema
+- [x] `plan_receiver` 通道择优 `gateway → loopback → manual`：配 `PSI_OAUTH_CALLBACK_BASE`
+  走 Gateway（**浏览器与 agent 不必同机**，手机端可用，多用户唯一可行）；否则
+  `127.0.0.1:PSI_OAUTH_LOOPBACK_PORT`（默认 17860）起一次性监听；端口被占则不抢、直接降级
+- [x] `auth_start_impl` 选通道并把 `state`/`code_verifier`/`redirect_uri`/`mode` 写进 pending，
+  返回 `auto_receive`/`mode`/`next_step`；新增工具 `feishu_auth_wait`（10-600s，可重复调用续等）
+- [x] **state 真校验**（原 §9.3 第 3 条）：回环 handler 不匹配即 400 且**不写结果、继续等真回调**；
+  Gateway 侧 state 即中继键；熵 `os.urandom(8)` → 24 字节
+- [x] **启用 PKCE S256**：authorize 带 `code_challenge`，换 token 带 `code_verifier` +
+  `redirect_uri`（不一致飞书报 20071，verifier 不匹配报 20049）
+- [x] `_AUTH_PROMPT` / `TOOLS.md` / 工具 docstring 改成按 `auto_receive` 分支，手工贴码降级为兜底；
+  两种部署配置写进 `TOOLS.md` + workspace `AGENTS.md`（回调地址须登记到飞书后台）
+- [x] 删已无用的 `_redirect_uri()`（零抑制/无死代码）
+- [x] 测试：relay 6（一次性/未知 state/空 state 报错/错误透传/TTL/上限淘汰）+ 端点 7（成功页含
+  「不用复制」/缺 state/错误记录/取件后 404）+ receiver 11（通道择优 6 + 真实回环往返，含
+  state 不匹配后仍等真回调）+ `test_feishu` 的 PKCE/`auto_receive`/`auth_wait` 若干
+- [x] Gateway 通道真实 aiohttp server 端到端跑通（浏览器 200 拿到成功页、工具自动收到 code）
+- [x] 门禁：`ruff check` + `ruff format --check` + `ty check` + pytest（既有失败项 stash 比对与基线一致）
+
 

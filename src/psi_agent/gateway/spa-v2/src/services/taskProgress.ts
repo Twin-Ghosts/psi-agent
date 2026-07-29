@@ -1,5 +1,6 @@
 import type { SessionTodo } from './api'
 import type { Task, TaskStep } from '../haitun-agent/model'
+import { plainTextPreview } from './assistantDisplay'
 
 /** Upper-level lifecycle for a task card (independent of todo UI detail). */
 export type TaskPhase = 'advance' | 'deliver' | 'done'
@@ -225,8 +226,7 @@ export function applyTaskProgress(task: Task, patch: ApplyProgressPatch = {}): T
     progressLabel: proj.progressLabel,
     hasTodoTrack: proj.hasTodoTrack,
     updated: proj.updated,
-    summary: summary
-      ? summary.slice(0, 120) + (summary.length > 120 ? '…' : '')
-      : task.summary,
+    // Card / context / history previews: strip MD delimiters (## ** `) for readability.
+    summary: summary ? plainTextPreview(summary, 120) : task.summary,
   }
 }

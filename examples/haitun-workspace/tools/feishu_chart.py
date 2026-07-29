@@ -52,6 +52,7 @@ async def feishu_chart_pie(
     caption: str = "",
     source: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append a pie chart to a Feishu doc — shares of a single whole.
 
@@ -75,6 +76,7 @@ async def feishu_chart_pie(
         source: Data provenance footnote, e.g. "HR 系统 2026-07".
         user_key: The sender's open_id (from ``<feishu_context>``); needed when the doc
             is user-owned and the bot isn't a collaborator.
+        identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
     try:
         labels = _cr.parse_labels(labels_json)
@@ -94,7 +96,14 @@ async def feishu_chart_pie(
         return _place.fail(str(exc))
     extra = {"folded_into_other": folded} if folded else None
     return await _place.place(
-        draw, kind="pie", title=title, document_id=document_id, caption=caption, user_key=user_key, extra=extra
+        draw,
+        kind="pie",
+        title=title,
+        document_id=document_id,
+        caption=caption,
+        user_key=user_key,
+        identity=identity,
+        extra=extra,
     )
 
 
@@ -109,6 +118,7 @@ async def feishu_chart_donut(
     caption: str = "",
     source: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append a donut chart to a Feishu doc — shares of a whole, with the total in the middle.
 
@@ -128,6 +138,7 @@ async def feishu_chart_donut(
         caption: Caption paragraph written under the chart.
         source: Data provenance footnote.
         user_key: The sender's open_id; needed for user-owned docs.
+        identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
     try:
         labels = _cr.parse_labels(labels_json)
@@ -148,7 +159,14 @@ async def feishu_chart_donut(
         return _place.fail(str(exc))
     extra = {"folded_into_other": folded} if folded else None
     return await _place.place(
-        draw, kind="donut", title=title, document_id=document_id, caption=caption, user_key=user_key, extra=extra
+        draw,
+        kind="donut",
+        title=title,
+        document_id=document_id,
+        caption=caption,
+        user_key=user_key,
+        identity=identity,
+        extra=extra,
     )
 
 
@@ -161,6 +179,7 @@ async def feishu_chart_funnel(
     caption: str = "",
     source: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append a funnel chart to a Feishu doc — stage-by-stage drop-off in a fixed sequence.
 
@@ -178,6 +197,7 @@ async def feishu_chart_funnel(
         caption: Caption paragraph written under the chart.
         source: Data provenance footnote.
         user_key: The sender's open_id; needed for user-owned docs.
+        identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
     try:
         stages = _cr.parse_labels(stages_json, "stages")
@@ -186,7 +206,7 @@ async def feishu_chart_funnel(
     except _cr.ChartDataError as exc:
         return _place.fail(str(exc))
     return await _place.place(
-        draw, kind="funnel", title=title, document_id=document_id, caption=caption, user_key=user_key
+        draw, kind="funnel", title=title, document_id=document_id, caption=caption, user_key=user_key, identity=identity
     )
 
 
@@ -205,6 +225,7 @@ async def feishu_chart_line(
     caption: str = "",
     source: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append a line chart to a Feishu doc — how values move along an ordered axis.
 
@@ -228,6 +249,7 @@ async def feishu_chart_line(
         caption: Caption paragraph written under the chart.
         source: Data provenance footnote.
         user_key: The sender's open_id; needed for user-owned docs.
+        identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
     try:
         labels = _cr.parse_labels(labels_json)
@@ -245,7 +267,7 @@ async def feishu_chart_line(
     except _cr.ChartDataError as exc:
         return _place.fail(str(exc))
     return await _place.place(
-        draw, kind="line", title=title, document_id=document_id, caption=caption, user_key=user_key
+        draw, kind="line", title=title, document_id=document_id, caption=caption, user_key=user_key, identity=identity
     )
 
 
@@ -260,6 +282,7 @@ async def feishu_chart_area(
     caption: str = "",
     source: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append an area chart to a Feishu doc — a trend whose accumulated volume matters.
 
@@ -280,6 +303,7 @@ async def feishu_chart_area(
         caption: Caption paragraph written under the chart.
         source: Data provenance footnote.
         user_key: The sender's open_id; needed for user-owned docs.
+        identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
     try:
         labels = _cr.parse_labels(labels_json)
@@ -298,7 +322,7 @@ async def feishu_chart_area(
     except _cr.ChartDataError as exc:
         return _place.fail(str(exc))
     return await _place.place(
-        draw, kind="area", title=title, document_id=document_id, caption=caption, user_key=user_key
+        draw, kind="area", title=title, document_id=document_id, caption=caption, user_key=user_key, identity=identity
     )
 
 
@@ -314,6 +338,7 @@ async def feishu_chart_stacked_area(
     caption: str = "",
     source: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append a stacked area chart to a Feishu doc — composition changing over time.
 
@@ -336,6 +361,7 @@ async def feishu_chart_stacked_area(
         caption: Caption paragraph written under the chart.
         source: Data provenance footnote.
         user_key: The sender's open_id; needed for user-owned docs.
+        identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
     try:
         labels = _cr.parse_labels(labels_json)
@@ -353,7 +379,13 @@ async def feishu_chart_stacked_area(
     except _cr.ChartDataError as exc:
         return _place.fail(str(exc))
     return await _place.place(
-        draw, kind="stacked-area", title=title, document_id=document_id, caption=caption, user_key=user_key
+        draw,
+        kind="stacked-area",
+        title=title,
+        document_id=document_id,
+        caption=caption,
+        user_key=user_key,
+        identity=identity,
     )
 
 
@@ -373,6 +405,7 @@ async def feishu_chart_column(
     caption: str = "",
     source: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append a vertical column chart to a Feishu doc — compare a value across categories.
 
@@ -396,6 +429,7 @@ async def feishu_chart_column(
         caption: Caption paragraph written under the chart.
         source: Data provenance footnote.
         user_key: The sender's open_id; needed for user-owned docs.
+        identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
     try:
         labels = _cr.parse_labels(labels_json)
@@ -416,7 +450,7 @@ async def feishu_chart_column(
     except _cr.ChartDataError as exc:
         return _place.fail(str(exc))
     return await _place.place(
-        draw, kind="column", title=title, document_id=document_id, caption=caption, user_key=user_key
+        draw, kind="column", title=title, document_id=document_id, caption=caption, user_key=user_key, identity=identity
     )
 
 
@@ -433,6 +467,7 @@ async def feishu_chart_bar(
     caption: str = "",
     source: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append a horizontal bar chart to a Feishu doc — rankings and long category names.
 
@@ -454,6 +489,7 @@ async def feishu_chart_bar(
         caption: Caption paragraph written under the chart.
         source: Data provenance footnote.
         user_key: The sender's open_id; needed for user-owned docs.
+        identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
     try:
         labels = _cr.parse_labels(labels_json)
@@ -475,7 +511,7 @@ async def feishu_chart_bar(
     except _cr.ChartDataError as exc:
         return _place.fail(str(exc))
     return await _place.place(
-        draw, kind="bar", title=title, document_id=document_id, caption=caption, user_key=user_key
+        draw, kind="bar", title=title, document_id=document_id, caption=caption, user_key=user_key, identity=identity
     )
 
 
@@ -491,6 +527,7 @@ async def feishu_chart_grouped_column(
     caption: str = "",
     source: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append a grouped (clustered) column chart — compare 2-4 series side by side.
 
@@ -512,6 +549,7 @@ async def feishu_chart_grouped_column(
         caption: Caption paragraph written under the chart.
         source: Data provenance footnote.
         user_key: The sender's open_id; needed for user-owned docs.
+        identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
     try:
         labels = _cr.parse_labels(labels_json)
@@ -529,7 +567,13 @@ async def feishu_chart_grouped_column(
     except _cr.ChartDataError as exc:
         return _place.fail(str(exc))
     return await _place.place(
-        draw, kind="grouped-column", title=title, document_id=document_id, caption=caption, user_key=user_key
+        draw,
+        kind="grouped-column",
+        title=title,
+        document_id=document_id,
+        caption=caption,
+        user_key=user_key,
+        identity=identity,
     )
 
 
@@ -546,6 +590,7 @@ async def feishu_chart_stacked_column(
     caption: str = "",
     source: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append a stacked column chart — category totals **and** their internal composition.
 
@@ -569,6 +614,7 @@ async def feishu_chart_stacked_column(
         caption: Caption paragraph written under the chart.
         source: Data provenance footnote.
         user_key: The sender's open_id; needed for user-owned docs.
+        identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
     try:
         labels = _cr.parse_labels(labels_json)
@@ -588,7 +634,13 @@ async def feishu_chart_stacked_column(
     except _cr.ChartDataError as exc:
         return _place.fail(str(exc))
     return await _place.place(
-        draw, kind="stacked-column", title=title, document_id=document_id, caption=caption, user_key=user_key
+        draw,
+        kind="stacked-column",
+        title=title,
+        document_id=document_id,
+        caption=caption,
+        user_key=user_key,
+        identity=identity,
     )
 
 
@@ -603,6 +655,7 @@ async def feishu_chart_waterfall(
     caption: str = "",
     source: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append a waterfall (bridge) chart — how a starting value becomes an ending value.
 
@@ -623,6 +676,7 @@ async def feishu_chart_waterfall(
         caption: Caption paragraph written under the chart.
         source: Data provenance footnote.
         user_key: The sender's open_id; needed for user-owned docs.
+        identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
     try:
         labels = _cr.parse_labels(labels_json)
@@ -633,7 +687,13 @@ async def feishu_chart_waterfall(
     except _cr.ChartDataError as exc:
         return _place.fail(str(exc))
     return await _place.place(
-        draw, kind="waterfall", title=title, document_id=document_id, caption=caption, user_key=user_key
+        draw,
+        kind="waterfall",
+        title=title,
+        document_id=document_id,
+        caption=caption,
+        user_key=user_key,
+        identity=identity,
     )
 
 
@@ -651,6 +711,7 @@ async def feishu_chart_histogram(
     caption: str = "",
     source: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append a histogram — the **shape** of one variable's distribution.
 
@@ -671,6 +732,7 @@ async def feishu_chart_histogram(
         caption: Caption paragraph written under the chart.
         source: Data provenance footnote.
         user_key: The sender's open_id; needed for user-owned docs.
+        identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
     try:
         values = _cr.parse_values(values_json)
@@ -680,7 +742,13 @@ async def feishu_chart_histogram(
     except _cr.ChartDataError as exc:
         return _place.fail(str(exc))
     return await _place.place(
-        draw, kind="histogram", title=title, document_id=document_id, caption=caption, user_key=user_key
+        draw,
+        kind="histogram",
+        title=title,
+        document_id=document_id,
+        caption=caption,
+        user_key=user_key,
+        identity=identity,
     )
 
 
@@ -694,6 +762,7 @@ async def feishu_chart_box(
     caption: str = "",
     source: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append a box plot — compare **distributions** across groups, not just their averages.
 
@@ -713,6 +782,7 @@ async def feishu_chart_box(
         caption: Caption paragraph written under the chart.
         source: Data provenance footnote.
         user_key: The sender's open_id; needed for user-owned docs.
+        identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
     try:
         parsed = _cr.parse_series(groups_json, "groups")
@@ -720,7 +790,7 @@ async def feishu_chart_box(
     except _cr.ChartDataError as exc:
         return _place.fail(str(exc))
     return await _place.place(
-        draw, kind="box", title=title, document_id=document_id, caption=caption, user_key=user_key
+        draw, kind="box", title=title, document_id=document_id, caption=caption, user_key=user_key, identity=identity
     )
 
 
@@ -735,6 +805,7 @@ async def feishu_chart_scatter(
     caption: str = "",
     source: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append a scatter plot — does one variable move with another?
 
@@ -758,6 +829,7 @@ async def feishu_chart_scatter(
         caption: Caption paragraph written under the chart.
         source: Data provenance footnote.
         user_key: The sender's open_id; needed for user-owned docs.
+        identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
     try:
         groups = _cr.parse_point_groups(points_json)
@@ -774,7 +846,13 @@ async def feishu_chart_scatter(
     except _cr.ChartDataError as exc:
         return _place.fail(str(exc))
     return await _place.place(
-        draw, kind="scatter", title=title, document_id=document_id, caption=caption, user_key=user_key
+        draw,
+        kind="scatter",
+        title=title,
+        document_id=document_id,
+        caption=caption,
+        user_key=user_key,
+        identity=identity,
     )
 
 
@@ -789,6 +867,7 @@ async def feishu_chart_bubble(
     caption: str = "",
     source: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append a bubble chart — three variables at once (x, y, and bubble size).
 
@@ -809,6 +888,7 @@ async def feishu_chart_bubble(
         caption: Caption paragraph written under the chart.
         source: Data provenance footnote.
         user_key: The sender's open_id; needed for user-owned docs.
+        identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
     try:
         points = _cr.parse_points(points_json, dims=3)
@@ -827,7 +907,7 @@ async def feishu_chart_bubble(
     except _cr.ChartDataError as exc:
         return _place.fail(str(exc))
     return await _place.place(
-        draw, kind="bubble", title=title, document_id=document_id, caption=caption, user_key=user_key
+        draw, kind="bubble", title=title, document_id=document_id, caption=caption, user_key=user_key, identity=identity
     )
 
 
@@ -843,6 +923,7 @@ async def feishu_chart_heatmap(
     caption: str = "",
     source: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append a heatmap — intensity across a two-dimensional grid.
 
@@ -863,6 +944,7 @@ async def feishu_chart_heatmap(
         caption: Caption paragraph written under the chart.
         source: Data provenance footnote.
         user_key: The sender's open_id; needed for user-owned docs.
+        identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
     try:
         rows = _cr.parse_labels(row_labels_json, "row_labels")
@@ -881,7 +963,13 @@ async def feishu_chart_heatmap(
     except _cr.ChartDataError as exc:
         return _place.fail(str(exc))
     return await _place.place(
-        draw, kind="heatmap", title=title, document_id=document_id, caption=caption, user_key=user_key
+        draw,
+        kind="heatmap",
+        title=title,
+        document_id=document_id,
+        caption=caption,
+        user_key=user_key,
+        identity=identity,
     )
 
 
@@ -897,6 +985,7 @@ async def feishu_chart_radar(
     caption: str = "",
     source: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append a radar (spider) chart — a multi-dimension profile at a glance.
 
@@ -917,6 +1006,7 @@ async def feishu_chart_radar(
         caption: Caption paragraph written under the chart.
         source: Data provenance footnote.
         user_key: The sender's open_id; needed for user-owned docs.
+        identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
     try:
         axes_labels = _cr.parse_labels(axes_json, "axes")
@@ -925,7 +1015,7 @@ async def feishu_chart_radar(
     except _cr.ChartDataError as exc:
         return _place.fail(str(exc))
     return await _place.place(
-        draw, kind="radar", title=title, document_id=document_id, caption=caption, user_key=user_key
+        draw, kind="radar", title=title, document_id=document_id, caption=caption, user_key=user_key, identity=identity
     )
 
 
@@ -940,6 +1030,7 @@ async def feishu_chart_pareto(
     caption: str = "",
     source: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append a Pareto chart — which few causes drive most of the effect (80/20).
 
@@ -960,6 +1051,7 @@ async def feishu_chart_pareto(
         caption: Caption paragraph written under the chart.
         source: Data provenance footnote.
         user_key: The sender's open_id; needed for user-owned docs.
+        identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
     try:
         labels = _cr.parse_labels(labels_json)
@@ -970,7 +1062,7 @@ async def feishu_chart_pareto(
     except _cr.ChartDataError as exc:
         return _place.fail(str(exc))
     return await _place.place(
-        draw, kind="pareto", title=title, document_id=document_id, caption=caption, user_key=user_key
+        draw, kind="pareto", title=title, document_id=document_id, caption=caption, user_key=user_key, identity=identity
     )
 
 
@@ -988,6 +1080,7 @@ async def feishu_chart_combo(
     caption: str = "",
     source: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append a combo chart — volume as bars plus a rate as a line on a second axis.
 
@@ -1012,6 +1105,7 @@ async def feishu_chart_combo(
         caption: Caption paragraph written under the chart.
         source: Data provenance footnote.
         user_key: The sender's open_id; needed for user-owned docs.
+        identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
     try:
         labels = _cr.parse_labels(labels_json)
@@ -1032,7 +1126,7 @@ async def feishu_chart_combo(
     except _cr.ChartDataError as exc:
         return _place.fail(str(exc))
     return await _place.place(
-        draw, kind="combo", title=title, document_id=document_id, caption=caption, user_key=user_key
+        draw, kind="combo", title=title, document_id=document_id, caption=caption, user_key=user_key, identity=identity
     )
 
 
@@ -1045,6 +1139,7 @@ async def feishu_chart_gantt(
     caption: str = "",
     source: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append a Gantt chart — project schedule as task bars along a time axis.
 
@@ -1066,6 +1161,7 @@ async def feishu_chart_gantt(
         caption: Caption paragraph written under the chart.
         source: Data provenance footnote.
         user_key: The sender's open_id; needed for user-owned docs.
+        identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
     try:
         tasks, tick_labels, today_offset = _cr.parse_gantt_tasks(tasks_json, start_date, today)
@@ -1073,7 +1169,7 @@ async def feishu_chart_gantt(
     except _cr.ChartDataError as exc:
         return _place.fail(str(exc))
     return await _place.place(
-        draw, kind="gantt", title=title, document_id=document_id, caption=caption, user_key=user_key
+        draw, kind="gantt", title=title, document_id=document_id, caption=caption, user_key=user_key, identity=identity
     )
 
 
@@ -1086,6 +1182,7 @@ async def feishu_chart_progress(
     caption: str = "",
     source: str = "",
     user_key: str = "",
+    identity: str = "",
 ) -> str:
     """Append progress/attainment bars — actual against a target, per item.
 
@@ -1104,6 +1201,7 @@ async def feishu_chart_progress(
         caption: Caption paragraph written under the chart.
         source: Data provenance footnote.
         user_key: The sender's open_id; needed for user-owned docs.
+        identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
     try:
         items = _cr.parse_pairs(items_json, "items")
@@ -1111,5 +1209,11 @@ async def feishu_chart_progress(
     except _cr.ChartDataError as exc:
         return _place.fail(str(exc))
     return await _place.place(
-        draw, kind="progress", title=title, document_id=document_id, caption=caption, user_key=user_key
+        draw,
+        kind="progress",
+        title=title,
+        document_id=document_id,
+        caption=caption,
+        user_key=user_key,
+        identity=identity,
     )

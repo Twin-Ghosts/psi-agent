@@ -45,6 +45,51 @@ async def test_state_save_and_load_roundtrip(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_state_roundtrip_preserves_max_context_tokens(tmp_path: Path) -> None:
+    """The compaction threshold must survive a Gateway restart.
+
+    ``save()`` whitelists AI fields explicitly, so a newly added field is dropped
+    unless listed — which would silently reset a configured threshold to the
+    default on every restart.
+    """
+    state = GatewayState(
+        _path=anyio.Path(tmp_path) / "state" / "latest.json",
+        _legacy_path=anyio.Path(tmp_path) / "legacy" / "latest.json",
+    )
+
+    await state.save(
+        ais=[
+            {
+                "id": "a1",
+                "provider": "openai",
+                "model": "gpt-4o",
+                "api_key": "sk-abc",
+                "base_url": "",
+                "max_context_tokens": 150_000,
+            },
+            # 0 disables compaction and must not collapse into the -1 default.
+            {
+                "id": "a2",
+                "provider": "openai",
+                "model": "gpt-4o",
+                "api_key": "sk-xyz",
+                "base_url": "",
+                "max_context_tokens": 0,
+            },
+            # Absent (e.g. a snapshot written before the field existed) -> sentinel.
+            {"id": "a3", "provider": "openai", "model": "gpt-4o", "api_key": "k", "base_url": ""},
+        ],
+        sessions=[],
+        titles=[],
+    )
+
+    snapshot = await state.load()
+    assert snapshot["ais"][0]["max_context_tokens"] == 150_000
+    assert snapshot["ais"][1]["max_context_tokens"] == 0
+    assert snapshot["ais"][2]["max_context_tokens"] == -1
+
+
+@pytest.mark.anyio
 async def test_state_load_missing_file_returns_empty(tmp_path: Path) -> None:
     state = GatewayState(
         _path=anyio.Path(tmp_path) / "nonexistent" / "latest.json",

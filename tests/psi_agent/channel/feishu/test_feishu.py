@@ -30,12 +30,23 @@ from psi_agent.channel.feishu.client import (
 
 
 def _resolver(core: ChannelCore):
-    """把固定 core 包成 resolve_core(open_id) 回调 (handler 现按 open_id 解析 core)。"""
+    """把固定 core 包成 resolve_core(open_id, ...) 回调 (handler 现按会话解析 core)。"""
 
-    async def _resolve(open_id: str | None) -> ChannelCore:
+    async def _resolve(open_id: str | None, *, chat_id: str = "", chat_type: str = "") -> ChannelCore:
         return core
 
     return _resolve
+
+
+def _recording_resolver(core: ChannelCore):
+    """同 _resolver, 但记录每次调用的路由参数, 供断言 handler 传了什么。"""
+    calls: list[dict] = []
+
+    async def _resolve(open_id: str | None, *, chat_id: str = "", chat_type: str = "") -> ChannelCore:
+        calls.append({"open_id": open_id, "chat_id": chat_id, "chat_type": chat_type})
+        return core
+
+    return _resolve, calls
 
 
 def test_channel_feishu_defaults():
@@ -650,7 +661,7 @@ async def test_gateway_route_provider_caches_socket() -> None:
     assert socket2 == socket1
     assert len(http.post_calls) == 1
     assert http.post_calls[0]["url"] == "http://127.0.0.1:9000/feishu/route"
-    assert http.post_calls[0]["json"] == {"open_id": "ou_1"}
+    assert http.post_calls[0]["json"] == {"open_id": "ou_1", "chat_id": "", "chat_type": ""}
 
 
 @pytest.mark.anyio
@@ -821,3 +832,119 @@ async def test_run_feishu_registers_approval_processor(monkeypatch):
         tg.cancel_scope.cancel()
 
     assert calls == [channel]
+
+
+@pytest.mark.anyio
+async def test_handle_group_message_routes_by_chat_id(monkeypatch, tmp_path):
+    """群消息把 chat_id/chat_type 交给 resolve_core, 以便整群共用一个 session。"""
+    monkeypatch.setattr(client.platformdirs, "user_downloads_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(client, "_build_chunks", AsyncMock(return_value=[TextChunk("hi")]))
+
+    channel = _fake_channel()
+    core = ChannelCore(session_socket=str(tmp_path / "x.sock"))
+    resolve, calls = _recording_resolver(core)
+    ctx = SimpleNamespace(sender_id="ou_1", chat_id="oc_group", chat_type="group", message_id="om_1")
+
+    await _handle_and_stream(channel, resolve, None, ctx)
+
+    assert calls == [{"open_id": "ou_1", "chat_id": "oc_group", "chat_type": "group"}]
+
+
+@pytest.mark.anyio
+async def test_handle_p2p_message_passes_p2p_chat_type(monkeypatch, tmp_path):
+    """私聊也如实传 chat_type=p2p, 由 Gateway 决定按 open_id 路由。"""
+    monkeypatch.setattr(client.platformdirs, "user_downloads_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(client, "_build_chunks", AsyncMock(return_value=[TextChunk("hi")]))
+
+    channel = _fake_channel()
+    core = ChannelCore(session_socket=str(tmp_path / "x.sock"))
+    resolve, calls = _recording_resolver(core)
+    ctx = SimpleNamespace(sender_id="ou_1", chat_id="oc_dm", chat_type="p2p", message_id="om_1")
+
+    await _handle_and_stream(channel, resolve, None, ctx)
+
+    assert calls == [{"open_id": "ou_1", "chat_id": "oc_dm", "chat_type": "p2p"}]
+
+
+@pytest.mark.anyio
+async def test_handle_message_without_chat_type_degrades_to_empty(monkeypatch, tmp_path):
+    """ctx 无 chat_type 属性 (老事件/精简 ctx) 时传空串, 不抛 AttributeError。"""
+    monkeypatch.setattr(client.platformdirs, "user_downloads_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(client, "_build_chunks", AsyncMock(return_value=[TextChunk("hi")]))
+
+    channel = _fake_channel()
+    core = ChannelCore(session_socket=str(tmp_path / "x.sock"))
+    resolve, calls = _recording_resolver(core)
+    ctx = SimpleNamespace(sender_id="ou_1", chat_id="oc_1", message_id="om_1")
+
+    await _handle_and_stream(channel, resolve, None, ctx)
+
+    assert calls == [{"open_id": "ou_1", "chat_id": "oc_1", "chat_type": ""}]
+
+
+@pytest.mark.anyio
+async def test_comment_resolves_core_per_operator(monkeypatch, tmp_path):
+    """文档评论不属于任何群聊, 故只按评论人 open_id 路由 (不传 chat_*)。"""
+    core = ChannelCore(session_socket=str(tmp_path / "x.sock"))
+    resolve, calls = _recording_resolver(core)
+    monkeypatch.setattr(client, "_collect_reply", AsyncMock(return_value="ok"))
+    channel = _comment_channel()
+
+    await _handle_comment(channel, resolve, None, _comment_event())
+
+    assert calls == [{"open_id": "ou_1", "chat_id": "", "chat_type": ""}]
+
+
+@pytest.mark.anyio
+async def test_gateway_route_provider_keys_group_by_chat_id() -> None:
+    """群聊按 chat_id 缓存/请求; 同群不同发送者只打 Gateway 一次。"""
+    http = _FakeHttp([_FakeResp(201, {"channel_socket": "/tmp/feishu-chat.sock"})])
+    provider = client._GatewayRouteProvider("http://127.0.0.1:9000", cast("Any", http))
+
+    s1 = await provider.ensure("ou_1", chat_id="oc_group", chat_type="group")
+    s2 = await provider.ensure("ou_2", chat_id="oc_group", chat_type="group")
+
+    assert s1 == s2 == "/tmp/feishu-chat.sock"
+    assert len(http.post_calls) == 1
+    assert http.post_calls[0]["json"] == {
+        "open_id": "ou_1",
+        "chat_id": "oc_group",
+        "chat_type": "group",
+    }
+
+
+@pytest.mark.anyio
+async def test_gateway_route_provider_p2p_and_group_do_not_share_cache() -> None:
+    """同一个人的私聊与其所在群是两个不同的路由键, 各打一次 Gateway。"""
+    http = _FakeHttp(
+        [
+            _FakeResp(201, {"channel_socket": "/tmp/dm.sock"}),
+            _FakeResp(201, {"channel_socket": "/tmp/group.sock"}),
+        ]
+    )
+    provider = client._GatewayRouteProvider("http://127.0.0.1:9000", cast("Any", http))
+
+    dm = await provider.ensure("ou_1", chat_id="oc_dm", chat_type="p2p")
+    grp = await provider.ensure("ou_1", chat_id="oc_group", chat_type="group")
+
+    assert dm == "/tmp/dm.sock"
+    assert grp == "/tmp/group.sock"
+    assert len(http.post_calls) == 2
+
+
+@pytest.mark.anyio
+async def test_gateway_route_provider_group_cache_is_per_chat() -> None:
+    """不同群各自独立缓存, 互不复用。"""
+    http = _FakeHttp(
+        [
+            _FakeResp(201, {"channel_socket": "/tmp/a.sock"}),
+            _FakeResp(201, {"channel_socket": "/tmp/b.sock"}),
+        ]
+    )
+    provider = client._GatewayRouteProvider("http://127.0.0.1:9000", cast("Any", http))
+
+    a = await provider.ensure("ou_1", chat_id="oc_a", chat_type="group")
+    b = await provider.ensure("ou_1", chat_id="oc_b", chat_type="group")
+
+    assert (a, b) == ("/tmp/a.sock", "/tmp/b.sock")
+    assert len(http.post_calls) == 2

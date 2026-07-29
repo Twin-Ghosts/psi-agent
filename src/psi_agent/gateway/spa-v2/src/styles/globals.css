@@ -4805,9 +4805,8 @@ textarea:focus-visible {
   gap: 4px;
   max-width: 100%;
 }
-.focus-chat-msg.user .focus-chat-bubble-wrap {
-  flex-direction: row-reverse;
-}
+/* User: DOM is [actions][bubble]; keep LTR so copy/retry sit on the
+   center side of the bubble (not between bubble and avatar). Matches spa v1. */
 .focus-chat-side-actions {
   display: flex;
   flex-direction: column;
@@ -4827,21 +4826,30 @@ textarea:focus-visible {
   border: none;
   border-radius: 999px;
   background: none;
-  color: #7a8b9c;
   cursor: pointer;
   opacity: 0;
   transition: opacity 0.15s, background 0.15s, color 0.15s;
 }
+.focus-chat-copy-btn {
+  color: #7a8b9c;
+}
+.focus-chat-retry-btn {
+  color: #e11d48;
+}
 .focus-chat-bubble-wrap:hover .focus-chat-copy-btn,
 .focus-chat-copy-btn:focus-visible,
 .focus-chat-side-actions.has-retry .focus-chat-copy-btn,
+.focus-chat-side-actions.has-retry .focus-chat-retry-btn,
 .focus-chat-retry-btn {
   opacity: 1;
 }
-.focus-chat-copy-btn:hover,
-.focus-chat-retry-btn:hover:not(:disabled) {
+.focus-chat-copy-btn:hover {
   background: rgba(11, 47, 91, 0.06);
   color: #1f3348;
+}
+.focus-chat-retry-btn:hover:not(:disabled) {
+  background: rgba(225, 29, 72, 0.1);
+  color: #be123c;
 }
 .focus-chat-retry-btn:disabled {
   opacity: 0.45;
