@@ -79,6 +79,9 @@ message after Haitun starts, the workspace automatically initiates
 for different users remain isolated. Model-visible `<feishu_context>` never
 selects credentials.
 
+Generic work-arrangement records use the assignment tools backed by the same
+remote Fusion Memory connection.
+
 Users absent from the map can chat normally but receive no bearer token,
 connector, passive writer, checkpoint, or durable memory. Duplicate token
 assignments reject the map, and token-map mode never falls back to

@@ -10,8 +10,9 @@ the agent process never imports database, model, or memory-service code.
 - `memory_search`: retrieve raw evidence.
 - `memory_answer_context`: retrieve query-grounded context for an answer.
 - `memory_health`: verify authenticated MCP connectivity for the current user.
+- `assignment_upsert` / `assignment_get` / `assignment_list` / `assignment_transition`: manage generic work-arrangement records and state transitions.
 
-All four tools call the Streamable HTTP MCP endpoint at
+All listed tools call the Streamable HTTP MCP endpoint at
 `FUSION_MEMORY_MCP_URL`. There is no native memory HTTP API in this workspace.
 
 ## Configuration

@@ -7,8 +7,11 @@ Covers ``_tool_index`` (static AST scan) and the ``tool_search`` /
 from __future__ import annotations
 
 import builtins
+import hashlib
 import importlib
+import json
 import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -38,9 +41,87 @@ async def test_index_finds_known_tools_and_skips_private_files():
     assert "fetch" in names
     # The three discovery tools index themselves.
     assert {"tool_search", "tool_search_code", "tool_describe"} <= names
+    assert {"assignment_upsert", "assignment_get", "assignment_list", "assignment_transition"} <= names
     # Private helper files (``_fetch_impl.py``) never expose a tool.
     assert "fetch_impl" not in names
     assert all(not n.startswith("_") for n in names)
+
+
+async def test_assignment_read_tools_are_replayable():
+    source = await (anyio.Path(str(TOOLS_DIR)) / "_fusion_memory_mcp.py").read_text(encoding="utf-8")
+    assert '"assignment_get"' in source
+    assert '"assignment_list"' in source
+    assert '"assignment_upsert"' not in source.split("READ_TOOLS", 1)[1].split("}", 1)[0]
+
+
+async def test_assignment_upsert_forwards_assignment_object(monkeypatch):
+    fake_client = _FakeMemoryClient()
+    module = _import_assignment_tool_with_fake_client("assignment_upsert", fake_client, monkeypatch)
+
+    out = await module.assignment_upsert(
+        json.dumps(
+            {
+                "title": "同步客户会议后续",
+                "assigner": {"user_id": "user-a"},
+                "recipients": [{"user_id": "user-b"}],
+                "idempotency_key": "feishu-message-1",
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    assert json.loads(out)["ok"] is True
+    assert fake_client.calls == [
+        (
+            "assignment_upsert",
+            {
+                "assignment": {
+                    "title": "同步客户会议后续",
+                    "assigner": {"user_id": "user-a"},
+                    "recipients": [{"user_id": "user-b"}],
+                    "idempotency_key": "feishu-message-1",
+                }
+            },
+            False,
+        )
+    ]
+
+
+async def test_assignment_list_forwards_read_filter(monkeypatch):
+    fake_client = _FakeMemoryClient()
+    module = _import_assignment_tool_with_fake_client("assignment_list", fake_client, monkeypatch)
+
+    out = await module.assignment_list(participant_user_id="user-b", state="assigned", limit=200)
+
+    assert json.loads(out)["ok"] is True
+    assert fake_client.calls == [
+        (
+            "assignment_list",
+            {"participant_user_id": "user-b", "state": "assigned", "limit": 50},
+            True,
+        )
+    ]
+
+
+async def test_assignment_transition_rejects_invalid_json(monkeypatch):
+    fake_client = _FakeMemoryClient()
+    module = _import_assignment_tool_with_fake_client("assignment_transition", fake_client, monkeypatch)
+
+    out = await module.assignment_transition("wa-1", "not-json")
+
+    payload = json.loads(out)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "invalid_argument"
+    assert fake_client.calls == []
+
+
+async def test_work_assignment_skill_documents_generic_assignment_flow():
+    skill_path = WORKSPACE_ROOT / "skills" / "work-assignment-delegation" / "SKILL.md"
+    source = await anyio.Path(str(skill_path)).read_text(encoding="utf-8")
+    assert "assignment_upsert" in source
+    assert "assignment_transition" in source
+    assert "不只限于开发任务" in source
+    assert "不能把推测写成确定事实" in source
 
 
 async def test_index_does_not_execute_tool_modules(monkeypatch):
@@ -64,6 +145,34 @@ async def test_index_does_not_execute_tool_modules(monkeypatch):
 
 async def _write(dir_path: anyio.Path, name: str, body: str) -> None:
     await (dir_path / name).write_text(body, encoding="utf-8")
+
+
+class _FakeMemoryClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any], bool]] = []
+
+    async def call_tool(self, name: str, arguments: dict[str, Any], *, retryable: bool) -> dict[str, Any]:
+        self.calls.append((name, arguments, retryable))
+        return {"ok": True, "result": {"name": name, "arguments": arguments}}
+
+
+def _import_assignment_tool_with_fake_client(name: str, fake_client: _FakeMemoryClient, monkeypatch) -> Any:
+    mcp_path = TOOLS_DIR / "_fusion_memory_mcp.py"
+    mcp_module_name = f"fusion_memory_tool__fusion_memory_mcp_{hashlib.sha256(str(mcp_path).encode()).hexdigest()[:12]}"
+    fake_mcp_module = types.ModuleType(mcp_module_name)
+    fake_mcp_module.CLIENT = fake_client
+    monkeypatch.setitem(sys.modules, mcp_module_name, fake_mcp_module)
+    sys.modules.pop(name, None)
+    assignment_common = TOOLS_DIR / "_assignment_tool_common.py"
+    common_name = (
+        "fusion_memory_tool__assignment_tool_common_"
+        f"{hashlib.sha256(str(assignment_common).encode()).hexdigest()[:12]}"
+    )
+    fake_common_module = types.ModuleType(common_name)
+    fake_common_module.CLIENT = fake_client
+    monkeypatch.setitem(sys.modules, common_name, fake_common_module)
+    sys.modules.pop("_assignment_tool_common", None)
+    return importlib.import_module(name)
 
 
 async def test_extract_signature_and_docstring(tmp_path):
