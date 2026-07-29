@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import importlib
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -9,15 +9,22 @@ from typing import Any
 import pytest
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
-TOOLS_DIR = WORKSPACE_ROOT / "tools"
-if str(TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(TOOLS_DIR))
+CONFIG_PATH = WORKSPACE_ROOT / "tools" / "_fusion_memory_config.py"
 
-config_module: Any = importlib.import_module("_fusion_memory_config")
+
+def load_config_module() -> Any:
+    module_name = "fusion_memory_workspace_config_under_test"
+    spec = importlib.util.spec_from_file_location(module_name, CONFIG_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.mark.anyio
 async def test_resolve_memory_config_auto_registers_missing_feishu_user(tmp_path, monkeypatch) -> None:
+    config_module = load_config_module()
     token_map = tmp_path / "tokens.json"
     token_map.write_text("{}", encoding="utf-8")
     calls: list[dict[str, object]] = []
@@ -69,12 +76,13 @@ async def test_resolve_memory_config_auto_registers_missing_feishu_user(tmp_path
         }
     ]
     assert json.loads(token_map.read_text(encoding="utf-8")) == {
-        "ou_a": {"token": "memory-token", "workspace_id": "haitun"}
+        "ou_a": {"token": "memory-token", "workspace_id": "fusion-memory"}
     }
 
 
 @pytest.mark.anyio
 async def test_resolve_memory_config_requires_registration_credentials_when_enabled(tmp_path) -> None:
+    config_module = load_config_module()
     token_map = tmp_path / "tokens.json"
     token_map.write_text("{}", encoding="utf-8")
     cfg = config_module.build_memory_config(

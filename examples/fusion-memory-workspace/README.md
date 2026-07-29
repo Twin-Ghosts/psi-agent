@@ -24,6 +24,24 @@ export FUSION_MEMORY_MCP_URL="https://memory.example.com/mcp"
 export FUSION_MEMORY_TOKEN_MAP_FILE="/absolute/path/to/memory_tokens.json"
 ```
 
+If the Memory service exposes Feishu first-use registration, the starter may
+enable automatic registration for private-chat Feishu users that are missing
+from the token map:
+
+```bash
+export FUSION_MEMORY_AUTO_REGISTER_FEISHU=1
+export FUSION_MEMORY_ORGANIZATION_ID="org_example"
+export PSI_FEISHU_APP_ID="cli_xxx"
+export PSI_FEISHU_APP_SECRET="..."
+```
+
+The workspace signs a short-lived assertion for the runtime-observed
+`feishu-<open_id>` Session, calls `<FUSION_MEMORY_MCP_URL without /mcp>/feishu/register`,
+and writes the returned bearer token into the token map. Model-visible text
+cannot choose or override the Feishu identity. When auto-registration is off,
+unknown users keep the existing behavior: they can chat, but durable memory is
+not activated.
+
 The endpoint path must be exactly `/mcp`; HTTPS is required for non-loopback
 hosts. The map is a JSON object keyed by Feishu `open_id`:
 
@@ -67,6 +85,9 @@ the shared legacy token.
 
 Optional settings:
 
+- `FUSION_MEMORY_AUTO_REGISTER_FEISHU`: enable Feishu first-use registration.
+- `FUSION_MEMORY_ORGANIZATION_ID`: organization selected for this deployment;
+  required when auto-registration is enabled.
 - `FUSION_MEMORY_MCP_TIMEOUT_SECONDS`: request timeout, default `30`, bounded
   to `0.1..120` seconds.
 - `FUSION_MEMORY_MCP_MAX_RETRIES`: retry count for reads and idempotent writes,

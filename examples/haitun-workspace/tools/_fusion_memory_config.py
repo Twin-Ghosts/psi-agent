@@ -1,20 +1,19 @@
 from __future__ import annotations
 
-import hashlib
 import base64
-import secrets
-from datetime import datetime, timezone
+import hashlib
 import hmac
 import ipaddress
 import json
 import os
 import re
+import secrets
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
-import anyio
 import httpx
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
@@ -130,8 +129,12 @@ def build_memory_config(env: Mapping[str, str] | None = None) -> MemoryMcpConfig
         ),
         auto_register_feishu=_bool_env(values.get("FUSION_MEMORY_AUTO_REGISTER_FEISHU")),
         organization_id=(values.get("FUSION_MEMORY_ORGANIZATION_ID") or "").strip() or None,
-        feishu_app_id=(values.get("PSI_FEISHU_APP_ID") or values.get("FUSION_MEMORY_FEISHU_APP_ID") or "").strip() or None,
-        feishu_app_secret=(values.get("PSI_FEISHU_APP_SECRET") or values.get("FUSION_MEMORY_FEISHU_APP_SECRET") or "").strip() or None,
+        feishu_app_id=(
+            values.get("PSI_FEISHU_APP_ID") or values.get("FUSION_MEMORY_FEISHU_APP_ID") or ""
+        ).strip() or None,
+        feishu_app_secret=(
+            values.get("PSI_FEISHU_APP_SECRET") or values.get("FUSION_MEMORY_FEISHU_APP_SECRET") or ""
+        ).strip() or None,
     )
 
 
@@ -270,9 +273,11 @@ def _sign_registration_assertion(
         "feishu_open_id": feishu_open_id,
         "display_name": display_name,
         "nonce": secrets.token_urlsafe(16),
-        "issued_at": datetime.now(timezone.utc).isoformat(),
+        "issued_at": datetime.now(UTC).isoformat(),
     }
-    signature = hmac.new(app_secret.encode("utf-8"), _canonical_json(payload).encode("utf-8"), hashlib.sha256).hexdigest()
+    signature = hmac.new(
+        app_secret.encode("utf-8"), _canonical_json(payload).encode("utf-8"), hashlib.sha256
+    ).hexdigest()
     envelope = {"payload": payload, "signature": signature}
     return base64.urlsafe_b64encode(_canonical_json(envelope).encode("utf-8")).decode("ascii")
 
@@ -282,37 +287,23 @@ def _canonical_json(value: object) -> str:
 
 
 async def _write_token_map_entry(path: str, open_id: str, token: str, workspace_id: str) -> None:
-    async with await anyio.open_file(path, "r+", encoding="utf-8") as handle:
-        raw = await handle.read()
-        payload = json.loads(raw or "{}")
-        if not isinstance(payload, dict):
-            raise MemoryConfigError("configuration_error", "Fusion Memory token map must be a JSON object")
-        existing = payload.get(open_id)
-        if existing is not None:
-            if not isinstance(existing, dict):
-                raise MemoryConfigError("configuration_error", "Fusion Memory token-map entry is invalid")
-            return
-        payload[open_id] = {"token": token, "workspace_id": workspace_id}
-        await handle.seek(0)
-        await handle.write(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
-        await handle.truncate()
+    _write_token_map_entry_sync(path, open_id, token, workspace_id)
     with _TOKEN_MAP_CACHE_LOCK:
         _TOKEN_MAP_CACHE.pop(path, None)
 
 
 async def _read_token_map(path: str) -> dict[str, object]:
-    token_map_path = anyio.Path(path)
     for attempt in range(2):
-        before = await _token_map_signature(token_map_path)
+        before = await _token_map_signature(path)
         with _TOKEN_MAP_CACHE_LOCK:
             cached = _TOKEN_MAP_CACHE.get(path)
             if cached is not None and cached[0] == before:
                 return cached[1]
         try:
-            raw = await token_map_path.read_text(encoding="utf-8")
+            raw = _read_token_map_text(path)
         except OSError as exc:
             raise MemoryConfigError("configuration_error", "Fusion Memory token map is unavailable") from exc
-        after = await _token_map_signature(token_map_path)
+        after = await _token_map_signature(path)
         if before != after:
             if attempt == 0:
                 continue
@@ -330,12 +321,47 @@ async def _read_token_map(path: str) -> dict[str, object]:
     raise MemoryConfigError("configuration_error", "Fusion Memory token map is unavailable")
 
 
-async def _token_map_signature(path: anyio.Path) -> tuple[int, int, int]:
+async def _token_map_signature(path: str) -> tuple[int, int, int]:
     try:
-        stat = await path.stat()
+        total, digest_value = _token_map_signature_sync(path)
     except OSError as exc:
         raise MemoryConfigError("configuration_error", "Fusion Memory token map is unavailable") from exc
-    return stat.st_mtime_ns, stat.st_size, stat.st_ino
+    return total, 0, digest_value
+
+
+def _read_token_map_text(path: str) -> str:
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _token_map_signature_sync(path: str) -> tuple[int, int]:
+    digest = hashlib.sha256()
+    total = 0
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(64 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            digest.update(chunk)
+    return total, int.from_bytes(digest.digest()[:8], "big")
+
+
+def _write_token_map_entry_sync(path: str, open_id: str, token: str, workspace_id: str) -> None:
+    with open(path, "r+", encoding="utf-8") as handle:
+        raw = handle.read()
+        payload = json.loads(raw or "{}")
+        if not isinstance(payload, dict):
+            raise MemoryConfigError("configuration_error", "Fusion Memory token map must be a JSON object")
+        existing = payload.get(open_id)
+        if existing is not None:
+            if not isinstance(existing, dict):
+                raise MemoryConfigError("configuration_error", "Fusion Memory token-map entry is invalid")
+            return
+        payload[open_id] = {"token": token, "workspace_id": workspace_id}
+        handle.seek(0)
+        handle.write(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        handle.truncate()
 
 
 def _ensure_unique_tokens(token_map: dict[str, object]) -> None:
