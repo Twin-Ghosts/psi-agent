@@ -160,7 +160,7 @@ def _import_assignment_tool_with_fake_client(name: str, fake_client: _FakeMemory
     mcp_path = TOOLS_DIR / "_fusion_memory_mcp.py"
     mcp_module_name = f"fusion_memory_tool__fusion_memory_mcp_{hashlib.sha256(str(mcp_path).encode()).hexdigest()[:12]}"
     fake_mcp_module = types.ModuleType(mcp_module_name)
-    fake_mcp_module.CLIENT = fake_client
+    fake_mcp_module.__dict__["CLIENT"] = fake_client
     monkeypatch.setitem(sys.modules, mcp_module_name, fake_mcp_module)
     sys.modules.pop(name, None)
     assignment_common = TOOLS_DIR / "_assignment_tool_common.py"
@@ -168,7 +168,7 @@ def _import_assignment_tool_with_fake_client(name: str, fake_client: _FakeMemory
         f"fusion_memory_tool__assignment_tool_common_{hashlib.sha256(str(assignment_common).encode()).hexdigest()[:12]}"
     )
     fake_common_module = types.ModuleType(common_name)
-    fake_common_module.CLIENT = fake_client
+    fake_common_module.__dict__["CLIENT"] = fake_client
     monkeypatch.setitem(sys.modules, common_name, fake_common_module)
     sys.modules.pop("_assignment_tool_common", None)
     return importlib.import_module(name)
