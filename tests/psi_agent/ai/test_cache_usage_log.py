@@ -23,10 +23,18 @@ class _Details:
 
 
 class _Usage:
+    """Reports a cache detail, or an explicit ``None`` like OpenAI-shaped usage does."""
+
     def __init__(self, prompt_tokens: int = 0, details: _Details | None = None) -> None:
         self.prompt_tokens = prompt_tokens
-        if details is not None:
-            self.prompt_tokens_details = details
+        self.prompt_tokens_details = details
+
+
+class _UsageWithoutDetails:
+    """A provider whose usage object has no ``prompt_tokens_details`` attribute at all."""
+
+    def __init__(self, prompt_tokens: int = 0) -> None:
+        self.prompt_tokens = prompt_tokens
 
 
 @pytest.fixture
@@ -53,16 +61,14 @@ def test_zero_cached_tokens_is_still_reported(logged: list[str]) -> None:
 
 def test_provider_without_cache_detail_stays_quiet(logged: list[str]) -> None:
     """No detail means no information, which is not the same as a zero hit."""
-    _log_cache_usage(_Usage(prompt_tokens=1000))
+    _log_cache_usage(_UsageWithoutDetails(prompt_tokens=1000))
 
     assert logged == []
 
 
 def test_none_detail_stays_quiet(logged: list[str]) -> None:
-    usage = _Usage(prompt_tokens=1000)
-    usage.prompt_tokens_details = None  # type: ignore[assignment]
-
-    _log_cache_usage(usage)
+    """The attribute exists but is ``None`` — same reading as it being absent."""
+    _log_cache_usage(_Usage(prompt_tokens=1000, details=None))
 
     assert logged == []
 
