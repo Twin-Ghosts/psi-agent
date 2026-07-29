@@ -943,16 +943,26 @@ async def system_prompt_builder() -> str:
     return await System(workspace_dir).build_system_prompt()
 
 
+RECENT_TURNS_KEPT_VERBATIM = 20
+"""How many trailing history messages ``compact_history`` keeps verbatim.
+
+Raised from 4 to 20: with 4, a compaction triggered near the token threshold
+left so little verbatim tail that the model lost the thread of the current
+task and re-compacted almost every other turn.  20 messages is roughly 10
+exchanges (~1% of the default 100K threshold for chat-only traffic).
+"""
+
+
 async def compact_history(history: list[dict[str, Any]], complete_fn) -> str:
     """Summarize older conversation turns via LLM, keeping recent turns verbatim.
 
     Returns the summary string with recent turns appended; the framework
     merges the whole result into the system prompt.
     """
-    if len(history) <= 6:
+    if len(history) <= RECENT_TURNS_KEPT_VERBATIM + 2:
         return ""
 
-    recent_count = 4
+    recent_count = RECENT_TURNS_KEPT_VERBATIM
     older = history[:-recent_count]
     recent = history[-recent_count:]
 
