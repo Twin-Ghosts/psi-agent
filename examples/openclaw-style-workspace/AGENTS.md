@@ -13,6 +13,12 @@ The system prompt follows OpenClaw's `buildAgentSystemPrompt()` structure:
 - **Dynamic suffix** (rebuilt each turn): channel guidance, heartbeats, silent
   replies, user profile, datetime, runtime info
 
+"Rebuilt each turn" is what `system_prompt_dynamic_suffix()` delivers: the session loader
+calls it before every turn, and it re-renders `build_dynamic_suffix()` onto the existing
+prefix. The prefix itself is built once per Session and reused byte-for-byte, so upstream
+prompt caching keeps hitting. Add a section to `build_dynamic_suffix()` and it refreshes
+per turn automatically; add it to the stable prefix and it freezes at first build.
+
 ## Configuration
 
 The following environment variables control the dynamic sections:

@@ -230,7 +230,7 @@ class SessionAgent:
                 await self._tool_registry.refresh()
                 await self._schedule_registry.refresh()
 
-                # system prompt (lazy + optional rebuild)
+                # system prompt (lazy build / optional rebuild / per-turn tail refresh)
                 await self._system_prompt.ensure(self._conversation)
 
                 # peek pending schedule chunks — yield first, clear only after yield

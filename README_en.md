@@ -207,7 +207,7 @@ my-workspace/
 │   └── daily-report/
 │       └── TASK.md           # YAML header (name, cron) + Markdown body
 └── systems/
-    └── system.py             # async def system_prompt_builder() / system_prompt_rebuild_checker()
+    └── system.py             # async def system_prompt_builder() / system_prompt_rebuild_checker() / system_prompt_dynamic_suffix()
 ```
 
 ### Tools
@@ -233,7 +233,7 @@ async def bash(command: str) -> str:
 
 ### System Prompt
 
-Define two optional async functions in `systems/system.py`:
+Define three optional async functions in `systems/system.py`:
 
 ```python
 async def system_prompt_builder() -> str:
@@ -243,11 +243,24 @@ async def system_prompt_builder() -> str:
 async def system_prompt_rebuild_checker() -> bool:
     """Called before every agent turn. Return True to rebuild the system prompt."""
     return False
+
+async def system_prompt_dynamic_suffix(current: str) -> str:
+    """Called before every agent turn. Takes the current full prompt, returns it
+    with only the volatile tail re-rendered."""
+    head, sep, _tail = current.partition(BOUNDARY)
+    return head + sep + render_volatile_sections() if sep else current
 ```
 
 - `builder` is lazily called on the first conversation turn
 - `checker` runs before each turn, useful for auto-refreshing prompts when files change
-- Both are optional; sensible defaults are used when absent
+- `dynamic_suffix` runs every turn when neither of the above fires, re-rendering **only the
+  volatile tail** (wall-clock time, dynamic context files). A full rebuild would change the
+  cached prefix and defeat upstream prompt caching, so the workspace decides where to split
+  "stable prefix + boundary + volatile tail" — the framework only hands over the old string
+  and writes back the new one. Without it the whole prompt never changes within a Session,
+  freezing everything in it that describes *now* at first-build time
+- All three are optional; sensible defaults are used when absent. A refresher that raises,
+  returns a non-string, or returns an empty string leaves the prompt untouched
 
 ### Scheduled Tasks
 

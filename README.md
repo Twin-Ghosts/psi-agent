@@ -207,7 +207,7 @@ my-workspace/
 │   └── daily-report/
 │       └── TASK.md           # YAML 头 (name, cron) + Markdown body
 └── systems/
-    └── system.py             # async def system_prompt_builder() / system_prompt_rebuild_checker()
+    └── system.py             # async def system_prompt_builder() / system_prompt_rebuild_checker() / system_prompt_dynamic_suffix()
 ```
 
 ### Tools
@@ -233,7 +233,7 @@ async def bash(command: str) -> str:
 
 ### System Prompt
 
-在 `systems/system.py` 中定义两个可选异步函数：
+在 `systems/system.py` 中定义三个可选异步函数：
 
 ```python
 async def system_prompt_builder() -> str:
@@ -243,11 +243,17 @@ async def system_prompt_builder() -> str:
 async def system_prompt_rebuild_checker() -> bool:
     """每次对话回合前调用。返回 True 则重建 system prompt。"""
     return False
+
+async def system_prompt_dynamic_suffix(current: str) -> str:
+    """每次对话回合前调用。收当前完整 prompt，返回只换掉易变尾部的完整 prompt。"""
+    head, sep, _tail = current.partition(BOUNDARY)
+    return head + sep + render_volatile_sections() if sep else current
 ```
 
 - `builder` 在首次对话时惰性调用
 - `checker` 每次回合前调用，可用于监控文件变更后自动刷新 prompt
-- 两个都是可选的，缺失时用合理默认值
+- `dynamic_suffix` 在前两者都未触发时每回合调用，**只重渲染易变尾部**（时间、动态上下文文件）。整段重建会改动被缓存的前缀、击穿上游 prompt caching，因此把「稳定前缀 + 边界 + 易变尾部」的切法交给 workspace 自己定，框架只负责把旧串交出去、拿新串写回。不定义它则整段 prompt 在会话内永不变——里面所有描述「现在」的内容都会冻结在首次构建那一刻
+- 三个都是可选的，缺失时用合理默认值。刷新抛异常、返回非字符串或空串时一律保留原 prompt
 
 ### 定时任务
 
