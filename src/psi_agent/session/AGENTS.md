@@ -145,7 +145,7 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 | **构建失败** | `except Exception` 记 ERROR 后返回 `""`，不中断回合。**丢一行时钟远好过丢掉整个回合** |
 | **返回值不可用** | 非 `str` / 空串 / 纯空白一律当「没有这个块」 |
 | **为什么不给 `turn_context_fn` 设默认函数**（不同于 `builder` / `checker` 的「Default over None」，见根 AGENTS.md 坑 8） | 默认函数只能返回空串，那与 `None` 语义重合、却多一次无谓的 `await`；且 `None` 在这里承载**可观测的语义**——「这个 workspace 没有易变块」。`compaction_fn` 同样保持 `None` |
-| **为什么不单独发一条尾部消息** | Anthropic Messages API 要求 user / assistant 交替，连着两条 user 消息直接 400 |
+| **为什么不单独发一条尾部消息** | 不是因为发不出去——Anthropic 会把连续的同角色轮次**合并成一条**（"Consecutive `user` or `assistant` turns in your request will be combined into a single turn"），不报错。真正的理由是那条消息**必须落进 history 才能发出去**（`messages_for_ai()` 只投影已有行，凭空插一条就要在投影期造行），于是每回合都往历史里多塞一条一次性的时钟消息：历史被噪音撑大、压缩时还得判断哪些该丢。挂在本回合 user 消息上则一行不多、且天然随该回合一起过期 |
 | **`USER.md` / `HEARTBEAT.md` 归谁** | 留在提示词里——它们是「当作长期上下文读」的散文，不是本回合的新闻。文档承诺的「re-read every turn」由 `system_prompt_rebuild_checker()` 按**内容哈希**兑现：字节真变了才整段重建，改一次付一次，而不是每回合付一次 |
 
 ## 其他约定
