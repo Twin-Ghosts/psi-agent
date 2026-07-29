@@ -26,10 +26,15 @@ class SystemPrompt:
     ``True`` triggers an in-place rebuild.
     ``compaction_fn(history, complete_fn) → str`` summarises the
     conversation history when the token budget is exceeded.
+    ``refresher(current) → str`` is called before every agent turn to
+    re-render only the *volatile tail* of an existing prompt (wall-clock time,
+    dynamic context files). See ``ensure`` for why this is separate from
+    ``checker``.
 
     Defaults: if no builder is provided, an empty prompt is used.  If
     no checker is provided, the prompt is never rebuilt.  If no
-    compaction_fn is provided, compaction is silently skipped.
+    compaction_fn is provided, compaction is silently skipped.  If no
+    refresher is provided, the volatile tail is left untouched.
     """
 
     @staticmethod
@@ -45,10 +50,12 @@ class SystemPrompt:
         builder: Callable[..., Any] | None = None,
         checker: Callable[..., Any] | None = None,
         compaction_fn: Callable[..., Any] | None = None,
+        refresher: Callable[..., Any] | None = None,
     ):
         self._builder = builder if builder is not None else self._default_builder
         self._checker = checker if checker is not None else self._default_checker
         self._compaction_fn = compaction_fn
+        self._refresher = refresher
 
     @property
     def compaction_fn(self) -> Callable[..., Any] | None:
@@ -57,12 +64,38 @@ class SystemPrompt:
     @classmethod
     async def from_workspace(cls, workspace_path: Path, session_id: str) -> SystemPrompt:
         """Load the system module.  Defaults are used when builder, checker,
-        or compaction_fn are not found in the workspace."""
-        builder, checker, compaction_fn = await cls._load_module(workspace_path, session_id)
-        return cls(builder=builder, checker=checker, compaction_fn=compaction_fn)
+        compaction_fn, or refresher are not found in the workspace."""
+        builder, checker, compaction_fn, refresher = await cls._load_module(workspace_path, session_id)
+        return cls(builder=builder, checker=checker, compaction_fn=compaction_fn, refresher=refresher)
 
     async def ensure(self, conversation: Conversation) -> None:
-        """Build or rebuild the system prompt if needed."""
+        """Build, rebuild, or refresh the volatile tail of the system prompt.
+
+        Three paths, in order of precedence:
+
+        1. Empty history → build the whole prompt.
+        2. ``checker()`` says yes → rebuild the whole prompt (already current,
+           so no refresh on top).
+        3. Otherwise → re-render only the part after the workspace's cache
+           boundary, via ``system_prompt_dynamic_suffix()``.
+
+        Path 3 exists because the prompt is otherwise built once and reused for
+        the life of the history, which freezes everything in it that describes
+        **now**: a Session opened on Monday kept telling users it was Monday
+        all week, and a wrong ``Time zone`` label baked in at build time stayed
+        wrong for as long as the Session lived. Rebuilding it all every turn
+        would fix the clock and break two other things — a full workspace
+        re-scan per turn (~110 ms for a ~150 KB prompt here), and a cached
+        prefix that changes every turn, defeating upstream prompt caching. So
+        only the tail is re-rendered; the stable prefix, and its cache entry,
+        survive byte-for-byte.
+
+        A workspace opts in by exposing ``system_prompt_dynamic_suffix()``;
+        those that don't are left exactly as they were. A refresher that
+        raises, returns a non-string, or finds no boundary is likewise a no-op,
+        because a stale clock is a far smaller problem than a system prompt
+        truncated at a boundary we could not locate.
+        """
         if not conversation.messages:
             try:
                 sp = await self._builder()
@@ -70,30 +103,56 @@ class SystemPrompt:
                 conversation.replace_system(sp)
             except Exception as e:
                 logger.error(f"Failed to build system prompt: {e}")
-        else:
-            try:
-                if await self._checker():
-                    sp = await self._builder()
-                    logger.info(f"System prompt rebuilt ({len(sp)} chars)")
-                    conversation.replace_system(sp)
-            except Exception as e:
-                logger.error(f"Rebuild check or rebuild failed: {e}")
+            return
+
+        try:
+            if await self._checker():
+                sp = await self._builder()
+                logger.info(f"System prompt rebuilt ({len(sp)} chars)")
+                conversation.replace_system(sp)
+                return
+        except Exception as e:
+            logger.error(f"Rebuild check or rebuild failed: {e}")
+
+        if self._refresher is None:
+            return
+        head = conversation.messages[0]
+        if head.get("role") != "system":
+            return
+        current = head.get("content")
+        if not isinstance(current, str):
+            return
+        try:
+            refreshed = await self._refresher(current)
+        except Exception as e:
+            logger.error(f"System prompt dynamic refresh failed: {e}")
+            return
+        if not isinstance(refreshed, str) or not refreshed or refreshed == current:
+            return
+        conversation.replace_system(refreshed)
+        logger.info(f"System prompt dynamic tail refreshed ({len(refreshed)} chars)")
 
     # -- module loading --------------------------------------------------------
 
     @staticmethod
     async def _load_module(
         workspace_path: Path, session_id: str
-    ) -> tuple[Callable[..., Any] | None, Callable[..., Any] | None, Callable[..., Any] | None]:
+    ) -> tuple[
+        Callable[..., Any] | None,
+        Callable[..., Any] | None,
+        Callable[..., Any] | None,
+        Callable[..., Any] | None,
+    ]:
         """Import ``system_prompt_builder``, ``system_prompt_rebuild_checker``,
-        and ``compact_history`` from ``workspace/systems/system.py``."""
+        ``compact_history``, and ``system_prompt_dynamic_suffix`` from
+        ``workspace/systems/system.py``."""
         system_py = workspace_path / "systems" / "system.py"
         ap = anyio.Path(str(system_py))
         try:
             file_bytes = await ap.read_bytes()
         except OSError:
             logger.warning(f"No system.py found at {system_py}")
-            return None, None, None
+            return None, None, None, None
 
         file_hash = hashlib.sha256(file_bytes).hexdigest()
         module_name = f"psi_system_{session_id}_{file_hash}"
@@ -103,7 +162,7 @@ class SystemPrompt:
             compiled = compile(source, str(system_py), "exec")
         except Exception as e:
             logger.error(f"Failed to read or compile {system_py!r}: {e!r}")
-            return None, None, None
+            return None, None, None, None
 
         module = types.ModuleType(module_name)
         module.__file__ = str(system_py)
@@ -113,7 +172,7 @@ class SystemPrompt:
         except Exception as e:
             logger.error(f"Failed to execute system module {system_py!r}: {e!r}")
             sys.modules.pop(module_name, None)
-            return None, None, None
+            return None, None, None, None
         except BaseException:
             sys.modules.pop(module_name, None)
             raise
@@ -122,11 +181,12 @@ class SystemPrompt:
             builder = SystemPrompt._extract_async_func(module, "system_prompt_builder")
             checker = SystemPrompt._extract_async_func(module, "system_prompt_rebuild_checker")
             compaction_fn = SystemPrompt._extract_async_func(module, "compact_history")
+            refresher = SystemPrompt._extract_async_func(module, "system_prompt_dynamic_suffix")
         except Exception as e:
             logger.error(f"Failed to extract functions from {system_py!r}: {e!r}")
             sys.modules.pop(module_name, None)
-            return None, None, None
-        return builder, checker, compaction_fn
+            return None, None, None, None
+        return builder, checker, compaction_fn, refresher
 
     @staticmethod
     def _extract_async_func(module: object, name: str) -> Callable[..., Any] | None:

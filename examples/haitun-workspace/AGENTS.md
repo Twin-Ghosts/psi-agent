@@ -5,7 +5,10 @@ in the system prompt). It merges the most useful parts of the other example work
 
 - **Prompt engine** — a layered builder (stable prefix + cache boundary + dynamic
   suffix, skills index, bootstrap context files), with **all configuration kept inside this
-  workspace** (there is no global config directory).
+  workspace** (there is no global config directory). The stable prefix is built once per
+  Session; everything below the cache boundary is re-rendered **every turn** via
+  `system_prompt_dynamic_suffix()`, so the clock and the dynamic context files below stay
+  current without invalidating the cached prefix.
 - **Fusion Flow** — full workflow-authoring capability (`flow_manage`, the bundled node
   runtime under `skills/fusion-flow/`, the `bin/` stateful-session shim, the `flows/`
   layout, and authoring guidance injected into the prompt).
@@ -253,13 +256,16 @@ service tools:
 
 ## ⚠️ Intentionally-kept un-wired code (future extension)
 
-psi-agent's session loader only ever calls `system_prompt_builder()` (and an optional
-`system_prompt_rebuild_checker()`), loads `tools/*.py`, and runs `schedules/*/TASK.md`. The
+psi-agent's session loader only ever calls the module-level `system_prompt_builder()`,
+`system_prompt_rebuild_checker()`, `system_prompt_dynamic_suffix()` and `compact_history()`
+(all but the first optional), loads `tools/*.py`, and runs `schedules/*/TASK.md`. The
 following are deliberately included as **future-extension hooks** and are **NOT** invoked by
 the current framework — do not "clean them up" as dead code:
 
 - `systems/system.py`: `System.compact_history()`, `System.after_turn()`, and the
-  `_run_self_evolution_review` / self-evolution helpers.
+  `_run_self_evolution_review` / self-evolution helpers. (The **module-level**
+  `compact_history()` is a separate, self-contained implementation and *is* invoked on a
+  compaction signal; the identically-named `System` method is not reached from it.)
 - `systems/curator.py`, `systems/background_review.py`, `systems/threat_patterns.py`,
   `systems/prompt_constants.py` — standalone modules from the hermes-style design, kept for
   when matching hooks are wired into the framework. They are not imported by `system.py`.
