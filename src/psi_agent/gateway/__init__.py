@@ -246,9 +246,7 @@ class Gateway:
                         for info in await sm.list_all()
                     ],
                     titles=[{"id": sid, "title": title} for sid, title in tm.get_all().items()],
-                    summaries=[
-                        {"id": sid, "summary": text} for sid, text in sum_m.get_all().items()
-                    ],
+                    summaries=[{"id": sid, "summary": text} for sid, text in sum_m.get_all().items()],
                     routers=[
                         {
                             "id": info.id,
