@@ -66,13 +66,13 @@ export function TaskFocusDetails({
         : (task.progressIndeterminate
           ? `${task.statusLabel} · 处理中`
           : `${task.statusLabel}${task.phase === "done" ? " · 已完成" : ""}`),
-      detail: plainTextFromMarkdown(task.summary),
+      detail: task.updated || "状态已同步",
       time: task.updated,
     }] : tasks.slice(0, 3).map((item) => ({
       id: `status-${item.id}`,
       kind: "status" as const,
       title: `${item.shortTitle} · ${item.statusLabel}`,
-      detail: plainTextFromMarkdown(item.summary),
+      detail: item.updated || item.statusLabel,
       time: item.updated,
     }))),
   ].slice(0, 8);
@@ -102,7 +102,7 @@ export function TaskFocusDetails({
     <div className="focus-detail-panel">
       <section className="focus-state-banner">
         <div>
-          <span><Sparkles size={13} /> 当前任务上下文</span>
+          <span><Sparkles size={13} /> 任务摘要</span>
           <strong>{task ? task.title : "今天全部任务的执行上下文"}</strong>
           <p>{task ? plainTextFromMarkdown(task.summary) : `共 ${tasks.length} 个任务，综合进度 ${overall}%。您可以基于任一历史动作继续补充要求。`}</p>
         </div>

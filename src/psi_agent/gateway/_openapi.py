@@ -343,6 +343,67 @@ OPENAPI_SPEC = {
                 },
             },
         },
+        "/summaries": {
+            "get": {
+                "summary": "List all session task summaries",
+                "operationId": "listSummaries",
+                "responses": {
+                    "200": {"description": "Map of session IDs to task summaries"},
+                },
+            },
+            "post": {
+                "summary": "Set a session task summary",
+                "operationId": "setSummary",
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": ["id", "summary"],
+                                "properties": {
+                                    "id": {"type": "string"},
+                                    "summary": {"type": "string"},
+                                },
+                            },
+                        },
+                    },
+                },
+                "responses": {
+                    "200": {"description": "Summary set"},
+                    "400": {"$ref": "#/components/responses/Error"},
+                    "500": {"$ref": "#/components/responses/Error"},
+                },
+            },
+        },
+        "/summaries/generate": {
+            "post": {
+                "summary": "AI-generated task summary (1-2 sentences, not a title)",
+                "operationId": "generateSummary",
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": ["id", "user_text", "assistant_text"],
+                                "properties": {
+                                    "id": {"type": "string"},
+                                    "user_text": {"type": "string"},
+                                    "assistant_text": {"type": "string"},
+                                },
+                            },
+                        },
+                    },
+                },
+                "responses": {
+                    "200": {"description": "Generated summary"},
+                    "400": {"$ref": "#/components/responses/Error"},
+                    "404": {"$ref": "#/components/responses/Error"},
+                    "500": {"$ref": "#/components/responses/Error"},
+                },
+            },
+        },
         "/ui/attention": {
             "post": {
                 "summary": "Flash tray icon / native window when chat completes in background",

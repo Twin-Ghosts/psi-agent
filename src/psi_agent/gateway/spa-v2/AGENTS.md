@@ -95,9 +95,17 @@ Hub「使用免费模型」→ clearAiPool → hydrateAiForSessions(全部 sessi
   - **尾行**：只活「规划下一步…」/「撰写回复…」；**刻意**永不把「规划下一步」推进 `lines`。
   - **`hideAgentProse`（刻意为之，对标 Cursor）**：仅在过程轴仍为「规划下一步…」（工具 / thinking）时藏正文，避免半截计划与过程轴抢戏；一旦 SSE `content` 到达、尾行切到「撰写回复…」，**正文必须边到边显示**（过程轴仍可挂在上方）。回合结束再收起过程轴。
   - **`preferResultBelowRule`（刻意为之）**：仅展示层——短计划在 `---` 之上时偏好渲染下半段结果；**不改** JSONL / 复制源可选策略以实现为准。
-  - **任务上下文 / 历史 / 卡片 `summary`**：写入经 `plainTextPreview`（`assistantDisplay`）剥掉 `##` / `**` / `` ` `` 等 MD 分隔符；展示侧再 `plainTextFromMarkdown` 兜底。对话气泡仍走完整 Markdown。
+  - **任务摘要 `summary`（刻意为之）**：不再截取助手末条回复。回合成功后（及历史缺摘要时）`POST /summaries/generate` 另开一轮模型写 1～2 句；Gateway `SummaryManager` 持久化到 AppData state（与 titles 同级）。左栏标题为「任务摘要」；任务卡正文同字段；「任务历史」合成行只显示状态/`updated`，不再复贴摘要。展示侧仍 `plainTextFromMarkdown` 兜底。对话气泡仍走完整 Markdown。
 
 - 流式进行中不显示助手操作栏。
+
+### 左栏：摘要 vs 历史
+
+| UI | 数据 |
+|----|------|
+| 「任务摘要」 | `task.summary` ← LLM `/summaries/generate`（持久化） |
+| 任务卡正文 | 同上 |
+| 「任务历史」 | 合成 status 行（`statusLabel` + `updated`）；**不是** `/history` 多轮时间线，后续可重设计 |
 
 ### 历史展示隔离（对齐敲定协议 / spa v1）
 

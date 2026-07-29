@@ -27,6 +27,7 @@ from psi_agent.gateway._router_manager import RouterManager, RouterUpstreamInfo
 from psi_agent.gateway._scheduler_manager import SchedulerManager
 from psi_agent.gateway._session_manager import SessionInfo, SessionManager
 from psi_agent.gateway._spa_shell import DEFAULT_APP_NAME, inject_app_name, read_spa_index_template
+from psi_agent.gateway._summary_manager import SummaryManager
 from psi_agent.gateway._title_manager import TitleManager
 from psi_agent.gateway._todo_manager import TodoManager
 from psi_agent.gateway._workspace_manager import WorkspaceManager
@@ -169,12 +170,14 @@ async def create_app(
     appdata: str = "",
     scheduler_ai_id: str = "",
     schedm: SchedulerManager | None = None,
+    sum_m: SummaryManager | None = None,
 ) -> web.Application:
     app = web.Application(client_max_size=100 * 1024 * 1024)
     app["aim"] = aim
     app["rm"] = rm
     app["sm"] = sm
     app["tm"] = tm
+    app["sum_m"] = sum_m if sum_m is not None else SummaryManager()
     # Owns the scheduler Sessions: one per workspace, created on demand, hidden
     # from SPA / state. Gateway.run passes its own instance (also needed by
     # startup restore); standalone tests may omit it.
@@ -228,6 +231,9 @@ async def create_app(
     app.router.add_get("/titles", _list_titles)
     app.router.add_post("/titles", _set_title)
     app.router.add_post("/titles/generate", _generate_title)
+    app.router.add_get("/summaries", _list_summaries)
+    app.router.add_post("/summaries", _set_summary)
+    app.router.add_post("/summaries/generate", _generate_summary)
     app.router.add_post("/ui/attention", _request_attention)
     app.router.add_get("/workspace/cwd", _get_cwd)
     app.router.add_get("/defaults", _get_defaults)
@@ -361,6 +367,7 @@ async def _delete_session(request: web.Request) -> web.Response:
     sm: SessionManager = request.app["sm"]
     hm: HistoryManager = request.app["hm"]
     tm: TitleManager = request.app["tm"]
+    sum_m: SummaryManager = request.app["sum_m"]
     session_id = request.match_info["session_id"]
     try:
         workspace = sm.get_workspace(session_id)
@@ -368,6 +375,7 @@ async def _delete_session(request: web.Request) -> web.Response:
         appdata = str(request.app.get("appdata") or "")
         await hm.delete(workspace, session_id, appdata=appdata)
         await tm.delete(session_id)
+        await sum_m.delete(session_id)
         return _json({"id": session_id, "status": "stopped"})
     except LookupError as e:
         return _error(str(e), status=404)
@@ -505,9 +513,23 @@ async def _set_title(request: web.Request) -> web.Response:
         return _error(str(e), status=500)
 
 
-async def _generate_title(request: web.Request) -> web.Response:
+async def _session_ai_socket(request: web.Request, sid: str) -> str:
+    """Resolve the AI socket used for title/summary generation for *sid*."""
     aim: AIManager = request.app["aim"]
     sm: SessionManager = request.app["sm"]
+    sessions = await sm.list_all()
+    sess = next((s for s in sessions if s.id == sid), None)
+    if not sess:
+        raise LookupError("Session not found")
+    if sess.backend_type == "ai":
+        return aim.get_socket(sess.backend_id)
+    rm: RouterManager | None = request.app["rm"]
+    if rm is None:
+        raise LookupError("Router manager is not configured")
+    return aim.get_socket(rm.get(sess.backend_id).default_ai_id)
+
+
+async def _generate_title(request: web.Request) -> web.Response:
     tm: TitleManager = request.app["tm"]
     try:
         body = await request.json()
@@ -518,17 +540,7 @@ async def _generate_title(request: web.Request) -> web.Response:
         return _error(str(e), status=400)
 
     try:
-        sessions = await sm.list_all()
-        sess = next((s for s in sessions if s.id == sid), None)
-        if not sess:
-            return _error("Session not found", status=404)
-        if sess.backend_type == "ai":
-            ai_socket = aim.get_socket(sess.backend_id)
-        else:
-            rm: RouterManager | None = request.app["rm"]
-            if rm is None:
-                raise LookupError("Router manager is not configured")
-            ai_socket = aim.get_socket(rm.get(sess.backend_id).default_ai_id)
+        ai_socket = await _session_ai_socket(request, sid)
     except LookupError as e:
         return _error(str(e), status=404)
 
@@ -537,6 +549,47 @@ async def _generate_title(request: web.Request) -> web.Response:
         return _json({"id": sid, "title": title})
     logger.warning(f"Title generation returned no result for session {sid!r}")
     return _error("Failed to generate title", status=500)
+
+
+async def _list_summaries(request: web.Request) -> web.Response:
+    sum_m: SummaryManager = request.app["sum_m"]
+    return _json(sum_m.get_all())
+
+
+async def _set_summary(request: web.Request) -> web.Response:
+    sum_m: SummaryManager = request.app["sum_m"]
+    try:
+        body = await request.json()
+        sid = body["id"]
+        await sum_m.set(sid, body["summary"])
+        return _json({"id": sid, "summary": body["summary"]})
+    except (KeyError, TypeError) as e:
+        return _error(str(e), status=400)
+    except Exception as e:
+        logger.error(f"Unexpected error setting summary: {e!r}")
+        return _error(str(e), status=500)
+
+
+async def _generate_summary(request: web.Request) -> web.Response:
+    sum_m: SummaryManager = request.app["sum_m"]
+    try:
+        body = await request.json()
+        sid = body["id"]
+        user_text = body.get("user_text", "")
+        assistant_text = body.get("assistant_text", "")
+    except (KeyError, TypeError) as e:
+        return _error(str(e), status=400)
+
+    try:
+        ai_socket = await _session_ai_socket(request, sid)
+    except LookupError as e:
+        return _error(str(e), status=404)
+
+    summary = await sum_m.generate(sid, ai_socket, user_text, assistant_text)
+    if summary:
+        return _json({"id": sid, "summary": summary})
+    logger.warning(f"Summary generation returned no result for session {sid!r}")
+    return _error("Failed to generate summary", status=500)
 
 
 async def _get_cwd(request: web.Request) -> web.Response:

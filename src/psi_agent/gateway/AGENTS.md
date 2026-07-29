@@ -15,6 +15,7 @@ Gateway 进程
 ├── SessionManager     — Session 实例注册表 + 生命周期管理
 ├── SchedulerManager   — 每 workspace 一个全量激活的调度 Session（触发其 schedules/，对 SPA 隐藏）
 ├── TitleManager       — 会话标题 CRUD + AI 自动生成
+├── SummaryManager     — 任务摘要 CRUD + AI 生成（spa-v2）
 ├── WorkspaceManager   — 目录浏览
 ├── ChatManager        — SSE 流式对话管理
 ├── HistoryManager     — JSONL 历史读取（AppData `histories/` + legacy 双读）
@@ -42,6 +43,7 @@ Gateway 进程
 | `_feishu_manager.py` | `FeishuManager` — 飞书会话 → Session 路由表（私聊按 `open_id`、群聊按 `chat_id`；复用 SessionManager 按需 spawn）+ FeishuRoute |
 | `_oauth_manager.py` | `OAuthRelay` — OAuth 回调中继（`state → code` 一次性信箱，带 TTL；供 `GET /oauth/callback` + `GET /oauth/code`），让授权码免用户手工复制 |
 | `_title_manager.py` | 会话标题 CRUD + AI 自动生成 |
+| `_summary_manager.py` | 任务摘要 CRUD + AI 自动生成（spa-v2；与 title 同级持久化） |
 | `_state.py` | `GatewayState` — `{appdata}/state/latest.json` + 时间戳快照；缺则双读 cwd `state/latest.json` |
 | `_spa_shell.py` | SPA 外壳注入 — `DEFAULT_APP_NAME`、`inject_app_name()`、`read_spa_index_template()`；`GET /spa/index.html` 替换 `__GATEWAY_APP_NAME__` |
 | `server.py` | aiohttp Application + REST handlers |
@@ -64,8 +66,8 @@ Gateway 进程
 3. resolve default_agent / default_workspace（见 `_defaults.py`）
 4. state = GatewayState.from_appdata(appdata_root) + snapshot = await state.load()  — AppData state（legacy 双读）
 5. anyio.create_task_group()                          — 手动管理 task group
-6. 创建 AIManager + RouterManager + SessionManager（注入 `_default_agent` / `_default_workspace`）+ TitleManager
-7. 恢复 AI / Router / Session（Session 恢复时带 `agent`，缺省用 Gateway default）/ titles
+6. 创建 AIManager + RouterManager + SessionManager（注入 `_default_agent` / `_default_workspace`）+ TitleManager + SummaryManager
+7. 恢复 AI / Router / Session（Session 恢复时带 `agent`，缺省用 Gateway default）/ titles / summaries
 8. 创建 SchedulerManager（`--scheduler-ai-id`，空则回落 `--feishu-ai-id`）
 9. await create_app(..., default_agent=..., default_workspace=..., appdata=..., schedm=...)  — 注册 REST（含 `GET /defaults`）
 10. 为每个已恢复 Session 的 workspace `schedm.ensure(...)` — 按需拉起调度 Session（无 `schedules/` 则跳过）
@@ -291,6 +293,7 @@ Session 运行时 crash 时，`_run_session` 的 except 块从 `_entries` 中移
 REST ``DELETE /sessions/{id}`` 在 SessionManager.delete 之后还会：
 - 删除 AppData 与 legacy workspace 下的 ``histories/{id}.jsonl``（``HistoryManager.delete``，文件不存在则忽略）
 - 清除 ``TitleManager`` 中该会话标题
+- 清除 ``SummaryManager`` 中该会话任务摘要
 
 ## TodoManager
 
@@ -369,6 +372,14 @@ OAuth 回调中继（`_oauth_manager.py`）：让**授权码自己回到发起�
 
 **generate(session_id, ai_socket, user_text, assistant_text)** — 通过 AI 自动生成标题，成功后写入 `_titles` 并调用 `_persist`。返回生成的 title 字符串，失败返回 None。
 
+## SummaryManager
+
+与 TitleManager 对称：session_id → 任务摘要（1～2 句，spa-v2「任务摘要」/ 任务卡正文）。
+
+- `GET/POST /summaries`、`POST /summaries/generate`（body 同 titles：`id` + `user_text` + `assistant_text`）
+- 生成提示要求概括目标与进展，**禁止**复述原文大段、禁止 Markdown 符号
+- 持久化进 AppData `state/latest.json` 的 `summaries` 数组；删除 Session 时一并清除
+
 ## REST API
 
 | Method | Endpoint | Description |
@@ -398,6 +409,9 @@ OAuth 回调中继（`_oauth_manager.py`）：让**授权码自己回到发起�
 | GET | `/titles` | 获取所有 session 标题 |
 | POST | `/titles` | 设置 session 标题 `{id, title}` |
 | POST | `/titles/generate` | AI 自动生成标题 `{id, user_text, assistant_text}` |
+| GET | `/summaries` | 获取所有 session 任务摘要 |
+| POST | `/summaries` | 设置任务摘要 `{id, summary}` |
+| POST | `/summaries/generate` | AI 生成任务摘要 `{id, user_text, assistant_text}` |
 | POST | `/ui/attention` | 会话在后台完成时闪烁托盘/webview（best-effort，需 `--tray` / `--webview`） |
 | GET | `/openapi.json` | OpenAPI schema |
 | GET | `/favicon.ico` | 托盘图标（仅当 `--icon` 设置时注册，返回该图标文件） |

@@ -51,8 +51,10 @@ import {
   deleteSession,
   fetchHistory,
   fetchSessionTodos,
+  generateSummary,
   generateTitle,
   listSessions,
+  listSummaries,
   listTitles,
   setTitle,
   type AiInfo,
@@ -218,6 +220,20 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
     }
   }, []);
 
+  const refreshTaskSummary = useCallback((cardId: string, userText: string, assistantText: string) => {
+    const user = userText.trim();
+    const asst = assistantText.trim();
+    if (!user && !asst) return;
+    void generateSummary(cardId, user.slice(0, 800), asst.slice(0, 2000))
+      .then((res) => {
+        if (!res?.summary?.trim()) return;
+        setTasks((current) =>
+          current.map((task) => (task.id === cardId ? { ...task, summary: res.summary!.trim() } : task)),
+        );
+      })
+      .catch(() => {});
+  }, []);
+
   const ensureHistory = useCallback(async (taskId: string) => {
     if (taskId === "overview" || historyLoadedRef.current.has(taskId)) return;
     historyLoadedRef.current.add(taskId);
@@ -229,31 +245,45 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
         ...current,
         [taskId]: chat.length ? chat : (current[taskId] ?? []),
       }));
+      let lastUserText = "";
+      let lastAgentText = "";
       setTasks((current) =>
         current.map((task) => {
           if (task.id !== taskId) return task;
           let next = names.length ? withHistoricalDeliverables(task, names, paths) : task;
           if (chat.length) {
             const lastAgent = [...chat].reverse().find((m) => m.role === "agent" && !m.failed);
+            const lastUser = [...chat].reverse().find((m) => m.role === "user" && !m.failed);
             if (lastAgent) {
-              next = withCompletedTurn(
-                {
-                  ...next,
-                  updated: names.length ? "已从历史同步交付物" : "已从历史同步",
-                },
-                { summary: lastAgent.text },
-              );
+              lastAgentText = lastAgent.text;
+              lastUserText = lastUser?.text ?? "";
+              next = withCompletedTurn({
+                ...next,
+                updated: names.length ? "已从历史同步交付物" : "已从历史同步",
+              });
             }
           }
           return next;
         }),
       );
       await refreshTodos(taskId);
+      // Missing / placeholder summary → one LLM pass (not a raw reply slice).
+      setTasks((current) => {
+        const task = current.find((t) => t.id === taskId);
+        const placeholder =
+          !task?.summary?.trim()
+          || task.summary.includes("任务已接入 Gateway Session")
+          || task.summary.startsWith("Agent 已收到任务描述");
+        if (placeholder && (lastUserText || lastAgentText)) {
+          refreshTaskSummary(taskId, lastUserText, lastAgentText);
+        }
+        return current;
+      });
     } catch (e) {
       historyLoadedRef.current.delete(taskId);
       showToast(e instanceof Error ? e.message : "加载历史失败");
     }
-  }, [refreshTodos, showToast]);
+  }, [refreshTodos, refreshTaskSummary, showToast]);
 
   // While Agent runs, poll todos so middle step updates mid-turn (tool writes file).
   // Pass streaming=true so 「产出与确认」 stays working until the turn ends.
@@ -285,9 +315,13 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
       setBootReady(false);
       setOpenModelsOnce(false);
       try {
-        // One hydrate pipeline: sessions → revive dangling AI → titles → tasks.
+        // One hydrate pipeline: sessions → revive dangling AI → titles/summaries → tasks.
         // Empty AI must not skip sessions; missing Session backends must not survive refresh.
-        const [sessions, titles] = await Promise.all([listSessions(), listTitles()]);
+        const [sessions, titles, summaries] = await Promise.all([
+          listSessions(),
+          listTitles(),
+          listSummaries().catch(() => ({}) as Record<string, string>),
+        ]);
         if (cancelled) return;
         const inWs = sessions.filter((s) =>
           sessionMatchesWorkspace(s.workspace, workspaceNorm),
@@ -299,7 +333,11 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
         if (cancelled) return;
         setAiId(preferred?.id ?? null);
         setOpenModelsOnce(openModels);
-        const mapped = inWs.map((s) => sessionToTask(s, titles[s.id] || "新任务"));
+        const mapped = inWs.map((s) =>
+          sessionToTask(s, titles[s.id] || "新任务", {
+            ...(summaries[s.id] ? { summary: summaries[s.id] } : {}),
+          }),
+        );
         setTasks(mapped);
         historyLoadedRef.current = new Set(["overview"]);
         setMessages({ overview: [OVERVIEW_WELCOME] });
@@ -552,7 +590,7 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
     setTurnProgressLog(progressLogStart());
     const userVisible = titleSource ?? (text.trim() || "附件");
     let turnOk = false;
-    let replySummary = "";
+    let assistantFull = "";
     // Enter advance phase for this turn (layer-1); todos refine the middle label.
     setTasks((current) =>
       current.map((task) =>
@@ -614,7 +652,7 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
         return;
       }
       turnOk = true;
-      replySummary = full.trim();
+      assistantFull = full.trim();
       const hasBlob = blobs.length > 0;
       if (!full.trim() && !hasBlob) {
         // No displayable reply — mark orphan user failed (same as history normalize).
@@ -700,12 +738,9 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
         await refreshTodos(cardId, false);
         if (!turnOk || epoch !== streamEpochRef.current) return;
         setTasks((current) =>
-          current.map((task) =>
-            (task.id === cardId
-              ? withCompletedTurn(task, { summary: replySummary || undefined })
-              : task),
-          ),
+          current.map((task) => (task.id === cardId ? withCompletedTurn(task) : task)),
         );
+        refreshTaskSummary(cardId, userVisible, assistantFull);
       })();
     }
   };

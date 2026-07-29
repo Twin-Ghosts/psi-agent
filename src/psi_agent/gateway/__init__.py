@@ -21,6 +21,7 @@ from psi_agent.gateway._scheduler_manager import SchedulerManager
 from psi_agent.gateway._session_manager import SessionManager
 from psi_agent.gateway._spa_shell import DEFAULT_APP_NAME
 from psi_agent.gateway._state import GatewayState
+from psi_agent.gateway._summary_manager import SummaryManager
 from psi_agent.gateway._title_manager import TitleManager
 from psi_agent.gateway._tray import GatewayTray
 from psi_agent.gateway._webview import GatewayWebView
@@ -143,6 +144,7 @@ class Gateway:
                 _appdata=appdata_root,
             )
             tm = TitleManager()
+            sum_m = SummaryManager()
 
             for cfg in snapshot.get("ais", []):
                 try:
@@ -192,6 +194,9 @@ class Gateway:
             for t in snapshot.get("titles", []):
                 await tm.set(t["id"], t["title"])
 
+            for row in snapshot.get("summaries", []):
+                await sum_m.set(row["id"], row["summary"])
+
             attention = AttentionHub()
             schedm = SchedulerManager(_sm=sm, _ai_id=self.scheduler_ai_id or self.feishu_ai_id)
             app = await create_app(
@@ -209,6 +214,7 @@ class Gateway:
                 appdata=appdata_root,
                 scheduler_ai_id=self.scheduler_ai_id,
                 schedm=schedm,
+                sum_m=sum_m,
             )
 
             # Restored sessions need a scheduler Session for their workspace too
@@ -240,6 +246,9 @@ class Gateway:
                         for info in await sm.list_all()
                     ],
                     titles=[{"id": sid, "title": title} for sid, title in tm.get_all().items()],
+                    summaries=[
+                        {"id": sid, "summary": text} for sid, text in sum_m.get_all().items()
+                    ],
                     routers=[
                         {
                             "id": info.id,
@@ -260,6 +269,7 @@ class Gateway:
             rm._persist = _do_persist
             sm._persist = _do_persist
             tm._persist = _do_persist
+            sum_m._persist = _do_persist
 
             await _do_persist()
 

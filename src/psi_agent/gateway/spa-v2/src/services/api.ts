@@ -107,6 +107,18 @@ export async function generateTitle(sessionId: string, userText: string, assista
   })
 }
 
+export async function listSummaries() {
+  return api<Record<string, string>>('GET', '/summaries')
+}
+
+export async function generateSummary(sessionId: string, userText: string, assistantText: string) {
+  return api<{ id: string; summary: string | null }>('POST', '/summaries/generate', {
+    id: sessionId,
+    user_text: userText,
+    assistant_text: assistantText,
+  })
+}
+
 export type HistoryMessage = {
   role: 'user' | 'assistant'
   text: string
