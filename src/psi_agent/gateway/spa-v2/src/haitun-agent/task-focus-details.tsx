@@ -65,14 +65,17 @@ export function TaskFocusDetails({
         ? `${task.statusLabel} · ${task.progressLabel || `${task.progress}%`}`
         : (task.progressIndeterminate
           ? `${task.statusLabel} · 处理中`
-          : `${task.statusLabel}${task.phase === "done" ? " · 已完成" : ""}`),
-      detail: task.updated || "状态已同步",
+          : task.phase === "done"
+            ? (task.status === "completed" ? task.statusLabel : "本轮已完成")
+            : task.statusLabel),
+      // detail must not repeat time — template renders both <p> and <em>.
+      detail: "",
       time: task.updated,
     }] : tasks.slice(0, 3).map((item) => ({
       id: `status-${item.id}`,
       kind: "status" as const,
       title: `${item.shortTitle} · ${item.statusLabel}`,
-      detail: item.updated || item.statusLabel,
+      detail: "",
       time: item.updated,
     }))),
   ].slice(0, 8);
@@ -159,7 +162,11 @@ export function TaskFocusDetails({
             {historyItems.map((item) => (
               <div className={`focus-history-item ${item.kind}`} key={item.id}>
                 <span className="focus-history-icon"><FocusHistoryIcon item={item} task={task} /></span>
-                <div><strong>{item.title}</strong><p>{item.detail}</p><em>{item.time}</em></div>
+                <div>
+                  <strong>{item.title}</strong>
+                  {item.detail.trim() ? <p>{item.detail}</p> : null}
+                  {item.time.trim() ? <em>{item.time}</em> : null}
+                </div>
               </div>
             ))}
             {historyItems.length === 0 && (
