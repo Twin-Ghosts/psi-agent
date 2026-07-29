@@ -6,6 +6,8 @@ Finalized protocol (2026-07-17):
 - ``kind: "schedule.silent"`` — schedule trigger input, or silent schedule result
   (never display; schedule *user* rows are always this)
 - ``kind: "schedule.display"`` — schedule *assistant* result that should surface
+- ``kind: "trigger.silent"`` / ``kind: "trigger.display"`` — event-trigger turns
+  (same display rules as schedule.* )
 - ``kind: "compacted"`` — compaction summary (system-side; not a chat bubble)
 
 Legacy aliases still accepted when reading JSONL:
@@ -25,6 +27,8 @@ from typing import Any
 KIND_CHAT = "chat"
 KIND_SCHEDULE_SILENT = "schedule.silent"
 KIND_SCHEDULE_DISPLAY = "schedule.display"
+KIND_TRIGGER_SILENT = "trigger.silent"
+KIND_TRIGGER_DISPLAY = "trigger.display"
 KIND_COMPACTED = "compacted"
 
 KIND_KEY = "kind"
@@ -43,7 +47,16 @@ _LEGACY_ROLE_TO_WIRE: dict[str, str] = {
     "assistant_schedule": "assistant",
 }
 
-_KNOWN_KINDS = frozenset({KIND_CHAT, KIND_SCHEDULE_SILENT, KIND_SCHEDULE_DISPLAY, KIND_COMPACTED})
+_KNOWN_KINDS = frozenset(
+    {
+        KIND_CHAT,
+        KIND_SCHEDULE_SILENT,
+        KIND_SCHEDULE_DISPLAY,
+        KIND_TRIGGER_SILENT,
+        KIND_TRIGGER_DISPLAY,
+        KIND_COMPACTED,
+    }
+)
 
 # Presentation-only strip of wire transfer markers (Gateway history projection).
 _TRANSFER_MARKER_RE = re.compile(r"\[(?:SEND|RECV):[^\]]*\]")
@@ -196,8 +209,8 @@ def is_displayable_chat_message(msg: dict[str, Any]) -> bool:
     Whitelist by provenance ``kind`` (not content blacklist):
 
     - ``chat`` user/assistant with non-empty content → yes
-    - ``schedule.display`` assistant with non-empty content → yes
-    - ``schedule.silent`` / ``compacted`` / tools / system → no
+    - ``schedule.display`` / ``trigger.display`` assistant with non-empty content → yes
+    - ``schedule.silent`` / ``trigger.silent`` / ``compacted`` / tools / system → no
     """
     kind = message_kind(msg)
     role = wire_role(msg.get("role"))
@@ -210,6 +223,6 @@ def is_displayable_chat_message(msg: dict[str, Any]) -> bool:
     if kind == KIND_CHAT:
         # Legacy untagged heartbeat assistant replies (pre-kind JSONL).
         return text.strip() != "HEARTBEAT_OK"
-    if kind == KIND_SCHEDULE_DISPLAY:
+    if kind in {KIND_SCHEDULE_DISPLAY, KIND_TRIGGER_DISPLAY}:
         return role == "assistant"
     return False

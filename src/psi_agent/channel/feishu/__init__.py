@@ -32,6 +32,13 @@ class ChannelFeishu:
     ``session_socket``。所挂 AI 及 workspace 由 Gateway 侧 ``--feishu-ai-id`` /
     ``--feishu-workspace-root`` 决定, channel 无需关心。"""
 
+    agent: str = ""
+    """Agent package root containing ``channel_events/`` (event defs for this Channel).
+
+    Empty → ``PSI_AGENT`` env, else cwd. Same package as Session ``--agent`` when
+    Feishu shares haitun-workspace. Event defs live here (not under ``src/psi_agent/channel``).
+    """
+
     app_id: str = ""
     """Feishu app ID (CLI arg > PSI_FEISHU_APP_ID env)."""
 
@@ -69,6 +76,7 @@ class ChannelFeishu:
             raise ValueError("No Feishu app_secret. Set --app-secret or PSI_FEISHU_APP_SECRET.")
 
         logger.info(f"Starting Feishu bot, connecting to {self.session_socket}")
+        agent_root = self.agent or os.environ.get("PSI_AGENT", "") or ""
         await run_feishu(
             session_socket=self.session_socket,
             app_id=app_id,
@@ -80,4 +88,5 @@ class ChannelFeishu:
             respond_to_comments=self.respond_to_comments,
             gateway_url=self.gateway_url,
             appdata=self.appdata,
+            agent_root=agent_root,
         )

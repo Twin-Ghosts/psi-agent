@@ -77,6 +77,10 @@ service tools:
 | `PSI_OAUTH_CALLBACK_BASE` | Gateway base URL the user's browser can reach; makes OAuth authorization copy-paste-free via the `/oauth/callback` relay (works for phone approval / multi-user). Register `<base>/oauth/callback` in the Feishu console. |
 | `PSI_OAUTH_LOOPBACK_PORT` | Port for the one-shot `127.0.0.1` OAuth callback listener (default `17860`); same-machine deployments only. |
 
+## Channel events (`channel_events/`)
+
+**定事信号源（交付对接）**：有「每次 xx 就…」类需求且 xx 可观测时，在 **`channel_events/<channel>/`** 按需注册事件（≈ 加 tool），**不要**改 Session catalog。必读：`docs/superpowers/specs/2026-07-29-channel-events-developer-guide.md`。挂钩仍用 `triggers/` + `trigger_manage`。
+
 ## Tools (`tools/`)
 
 ### Path roots（workspace / agent ContextVar + AppData）
@@ -109,6 +113,7 @@ service tools:
 | `skill_manage` | CRUD on **agent** `skills/<name>/SKILL.md`（经 `get_agent()`；agent-created skills are mutable）. |
 | `flow_manage` | CRUD + promote on Fusion Flow assets under **workspace** `flows/`. |
 | `schedule_manage` | CRUD on **workspace** `schedules/<name>/TASK.md`. **Recurring**: `action=create` + `cron`. **One-shot**: `action=create` + `once_at` (`YYYY-MM-DD HH:MM` local) → writes cron + `run_once: true` (Session deletes TASK.md after first successful fire). **`fire=tool`**: Session calls `tool(**tool_args)` at fire time with no LLM (required for Feishu IM reminders via `feishu_message_send`). `fire=prompt` (default) injects TASK body for an agent turn. Also `visibility` (`display`/`silent`), list/view/patch/delete. |
+| `trigger_manage` | CRUD on **agent** `triggers/<name>/TRIGGER.md`。`event` 名应对齐 agent ``channel_events/`` 已接通能力；Session 不再用 catalog 硬拒。`fire=tool` 命中后直调工具。见 `skills/feishu-event-remind`；事件定义见 ``channel_events/README.md``。 |
 | `memory_add` / `memory_search` / `memory_answer_context` / `memory_health` | Per-Session routed Fusion Memory MCP tools. Authentication comes only from the trusted runtime Session and operator token map. |
 | `haibao_list_datasets` / `haibao_ask` | Bundled Haibao MCP Adapter tools for real business-data queries. They require an operator-provisioned private MCP server; no private server or database onboarding is bundled. |
 | `search` (`search.py` + `_mcp.py`) | Serper web search via MCP. Requires the `mcp` extra and `uvx serper-mcp-server`; tools surface as `serper_*`. |
@@ -163,6 +168,7 @@ service tools:
   - `feishu-admin-finance-assistant` — 真知小助手: answer 行政/财务 policy questions from Feishu docs synced into the local `llm-wiki` (`wiki_*`), always citing sources, routing any implied action through `admin-finance-governance`. `knowledge-base`.
 - `feishu-todo-board-sync` — 搬运一篇飞书 docx 个人 ToDoList 进团队看板电子表格（列=日期、行=人）: slice the doc's newest date section, split its `ToDo` items **by the `@name` mentioned in each item** (items mentioning nobody go to the doc's owner), assemble each person's cell text, and write it to the **caller-specified** column. Three hard rules: attribution follows `@name`; the target column is always given by the caller (**never** inferred from the source doc's date, whose format differs from the header's); a non-empty target cell is reported for confirmation instead of being silently overwritten. Board structure (header row / name column / `SHEET_ID`) is discovered per run, never hardcoded. Drives the existing `feishu_wiki_get_node` → `feishu_sheet_tabs` → `feishu_doc_read` → `feishu_sheet_read` → `feishu_sheet_write` tools; `productivity`, no dedicated tool, no extra deps. Never adds rows for people absent from the board — it reports them as skipped.
 - `feishu-schedule-message` — Feishu timed reminders via **`schedule_manage` `fire=tool`**: Session **directly** calls `feishu_message_send(**tool_args)` at fire time (no LLM). Pass `tool_args` JSON with real `chat_id`/`open_id` from `<feishu_context>` (**not** Gateway `session_id`). Prefer `visibility=silent`. One-shot (`once_at`) **rejects** `fire=prompt` / content-embedded calls — create must include `fire`+`tool`+`tool_args` in one shot; Session `run_once` deletes TASK after fire.
+- `feishu-event-remind` — Feishu **event** reminders（定事）via **`trigger_manage` `fire=tool`**: map NL → catalog `event`（如 `feishu.chat.member_added`）+ dual-write `raw_event`（如 `im.chat.member.user.added_v1`）；Session 先规范匹配再 raw 回退。禁止手写 `TRIGGER.md`；未接通事件勿 invent catalog 名。
 - **Feishu tool credentials on Gateway（踩坑）**：`feishu_message_send` 等 workspace 工具跑在 **Session / Gateway 进程**里，读的是该进程的 `PSI_FEISHU_APP_ID` / `PSI_FEISHU_APP_SECRET`。只给 Feishu **channel** 进程设环境变量不够——定时触发时会报 `Feishu app not configured`，飞书收不到推送。启动 Gateway 时也要带上同一组凭证。
 - **Feishu interactive-card callback contract**：发送给其他人的卡片必须同时传
   `business_context_json`（业务类型、稳定业务 ID、发起人、当前状态等收件方 agent 独立处理所需事实）和

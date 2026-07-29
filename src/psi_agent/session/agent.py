@@ -13,6 +13,7 @@ from loguru import logger
 from psi_agent.session.ai_client import AiClient
 from psi_agent.session.channel_adapter import ChannelAdapter
 from psi_agent.session.conversation import Conversation
+from psi_agent.session.event_protocol import EventProtocolError, parse_event_envelope
 from psi_agent.session.history_display import (
     KIND_COMPACTED,
     message_kind,
@@ -30,6 +31,7 @@ from psi_agent.session.runtime_context import runtime_scope
 from psi_agent.session.schedule_registry import ScheduleRegistry
 from psi_agent.session.system_prompt import SystemPrompt
 from psi_agent.session.tool_registry import ToolRegistry
+from psi_agent.session.trigger_registry import TriggerRegistry
 
 
 class SessionAgent:
@@ -55,6 +57,7 @@ class SessionAgent:
         conversation: Conversation | None = None,
         tool_registry: ToolRegistry | None = None,
         schedule_registry: ScheduleRegistry | None = None,
+        trigger_registry: TriggerRegistry | None = None,
         system_prompt: SystemPrompt | None = None,
         max_tool_rounds: int = 128,
         workspace_path: Path | None = None,
@@ -65,6 +68,7 @@ class SessionAgent:
         self._conversation = conversation or Conversation()
         self._tool_registry = tool_registry or ToolRegistry()
         self._schedule_registry = schedule_registry or ScheduleRegistry()
+        self._trigger_registry = trigger_registry or TriggerRegistry()
         self._system_prompt = system_prompt or SystemPrompt()
         self._max_tool_rounds = max_tool_rounds
         self._lock = anyio.Lock()
@@ -90,7 +94,7 @@ class SessionAgent:
 
         *workspace_path* is the user open-folder (relative file tools) and owns
         **schedules** (``schedules/``).
-        *agent_path* loads tools / system; when omitted, falls
+        *agent_path* loads tools / system / **triggers** (``triggers/``); when omitted, falls
         back to *workspace_path* (single-root compatibility).
         *appdata_root* holds history JSONL (Step 4C); empty → resolve via
         ``PSI_APPDATA`` / platformdirs.
@@ -124,6 +128,7 @@ class SessionAgent:
             active_names=active_schedules,
             deactive_names=deactive_schedules,
         )
+        trigger_registry = await TriggerRegistry.load(agent_root / "triggers")
         system_prompt = await SystemPrompt.from_workspace(agent_root, conversation.session_id)
 
         return cls(
@@ -131,6 +136,7 @@ class SessionAgent:
             conversation=conversation,
             tool_registry=tool_registry,
             schedule_registry=schedule_registry,
+            trigger_registry=trigger_registry,
             system_prompt=system_prompt,
             max_tool_rounds=max_tool_rounds,
             workspace_path=workspace_path,
@@ -156,6 +162,9 @@ class SessionAgent:
 
     async def reload_schedules(self) -> dict[str, str]:
         return await self._schedule_registry.refresh()
+
+    async def reload_triggers(self) -> dict[str, str]:
+        return await self._trigger_registry.refresh()
 
     # -- channel request lifecycle --------------------------------------------
 
@@ -192,6 +201,34 @@ class SessionAgent:
 
         logger.info("Session request completed")
         return response
+
+    async def handle_event(self, request: web.Request) -> web.Response:
+        """aiohttp handler for ``POST /events`` (Channel → Session envelopes)."""
+        try:
+            body = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"invalid JSON: {e}"}, status=400)
+        try:
+            envelope = parse_event_envelope(body)
+        except EventProtocolError as e:
+            logger.warning(f"POST /events rejected: {e}")
+            return web.json_response({"error": str(e)}, status=400)
+
+        async with self._lock:
+            matched = self._trigger_registry.match(envelope)
+            fired = await self._trigger_registry.dispatch(envelope, self)
+
+        logger.info(
+            f"POST /events ok event={envelope.event!r} matched={len(matched)} fired={fired!r}"
+        )
+        return web.json_response(
+            {
+                "ok": True,
+                "event": envelope.event,
+                "matched": len(matched),
+                "fired": fired,
+            }
+        )
 
     # -- agent loop -----------------------------------------------------------
 

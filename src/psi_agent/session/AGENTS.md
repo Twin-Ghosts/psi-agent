@@ -237,13 +237,39 @@ AI 的 tool_calls 通过 SSE 流式传输——多个 chunk 中的 `delta.tool_c
 - 多个 schedule 可以并发 sleep，但通过 lock 串行触发
 - 每个 schedule 在加载时独立处理——IO 错误、YAML 解析问题、cron 验证失败都只跳过该 schedule
 
+## Event / Trigger 协议（定事）
+
+与 schedule 平行：外部推送经 Channel → Session **通用事件管道** → ``TriggerRegistry`` 匹配 agent 包 ``triggers/*/TRIGGER.md`` → ``fire=tool|prompt``。
+
+### 通用转发接口（Session 只需这些）
+
+**业务事件注册不在 Session。** Session 只做统一收件与按 TRIGGER 发放。
+
+| 角色 | 位置 | 说明 |
+|------|------|------|
+| **统一接收** | ``session/server.py`` ``POST /events`` → ``SessionAgent.handle_event`` | 与 ``POST /chat/completions`` 并列；官方映射与合成事件**同一入口** |
+| **薄信封** | ``session/event_protocol.py`` | 校验形状（``source``/``event``/``payload``…），**无**业务事件 catalog 硬门槛 |
+| **发放（挂钩）** | ``session/trigger_registry.py`` | 匹配 TRIGGER → ``fire`` |
+
+事件从哪来、叫什么业务名：见 agent 包 ``channel_events/`` + Channel 加载（``docs/superpowers/specs/2026-07-29-channel-events-in-agent-package.md``）。
+
+| 概念 | 说明 |
+|------|------|
+| **channel_events** | Agent 包内按 Channel 维护的事件定义（≈ 加 tool）；含官方 ``platform_map`` 与预留 ``synthetic`` |
+| **信封** | ``event`` + ``payload``；可选 ``raw_event`` / ``raw_payload`` |
+| **匹配（刻意为之）** | 先 ``event``+``filter``；未命中再 ``raw_event``+``raw_filter`` |
+| **落盘挂钩** | ``{Session.agent}/triggers/``；haitun ``trigger_manage`` |
+| **kind** | ``trigger.silent`` / ``trigger.display`` |
+
+无 TRIGGER 时事件仍可进门，matched/fired 为空（能力开、钩子关）。
+
 ### History 展示白名单（``history_display.py``）
 
 | kind | 展示 |
 |------|------|
 | `chat` | user/assistant 非空 content |
-| `schedule.display` | 仅 assistant |
-| `schedule.silent` / `compacted` | 否 |
+| `schedule.display` / `trigger.display` | 仅 assistant |
+| `schedule.silent` / `trigger.silent` / `compacted` | 否 |
 | 遗留 `chat_type=schedule` / `*_schedule` role | 视为 silent |
 
 Gateway ``HistoryManager`` 同时投影剥掉 ``[SEND:]``/``[RECV:]`` 标记。
