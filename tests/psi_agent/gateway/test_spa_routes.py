@@ -36,7 +36,7 @@ async def test_spa_directory_routes_redirect_not_403(
     spa_v2_dist = spa_root / "spa-v2" / "dist"
     await spa_dist.mkdir(parents=True)
     await spa_v2_dist.mkdir(parents=True)
-    index = '<html><head><title>__GATEWAY_APP_NAME__</title></head></html>'
+    index = "<html><head><title>__GATEWAY_APP_NAME__</title></head></html>"
     await (spa_dist / "index.html").write_text(index, encoding="utf-8")
     await (spa_v2_dist / "index.html").write_text(index, encoding="utf-8")
 
