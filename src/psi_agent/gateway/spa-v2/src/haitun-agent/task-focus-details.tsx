@@ -10,6 +10,7 @@ import {
   Sparkles,
   Zap,
 } from "lucide-react";
+import { plainTextFromMarkdown } from "../services/assistantDisplay";
 import type { FocusHistoryItem, Task } from "./model";
 import { ProgressRing, TreasureVisual } from "./primitives";
 
@@ -65,13 +66,13 @@ export function TaskFocusDetails({
         : (task.progressIndeterminate
           ? `${task.statusLabel} · 处理中`
           : `${task.statusLabel}${task.phase === "done" ? " · 已完成" : ""}`),
-      detail: task.summary,
+      detail: plainTextFromMarkdown(task.summary),
       time: task.updated,
     }] : tasks.slice(0, 3).map((item) => ({
       id: `status-${item.id}`,
       kind: "status" as const,
       title: `${item.shortTitle} · ${item.statusLabel}`,
-      detail: item.summary,
+      detail: plainTextFromMarkdown(item.summary),
       time: item.updated,
     }))),
   ].slice(0, 8);
@@ -103,7 +104,7 @@ export function TaskFocusDetails({
         <div>
           <span><Sparkles size={13} /> 当前任务上下文</span>
           <strong>{task ? task.title : "今天全部任务的执行上下文"}</strong>
-          <p>{task ? task.summary : `共 ${tasks.length} 个任务，综合进度 ${overall}%。您可以基于任一历史动作继续补充要求。`}</p>
+          <p>{task ? plainTextFromMarkdown(task.summary) : `共 ${tasks.length} 个任务，综合进度 ${overall}%。您可以基于任一历史动作继续补充要求。`}</p>
         </div>
         <div className="focus-state-grid">
           <span><em>状态</em><strong>{task?.statusLabel ?? `${tasks.length} 个任务`}</strong></span>

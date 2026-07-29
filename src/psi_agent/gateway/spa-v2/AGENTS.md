@@ -80,6 +80,7 @@
   - **尾行**：只活「规划下一步…」/「撰写回复…」；**刻意**永不把「规划下一步」推进 `lines`。
   - **`hideAgentProse`（刻意为之，对标 Cursor）**：仅在过程轴仍为「规划下一步…」（工具 / thinking）时藏正文，避免半截计划与过程轴抢戏；一旦 SSE `content` 到达、尾行切到「撰写回复…」，**正文必须边到边显示**（过程轴仍可挂在上方）。回合结束再收起过程轴。
   - **`preferResultBelowRule`（刻意为之）**：仅展示层——短计划在 `---` 之上时偏好渲染下半段结果；**不改** JSONL / 复制源可选策略以实现为准。
+  - **任务上下文 / 历史 / 卡片 `summary`**：写入经 `plainTextPreview`（`assistantDisplay`）剥掉 `##` / `**` / `` ` `` 等 MD 分隔符；展示侧再 `plainTextFromMarkdown` 兜底。对话气泡仍走完整 Markdown。
 
 - 流式进行中不显示助手操作栏。
 

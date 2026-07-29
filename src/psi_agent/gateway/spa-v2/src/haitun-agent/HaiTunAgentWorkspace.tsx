@@ -226,9 +226,9 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
               next = withCompletedTurn(
                 {
                   ...next,
-                  summary: lastAgent.text.slice(0, 120) + (lastAgent.text.length > 120 ? "…" : ""),
                   updated: names.length ? "已从历史同步交付物" : "已从历史同步",
                 },
+                { summary: lastAgent.text },
               );
             }
           }
