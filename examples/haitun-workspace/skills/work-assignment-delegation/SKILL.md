@@ -25,6 +25,24 @@ category: productivity
 4. 如果接收者确认收到，调用 `assignment_transition`。
 5. 如果接收者需要形成可评审方案，先帮助整理方案，再记录 transition。
 
+接收者流程：
+
+1. 接收者查看任务详情时，先调用 `assignment_get` 拉取完整记录。
+2. 展示安排者原文、已确认背景、目标、期望结果、证据来源、缺口、风险、行动项和当前状态。
+3. 明确区分事实、假设和待确认事项；缺失信息只标成缺口，不补写成事实。
+4. 接收者确认收到时，调用 `assignment_transition`，其中 `transition_type: "confirm_receipt"`。
+5. 需要方案时，协助接收者形成可评审方案，至少包括目标理解、影响范围、关键步骤、风险、验证方式和需要评审的问题。
+6. 接收者确认方案后，调用 `assignment_transition`，其中 `transition_type: "submit_plan"`，并把方案写入 `plan`。
+7. 如果接收者明确不形成方案或任务不需要方案，调用 `assignment_transition`，其中 `transition_type: "close"`，并写入 `closure_reason`。不要调用 `closed_without_plan`，Memory 没有这个 transition。
+
+可评审方案要求：
+
+- 说明接收者对任务的理解，而不是替安排者新增事实。
+- 列出准备采用的步骤、交付物和验收方式。
+- 标出仍需安排者或评审人决策的问题。
+- 不开始实施，除非用户明确要求进入实施。
+- 如果方案基于假设，必须把假设放在单独小节。
+
 常用工具：
 
 - `assignment_upsert`

@@ -124,6 +124,19 @@ async def test_work_assignment_skill_documents_generic_assignment_flow():
     assert "不能把推测写成确定事实" in source
 
 
+async def test_work_assignment_skill_documents_recipient_plan_flow():
+    skill_path = WORKSPACE_ROOT / "skills" / "work-assignment-delegation" / "SKILL.md"
+    source = await anyio.Path(str(skill_path)).read_text(encoding="utf-8")
+    assert "接收者流程" in source
+    assert "安排者原文" in source
+    assert "可评审方案" in source
+    assert 'transition_type: "confirm_receipt"' in source
+    assert 'transition_type: "submit_plan"' in source
+    assert 'transition_type: "close"' in source
+    assert "closure_reason" in source
+    assert "不要调用 `closed_without_plan`" in source
+
+
 async def test_index_does_not_execute_tool_modules(monkeypatch):
     # Indexing must be pure AST parsing: importing a tool module could trigger
     # side effects (e.g. connecting to an MCP server). Guard by making import
