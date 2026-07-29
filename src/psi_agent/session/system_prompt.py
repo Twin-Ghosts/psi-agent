@@ -26,15 +26,14 @@ class SystemPrompt:
     ``True`` triggers an in-place rebuild.
     ``compaction_fn(history, complete_fn) → str`` summarises the
     conversation history when the token budget is exceeded.
-    ``refresher(current) → str`` is called before every agent turn to
-    re-render only the *volatile tail* of an existing prompt (wall-clock time,
-    dynamic context files). See ``ensure`` for why this is separate from
-    ``checker``.
+    ``turn_context_fn() → str`` is called before every agent turn to render
+    the *volatile* block for that turn (wall-clock time, runtime info). It goes
+    to the tail of the request, not into the prompt — see ``turn_context``.
 
     Defaults: if no builder is provided, an empty prompt is used.  If
     no checker is provided, the prompt is never rebuilt.  If no
     compaction_fn is provided, compaction is silently skipped.  If no
-    refresher is provided, the volatile tail is left untouched.
+    turn_context_fn is provided, no volatile block is injected.
     """
 
     @staticmethod
@@ -50,12 +49,12 @@ class SystemPrompt:
         builder: Callable[..., Any] | None = None,
         checker: Callable[..., Any] | None = None,
         compaction_fn: Callable[..., Any] | None = None,
-        refresher: Callable[..., Any] | None = None,
+        turn_context_fn: Callable[..., Any] | None = None,
     ):
         self._builder = builder if builder is not None else self._default_builder
         self._checker = checker if checker is not None else self._default_checker
         self._compaction_fn = compaction_fn
-        self._refresher = refresher
+        self._turn_context_fn = turn_context_fn
 
     @property
     def compaction_fn(self) -> Callable[..., Any] | None:
@@ -64,37 +63,27 @@ class SystemPrompt:
     @classmethod
     async def from_workspace(cls, workspace_path: Path, session_id: str) -> SystemPrompt:
         """Load the system module.  Defaults are used when builder, checker,
-        compaction_fn, or refresher are not found in the workspace."""
-        builder, checker, compaction_fn, refresher = await cls._load_module(workspace_path, session_id)
-        return cls(builder=builder, checker=checker, compaction_fn=compaction_fn, refresher=refresher)
+        compaction_fn, or turn_context_builder are not found in the workspace."""
+        builder, checker, compaction_fn, turn_context_fn = await cls._load_module(workspace_path, session_id)
+        return cls(
+            builder=builder,
+            checker=checker,
+            compaction_fn=compaction_fn,
+            turn_context_fn=turn_context_fn,
+        )
 
     async def ensure(self, conversation: Conversation) -> None:
-        """Build, rebuild, or refresh the volatile tail of the system prompt.
+        """Build or rebuild the system prompt.
 
-        Three paths, in order of precedence:
+        Two paths, in order of precedence:
 
         1. Empty history → build the whole prompt.
-        2. ``checker()`` says yes → rebuild the whole prompt (already current,
-           so no refresh on top).
-        3. Otherwise → re-render only the part after the workspace's cache
-           boundary, via ``system_prompt_dynamic_suffix()``.
+        2. ``checker()`` says yes → rebuild the whole prompt.
 
-        Path 3 exists because the prompt is otherwise built once and reused for
-        the life of the history, which freezes everything in it that describes
-        **now**: a Session opened on Monday kept telling users it was Monday
-        all week, and a wrong ``Time zone`` label baked in at build time stayed
-        wrong for as long as the Session lived. Rebuilding it all every turn
-        would fix the clock and break two other things — a full workspace
-        re-scan per turn (~110 ms for a ~150 KB prompt here), and a cached
-        prefix that changes every turn, defeating upstream prompt caching. So
-        only the tail is re-rendered; the stable prefix, and its cache entry,
-        survive byte-for-byte.
-
-        A workspace opts in by exposing ``system_prompt_dynamic_suffix()``;
-        those that don't are left exactly as they were. A refresher that
-        raises, returns a non-string, or finds no boundary is likewise a no-op,
-        because a stale clock is a far smaller problem than a system prompt
-        truncated at a boundary we could not locate.
+        Otherwise the prompt is left exactly as it was. Anything in it that
+        describes **now** therefore stays frozen for the life of the history —
+        which is why volatile content does not belong here at all, but in
+        ``turn_context()``.
         """
         if not conversation.messages:
             try:
@@ -110,27 +99,44 @@ class SystemPrompt:
                 sp = await self._builder()
                 logger.info(f"System prompt rebuilt ({len(sp)} chars)")
                 conversation.replace_system(sp)
-                return
         except Exception as e:
             logger.error(f"Rebuild check or rebuild failed: {e}")
 
-        if self._refresher is None:
-            return
-        head = conversation.messages[0]
-        if head.get("role") != "system":
-            return
-        current = head.get("content")
-        if not isinstance(current, str):
-            return
+    async def turn_context(self) -> str:
+        """Render this turn's volatile block, or ``""`` if the workspace has none.
+
+        The prompt is built once and reused for the life of the history, which
+        freezes everything in it that describes **now**: a Session opened on
+        Monday kept telling users it was Monday all week, and a ``Time zone``
+        label that was wrong at build time stayed wrong for as long as the
+        Session lived.
+
+        Re-rendering the prompt each turn would fix the clock and break
+        something worse. Requests are cached by prefix, so the first byte that
+        differs from the previous request invalidates everything after it —
+        and the system prompt is the *front* of the request. Rewriting it per
+        turn re-processes the entire conversation every turn; the further the
+        session goes, the more it costs. So the volatile block is not part of
+        the prompt at all: it rides on the current turn's user message, at the
+        **tail** of the request, where the invalidated suffix is just that one
+        turn. The prompt and every earlier turn stay byte-identical.
+
+        A workspace opts in by exposing ``turn_context_builder()``; those that
+        don't get no block. A builder that raises or returns a non-string is
+        likewise treated as "no block", because losing a clock line is a far
+        smaller problem than losing the turn.
+        """
+        if self._turn_context_fn is None:
+            return ""
         try:
-            refreshed = await self._refresher(current)
+            block = await self._turn_context_fn()
         except Exception as e:
-            logger.error(f"System prompt dynamic refresh failed: {e}")
-            return
-        if not isinstance(refreshed, str) or not refreshed or refreshed == current:
-            return
-        conversation.replace_system(refreshed)
-        logger.info(f"System prompt dynamic tail refreshed ({len(refreshed)} chars)")
+            logger.error(f"Turn context build failed: {e}")
+            return ""
+        if not isinstance(block, str) or not block.strip():
+            return ""
+        logger.info(f"Turn context built ({len(block)} chars)")
+        return block
 
     # -- module loading --------------------------------------------------------
 
@@ -144,7 +150,7 @@ class SystemPrompt:
         Callable[..., Any] | None,
     ]:
         """Import ``system_prompt_builder``, ``system_prompt_rebuild_checker``,
-        ``compact_history``, and ``system_prompt_dynamic_suffix`` from
+        ``compact_history``, and ``turn_context_builder`` from
         ``workspace/systems/system.py``."""
         system_py = workspace_path / "systems" / "system.py"
         ap = anyio.Path(str(system_py))
@@ -181,12 +187,12 @@ class SystemPrompt:
             builder = SystemPrompt._extract_async_func(module, "system_prompt_builder")
             checker = SystemPrompt._extract_async_func(module, "system_prompt_rebuild_checker")
             compaction_fn = SystemPrompt._extract_async_func(module, "compact_history")
-            refresher = SystemPrompt._extract_async_func(module, "system_prompt_dynamic_suffix")
+            turn_context_fn = SystemPrompt._extract_async_func(module, "turn_context_builder")
         except Exception as e:
             logger.error(f"Failed to extract functions from {system_py!r}: {e!r}")
             sys.modules.pop(module_name, None)
             return None, None, None, None
-        return builder, checker, compaction_fn, refresher
+        return builder, checker, compaction_fn, turn_context_fn
 
     @staticmethod
     def _extract_async_func(module: object, name: str) -> Callable[..., Any] | None:

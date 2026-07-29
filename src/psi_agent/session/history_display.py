@@ -15,6 +15,10 @@ Legacy aliases still accepted when reading JSONL:
 - roles ``user_schedule`` / ``assistant_schedule`` → schedule.silent
 
 AI requests strip display-only keys and rewrite legacy roles via ``messages_for_ai``.
+
+``turn_context`` (2026-07-29) is the same idea applied to volatile text: stored
+beside the user message it belongs to, folded into ``content`` only on the way
+to the AI, never rendered as part of a chat bubble.
 """
 
 from __future__ import annotations
@@ -34,7 +38,13 @@ CHAT_TYPE_KEY = "chat_type"
 CHAT_TYPE_COMMON = "common"
 CHAT_TYPE_SCHEDULE = "schedule"
 
-_DISPLAY_ONLY_KEYS = frozenset({KIND_KEY, CHAT_TYPE_KEY})
+# Volatile per-turn context (wall-clock time, runtime info) carried alongside
+# the user message it belongs to.  Folded into ``content`` only when the turn
+# is sent to the AI, so history rows stay byte-identical once written — see
+# ``messages_for_ai``.
+TURN_CONTEXT_KEY = "turn_context"
+
+_DISPLAY_ONLY_KEYS = frozenset({KIND_KEY, CHAT_TYPE_KEY, TURN_CONTEXT_KEY})
 
 _WIRE_ROLES = frozenset({"system", "user", "assistant", "tool"})
 
@@ -112,7 +122,11 @@ def with_chat_type(msg: dict[str, Any], chat_type: str) -> dict[str, Any]:
 def messages_for_ai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Project history for the AI backend.
 
-    - Strips display-only keys (``kind``, ``chat_type``) and fixes legacy roles.
+    - Strips display-only keys (``kind``, ``chat_type``, ``turn_context``) and
+      fixes legacy roles.
+    - Folds ``turn_context`` into the message's ``content`` (see
+      ``_fold_turn_context``) — the volatile block is stored out-of-band so
+      that it lands at the request tail without ever rewriting a stored row.
     - If a ``compacted`` message exists: deletes all messages between
       the first ``system`` (index 0) and the last ``compacted`` (exclusive),
       merges the compaction summary into the system message, and drops the
@@ -154,9 +168,7 @@ def messages_for_ai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 role = wire_role(msg.get("role"))
                 if role is None:
                     continue
-                projected = {k: v for k, v in msg.items() if k not in _DISPLAY_ONLY_KEYS}
-                projected["role"] = role
-                result.append(projected)
+                result.append(_project_for_ai(msg, role))
             return result
 
     out: list[dict[str, Any]] = []
@@ -166,10 +178,35 @@ def messages_for_ai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         role = wire_role(msg.get("role"))
         if role is None:
             continue
-        projected = {k: v for k, v in msg.items() if k not in _DISPLAY_ONLY_KEYS}
-        projected["role"] = role
-        out.append(projected)
+        out.append(_project_for_ai(msg, role))
     return out
+
+
+def _project_for_ai(msg: dict[str, Any], role: str) -> dict[str, Any]:
+    """Strip display-only keys, pin ``role``, and fold in ``turn_context``."""
+    projected = {k: v for k, v in msg.items() if k not in _DISPLAY_ONLY_KEYS}
+    projected["role"] = role
+    turn_context = msg.get(TURN_CONTEXT_KEY)
+    if isinstance(turn_context, str) and turn_context.strip():
+        projected["content"] = _fold_turn_context(projected.get("content"), turn_context)
+    return projected
+
+
+def _fold_turn_context(content: Any, turn_context: str) -> Any:
+    """Append the volatile block after ``content``.
+
+    Placed *after* the message body rather than before it so that the stored
+    text keeps the position it had when it was written — a prefix would shift
+    every byte of the turn and, on a cached prefix, cost exactly what storing
+    the block out-of-band was meant to save.  Non-string content (multimodal
+    block lists) is returned untouched: there is no single place to append to,
+    and dropping the block is better than corrupting the blocks.
+    """
+    if not isinstance(content, str):
+        return content
+    if not content:
+        return turn_context
+    return content + "\n\n" + turn_context
 
 
 def strip_transfer_markers(text: str) -> str:

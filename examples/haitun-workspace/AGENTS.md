@@ -3,12 +3,13 @@
 A consolidated psi-agent workspace. Its persona is fixed: a **Haitun agent** (always stated
 in the system prompt). It merges the most useful parts of the other example workspaces:
 
-- **Prompt engine** — a layered builder (stable prefix + cache boundary + dynamic
-  suffix, skills index, bootstrap context files), with **all configuration kept inside this
-  workspace** (there is no global config directory). The stable prefix is built once per
-  Session; everything below the cache boundary is re-rendered **every turn** via
-  `system_prompt_dynamic_suffix()`, so the clock and the dynamic context files below stay
-  current without invalidating the cached prefix.
+- **Prompt engine** — a layered builder (system prompt + per-turn context block, skills
+  index, bootstrap context files), with **all configuration kept inside this
+  workspace** (there is no global config directory). The prompt is built once per Session
+  and reused byte-for-byte; the clock and the runtime line are re-rendered **every turn** by
+  `turn_context_builder()` and delivered at the *tail* of the request, on the turn's own user
+  message, so staying current costs nothing off the cached prefix. `USER.md` and the dynamic
+  context files stay in the prompt and trigger a rebuild only when their **content** changes.
 - **Fusion Flow** — full workflow-authoring capability (`flow_manage`, the bundled node
   runtime under `skills/fusion-flow/`, the `bin/` stateful-session shim, the `flows/`
   layout, and authoring guidance injected into the prompt).
@@ -23,11 +24,11 @@ user profile, and bootstrap files all live at the workspace root:
 | File | Role |
 |---|---|
 | `SOUL.md` | Personality/values; augments the built-in Haitun agent identity (top of prompt). |
-| `USER.md` | User profile; injected into the dynamic suffix (below the cache boundary). |
+| `USER.md` | User profile; injected into the system prompt. Edit it and the prompt is rebuilt on the next turn. |
 | `IDENTITY.md` | Haitun identity details; loaded as a bootstrap context file. |
 | `TOOLS.md` | Local, environment-specific notes; bootstrap context file. |
 | `BOOTSTRAP.md` | First-run onboarding. **Delete it** to skip onboarding. Triggers the "Bootstrap Pending" section while present. |
-| `HEARTBEAT.md` | Dynamic context, re-read every turn (below the cache boundary). |
+| `HEARTBEAT.md` | Dynamic context. Picked up on the next turn after its **content** changes (`system_prompt_rebuild_checker()` compares a digest), not re-rendered on every turn. |
 | `AGENTS.md` | This file; also loaded as a bootstrap context file. |
 
 ## Remote Fusion Memory configuration
@@ -257,7 +258,7 @@ service tools:
 ## ⚠️ Intentionally-kept un-wired code (future extension)
 
 psi-agent's session loader only ever calls the module-level `system_prompt_builder()`,
-`system_prompt_rebuild_checker()`, `system_prompt_dynamic_suffix()` and `compact_history()`
+`system_prompt_rebuild_checker()`, `turn_context_builder()` and `compact_history()`
 (all but the first optional), loads `tools/*.py`, and runs `schedules/*/TASK.md`. The
 following are deliberately included as **future-extension hooks** and are **NOT** invoked by
 the current framework — do not "clean them up" as dead code:

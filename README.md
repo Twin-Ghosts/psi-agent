@@ -207,7 +207,7 @@ my-workspace/
 │   └── daily-report/
 │       └── TASK.md           # YAML 头 (name, cron) + Markdown body
 └── systems/
-    └── system.py             # async def system_prompt_builder() / system_prompt_rebuild_checker() / system_prompt_dynamic_suffix()
+    └── system.py             # async def system_prompt_builder() / system_prompt_rebuild_checker() / turn_context_builder()
 ```
 
 ### Tools
@@ -244,16 +244,15 @@ async def system_prompt_rebuild_checker() -> bool:
     """每次对话回合前调用。返回 True 则重建 system prompt。"""
     return False
 
-async def system_prompt_dynamic_suffix(current: str) -> str:
-    """每次对话回合前调用。收当前完整 prompt，返回只换掉易变尾部的完整 prompt。"""
-    head, sep, _tail = current.partition(BOUNDARY)
-    return head + sep + render_volatile_sections() if sep else current
+async def turn_context_builder() -> str:
+    """每次对话回合前调用。返回本回合的易变块（时间等），挂在本回合 user 消息尾部。"""
+    return render_volatile_sections()
 ```
 
 - `builder` 在首次对话时惰性调用
 - `checker` 每次回合前调用，可用于监控文件变更后自动刷新 prompt
-- `dynamic_suffix` 在前两者都未触发时每回合调用，**只重渲染易变尾部**（时间、动态上下文文件）。整段重建会改动被缓存的前缀、击穿上游 prompt caching，因此把「稳定前缀 + 边界 + 易变尾部」的切法交给 workspace 自己定，框架只负责把旧串交出去、拿新串写回。不定义它则整段 prompt 在会话内永不变——里面所有描述「现在」的内容都会冻结在首次构建那一刻
-- 三个都是可选的，缺失时用合理默认值。刷新抛异常、返回非字符串或空串时一律保留原 prompt
+- `turn_context_builder` 每回合调用，产物**不进 system prompt**，而是随本回合的 user 消息一起送到**请求尾部**。之所以不写进 prompt：上游按前缀缓存，而 system prompt 是整个请求的最前面，每回合改它（哪怕只改尾部）会让整段对话历史的缓存一起失效，会话越长越贵；挂在尾部则失效范围只有这一个回合。不定义它则整段 prompt 在会话内永不变——里面所有描述「现在」的内容都会冻结在首次构建那一刻
+- 三个都是可选的，缺失时用合理默认值。`turn_context_builder` 抛异常、返回非字符串或空串时一律当作没有这个块——丢一行时钟远好过丢掉整个回合
 
 ### 定时任务
 

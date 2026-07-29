@@ -4,15 +4,16 @@
 
 This merges three ideas into one workspace:
 
-* An OpenClaw-style prompt engine (stable prefix + cache boundary + dynamic
-  suffix, skills index, bootstrap context files) - **de-branded**, with **all
+* An OpenClaw-style prompt engine (layered builder + a per-turn context block,
+  skills index, bootstrap context files) - **de-branded**, with **all
   configuration kept inside the workspace** (there is no global config dir).
 * The Fusion Flow authoring capability (flows index + authoring guidance),
   fully merged from the fusion-flow workspace.
 * A fixed Haitun agent persona, always stated in the system prompt.
 
-Only ``system_prompt_builder()`` (and optionally ``system_prompt_rebuild_checker``)
-is invoked by psi-agent's session loader.  ``compact_history`` / ``after_turn`` /
+Only ``system_prompt_builder()`` (and optionally ``system_prompt_rebuild_checker``
+and ``turn_context_builder``) is invoked by psi-agent's session loader.
+``compact_history`` / ``after_turn`` /
 the self-evolution helpers below are **intentionally kept but currently un-wired**
 - they are future-extension hooks (see AGENTS.md).  Do not delete them as "dead
 code"; they exist on purpose.
@@ -91,7 +92,12 @@ from prompt_sections import (
 logger = logging.getLogger(__name__)
 
 HEARTBEAT_OK = "HEARTBEAT_OK"
-CACHE_BOUNDARY = "\n<!-- HAITUN_CACHE_BOUNDARY -->\n"
+
+# Last-seen digest of the per-turn context files, keyed by workspace — drives
+# ``system_prompt_rebuild_checker``. Process-wide: Gateway runs many Sessions in
+# one process and they read the same files, and the worst a shared entry costs
+# is one extra rebuild for a Session that had already picked the change up.
+_CONTEXT_FILE_DIGESTS: dict[str, str] = {}
 
 # Skill whose presence injects the ## Help guidance section.
 HELP_SKILL_NAME = "psi-agent-help"
@@ -747,7 +753,7 @@ async def _scan_tool_names(workspace_dir: anyio.Path) -> list[str]:
 
 
 async def _build_dynamic_context_files(workspace_dir: anyio.Path) -> str:
-    """Read dynamic context files (heartbeat.md) below the cache boundary."""
+    """Read dynamic context files (heartbeat.md) for the system prompt."""
     parts: list[str] = []
     dynamic_names_lower = {n.lower() for n in DYNAMIC_CONTEXT_FILE_BASENAMES}
     async for entry in workspace_dir.iterdir():
@@ -1102,47 +1108,35 @@ Never write API keys into this workspace, generated `.flow.ts` files, or committ
 
         stable_parts += ["", SILENT_REPLIES_SECTION]
 
-        stable_prefix = "\n".join(stable_parts)
-
-        return stable_prefix + CACHE_BOUNDARY + await self.build_dynamic_suffix(model)
-
-    async def build_dynamic_suffix(self, model: str | None = None) -> str:
-        """Assemble the part of the prompt that follows ``CACHE_BOUNDARY``.
-
-        Split out from ``build_system_prompt`` so a running Session can
-        re-render it every turn (``system_prompt_dynamic_suffix``) without
-        rebuilding — or invalidating the cache of — the stable prefix. Keeping
-        one definition of "dynamic" means a section added here starts
-        refreshing per turn automatically, instead of silently freezing at
-        first build the way the date did.
-        """
-        ws = self._agent_dir
+        model_identity = build_model_identity_line(model)
+        if model_identity:
+            stable_parts += ["", model_identity]
 
         # NOTE: the heartbeat instruction is intentionally NOT injected here.
         # The heartbeat schedule (schedules/heartbeat/TASK.md) already tells the
         # agent to reply HEARTBEAT_OK on its poll; injecting it into every turn's
         # system prompt caused HEARTBEAT_OK to leak into normal chat replies.
-        dynamic_parts: list[str] = []
-
-        model_identity = build_model_identity_line(model)
-        if model_identity:
-            dynamic_parts += [model_identity, ""]
-
         volatile = await _build_volatile(ws)
         if volatile:
-            dynamic_parts += [volatile, ""]
+            stable_parts += ["", volatile]
 
         dynamic_ctx = await _build_dynamic_context_files(ws)
         if dynamic_ctx:
-            dynamic_parts += [dynamic_ctx, ""]
+            stable_parts += ["", dynamic_ctx]
 
-        dynamic_parts += [_build_datetime_section(), ""]
-        dynamic_parts.append(_build_runtime_info(model))
+        return "\n".join(stable_parts)
 
-        while dynamic_parts and dynamic_parts[-1] == "":
-            dynamic_parts.pop()
+    async def build_turn_context(self, model: str | None = None) -> str:
+        """Assemble the volatile block for the turn about to run.
 
-        return "\n".join(dynamic_parts)
+        Everything here is re-rendered per turn and delivered at the tail of the
+        request (see ``turn_context_builder``), not inside the system prompt —
+        so it never invalidates the cached prefix. Keep it small and keep it to
+        things that genuinely change per turn: the clock, and the runtime
+        identity that can shift when the Session is re-attached elsewhere.
+        """
+        parts = [_build_datetime_section(), "", _build_runtime_info(model)]
+        return "\n".join(parts)
 
     async def compact_history(
         self,
@@ -1336,14 +1330,45 @@ async def compact_history(history: list[dict[str, Any]], complete_fn) -> str:
 
 
 async def system_prompt_rebuild_checker() -> bool:
-    """Activate Memory on the first turn after restoring an existing Session."""
+    """Activate Memory, and rebuild when a per-turn context file has changed.
+
+    ``USER.md`` and the ``HEARTBEAT.md``-style files are documented as
+    "re-read every turn", and they live in the prompt because they are prose
+    the agent should treat as standing context, not as news about this turn.
+    Rebuilding on every turn would invalidate the cached prefix for the whole
+    conversation; rebuilding only when their bytes actually change costs one
+    stat-and-read of a few small files and keeps the promise. Content, not
+    mtime: a rewrite with identical bytes should not cost a rebuild.
+    """
     agent_dir = anyio.Path(__file__).parent.parent
     await _activate_fusion_memory(agent_dir)
-    return False
+    return await _context_files_changed(agent_dir)
 
 
-async def system_prompt_dynamic_suffix(current: str) -> str:
-    """Re-render everything after ``CACHE_BOUNDARY`` for the turn about to run.
+async def _context_files_changed(workspace_dir: anyio.Path) -> bool:
+    """Whether ``USER.md`` / dynamic context files differ from the last check.
+
+    First call per process primes the digest and returns False — the prompt was
+    just built from these same files, so there is nothing to rebuild for.
+    """
+    try:
+        digest = hashlib.sha256(
+            (await _build_volatile(workspace_dir) + "\0" + await _build_dynamic_context_files(workspace_dir)).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+    except Exception as exc:
+        logger.debug("Context file digest failed, skipping rebuild: %r", exc)
+        return False
+
+    key = str(workspace_dir)
+    previous = _CONTEXT_FILE_DIGESTS.get(key)
+    _CONTEXT_FILE_DIGESTS[key] = digest
+    return previous is not None and previous != digest
+
+
+async def turn_context_builder() -> str:
+    """Render the volatile block for the turn about to run.
 
     ``system_prompt_builder`` runs once per Session, so every "now" it renders
     freezes: a Session opened last Friday goes on reporting Friday's date, and
@@ -1353,25 +1378,19 @@ async def system_prompt_dynamic_suffix(current: str) -> str:
     line and, asked to reconcile it with reality, invents timezone arithmetic
     to explain the gap.
 
-    Only the volatile tail is rebuilt, which is why the prompt has a boundary
-    at all: the stable prefix (identity, skills, tooling — the bulk of ~150 KB)
-    is reused byte-for-byte, so upstream prompt caching still hits and the
-    per-turn cost is a few string operations instead of a workspace re-scan.
-
-    Returns the prompt unchanged if it carries no boundary — that means it was
-    written by a different builder (or already compacted), and replacing a tail
-    we cannot locate would corrupt it.
+    The fix is not to re-render the prompt — that is the *front* of the
+    request, and rewriting it per turn invalidates the cache for the whole
+    conversation behind it. This block is delivered at the **tail** instead,
+    on the turn's own user message, so the prompt and every earlier turn stay
+    byte-identical.
     """
-    head, sep, _tail = current.partition(CACHE_BOUNDARY)
-    if not sep:
-        return current
     agent_dir = anyio.Path(__file__).parent.parent
     user_workspace = agent_dir
     raw = (_runtime_workspace() or "").strip()
     if raw:
         user_workspace = anyio.Path(raw)
     system = System(agent_dir, user_workspace=user_workspace)
-    return head + sep + await system.build_dynamic_suffix()
+    return await system.build_turn_context()
 
 
 async def _activate_fusion_memory(workspace_dir: anyio.Path) -> None:

@@ -207,7 +207,7 @@ my-workspace/
 │   └── daily-report/
 │       └── TASK.md           # YAML header (name, cron) + Markdown body
 └── systems/
-    └── system.py             # async def system_prompt_builder() / system_prompt_rebuild_checker() / system_prompt_dynamic_suffix()
+    └── system.py             # async def system_prompt_builder() / system_prompt_rebuild_checker() / turn_context_builder()
 ```
 
 ### Tools
@@ -244,23 +244,24 @@ async def system_prompt_rebuild_checker() -> bool:
     """Called before every agent turn. Return True to rebuild the system prompt."""
     return False
 
-async def system_prompt_dynamic_suffix(current: str) -> str:
-    """Called before every agent turn. Takes the current full prompt, returns it
-    with only the volatile tail re-rendered."""
-    head, sep, _tail = current.partition(BOUNDARY)
-    return head + sep + render_volatile_sections() if sep else current
+async def turn_context_builder() -> str:
+    """Called before every agent turn. Returns this turn's volatile block (the
+    clock, runtime info), carried on this turn's own user message."""
+    return render_volatile_sections()
 ```
 
 - `builder` is lazily called on the first conversation turn
 - `checker` runs before each turn, useful for auto-refreshing prompts when files change
-- `dynamic_suffix` runs every turn when neither of the above fires, re-rendering **only the
-  volatile tail** (wall-clock time, dynamic context files). A full rebuild would change the
-  cached prefix and defeat upstream prompt caching, so the workspace decides where to split
-  "stable prefix + boundary + volatile tail" — the framework only hands over the old string
-  and writes back the new one. Without it the whole prompt never changes within a Session,
-  freezing everything in it that describes *now* at first-build time
-- All three are optional; sensible defaults are used when absent. A refresher that raises,
-  returns a non-string, or returns an empty string leaves the prompt untouched
+- `turn_context_builder` runs every turn, and its output does **not** go into the system
+  prompt — it rides on this turn's user message, at the **tail** of the request. Why not in
+  the prompt: requests are cached by prefix and the system prompt is the *front* of the
+  request, so rewriting it per turn (even just its tail) invalidates the cache for the whole
+  conversation behind it, and the longer the session runs the more that costs. At the tail,
+  the invalidated suffix is just that one turn. Without it the whole prompt never changes
+  within a Session, freezing everything in it that describes *now* at first-build time
+- All three are optional; sensible defaults are used when absent. A `turn_context_builder`
+  that raises, returns a non-string, or returns an empty string is treated as "no block" —
+  losing a clock line is a far smaller problem than losing the turn
 
 ### Scheduled Tasks
 

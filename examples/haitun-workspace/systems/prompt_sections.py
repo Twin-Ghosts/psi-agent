@@ -1,8 +1,8 @@
 """System prompt section constants and builders for the Haitun agent.
 
 This module provides the reusable prompt sections and a few small builder
-functions for ``system.py``.  The prompt architecture (stable prefix +
-cache boundary + dynamic suffix, skills index, bootstrap context files) is
+functions for ``system.py``.  The prompt architecture (layered builder plus a
+per-turn context block, skills index, bootstrap context files) is
 adapted from an OpenClaw-style design, but **all product-specific branding
 has been removed** and **all configuration lives inside the workspace** -
 there is no global config directory.
@@ -491,7 +491,7 @@ Your first user-visible reply for a bootstrap-pending workspace must follow BOOT
 # Project Context file ordering
 # agents.md=10, identity.md=30, tools.md=50, bootstrap.md=60
 # soul.md / user.md are handled separately (identity line / volatile profile)
-# heartbeat.md -> dynamic (below the cache boundary)
+# heartbeat.md -> dynamic (rebuilt when its content changes)
 # ---------------------------------------------------------------------------
 
 CONTEXT_FILE_ORDER: dict[str, int] = {
@@ -502,7 +502,7 @@ CONTEXT_FILE_ORDER: dict[str, int] = {
     "session.md": 70,
 }
 
-# Files that go below the cache boundary (rebuilt each turn).
+# Files watched for content changes, which trigger a prompt rebuild.
 DYNAMIC_CONTEXT_FILE_BASENAMES: set[str] = {"heartbeat.md"}
 
 # ---------------------------------------------------------------------------

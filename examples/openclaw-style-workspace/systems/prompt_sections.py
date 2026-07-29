@@ -300,7 +300,7 @@ Your first user-visible reply for a bootstrap-pending workspace must follow BOOT
 # § Project Context file ordering  (system-prompt.ts:65-79)
 # agents.md=10, soul.md=20, identity.md=30, user.md=40, tools.md=50,
 # bootstrap.md=60
-# heartbeat.md → dynamic (below cache boundary)
+# heartbeat.md → dynamic (read on every prompt build)
 # ---------------------------------------------------------------------------
 
 CONTEXT_FILE_ORDER: dict[str, int] = {
@@ -312,7 +312,7 @@ CONTEXT_FILE_ORDER: dict[str, int] = {
     "bootstrap.md": 60,
 }
 
-# Files that go below the cache boundary (dynamic)
+# Files read on every prompt build (dynamic)
 DYNAMIC_CONTEXT_FILE_BASENAMES: set[str] = {"heartbeat.md", "openclaw.md"}
 
 # ---------------------------------------------------------------------------

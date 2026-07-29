@@ -50,7 +50,6 @@ from prompt_sections import (
 )
 
 HEARTBEAT_OK = "HEARTBEAT_OK"
-CACHE_BOUNDARY = "\n<!-- OPENCLAW_CACHE_BOUNDARY -->\n"
 
 _OPENCLAW_HOME = anyio.Path(os.path.expanduser("~/.openclaw"))
 _SOUL_MD_PATH = _OPENCLAW_HOME / "SOUL.md"
@@ -571,7 +570,7 @@ def _build_datetime_section() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Dynamic suffix sections
+# Environment- and file-driven sections
 # ---------------------------------------------------------------------------
 
 
@@ -667,7 +666,7 @@ async def _build_dynamic_context_files(workspace_dir: anyio.Path) -> str:
 
     Scans workspace_dir for files in DYNAMIC_CONTEXT_FILE_BASENAMES (case-
     insensitive). Each found file is included as a '## <FILENAME>' block.
-    Mirrors OpenClaw's heartbeat.md injection below the cache boundary.
+    Mirrors OpenClaw's heartbeat.md injection.
 
     Args:
         workspace_dir: Path to the workspace directory.
@@ -705,7 +704,7 @@ class System:
         tools = tool_names or await _scan_tool_names(self._workspace_dir)
         is_minimal = prompt_mode != "full"
 
-        # ── Stable prefix ────────────────────────────────────────────────
+        # ── System prompt sections ───────────────────────────────────────
         identity = await _load_soul_md()
         if not is_minimal:
             skills_xml = await _build_skills_index(self._workspace_dir)
@@ -783,81 +782,59 @@ class System:
         # Silent replies hint lives in stable prefix in OpenClaw
         stable_parts += ["", SILENT_REPLIES_SECTION]
 
-        stable_prefix = "\n".join(stable_parts)
-
-        return stable_prefix + CACHE_BOUNDARY + await self.build_dynamic_suffix(model, tools)
-
-    async def build_dynamic_suffix(self, model: str | None = None, tools: list[str] | None = None) -> str:
-        """Assemble the part of the prompt that follows ``CACHE_BOUNDARY``.
-
-        Split out from ``build_system_prompt`` so a running Session can
-        re-render it every turn (``system_prompt_dynamic_suffix``) without
-        rebuilding — or invalidating the cache of — the stable prefix. Keeping
-        one definition of "dynamic" means a section added here starts
-        refreshing per turn automatically, instead of silently freezing at
-        first build the way the date did.
-        """
-        if tools is None:
-            tools = await _scan_tool_names(self._workspace_dir)
-
-        # ── Dynamic suffix ────────────────────────────────────────────────
-        dynamic_parts: list[str] = []
-
-        # Webchat canvas / messaging channel guidance
+        # ── Channel / runtime-shaped sections ────────────────────────────
+        # Read from the process environment, which does not change per turn,
+        # so they stay in the prompt. Only the clock and the runtime line are
+        # rendered per turn — see ``build_turn_context``.
         channel = os.environ.get("OPENCLAW_CHANNEL", "")
-        dynamic_parts += [MESSAGING_SECTION_MOCK, ""]
+        stable_parts += ["", MESSAGING_SECTION_MOCK]
 
-        # TTS / Voice
         tts_hint = os.environ.get("OPENCLAW_TTS_HINT", "").strip()
         if tts_hint:
             tts_section = build_tts_section(tts_hint)
             if tts_section:
-                dynamic_parts += [tts_section, ""]
+                stable_parts += ["", tts_section]
 
-        # Heartbeats
-        dynamic_parts += [HEARTBEATS_SECTION, ""]
+        stable_parts += ["", HEARTBEATS_SECTION]
 
-        # Reactions (OPENCLAW_REACTIONS=minimal|extensive, OPENCLAW_CHANNEL)
         reactions_level = os.environ.get("OPENCLAW_REACTIONS", "").strip().lower()
         if reactions_level in ("minimal", "extensive") and channel:
-            dynamic_parts += [build_reactions_section(reactions_level, channel), ""]
+            stable_parts += ["", build_reactions_section(reactions_level, channel)]
 
-        # Model aliases
         aliases_section = _build_model_aliases_section()
         if aliases_section:
-            dynamic_parts += [aliases_section, ""]
+            stable_parts += ["", aliases_section]
 
-        # Model identity line
         model_identity = build_model_identity_line(model)
         if model_identity:
-            dynamic_parts += [model_identity, ""]
+            stable_parts += ["", model_identity]
 
-        # Volatile user profile
         volatile = await _build_volatile(self._workspace_dir)
         if volatile:
-            dynamic_parts += [volatile, ""]
+            stable_parts += ["", volatile]
 
-        # Dynamic context files (heartbeat.md, openclaw.md, etc.)
         dynamic_ctx = await _build_dynamic_context_files(self._workspace_dir)
         if dynamic_ctx:
-            dynamic_parts += [dynamic_ctx, ""]
+            stable_parts += ["", dynamic_ctx]
 
-        # Provider contribution (OPENCLAW_PROVIDER_HINT)
         provider = _build_provider_contribution()
         if provider:
-            dynamic_parts += [provider, ""]
+            stable_parts += ["", provider]
 
-        # Date/time
-        dynamic_parts += [_build_datetime_section(), ""]
+        return "\n".join(stable_parts)
 
-        # Runtime info (last — highest churn)
-        dynamic_parts.append(_build_runtime_info(model, tools))
+    async def build_turn_context(self, model: str | None = None, tools: list[str] | None = None) -> str:
+        """Assemble the volatile block for the turn about to run.
 
-        # Remove trailing empty strings
-        while dynamic_parts and dynamic_parts[-1] == "":
-            dynamic_parts.pop()
-
-        return "\n".join(dynamic_parts)
+        Delivered at the tail of the request rather than inside the prompt (see
+        ``turn_context_builder``), so re-rendering it per turn leaves the cached
+        prefix — prompt plus every earlier turn — byte-identical. Keep it to
+        what genuinely changes per turn: the clock, and the runtime line whose
+        model/host can shift when a Session is re-attached.
+        """
+        if tools is None:
+            tools = await _scan_tool_names(self._workspace_dir)
+        return "\n".join([_build_datetime_section(), "", _build_runtime_info(model, tools)])
 
     async def compact_history(
         self,
@@ -956,23 +933,17 @@ async def system_prompt_builder() -> str:
     return await System(workspace_dir).build_system_prompt()
 
 
-async def system_prompt_dynamic_suffix(current: str) -> str:
-    """Re-render everything after ``CACHE_BOUNDARY`` for the turn about to run.
+async def turn_context_builder() -> str:
+    """Render the volatile block for the turn about to run.
 
     ``system_prompt_builder`` runs once per Session, so every "now" it renders
     freezes — a Session opened last Friday goes on reporting Friday's date.
-    Only the volatile tail is rebuilt, so the stable prefix is reused
-    byte-for-byte and upstream prompt caching still hits.
-
-    Returns the prompt unchanged if it carries no boundary: that means it came
-    from a different builder (or was already compacted), and replacing a tail
-    we cannot locate would corrupt it.
+    Re-rendering the prompt would fix that at the cost of the cache for the
+    whole conversation behind it, since the prompt is the front of the request.
+    This block goes to the tail instead, on the turn's own user message.
     """
-    head, sep, _tail = current.partition(CACHE_BOUNDARY)
-    if not sep:
-        return current
     workspace_dir = anyio.Path(__file__).parent.parent
-    return head + sep + await System(workspace_dir).build_dynamic_suffix()
+    return await System(workspace_dir).build_turn_context()
 
 
 async def compact_history(history: list[dict[str, Any]], complete_fn) -> str:
