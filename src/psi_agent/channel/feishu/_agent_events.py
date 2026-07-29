@@ -21,9 +21,9 @@ from psi_agent.channel._synthetic import start_synthetic_producers
 
 _CustomizedEventProcessor: Any = None
 try:
-    from lark_channel.event.custom import CustomizedEventProcessor as _CEP
+    from lark_channel.event.custom import CustomizedEventProcessor
 
-    _CustomizedEventProcessor = _CEP
+    _CustomizedEventProcessor = CustomizedEventProcessor
 except ImportError:  # pragma: no cover
     pass
 
