@@ -111,15 +111,20 @@ class SystemPrompt:
         label that was wrong at build time stayed wrong for as long as the
         Session lived.
 
-        Re-rendering the prompt each turn would fix the clock and break
-        something worse. Requests are cached by prefix, so the first byte that
-        differs from the previous request invalidates everything after it —
-        and the system prompt is the *front* of the request. Rewriting it per
-        turn re-processes the entire conversation every turn; the further the
-        session goes, the more it costs. So the volatile block is not part of
-        the prompt at all: it rides on the current turn's user message, at the
-        **tail** of the request, where the invalidated suffix is just that one
-        turn. The prompt and every earlier turn stay byte-identical.
+        Re-rendering the prompt each turn would fix the clock at the cost of
+        rebuilding it — a full workspace rescan, ~110ms and ~150KB for haitun —
+        and it would permanently rule out prompt caching. Upstream caches by
+        prefix, and the system prompt is the *front* of the request, so a prompt
+        that changes every turn can never be cached however the cache is
+        configured. (Caching is not enabled here today: Anthropic's is opt-in
+        and nothing in ``src/`` sets ``cache_control``. Keeping the prefix
+        stable is what makes enabling it possible later, not an optimization
+        that is already paying off.)
+
+        So the volatile block is not part of the prompt at all: it rides on the
+        current turn's user message, at the **tail** of the request, where the
+        change is confined to that one turn. The prompt and every earlier turn
+        project byte-identically.
 
         A workspace opts in by exposing ``turn_context_builder()``; those that
         don't get no block. A builder that raises or returns a non-string is

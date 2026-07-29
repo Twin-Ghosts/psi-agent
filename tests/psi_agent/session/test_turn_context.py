@@ -3,8 +3,9 @@
 The system prompt is built once per Session and then reused verbatim, which
 froze every "now" it contained: a Session opened on the 24th kept reporting the
 24th for days, under whatever ``Time zone`` label happened to be correct at
-build time. Re-rendering the prompt would fix the clock and invalidate the
-cached prefix for the whole conversation behind it, so the volatile block rides
+build time. Re-rendering the prompt would fix the clock at the price of a full
+workspace rescan per turn, and of a request prefix that never repeats — which
+rules out prompt caching however it is configured. So the volatile block rides
 on the turn's own user message instead. These tests pin that contract — where
 the block lands, that it never rewrites a stored row, and the failure modes
 that must degrade to "no block" rather than to a broken turn.
@@ -163,7 +164,7 @@ def test_block_never_reaches_the_stored_row() -> None:
 
 
 def test_earlier_turns_project_byte_identically() -> None:
-    """Only the newest turn carries a block, so the cached prefix is stable."""
+    """Only the newest turn carries a block, so the request prefix is stable."""
     first = messages_for_ai(
         [
             {"role": "system", "content": "PROMPT"},

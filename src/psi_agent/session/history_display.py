@@ -196,9 +196,9 @@ def _fold_turn_context(content: Any, turn_context: str) -> Any:
     """Append the volatile block after ``content``.
 
     Placed *after* the message body rather than before it so that the stored
-    text keeps the position it had when it was written — a prefix would shift
-    every byte of the turn and, on a cached prefix, cost exactly what storing
-    the block out-of-band was meant to save.  Non-string content (multimodal
+    text keeps the position it had when it was written — prefixing would shift
+    every byte of the turn, which is exactly what storing the block
+    out-of-band is meant to avoid.  Non-string content (multimodal
     block lists) is returned untouched: there is no single place to append to,
     and dropping the block is better than corrupting the blocks.
     """

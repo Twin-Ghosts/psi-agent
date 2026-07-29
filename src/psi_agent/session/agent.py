@@ -245,7 +245,7 @@ class SessionAgent:
 
                 # Volatile context (wall-clock time, runtime info) rides on this
                 # turn's user message instead of the prompt, so the per-turn
-                # change lands at the request tail and leaves the cached prefix —
+                # change lands at the request tail and leaves the prefix —
                 # prompt plus every earlier turn — byte-identical.
                 turn_context = await self._system_prompt.turn_context()
                 if turn_context:

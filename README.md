@@ -251,7 +251,7 @@ async def turn_context_builder() -> str:
 
 - `builder` 在首次对话时惰性调用
 - `checker` 每次回合前调用，可用于监控文件变更后自动刷新 prompt
-- `turn_context_builder` 每回合调用，产物**不进 system prompt**，而是随本回合的 user 消息一起送到**请求尾部**。之所以不写进 prompt：上游按前缀缓存，而 system prompt 是整个请求的最前面，每回合改它（哪怕只改尾部）会让整段对话历史的缓存一起失效，会话越长越贵；挂在尾部则失效范围只有这一个回合。不定义它则整段 prompt 在会话内永不变——里面所有描述「现在」的内容都会冻结在首次构建那一刻
+- `turn_context_builder` 每回合调用，产物**不进 system prompt**，而是随本回合的 user 消息一起送到**请求尾部**。之所以不写进 prompt：一是每回合重建要重扫整个 workspace；二是上游按前缀缓存，而 system prompt 是整个请求的最前面，每回合改它（哪怕只改尾部）就意味着无论怎么配缓存都不可能命中。挂在尾部则变动只落在这一个回合，前缀保持稳定——这是**开启缓存的前提**，框架本身并未开启（Anthropic 的 prompt caching 是 opt-in，需在请求顶层放 `cache_control`）。不定义它则整段 prompt 在会话内永不变——里面所有描述「现在」的内容都会冻结在首次构建那一刻
 - 三个都是可选的，缺失时用合理默认值。`turn_context_builder` 抛异常、返回非字符串或空串时一律当作没有这个块——丢一行时钟远好过丢掉整个回合
 
 ### 定时任务

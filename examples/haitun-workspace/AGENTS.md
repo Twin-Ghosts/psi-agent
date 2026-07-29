@@ -8,7 +8,7 @@ in the system prompt). It merges the most useful parts of the other example work
   workspace** (there is no global config directory). The prompt is built once per Session
   and reused byte-for-byte; the clock and the runtime line are re-rendered **every turn** by
   `turn_context_builder()` and delivered at the *tail* of the request, on the turn's own user
-  message, so staying current costs nothing off the cached prefix. `USER.md` and the dynamic
+  message, so staying current leaves the prompt and every earlier turn untouched. `USER.md` and the dynamic
   context files stay in the prompt and trigger a rebuild only when their **content** changes.
 - **Fusion Flow** — full workflow-authoring capability (`flow_manage`, the bundled node
   runtime under `skills/fusion-flow/`, the `bin/` stateful-session shim, the `flows/`

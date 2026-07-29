@@ -10,6 +10,29 @@ from any_llm.api import ChatCompletionChunk, acompletion
 from loguru import logger
 
 
+def _log_cache_usage(usage: Any) -> None:
+    """Log how much of the prompt came from the upstream cache.
+
+    Without this there is no way to tell whether prompt caching is working: the
+    session keeps history stable so that a cached prefix *can* be reused, but
+    caching is opt-in upstream (Anthropic needs a top-level ``cache_control``)
+    and nothing in ``src/`` sets it today. ``cached_tokens == 0`` on every turn
+    is the expected reading until something does.
+
+    ``any_llm`` maps Anthropic's ``cache_read_input_tokens`` onto the OpenAI
+    shape as ``prompt_tokens_details.cached_tokens``; providers that report no
+    cache detail simply have none, so this stays quiet rather than logging a
+    misleading zero.
+    """
+    details = getattr(usage, "prompt_tokens_details", None)
+    cached = getattr(details, "cached_tokens", None)
+    if cached is None:
+        return
+    prompt_tokens = usage.prompt_tokens or 0
+    share = f", {cached * 100 // prompt_tokens}%" if prompt_tokens else ""
+    logger.info(f"Prompt cache: cached_tokens={cached}, prompt_tokens={prompt_tokens}{share}")
+
+
 async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
     logger.info("Received chat completion request")
     try:
@@ -86,6 +109,8 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
         max_context_tokens: int = request.app.get("max_context_tokens", 0)
         compaction_usage: dict[str, int] = {}
         async for chunk in stream:
+            if chunk.usage:
+                _log_cache_usage(chunk.usage)
             if max_context_tokens > 0 and chunk.usage and chunk.usage.prompt_tokens > max_context_tokens:
                 compaction_needed = True
                 compaction_usage = {

@@ -80,6 +80,14 @@ AI 层强制 `stream_options={"include_usage": True}` 获取上游 token 用量�
 
 `psi_compaction` 是 psi-agent 内部扩展字段，非 OpenAI 标准。仅 OpenAI / Anthropic / Gemini 及兼容 provider 支持 `usage` 返回；Groq / Mistral / Ollama 等 strip `stream_options`，compaction 不触发。
 
+## 提示缓存观测
+
+同一份 `usage` 顺带记一行缓存命中，格式 `Prompt cache: cached_tokens=N, prompt_tokens=M, X%`（`_log_cache_usage`）。
+
+- **读的是哪个字段**：`any_llm` 把 Anthropic 的 `cache_read_input_tokens` 映射成 OpenAI 形状的 `prompt_tokens_details.cached_tokens`（见 `providers/anthropic/utils.py`）。provider 不报缓存明细时**不记日志**——「没有信息」和「命中 0」是两回事，后者才说明缓存没生效。
+- **为什么需要它**：Session 侧刻意让请求前缀逐字节稳定（见根 `AGENTS.md` 坑 19），但**上游缓存是 opt-in 的**：Anthropic 要在请求顶层放 `cache_control`，而 `src/` 里目前没有任何一处设置它。所以**当下每回合读到 `cached_tokens=0` 是预期结果**；没有这行日志，就无从判断「前缀稳定但没开缓存」和「开了缓存却没命中」。
+- **真要开启前先确认**：提示词长度过得了最低门槛（Opus 5 是 512 token，Sonnet 5 / Opus 4.8 是 1024，各模型不同），以及会话节奏跟得上默认 5 分钟 TTL（1 小时 TTL 要付 2 倍输入价）。两个计数都是 0 通常就是没过最低长度，且**上游不报错**。
+
 ## 依赖
 
 - `any-llm-sdk`：多 provider 客户端

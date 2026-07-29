@@ -131,8 +131,10 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 | | |
 |--|--|
 | **代价一：重扫 workspace** | 整段构建要重扫 skills / tools / bootstrap 文件。实测 haitun 约 **110ms、150KB** 提示词，放进每个回合是净损失 |
-| **代价二：击穿提示缓存** | 上游按**前缀**缓存，与上次请求第一个不同的 token 之后全部失效。而 system prompt 是**整个请求的最前面**（`any_llm` 的 Anthropic 转换器把所有 `role=system` 抽成顶层 `system` 参数，排在 `messages` 之前）——改它的尾部同样在前缀里，**整段对话历史随之失效**，会话越长越贵。切 `stable_prefix + 边界 + dynamic_suffix` 并不能救：省下的只是重扫开销，缓存照样每回合击穿 |
-| **所以** | 易变块彻底移出提示词，挂到**请求尾部**（本回合 user 消息）。失效后缀就只是这一个回合，提示词与之前每个回合逐字节不变 |
+| **代价二：永久堵死提示缓存** | 上游按**前缀**缓存，而 system prompt 是**整个请求的最前面**（`any_llm` 的 Anthropic 转换器把所有 `role=system` 抽成顶层 `system` 参数，排在 `messages` 之前）。每回合改它——哪怕只改尾部——就意味着无论怎么配缓存都不可能命中 |
+| **⚠️ 时态：本仓当前并未开启缓存** | Anthropic 的 prompt caching 是 **opt-in** 的：文档里那个叫 "automatic caching" 的选项指的是断点自动前移，**仍然要在请求顶层放一个 `cache_control`**；`src/` 里没有任何 `cache_control`/`ephemeral`（可 grep 复核），`ai/server.py` 也只读 `prompt_tokens`/`completion_tokens`/`total_tokens`。所以**代价二是未来式**，当下真正在付的只有代价一 |
+| **所以** | 易变块彻底移出提示词，挂到**请求尾部**（本回合 user 消息）。这不是「保住了缓存」，而是**让前缀真正稳定下来、把开启缓存变成一个可行选项**；开启本身是独立的事（动计费行为，且要先确认提示词过得了 512/1024 token 门槛、会话节奏跟得上 5 分钟 TTL）|
+| **怎么验证缓存真开了** | 看响应的 `cache_read_input_tokens`——`any_llm` 会把它转成 `prompt_tokens_details.cached_tokens`（`providers/anthropic/utils.py`）。**两个计数都是 0 就说明没缓存**（通常是没过最低长度）|
 
 ### 契约与容错（刻意为之）
 

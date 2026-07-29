@@ -254,11 +254,14 @@ async def turn_context_builder() -> str:
 - `checker` runs before each turn, useful for auto-refreshing prompts when files change
 - `turn_context_builder` runs every turn, and its output does **not** go into the system
   prompt — it rides on this turn's user message, at the **tail** of the request. Why not in
-  the prompt: requests are cached by prefix and the system prompt is the *front* of the
-  request, so rewriting it per turn (even just its tail) invalidates the cache for the whole
-  conversation behind it, and the longer the session runs the more that costs. At the tail,
-  the invalidated suffix is just that one turn. Without it the whole prompt never changes
-  within a Session, freezing everything in it that describes *now* at first-build time
+  the prompt: rebuilding it per turn means rescanning the whole workspace per turn, and
+  upstream caches by prefix while the system prompt is the *front* of the request — so a
+  prompt that changes every turn can never be cached however the cache is configured. At
+  the tail, the change is confined to that one turn and the prefix stays stable, which is
+  what makes enabling caching possible (the framework does not enable it: Anthropic's
+  prompt caching is opt-in and needs a top-level `cache_control`). Without it the whole
+  prompt never changes within a Session, freezing everything in it that describes *now* at
+  first-build time
 - All three are optional; sensible defaults are used when absent. A `turn_context_builder`
   that raises, returns a non-string, or returns an empty string is treated as "no block" —
   losing a clock line is a far smaller problem than losing the turn

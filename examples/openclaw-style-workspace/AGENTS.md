@@ -14,10 +14,10 @@ The system prompt follows OpenClaw's `buildAgentSystemPrompt()` structure:
 
 The turn context is what `turn_context_builder()` delivers: the session loader calls it
 before every turn, and the block rides on that turn's own user message — at the **tail** of
-the request, not inside the prompt. Requests are cached by prefix and the system prompt is
-the *front* of the request, so rewriting it per turn (even just its tail) would invalidate
-the cache for the whole conversation behind it; at the tail, the invalidated suffix is just
-that one turn. Add a section to `build_turn_context()` and it refreshes per turn
+the request, not inside the prompt. Upstream caches by prefix and the system prompt is the
+*front* of the request, so a prompt rewritten per turn (even just its tail) can never be
+cached however the cache is configured; at the tail, the change is confined to that one turn
+and the prefix stays stable. Add a section to `build_turn_context()` and it refreshes per turn
 automatically; add it to the prompt and it freezes at first build — which is exactly what
 happened to the clock before this split existed.
 

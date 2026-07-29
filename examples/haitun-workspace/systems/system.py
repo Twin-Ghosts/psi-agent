@@ -1131,9 +1131,9 @@ Never write API keys into this workspace, generated `.flow.ts` files, or committ
 
         Everything here is re-rendered per turn and delivered at the tail of the
         request (see ``turn_context_builder``), not inside the system prompt —
-        so it never invalidates the cached prefix. Keep it small and keep it to
-        things that genuinely change per turn: the clock, and the runtime
-        identity that can shift when the Session is re-attached elsewhere.
+        so the prompt and every earlier turn stay byte-identical. Keep it small
+        and keep it to things that genuinely change per turn: the clock, and the
+        runtime identity that can shift when the Session is re-attached.
         """
         parts = [_build_datetime_section(), "", _build_runtime_info(model)]
         return "\n".join(parts)
@@ -1335,10 +1335,10 @@ async def system_prompt_rebuild_checker() -> bool:
     ``USER.md`` and the ``HEARTBEAT.md``-style files are documented as
     "re-read every turn", and they live in the prompt because they are prose
     the agent should treat as standing context, not as news about this turn.
-    Rebuilding on every turn would invalidate the cached prefix for the whole
-    conversation; rebuilding only when their bytes actually change costs one
-    stat-and-read of a few small files and keeps the promise. Content, not
-    mtime: a rewrite with identical bytes should not cost a rebuild.
+    Rebuilding on every turn would mean a full workspace rescan every turn, and
+    a prompt that never repeats itself; rebuilding only when their bytes actually
+    change costs one read of a few small files and keeps the promise. Content,
+    not mtime: a rewrite with identical bytes should not cost a rebuild.
     """
     agent_dir = anyio.Path(__file__).parent.parent
     await _activate_fusion_memory(agent_dir)
