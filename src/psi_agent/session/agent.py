@@ -31,6 +31,15 @@ from psi_agent.session.schedule_registry import ScheduleRegistry
 from psi_agent.session.system_prompt import SystemPrompt
 from psi_agent.session.tool_registry import ToolRegistry
 
+COMPACTION_COOLDOWN_FRACTION = 0.1
+"""Share of the threshold that must accrue before compaction may run again.
+
+Guards against back-to-back compactions when the system prompt itself is a large
+fraction of the threshold — in that regime the signal re-fires every turn but
+compaction cannot shrink the system prompt, so each pass costs an LLM call and
+erodes older context without lowering ``prompt_tokens``.
+"""
+
 
 class SessionAgent:
     """The session runtime — conversation state, tools, schedules, and the
@@ -70,6 +79,7 @@ class SessionAgent:
         self._lock = anyio.Lock()
         self._workspace_path = workspace_path
         self._agent_path = agent_path
+        self._tokens_at_last_compaction: int | None = None
 
     # -- factory --------------------------------------------------------------
 
@@ -282,6 +292,8 @@ class SessionAgent:
                     accumulated_content: str = ""
                     accumulated_reasoning: str = ""
                     _compaction_needed = False
+                    _compaction_prompt_tokens = 0
+                    _compaction_threshold = 0
 
                     async with aclosing(self._ai_client.stream(request_body)) as stream:
                         async for delta in stream:
@@ -302,6 +314,8 @@ class SessionAgent:
 
                             if delta.compaction_needed:
                                 _compaction_needed = True
+                                _compaction_prompt_tokens = delta.prompt_tokens
+                                _compaction_threshold = delta.compaction_threshold
 
                             if delta.finish_reason and not finish_reason:
                                 finish_reason = delta.finish_reason
@@ -424,7 +438,7 @@ class SessionAgent:
                         await self._conversation.commit()
                         await self._schedule_registry.refresh()
                         if _compaction_needed:
-                            await self._maybe_compact()
+                            await self._maybe_compact(_compaction_prompt_tokens, _compaction_threshold)
                         return
 
                     if finish_reason not in ("error", "stop", "tool_calls", "compaction_needed"):
@@ -453,13 +467,24 @@ class SessionAgent:
                     await self._conversation.commit()
                     yield AgentChunk(content="[Max tool rounds reached]")
 
-    async def _maybe_compact(self) -> None:
+    async def _maybe_compact(self, prompt_tokens: int = 0, threshold: int = 0) -> None:
         """Invoke compact_history from system.py, insert compaction message
         into conversation.  system prompt merge + old-message trimming is
-        deferred to ``messages_for_ai()``."""
+        deferred to ``messages_for_ai()``.
+
+        A cooldown guards against back-to-back compactions: the signal only says
+        "prompt_tokens exceeded the threshold", and compaction cannot shrink the
+        system prompt itself.  When the system prompt alone is a large fraction of
+        the threshold, every subsequent turn re-raises the signal, so without this
+        gate the session would re-summarize constantly — each pass paying an LLM
+        call and eroding older context.
+        """
         compaction_fn = self._system_prompt.compaction_fn
         if compaction_fn is None:
             logger.warning("No compact_history function in system.py, skipping compaction")
+            return
+
+        if not self._compaction_cooldown_elapsed(prompt_tokens, threshold):
             return
 
         async def complete_fn(messages: list[dict[str, Any]]) -> str:
@@ -482,6 +507,36 @@ class SessionAgent:
 
             self._conversation.add({"role": "compacted", "content": summary, "kind": KIND_COMPACTED})
             await self._conversation.commit()
+            # Watermark only on success: a failed compaction did not shrink
+            # anything, so the next signal should still be allowed through.
+            self._tokens_at_last_compaction = prompt_tokens or None
             logger.info("Compaction completed")
         except Exception as e:
             logger.error(f"Compaction failed: {e!r}")
+
+    def _compaction_cooldown_elapsed(self, prompt_tokens: int, threshold: int) -> bool:
+        """Whether enough new context accrued since the last compaction.
+
+        Requires growth of at least ``COMPACTION_COOLDOWN_FRACTION`` of the
+        threshold.  Measured in upstream-reported ``prompt_tokens`` rather than
+        message count, because a single tool result can be tens of thousands of
+        tokens while two chat messages are a few hundred — a count-based gate
+        would be meaningless for tool-heavy turns.
+
+        Fails open: when the signal carries no usable numbers (older AI layer,
+        malformed field) compaction proceeds as before.
+        """
+        last = self._tokens_at_last_compaction
+        if last is None or prompt_tokens <= 0 or threshold <= 0:
+            return True
+
+        required = int(threshold * COMPACTION_COOLDOWN_FRACTION)
+        grown = prompt_tokens - last
+        if grown >= required:
+            return True
+        logger.info(
+            f"Compaction skipped by cooldown: prompt_tokens grew {grown} since last "
+            f"compaction (need {required}; threshold={threshold}). The system prompt "
+            f"likely dominates the budget, so re-summarizing would not shrink it."
+        )
+        return False

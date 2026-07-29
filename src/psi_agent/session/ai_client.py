@@ -15,6 +15,20 @@ from psi_agent._sockets import resolve_connector_and_endpoint
 from psi_agent.session.protocol import AiDelta
 
 
+def _as_int(value: object) -> int:
+    """Coerce an untrusted SSE field to int; 0 when absent or malformed."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
+
+
 class AiClient:
     """Protocol adapter for the AI backend — handles HTTP/SSE and yields AiDelta."""
 
@@ -81,5 +95,11 @@ class AiClient:
                     tool_calls=delta_data.get("tool_calls"),
                     finish_reason=c.get("finish_reason"),
                     compaction_needed=compaction_needed,
+                    prompt_tokens=_as_int(compaction_signal.get("prompt_tokens"))
+                    if isinstance(compaction_signal, dict)
+                    else 0,
+                    compaction_threshold=_as_int(compaction_signal.get("threshold"))
+                    if isinstance(compaction_signal, dict)
+                    else 0,
                 )
             logger.debug("SSE stream consumed successfully")

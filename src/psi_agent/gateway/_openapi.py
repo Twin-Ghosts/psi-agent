@@ -453,6 +453,17 @@ OPENAPI_SPEC = {
                     "model": {"type": "string"},
                     "api_key": {"type": "string"},
                     "base_url": {"type": "string"},
+                    "max_context_tokens": {
+                        "type": "integer",
+                        "default": -1,
+                        "description": (
+                            "Prompt token threshold that triggers history compaction. "
+                            "-1 = resolve from PSI_MAX_CONTEXT_TOKENS env var, else 100000. "
+                            "0 = disable compaction. Keep it well below the model's real "
+                            "context window so compaction runs before the upstream rejects "
+                            "the request."
+                        ),
+                    },
                 },
             },
             "AiInfo": {
@@ -462,6 +473,7 @@ OPENAPI_SPEC = {
                     "socket": {"type": "string"},
                     "provider": {"type": "string"},
                     "model": {"type": "string"},
+                    "max_context_tokens": {"type": "integer"},
                 },
             },
             "SessionCreateRequest": {

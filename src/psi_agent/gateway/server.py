@@ -248,6 +248,7 @@ async def _create_ai(request: web.Request) -> web.Response:
             api_key=body["api_key"],
             base_url=body["base_url"],
             id=body.get("id", ""),
+            max_context_tokens=int(body.get("max_context_tokens", -1)),
         )
         return _json(asdict(info), status=201)
     except (TypeError, ValueError, KeyError) as e:

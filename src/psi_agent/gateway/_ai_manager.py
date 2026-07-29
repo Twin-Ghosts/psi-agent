@@ -26,6 +26,13 @@ class AiInfo:
     model: str
     api_key: str
     base_url: str
+    max_context_tokens: int = -1
+    """Prompt token threshold that triggers compaction.
+
+    ``-1`` keeps ``Ai``'s own resolution (``PSI_MAX_CONTEXT_TOKENS`` env var,
+    else 100K); ``0`` disables compaction.  Defaulted so state snapshots
+    written before this field existed still restore.
+    """
 
 
 @dataclass
@@ -50,6 +57,7 @@ class AIManager:
         base_url: str,
         *,
         id: str = "",
+        max_context_tokens: int = -1,
     ) -> AiInfo:
         ai_id = id or _new_uuid()
         async with self._lock:
@@ -64,6 +72,7 @@ class AIManager:
                 model=model,
                 api_key=api_key,
                 base_url=base_url,
+                max_context_tokens=max_context_tokens,
             )
             scope = anyio.CancelScope()
 
@@ -79,7 +88,15 @@ class AIManager:
 
             logger.debug(f"AIManager: starting AI {ai_id!r} task")
             self._tg.start_soon(_run_ai)
-            info = AiInfo(id=ai_id, socket=socket, provider=provider, model=model, api_key=api_key, base_url=base_url)
+            info = AiInfo(
+                id=ai_id,
+                socket=socket,
+                provider=provider,
+                model=model,
+                api_key=api_key,
+                base_url=base_url,
+                max_context_tokens=max_context_tokens,
+            )
             self._entries[ai_id] = _AiEntry(scope=scope, info=info)
         try:
             await _wait_socket(info.socket)

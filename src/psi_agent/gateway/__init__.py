@@ -152,6 +152,7 @@ class Gateway:
                         api_key=cfg.get("api_key", ""),
                         base_url=cfg.get("base_url", ""),
                         id=cfg.get("id", ""),
+                        max_context_tokens=int(cfg.get("max_context_tokens", -1)),
                     )
                     logger.info(f"Restored AI {cfg.get('id', '?')!r}")
                 except Exception as e:
