@@ -132,11 +132,7 @@ class TriggerRegistry:
             if trigger.source and trigger.source != envelope.source:
                 continue
             matched = False
-            if (
-                trigger.event
-                and trigger.event == envelope.event
-                and filter_matches(envelope.payload, trigger.filter)
-            ):
+            if trigger.event and trigger.event == envelope.event and filter_matches(envelope.payload, trigger.filter):
                 matched = True
             if not matched and trigger.raw_event:
                 env_raw = (envelope.raw_event or "").strip()
@@ -344,9 +340,7 @@ class TriggerRegistry:
 
                 platform_raw_event = str(header.get("raw_event") or "").strip()
                 raw_filter_hdr = header.get("raw_filter", {})
-                raw_filt: dict[str, Any] = (
-                    dict(raw_filter_hdr) if isinstance(raw_filter_hdr, dict) else {}
-                )
+                raw_filt: dict[str, Any] = dict(raw_filter_hdr) if isinstance(raw_filter_hdr, dict) else {}
 
                 visibility = str(header.get("visibility") or "silent").strip().casefold()
                 if visibility not in {"display", "silent"}:

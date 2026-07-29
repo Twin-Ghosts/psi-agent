@@ -218,9 +218,7 @@ class SessionAgent:
             matched = self._trigger_registry.match(envelope)
             fired = await self._trigger_registry.dispatch(envelope, self)
 
-        logger.info(
-            f"POST /events ok event={envelope.event!r} matched={len(matched)} fired={fired!r}"
-        )
+        logger.info(f"POST /events ok event={envelope.event!r} matched={len(matched)} fired={fired!r}")
         return web.json_response(
             {
                 "ok": True,

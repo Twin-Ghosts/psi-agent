@@ -846,11 +846,7 @@ async def run_feishu(
             _register_approval_processor(channel, _on_approval)
             await _ensure_bot_identity(channel)
             # Agent-package channel_events/feishu → unified POST /events
-            root = (
-                await anyio.Path(agent_root).expanduser()
-                if agent_root.strip()
-                else anyio.Path.cwd()
-            )
+            root = await anyio.Path(agent_root).expanduser() if agent_root.strip() else anyio.Path.cwd()
             root_resolved = Path(await root.resolve())
             # TaskGroup owns synthetic producers; cancel with Channel shutdown.
             async with anyio.create_task_group() as events_tg:

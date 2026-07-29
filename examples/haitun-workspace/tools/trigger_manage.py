@@ -49,10 +49,7 @@ def _validate_trigger_name(trigger_name: str) -> str | None:
     if "\x00" in trigger_name:
         return f"Invalid trigger name {trigger_name!r}: must not contain null characters."
     if not re.fullmatch(r"[A-Za-z0-9_-]+", trigger_name):
-        return (
-            f"Invalid trigger name {trigger_name!r}: "
-            "only letters, digits, hyphens, and underscores are allowed."
-        )
+        return f"Invalid trigger name {trigger_name!r}: only letters, digits, hyphens, and underscores are allowed."
     return None
 
 

@@ -21,9 +21,7 @@ def map_event(raw: dict[str, Any]) -> list[dict[str, Any]]:
     operator = event.get("operator_id") or event.get("operator") or {}
     operator_open_id = ""
     if isinstance(operator, dict):
-        operator_open_id = str(
-            operator.get("open_id") or operator.get("user_id") or ""
-        ).strip()
+        operator_open_id = str(operator.get("open_id") or operator.get("user_id") or "").strip()
 
     users = event.get("users") or event.get("user_list") or []
     if not isinstance(users, list) or not users:
