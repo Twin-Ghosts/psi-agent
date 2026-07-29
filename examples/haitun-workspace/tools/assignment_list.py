@@ -10,9 +10,7 @@ async def assignment_list(
 ) -> str:
     """List Fusion Memory organization work assignments."""
     normalized_participant = (
-        participant_user_id.strip()
-        if isinstance(participant_user_id, str) and participant_user_id.strip()
-        else None
+        participant_user_id.strip() if isinstance(participant_user_id, str) and participant_user_id.strip() else None
     )
     normalized_state = state.strip() if isinstance(state, str) and state.strip() else None
     if participant_user_id is not None and normalized_participant is None:

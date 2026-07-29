@@ -165,8 +165,7 @@ def _import_assignment_tool_with_fake_client(name: str, fake_client: _FakeMemory
     sys.modules.pop(name, None)
     assignment_common = TOOLS_DIR / "_assignment_tool_common.py"
     common_name = (
-        "fusion_memory_tool__assignment_tool_common_"
-        f"{hashlib.sha256(str(assignment_common).encode()).hexdigest()[:12]}"
+        f"fusion_memory_tool__assignment_tool_common_{hashlib.sha256(str(assignment_common).encode()).hexdigest()[:12]}"
     )
     fake_common_module = types.ModuleType(common_name)
     fake_common_module.CLIENT = fake_client
