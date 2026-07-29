@@ -79,7 +79,7 @@ service tools:
 
 ## Channel events (`channel_events/`)
 
-**定事信号源（交付对接）**：有「每次 xx 就…」类需求且 xx 可观测时，在 **`channel_events/<channel>/`** 按需注册事件（≈ 加 tool），**不要**改 Session catalog。必读：`docs/superpowers/specs/2026-07-29-channel-events-developer-guide.md`。挂钩仍用 `triggers/` + `trigger_manage`。
+**定事信号源（交付对接）**：有「每次 xx 就…」类需求且 xx 可观测时，在 **`channel_events/<channel>/`** 按需注册（官方：`map.py`；自定义：`produce.py`），≈ 加 tool；**不要**改 Session catalog，也**不要**为每个事件改 Channel 源码（Feishu 已统一接线）。必读：`docs/superpowers/specs/2026-07-29-channel-events-developer-guide.md`。挂钩仍用 `triggers/` + `trigger_manage`。
 
 ## Tools (`tools/`)
 

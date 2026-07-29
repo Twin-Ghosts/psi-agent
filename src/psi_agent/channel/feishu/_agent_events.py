@@ -1,8 +1,15 @@
-"""Wire agent-package ``channel_events/feishu`` into Feishu WS → Session ``/events``."""
+"""Wire agent-package ``channel_events/feishu`` into Feishu WS → Session ``/events``.
+
+- ``kind: platform_map`` — register CustomizedEventProcessor per ``platform_event``
+- ``kind: synthetic`` — start unified producer tasks (``produce.py``) in a TaskGroup
+
+After this wiring, new Feishu events are added only under the agent package.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -10,11 +17,20 @@ from loguru import logger
 
 from psi_agent.channel._core import ChannelCore
 from psi_agent.channel._event_defs import ChannelEventDef, load_channel_event_defs
+from psi_agent.channel._synthetic import start_synthetic_producers
 
 try:
     from lark_channel.event.custom import CustomizedEventProcessor
 except ImportError:  # pragma: no cover
     CustomizedEventProcessor = None  # type: ignore[misc, assignment]
+
+
+@dataclass(frozen=True, slots=True)
+class FeishuAgentEventsStats:
+    """How many Feishu agent-package events were wired at Channel start."""
+
+    platform_processors: int
+    synthetic_producers: int
 
 
 def _raw_to_dict(raw: Any) -> dict[str, Any]:
@@ -46,20 +62,39 @@ async def register_feishu_agent_events(
     agent_root: Path,
     resolve_core: Callable[[str | None], Awaitable[ChannelCore]],
     portal_start: Callable[..., Any],
-) -> int:
-    """Load ``channel_events/feishu`` and register platform_map processors.
+    task_group: Any | None = None,
+) -> FeishuAgentEventsStats:
+    """Load ``channel_events/feishu``; register platform_map + start synthetics.
 
-    Must run **after** ``start_background()`` (dispatcher rebuild). Returns
-    how many platform_event processors were registered.
+    Must run **after** ``start_background()`` (dispatcher rebuild). Pass an
+    open ``anyio`` TaskGroup so synthetic producers cancel with Channel.
     """
+    defs = await load_channel_event_defs(agent_root, "feishu")
+    platform_n = _register_platform_map(defs, channel, resolve_core, portal_start)
+    synthetic_n = 0
+    if task_group is not None:
+        synthetic_n = start_synthetic_producers(defs, resolve_core=resolve_core, task_group=task_group)
+    elif any(d.kind == "synthetic" and d.produce_fn for d in defs):
+        logger.warning("synthetic channel_events present but no task_group — producers not started")
+    return FeishuAgentEventsStats(
+        platform_processors=platform_n,
+        synthetic_producers=synthetic_n,
+    )
+
+
+def _register_platform_map(
+    defs: list[ChannelEventDef],
+    channel: Any,
+    resolve_core: Callable[[str | None], Awaitable[ChannelCore]],
+    portal_start: Callable[..., Any],
+) -> int:
     if CustomizedEventProcessor is None:
         logger.warning("lark_channel CustomizedEventProcessor missing — agent events off")
         return 0
 
-    defs = await load_channel_event_defs(agent_root, "feishu")
     platform_defs = [d for d in defs if d.kind == "platform_map" and d.map_fn and d.platform_event]
     if not platform_defs:
-        logger.info(f"No feishu platform_map events under {agent_root / 'channel_events' / 'feishu'}")
+        logger.info("No feishu platform_map events under channel_events/feishu")
         return 0
 
     dispatcher = getattr(channel, "dispatcher", None)

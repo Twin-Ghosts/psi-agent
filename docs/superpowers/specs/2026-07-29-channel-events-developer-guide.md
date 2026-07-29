@@ -1,7 +1,21 @@
 # 开发者对接：`channel_events`（按需反复注册触发事件）
 
-> **交付物**（2026-07-29）：定事能力引入了一块**新的维护空间**。后续开发者接到「用户想要每次有 xx 就提醒/干活」类需求时，**默认动作是来这里注册事件**，而不是改 Session catalog，也不是只写 skill。  
+> **交付物**（2026-07-29）：定事能力引入了一块**新的维护空间**。后续开发者接到「用户想要每次有 xx 就提醒/干活」类需求时，**默认动作是来这里注册事件**，而不是改 Session catalog，也不是只写 skill，也**不要**改 `src/psi_agent/channel`。  
 > 设计背景见同目录 `2026-07-29-channel-events-in-agent-package.md`。
+
+---
+
+## 验收目标（本次提交之后）
+
+在**当前已接线的 Channel**（Feishu）下：
+
+| 要加… | 改哪里 | 不改哪里 |
+|--------|--------|----------|
+| 官方推送事件 | agent `channel_events/feishu/<slug>/`（`EVENT.yaml` + `map.py`） | Session / Channel 源码 |
+| 自定义合成事件 | 同上（`EVENT.yaml` + `produce.py`） | Session / Channel 源码 |
+| 进总线后的反应 | agent `triggers/`（`trigger_manage`） | Channel 源码 |
+
+**重启 Channel**（`--agent` / `PSI_AGENT` 指向该包）后生效。只有换 Channel 种类、扩框架接口、修 bug 才动 `src/psi_agent/channel`。
 
 ---
 
@@ -35,20 +49,32 @@ Session 只负责 `POST /events` 统一转发 + 按 TRIGGER 开火，**没有**�
 examples/haitun-workspace/channel_events/     # 或其他 Session --agent 包根
   README.md
   feishu/
-    member_added/          # 示例：有人进群
-      EVENT.yaml           # name / source / kind / platform_event
+    member_added/          # 官方：有人进群
+      EVENT.yaml           # kind: platform_map + platform_event
       map.py               # map_event(raw) -> list[envelope]
+    demo_tick/             # 自定义模板：kind synthetic
+      EVENT.yaml           # kind: synthetic
+      produce.py           # async produce(ctx) -> None；await ctx.emit(...)
 ```
 
 | 文件 | 作用 |
 |------|------|
-| `EVENT.yaml` | 公布稳定 `name`（TRIGGER 的 `event:`）、`platform_event`（官方推送类型）、`kind` |
-| `map.py` | 平台原始载荷 → Session 信封（可一对多，如多名新人） |
+| `EVENT.yaml` | 稳定 `name`（TRIGGER 的 `event:`）、`kind`、`platform_event`（仅官方） |
+| `map.py` | **官方** `platform_map`：平台原始载荷 → Session 信封 |
+| `produce.py` | **自定义** `synthetic`：长驻协程，条件满足时 `await ctx.emit(信封)` |
 
-框架胶水（一般不用改业务清单）：
+**生产者在哪**：
+
+| kind | 真正的生产者 | Channel 做什么 |
+|------|----------------|----------------|
+| `platform_map` | 飞书等平台推送 | 通用 on → `map.py` → `post_event` |
+| `synthetic` | agent 包里的 `produce.py`（统一 runner 启动） | 启动/取消任务 + `ctx.emit` → `post_event` |
+
+框架胶水（**一般不要为业务事件改这些**）：
 
 - 加载：`src/psi_agent/channel/_event_defs.py`
-- Feishu 注册转发：`src/psi_agent/channel/feishu/_agent_events.py`
+- 合成 runner：`src/psi_agent/channel/_synthetic.py`
+- Feishu 接线：`src/psi_agent/channel/feishu/_agent_events.py`
 - 管道：`ChannelCore.post_event` → Session `POST /events`
 
 Feishu Channel 启动需指向同一 agent 包：`--agent` 或 `PSI_AGENT`。
@@ -57,14 +83,22 @@ Feishu Channel 启动需指向同一 agent 包：`--agent` 或 `PSI_AGENT`。
 
 ## 加一条事件的检查清单
 
-1. 确认有可观测信号（官方 event / 可合成条件）。  
-2. 新建 `channel_events/<channel>/<slug>/`。  
-3. 写 `EVENT.yaml`（`kind: platform_map` 时填 `platform_event`）。  
-4. 写 `map.py`：`def map_event(raw: dict) -> list[dict]`，信封含 `source` / `event` / `payload`（建议带 `raw_event`、`idempotency_key`、`routing.open_id`）。  
-5. 飞书后台订好对应事件与权限。  
-6. **重启 Channel**（defs 在启动时加载）。  
-7. 更新 skill 对照表（如 `skills/feishu-event-remind`）只列**已接通**名。  
-8. 需要时补单测（map + load）。
+### A. 官方推送（`platform_map`）
+
+1. 确认飞书有对应官方 event + 权限/订阅。  
+2. 新建 `channel_events/feishu/<slug>/`。  
+3. `EVENT.yaml`：`kind: platform_map` + `platform_event`。  
+4. `map.py`：`def map_event(raw: dict) -> list[dict]`。  
+5. 重启 Channel；更新 skill 对照表（只列已接通名）。  
+
+### B. 自定义合成（`synthetic`）
+
+1. 确认有可观测条件（轮询 API、组合状态、内部信号等）。  
+2. 新建目录（可复制 `demo_tick/`）。  
+3. `EVENT.yaml`：`kind: synthetic`（**不要**填 `platform_event`）。  
+4. `produce.py`：`async def produce(ctx)` — 循环/等待；`await ctx.emit({...})`；可用 `anyio.sleep`；Channel 关停会 cancel。  
+5. `ctx.event_name` / `ctx.source` 已由框架填好；信封建议带 `payload`、`idempotency_key`、`routing.open_id`。  
+6. 重启 Channel；需要时订 `triggers/`。  
 
 挂钩（提醒文案、调哪个工具）用 `trigger_manage` / `triggers/`，**不要**在 `channel_events` 里写业务动作。
 
@@ -87,5 +121,7 @@ Feishu Channel 启动需指向同一 agent 包：`--agent` 或 `PSI_AGENT`。
 ## 刻意为之（勿当 bug 修）
 
 - Session **无**业务 catalog 硬门槛；未匹配 TRIGGER 时 `matched/fired` 可为空。  
-- 官方推送与（预留）合成事件都走**同一** `POST /events`。  
-- 任意 NL「xx 事」永远可行 —— **不承诺**；未接通就明确说暂不支持。
+- 官方推送与合成事件都走**同一** `POST /events`。  
+- Feishu 下新事件默认**只改 agent 包**；不要为每个事件在 Channel 再写一个 onXxx。  
+- 任意 NL「xx 事」永远可行 —— **不承诺**；未接通就明确说暂不支持。  
+- `demo_tick` 默认空转；仅 `HAITUN_CHANNEL_EVENTS_DEMO=1` 时发一次演示信封，正式业务勿复用其 `name`。

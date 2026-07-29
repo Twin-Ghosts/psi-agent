@@ -35,12 +35,14 @@ TriggerRegistry 匹配 triggers/ → fire
 
 ```text
 {agent}/channel_events/feishu/<slug>/
-  EVENT.yaml     # name, source, kind=platform_map|synthetic, platform_event
-  map.py         # def map_event(raw) -> list[envelope_dict]
+  EVENT.yaml     # name, source, kind=platform_map|synthetic, platform_event?
+  map.py         # platform_map: def map_event(raw) -> list[envelope_dict]
+  produce.py     # synthetic: async def produce(ctx); await ctx.emit(envelope)
 ```
 
-Feishu Channel：`--agent` / `PSI_AGENT` 指向该包；启动后注册 `platform_event`。
+Feishu Channel：`--agent` / `PSI_AGENT` 指向该包；启动后注册 `platform_event`，并在 TaskGroup 中启动全部 `synthetic` 的 `produce.py`。
 
+**验收**：Feishu 接线完成后，后续开发者只按 developer guide 改 agent 包即可，不必再为每个事件改 Channel 源码。
 ---
 
 ## Session 接口

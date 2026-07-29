@@ -852,14 +852,21 @@ async def run_feishu(
                 else anyio.Path.cwd()
             )
             root_resolved = Path(await root.resolve())
-            n = await register_feishu_agent_events(
-                channel=channel,
-                agent_root=root_resolved,
-                resolve_core=resolve_core,
-                portal_start=portal.start_task_soon,
-            )
-            logger.info(f"Feishu agent channel_events registered processors={n} root={root_resolved}")
-            await anyio.sleep_forever()
+            # TaskGroup owns synthetic producers; cancel with Channel shutdown.
+            async with anyio.create_task_group() as events_tg:
+                stats = await register_feishu_agent_events(
+                    channel=channel,
+                    agent_root=root_resolved,
+                    resolve_core=resolve_core,
+                    portal_start=portal.start_task_soon,
+                    task_group=events_tg,
+                )
+                logger.info(
+                    f"Feishu agent channel_events root={root_resolved} "
+                    f"platform_processors={stats.platform_processors} "
+                    f"synthetic_producers={stats.synthetic_producers}"
+                )
+                await anyio.sleep_forever()
         finally:
             logger.info("Shutting down Feishu bot")
             with anyio.CancelScope(shield=True):
