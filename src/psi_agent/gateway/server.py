@@ -96,9 +96,14 @@ async def _handle_spa_index(request: web.Request) -> web.Response:
     return web.Response(text=body, content_type="text/html", charset="utf-8")
 
 
+def _gateway_spa_root() -> anyio.Path:
+    """Package dir that owns ``spa/`` and ``spa-v2/`` (tests may monkeypatch)."""
+    return anyio.Path(__file__).parent
+
+
 async def _handle_spa_v2_index(request: web.Request) -> web.Response:
     app_name: str = request.app["app_name"]
-    base = anyio.Path(__file__).parent / "spa-v2"
+    base = _gateway_spa_root() / "spa-v2"
     template: str | None = None
     for rel in ("dist/index.html", "index.html"):
         path = base / rel
@@ -187,21 +192,24 @@ async def create_app(
     app["default_workspace"] = default_workspace
     app["appdata"] = appdata
 
-    spa_dist = anyio.Path(__file__).parent / "spa" / "dist"
-    spa_v2_dist = anyio.Path(__file__).parent / "spa-v2" / "dist"
+    spa_root = _gateway_spa_root()
+    spa_dist = spa_root / "spa" / "dist"
+    spa_v2_dist = spa_root / "spa-v2" / "dist"
+    # Register directory redirects before add_static: aiohttp matches static
+    # ``/spa-v2/`` first when registered earlier, and show_index=False → 403.
     app.router.add_get("/spa/index.html", _handle_spa_index)
-    if await spa_dist.exists():
-        app.router.add_static("/spa/", str(spa_dist), show_index=False)
     app.router.add_get("/spa", _handle_spa)
     app.router.add_get("/spa/", _handle_spa)
+    if await spa_dist.exists():
+        app.router.add_static("/spa/", str(spa_dist), show_index=False)
 
     app.router.add_get("/spa-v2/index.html", _handle_spa_v2_index)
     if await spa_v2_dist.exists():
-        app.router.add_static("/spa-v2/", str(spa_v2_dist), show_index=False)
         logger.info(f"SPA v2 (default) enabled, serving {spa_v2_dist}")
         app.router.add_get("/", _handle_spa_v2)
         app.router.add_get("/spa-v2", _handle_spa_v2)
         app.router.add_get("/spa-v2/", _handle_spa_v2)
+        app.router.add_static("/spa-v2/", str(spa_v2_dist), show_index=False)
     else:
         app.router.add_get("/", _handle_spa)
     if favicon_path is not None:

@@ -47,7 +47,22 @@
 ```
 
 **新建任务输入**：单个大框（对齐总览 `context-chat`）——框内上部是预设快捷按钮（单行），底部是细条真输入（回形针 + 文本框 + 发送）；附件 chip 在细条上方。发送时随首轮 `streamSessionChat` 上传；可纯附件无文案。页内「返回任务总览」始终回总览（`goHome`）；顶栏在从模板进入时可显示「返回模板库」（`newTaskReturnView`）。
-**模型选择（防踩坑）**：启动 / 新建任务不盲选 `ais[0]`。池里若已有真实 key，会清掉残留的 `haitun-default` 占位项，并优先用户选中（localStorage）的 AI；仅空池才走免费远程。Session 创建时固定 `ai_id`——已绑坏 AI 的旧任务需新建。**刻意为之**：空池（「使用免费模型」）只弹模型面板、不选 AI，**仍加载** `GET /sessions`——勿在空池分支提前 return，否则刷新后任务卡全空、像「记录没了」（服务端 Session/JSONL 仍在）。
+**模型选择（防踩坑） / 启动渲染管线（刷新稳定）**：
+
+```text
+GET /spa-v2/     → 302 → index.html（redirect 须先于 add_static，否则 403）
+App              → GET /defaults → 选定 workspace（localStorage / defaults）
+Workbench boot   → GET /sessions + /titles
+                 → hydrateAiForSessions(session.ai_id…)
+                      purgePlaceholderAis
+                      reviveMissingSessionAis（同 id 复活免费后端）
+                 → setTasks（**从不**因空 AI 池跳过 sessions）
+                 → 仅池仍空时 openModelsOnce
+Hub「使用免费模型」→ clearAiPool → hydrateAiForSessions(全部 session) → 无 session 才 ensureDefaultAi
+发消息           → ensureSessionAi（同 id 复活，腰带）
+```
+
+不盲选 `ais[0]`。池里若已有真实 key，清掉残留 `haitun-default`；优先 localStorage 选中 AI。Gateway **不**级联删 Session——AI 被清后 Session 仍挂旧 `ai_id`；boot / 免费切换必须 **同 id 复活**，刷新后任务卡与可聊性不变。workspace 过滤用 `sessionMatchesWorkspace`（空 workspace 视为本工作区）。Session 创建时固定 `ai_id`。
 
 ### 任务卡三步进度（分层）
 

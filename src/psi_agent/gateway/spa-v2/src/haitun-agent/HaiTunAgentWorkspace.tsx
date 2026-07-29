@@ -57,7 +57,15 @@ import {
   setTitle,
   type AiInfo,
 } from "../services/api";
-import { ensureDefaultAi, pickPreferredAi, purgePlaceholderAis, writeStoredAiId } from "../services/bootstrapAi";
+import {
+  ensureDefaultAi,
+  ensureSessionAi,
+  hydrateAiForSessions,
+  pickPreferredAi,
+  purgePlaceholderAis,
+  readStoredAiId,
+  writeStoredAiId,
+} from "../services/bootstrapAi";
 import { chatFileToFile, filesToChatFiles } from "../services/chatFiles";
 import { filesFromClipboard } from "../services/clipboardFiles";
 import { onComposerEnterKey } from "../services/composerKeys";
@@ -74,6 +82,11 @@ import {
   withTodoProgress,
 } from "../services/sessionBridge";
 import { normalizeFailedTurns } from "../services/messageTurn";
+import {
+  normalizeWorkspacePath,
+  sessionBackendId,
+  sessionMatchesWorkspace,
+} from "../services/workspaceMatch";
 
 const OVERVIEW_WELCOME: ChatMessage = {
   role: "agent",
@@ -160,7 +173,7 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
   const historyLoadedRef = useRef<Set<string>>(new Set(["overview"]));
   /** Invalidate in-flight todo polls so a late streaming refresh cannot reopen 「产出与确认」. */
   const todoRefreshSeqRef = useRef<Record<string, number>>({});
-  const workspaceNorm = workspace.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  const workspaceNorm = normalizeWorkspacePath(workspace);
 
   const cards = useMemo(() => [{ id: "overview", title: OVERVIEW_LABEL }, ...tasks.map((task) => ({ id: task.id, title: task.shortTitle }))], [tasks]);
   const currentTask = currentIndex === 0 ? null : tasks[currentIndex - 1];
@@ -272,27 +285,20 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
       setBootReady(false);
       setOpenModelsOnce(false);
       try {
-        // Empty pool → open models panel. Do NOT POST free defaults on boot.
-        // Drop leftover haitun-default entries when the user already has a real key.
-        // **刻意为之**：无论 AI 池是否为空都加载 sessions——「使用免费模型」会清空池，
-        // 若提前 return 会把已有任务卡整表丢掉，刷新后像「记录没了」（Session 仍在 Gateway）。
-        const ais = await purgePlaceholderAis();
-        if (cancelled) return;
-        if (!Array.isArray(ais) || ais.length === 0) {
-          setAiId(null);
-          writeStoredAiId(null);
-          setOpenModelsOnce(true);
-        } else {
-          const preferred = pickPreferredAi(ais, null);
-          setAiId(preferred?.id ?? null);
-          if (preferred?.id) writeStoredAiId(preferred.id);
-        }
+        // One hydrate pipeline: sessions → revive dangling AI → titles → tasks.
+        // Empty AI must not skip sessions; missing Session backends must not survive refresh.
         const [sessions, titles] = await Promise.all([listSessions(), listTitles()]);
         if (cancelled) return;
-        const inWs = sessions.filter((s) => {
-          const w = (s.workspace || "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-          return !w || w === workspaceNorm;
-        });
+        const inWs = sessions.filter((s) =>
+          sessionMatchesWorkspace(s.workspace, workspaceNorm),
+        );
+        const { preferred, openModels } = await hydrateAiForSessions(
+          inWs.map((s) => sessionBackendId(s)),
+          readStoredAiId(),
+        );
+        if (cancelled) return;
+        setAiId(preferred?.id ?? null);
+        setOpenModelsOnce(openModels);
         const mapped = inWs.map((s) => sessionToTask(s, titles[s.id] || "新任务"));
         setTasks(mapped);
         historyLoadedRef.current = new Set(["overview"]);
@@ -485,6 +491,57 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
     files: Array<File | ChatFile> = [],
     titleSource?: string,
   ) => {
+    // 「使用免费模型」会 clearAiPool，但 Session 仍挂着旧 ai_id → 复活同 id 免费后端。
+    try {
+      const sessions = await listSessions();
+      const sess = sessions.find((s) => s.id === cardId);
+      const backendId = sess?.ai_id || sess?.backend_id;
+      const ai = await ensureSessionAi(backendId);
+      if (!ai?.id) {
+        showToast("没有可用 AI，请先在大模型中连接，或检查免费模型网络");
+        setOpenModelsOnce(true);
+        setMessages((current) => {
+          const list = [...(current[cardId] ?? [])];
+          for (let i = list.length - 1; i >= 0; i--) {
+            if (list[i]?.role === "agent" && !(list[i]?.text || "").trim()) {
+              list.splice(i, 1);
+              break;
+            }
+          }
+          for (let i = list.length - 1; i >= 0; i--) {
+            if (list[i]?.role === "user") {
+              list[i] = { ...list[i]!, failed: true, failedReason: "error" };
+              break;
+            }
+          }
+          return { ...current, [cardId]: list };
+        });
+        return;
+      }
+      setAiId(ai.id);
+      writeStoredAiId(ai.id);
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "模型不可用");
+      setOpenModelsOnce(true);
+      setMessages((current) => {
+        const list = [...(current[cardId] ?? [])];
+        for (let i = list.length - 1; i >= 0; i--) {
+          if (list[i]?.role === "agent" && !(list[i]?.text || "").trim()) {
+            list.splice(i, 1);
+            break;
+          }
+        }
+        for (let i = list.length - 1; i >= 0; i--) {
+          if (list[i]?.role === "user") {
+            list[i] = { ...list[i]!, failed: true, failedReason: "error" };
+            break;
+          }
+        }
+        return { ...current, [cardId]: list };
+      });
+      return;
+    }
+
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;

@@ -1,10 +1,20 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AiInfo } from './api'
 import {
+  hydrateAiForSessions,
   isPlaceholderAi,
   pickPreferredAi,
   PLACEHOLDER_API_KEY,
+  reviveMissingSessionAis,
 } from './bootstrapAi'
+
+vi.mock('./api', () => ({
+  listAis: vi.fn(),
+  createAi: vi.fn(),
+  deleteAi: vi.fn(),
+}))
+
+import { createAi, deleteAi, listAis } from './api'
 
 const ai = (partial: Partial<AiInfo> & Pick<AiInfo, 'id' | 'api_key'>): AiInfo => ({
   id: partial.id,
@@ -42,5 +52,63 @@ describe('pickPreferredAi', () => {
 
   it('falls back to placeholder only when pool is free-only', () => {
     expect(pickPreferredAi([free])?.id).toBe('free')
+  })
+})
+
+describe('reviveMissingSessionAis', () => {
+  beforeEach(() => {
+    vi.mocked(listAis).mockReset()
+    vi.mocked(createAi).mockReset()
+    vi.mocked(deleteAi).mockReset()
+  })
+
+  it('recreates free AI under dangling session ids', async () => {
+    const revived = ai({ id: 'sess-ai', api_key: PLACEHOLDER_API_KEY, provider: 'openai' })
+    vi.mocked(listAis)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([revived])
+    vi.mocked(createAi).mockResolvedValue(revived)
+
+    const out = await reviveMissingSessionAis(['sess-ai', 'sess-ai', '  '])
+    expect(createAi).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'sess-ai', api_key: PLACEHOLDER_API_KEY }),
+    )
+    expect(out.map((a) => a.id)).toEqual(['sess-ai'])
+  })
+
+  it('skips ids already in the pool', async () => {
+    const existing = ai({ id: 'alive', api_key: 'sk-x' })
+    vi.mocked(listAis).mockResolvedValue([existing])
+    const out = await reviveMissingSessionAis(['alive'])
+    expect(createAi).not.toHaveBeenCalled()
+    expect(out).toEqual([existing])
+  })
+})
+
+describe('hydrateAiForSessions', () => {
+  beforeEach(() => {
+    vi.mocked(listAis).mockReset()
+    vi.mocked(createAi).mockReset()
+    vi.mocked(deleteAi).mockReset()
+  })
+
+  it('opens models only when pool stays empty', async () => {
+    vi.mocked(listAis).mockResolvedValue([])
+    const empty = await hydrateAiForSessions([])
+    expect(empty.openModels).toBe(true)
+    expect(empty.preferred).toBeNull()
+  })
+
+  it('revives session backends and does not open models', async () => {
+    const revived = ai({ id: 'old', api_key: PLACEHOLDER_API_KEY, provider: 'openai' })
+    vi.mocked(listAis)
+      .mockResolvedValueOnce([]) // purge
+      .mockResolvedValueOnce([]) // revive start
+      .mockResolvedValueOnce([revived]) // revive end
+    vi.mocked(createAi).mockResolvedValue(revived)
+
+    const out = await hydrateAiForSessions(['old'])
+    expect(out.openModels).toBe(false)
+    expect(out.preferred?.id).toBe('old')
   })
 })

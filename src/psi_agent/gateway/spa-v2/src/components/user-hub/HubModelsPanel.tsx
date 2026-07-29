@@ -1,8 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Bot } from 'lucide-react'
 import type { AiInfo } from '../../services/api'
-import { createAi, listAis } from '../../services/api'
-import { clearAiPool, purgePlaceholderAis, writeStoredAiId } from '../../services/bootstrapAi'
+import { createAi, listAis, listSessions } from '../../services/api'
+import {
+  clearAiPool,
+  ensureDefaultAi,
+  hydrateAiForSessions,
+  purgePlaceholderAis,
+  writeStoredAiId,
+} from '../../services/bootstrapAi'
+import { sessionBackendId } from '../../services/workspaceMatch'
 import {
   getModelPreset,
   MODEL_PRESETS,
@@ -73,19 +80,36 @@ export default function HubModelsPanel({
     }
   }
 
-  /** Free model = clear local config; remote defaults resolve lazily on first chat. */
+  /** Free model = clear local keys, then revive Session backends (same id) as free
+   * remotes so existing tasks stay chatable after refresh. No sessions → create one
+   * free default via ensureDefaultAi. */
   const useFreeModel = async () => {
     if (connecting) return
     setConnecting(true)
     try {
       await clearAiPool()
-      setAis([])
-      onAisChanged?.([])
-      onSelectAi(null)
-      onToast?.('已切换为免费模型（空配置，对话时走远程）')
+      const sessions = await listSessions().catch(() => [])
+      let { ais, preferred } = await hydrateAiForSessions(
+        sessions.map((s) => sessionBackendId(s)),
+        null,
+      )
+      if (ais.length === 0) {
+        preferred = await ensureDefaultAi(null)
+        ais = preferred ? await listAis() : []
+      }
+      setAis(ais)
+      onAisChanged?.(ais)
+      if (preferred?.id) {
+        onSelectAi(preferred.id)
+        writeStoredAiId(preferred.id)
+        onToast?.('已切换为免费模型（远程 deepseek-v4-flash）')
+      } else {
+        onSelectAi(null)
+        onToast?.('免费模型暂时不可用，请检查网络或改连自有 API')
+      }
       onClose()
     } catch (e) {
-      onToast?.(e instanceof Error ? e.message : '清空模型配置失败')
+      onToast?.(e instanceof Error ? e.message : '切换免费模型失败')
     } finally {
       setConnecting(false)
     }

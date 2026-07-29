@@ -448,6 +448,8 @@ Gateway 提供两套 Web 控制台：
 
 构建产物分别为 `spa/dist/`、`spa-v2/dist/`，由 Gateway 静态服务。**有 `spa-v2/dist` 时** `GET /` 重定向到 `/spa-v2/index.html`；否则回退 `/spa/index.html`。设计细节见各自目录下的 `AGENTS.md`。
 
+**（踩坑）目录入口路由须先于 `add_static` 注册**：`GET /spa-v2/`、`GET /spa/` 的 redirect 必须写在 `add_static(..., show_index=False)` 之前。否则 aiohttp 先命中静态目录、禁止列目录 → 浏览器看到 `403: Forbidden`（`/spa-v2/index.html` 仍可能 200）。
+
 CI 打包（PyInstaller / Nuitka）会分别 `npm ci && npm run build` 两个前端，并用 `--add-data` / `--include-data-dir` 同时打进 `spa/dist` 与 `spa-v2/dist`，安装包默认打开即为 v2。
 
 ### 技术栈（v1 概要）

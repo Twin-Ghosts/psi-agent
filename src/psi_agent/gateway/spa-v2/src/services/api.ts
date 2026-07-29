@@ -38,6 +38,8 @@ export type AiInfo = {
   provider: string
   model: string
   base_url: string
+  /** Present on GET /ais; used to detect free-path ``haitun-default``. */
+  api_key?: string
 }
 
 export async function createAi(body: {

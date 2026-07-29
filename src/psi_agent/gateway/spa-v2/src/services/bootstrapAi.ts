@@ -4,8 +4,10 @@ import { createAi, deleteAi, listAis, type AiInfo } from './api'
  * Remote free-model endpoint (company domain). Real upstream key lives only on
  * the VM behind this proxy; SPA ships a placeholder Bearer.
  *
- * Do NOT POST this on boot — empty pool must open the models panel first.
- * Create only when the user chose free mode and a session actually needs an AI.
+ * Do NOT POST this on boot when the pool is empty and there are no Sessions —
+ * open the models panel first. When Sessions already bind dangling ``ai_id``s,
+ * ``hydrateAiForSessions`` / ``reviveMissingSessionAis`` recreate free AIs under
+ * those ids so refresh does not break chat.
  */
 /** Aligns with Hub model pool DeepSeek preset (`deepseek-v4-flash`); key injected on VPS. */
 export const DEFAULT_REMOTE_AI = {
@@ -98,7 +100,7 @@ export async function purgePlaceholderAis(): Promise<AiInfo[]> {
 /**
  * Resolve an AI for chat/session when the pool is empty: create the remote
  * free default. If AIs already exist, return the preferred real one.
- * Call only at use time (new task / new session), never on SPA boot.
+ * Call only at use time (new task / new session), never on SPA boot alone.
  */
 export async function ensureDefaultAi(
   preferredId?: string | null,
@@ -122,4 +124,98 @@ export async function ensureDefaultAi(
   } catch {
     return null
   }
+}
+
+/**
+ * Recreate free remote AIs for Session ``ai_id``s missing from the pool.
+ *
+ * Gateway does not cascade-delete Sessions when AIs are wiped; refresh / 「使用
+ * 免费模型」 leave dangling backends. Same-id revive keeps history + titles.
+ */
+export async function reviveMissingSessionAis(
+  sessionAiIds: Iterable<string | null | undefined>,
+): Promise<AiInfo[]> {
+  const want = [
+    ...new Set(
+      [...sessionAiIds]
+        .map((id) => (typeof id === 'string' ? id.trim() : ''))
+        .filter((id) => id.length > 0),
+    ),
+  ]
+  let existing: AiInfo[] = []
+  try {
+    existing = await listAis()
+  } catch {
+    return []
+  }
+  if (!Array.isArray(existing)) existing = []
+  const have = new Set(existing.map((a) => a.id))
+  for (const id of want) {
+    if (have.has(id)) continue
+    try {
+      const revived = await createAi({ ...DEFAULT_REMOTE_AI, id })
+      if (revived?.id) {
+        have.add(revived.id)
+        existing = [...existing, revived]
+      }
+    } catch {
+      // Race: already exists — refresh membership from server.
+      try {
+        existing = await listAis()
+        for (const a of existing) have.add(a.id)
+      } catch {
+        /* keep going */
+      }
+    }
+  }
+  try {
+    return await listAis()
+  } catch {
+    return existing
+  }
+}
+
+/**
+ * Single workbench AI hydrate (boot + Hub free-switch share this).
+ *
+ * 1. Drop leftover free placeholders when a real key exists
+ * 2. Revive dangling Session backends as free remotes (same id)
+ * 3. Pick UI selection; only open models when the pool is still empty
+ */
+export async function hydrateAiForSessions(
+  sessionAiIds: Iterable<string | null | undefined>,
+  preferredId?: string | null,
+): Promise<{ ais: AiInfo[]; preferred: AiInfo | null; openModels: boolean }> {
+  await purgePlaceholderAis()
+  const ais = await reviveMissingSessionAis(sessionAiIds)
+  const preferred = pickPreferredAi(ais, preferredId)
+  if (preferred?.id) writeStoredAiId(preferred.id)
+  return {
+    ais,
+    preferred,
+    openModels: ais.length === 0,
+  }
+}
+
+/**
+ * Keep an existing Session's backend alive after 「使用免费模型」 wiped the pool.
+ *
+ * Sessions keep their ``ai_id``; ``clearAiPool`` deletes the AI entry, so chat
+ * would hit a dead socket. Recreate the free remote AI under the **same id**
+ * (no Session delete → history/titles stay). If there is no prior id, fall back
+ * to ``ensureDefaultAi``.
+ */
+export async function ensureSessionAi(
+  sessionAiId?: string | null,
+): Promise<AiInfo | null> {
+  const want = sessionAiId?.trim() || null
+  if (want) {
+    const revived = await reviveMissingSessionAis([want])
+    const hit = revived.find((a) => a.id === want)
+    if (hit) {
+      writeStoredAiId(hit.id)
+      return hit
+    }
+  }
+  return ensureDefaultAi(want)
 }
