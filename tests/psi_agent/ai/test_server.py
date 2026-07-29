@@ -141,3 +141,90 @@ async def test_handler_strips_internal_routing_before_calling_the_external_provi
 
     assert "routing" not in received_provider_kwargs
     assert received_provider_kwargs["temperature"] == 0.2
+
+
+@pytest.mark.anyio
+async def test_upstream_retry_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The handler should retry on upstream acompletion failure and succeed if subsequent retry succeeds."""
+    call_count = 0
+    stream = _TrackingStream([_FakeChunk()])
+
+    async def fake_acompletion(**kwargs: Any) -> _TrackingStream:
+        nonlocal call_count
+        call_count += 1
+        if call_count < 2:
+            raise RuntimeError("Upstream temporary fail")
+        return stream
+
+    monkeypatch.setattr("psi_agent.ai.server.acompletion", fake_acompletion)
+
+    app = web.Application()
+    app["provider"] = "openai"
+    app["model"] = "test"
+    app["api_key"] = "k"
+    app["base_url"] = "http://upstream"
+    app["max_context_tokens"] = 0
+    app.router.add_post("/chat/completions", handle_chat_completions)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    site = web.SockSite(runner, sock)
+    await site.start()
+    await anyio.sleep(0.1)
+
+    socket_path = f"http://127.0.0.1:{sock.getsockname()[1]}"
+    try:
+        await _drain(socket_path)
+        assert call_count == 2
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.anyio
+async def test_upstream_retry_failure_streams_error_chunk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """If all retry attempts fail, the handler should return an HTTP 200 and stream an SSE error chunk."""
+    call_count = 0
+
+    async def fake_acompletion(**kwargs: Any) -> _TrackingStream:
+        nonlocal call_count
+        call_count += 1
+        raise RuntimeError("Upstream permanent fail")
+
+    monkeypatch.setattr("psi_agent.ai.server.acompletion", fake_acompletion)
+
+    app = web.Application()
+    app["provider"] = "openai"
+    app["model"] = "test"
+    app["api_key"] = "k"
+    app["base_url"] = "http://upstream"
+    app["max_context_tokens"] = 0
+    app.router.add_post("/chat/completions", handle_chat_completions)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    site = web.SockSite(runner, sock)
+    await site.start()
+    await anyio.sleep(0.1)
+
+    socket_path = f"http://127.0.0.1:{sock.getsockname()[1]}"
+    try:
+        body = {"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True}
+        async with (
+            ClientSession() as s,
+            s.post(f"{socket_path}/chat/completions", json=body) as resp,
+        ):
+            assert resp.status == 200
+            chunks = []
+            async for raw_line in resp.content:
+                line = raw_line.decode().strip()
+                if line.startswith("data: "):
+                    chunks.append(json.loads(line[6:]))
+            assert len(chunks) == 1
+            error_chunk = chunks[0]
+            assert error_chunk["choices"][0]["finish_reason"] == "error"
+            assert "[Upstream Error]" in error_chunk["choices"][0]["delta"]["content"]
+        assert call_count == 3  # Initial attempt + 2 retries = 3 total attempts
+    finally:
+        await runner.cleanup()
