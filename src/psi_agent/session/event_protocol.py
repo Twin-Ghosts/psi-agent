@@ -12,7 +12,7 @@ See ``session/AGENTS.md`` § Event / Trigger and
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 SCHEMA_VERSION = 1
 
@@ -82,7 +82,7 @@ def parse_event_envelope(raw: object) -> EventEnvelope:
     payload_raw = raw.get("payload")
     if not isinstance(payload_raw, dict):
         raise EventProtocolError("payload must be a JSON object")
-    payload: dict[str, Any] = dict(payload_raw)
+    payload = cast(dict[str, Any], payload_raw).copy()
 
     occurred_at = raw.get("occurred_at", "")
     if occurred_at is None:
@@ -121,9 +121,9 @@ def parse_event_envelope(raw: object) -> EventEnvelope:
         payload=payload,
         occurred_at=occurred_at.strip(),
         idempotency_key=idem.strip(),
-        routing=dict(routing_raw),
+        routing=cast(dict[str, Any], routing_raw).copy(),
         raw_event=raw_event.strip(),
-        raw_payload=dict(raw_payload_raw),
+        raw_payload=cast(dict[str, Any], raw_payload_raw).copy(),
     )
 
 

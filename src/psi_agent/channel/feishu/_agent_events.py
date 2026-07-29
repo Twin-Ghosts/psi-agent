@@ -19,10 +19,13 @@ from psi_agent.channel._core import ChannelCore
 from psi_agent.channel._event_defs import ChannelEventDef, load_channel_event_defs
 from psi_agent.channel._synthetic import start_synthetic_producers
 
+_CustomizedEventProcessor: Any = None
 try:
-    from lark_channel.event.custom import CustomizedEventProcessor
+    from lark_channel.event.custom import CustomizedEventProcessor as _CEP
+
+    _CustomizedEventProcessor = _CEP
 except ImportError:  # pragma: no cover
-    CustomizedEventProcessor = None  # type: ignore[misc, assignment]
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +91,7 @@ def _register_platform_map(
     resolve_core: Callable[[str | None], Awaitable[ChannelCore]],
     portal_start: Callable[..., Any],
 ) -> int:
-    if CustomizedEventProcessor is None:
+    if _CustomizedEventProcessor is None:
         logger.warning("lark_channel CustomizedEventProcessor missing — agent events off")
         return 0
 
@@ -118,7 +121,7 @@ def _register_platform_map(
                     logger.warning(f"schedule agent event {_edef.name!r} failed — {e!r}")
 
             try:
-                proc_map[key] = CustomizedEventProcessor(_on_event)
+                proc_map[key] = _CustomizedEventProcessor(_on_event)
                 registered += 1
                 logger.info(f"Registered channel event {edef.name!r} → {key}")
             except Exception as e:
