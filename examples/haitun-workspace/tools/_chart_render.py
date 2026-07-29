@@ -62,6 +62,13 @@ _INK = "#1F2329"  # primary text
 _MUTED = "#646A73"  # secondary text / tick labels
 _GRID = "#E5E6EB"  # gridlines, spines
 
+# Tags for the texts the panel closing pass has to find again. Position and content can't
+# identify them: a funnel's in-bar text and a heatmap's cell values are also axes texts,
+# and touching one of those would delete data from the chart.
+_GLYPH_KEY_GID = "psi-glyph-key"  # the "◇ 均值 — 中位数" key under a box plot
+_DONUT_TOTAL_GID = "psi-donut-total"  # the total in a donut's hole
+_DONUT_UNIT_GID = "psi-donut-unit"  # the "合计" caption under it
+
 # Rendered at 8x4.5in @ 200 DPI = 1600x900 px. Wide enough for a dense time axis,
 # 16:9 so it never dominates the page when Feishu scales it to column width.
 _FIG_W, _FIG_H, _DPI = 8.0, 4.5, 200
@@ -235,17 +242,153 @@ def _set_title(ax: Any, title: str, *, has_legend: bool) -> None:
 
     Panel mode never promotes: ``suptitle`` belongs to the figure, and in a combined
     figure that slot holds the figure's own title (or nothing) — a panel writing there
-    would erase its neighbour's. Inside a panel the legend is anchored to that panel's
-    axes, so an axes title placed above it with extra pad clears it just as well.
+    would erase its neighbour's. Instead the title is padded clear of the legend by the
+    legend's own measured height (``_pad_title_above_legend``). A *fixed* pad can't do it:
+    the legend is one to three rows depending on how many series the panel has, and a pad
+    that clears three rows leaves a chasm above a panel with one.
     """
     if not title:
         return
     if _panel_mode.get():
-        ax.set_title(title, loc="left", fontsize=13, pad=24 if has_legend else 10)
+        # The pad that lifts this clear of the legend is applied in a closing pass over
+        # the whole figure, not here: `_tag_panel` re-sets the title to prefix "(a)" and
+        # would reset any pad set now.
+        ax.set_title(title, loc="left", fontsize=13)
     elif has_legend:
         ax.figure.suptitle(title, x=0.01, ha="left", fontsize=17, fontweight="bold", color=_INK)
     else:
         ax.set_title(title, loc="left")
+
+
+def _lift_panel_titles_above_legends(fig: Any) -> None:
+    """Raise each panel's title until it clears the legend sitting above that panel.
+
+    In a single chart the two never meet: a title competing with a legend is promoted to
+    ``fig.suptitle`` and constrained layout stacks title / legend / axes into separate
+    bands. A panel can't use that figure-level slot, so both land just above the axes and
+    the legend swatches struck through the title — measured at 1600x900: legend spanning
+    821-884px with the title at 836-874px, entirely inside it.
+
+    Runs as a closing pass over the finished figure rather than from ``_set_title``,
+    because ``_tag_panel`` re-sets each title to prefix its "(a)" and would discard a pad
+    set earlier. Iterates to a fixed point: raising a title shrinks the axes, which moves
+    the legend that the next pad is measured against.
+
+    The pad is each legend's *measured* height plus a gap, never a constant — a legend is
+    one to three rows depending on the panel's series count, and a pad that clears three
+    rows leaves a chasm above a single-row one.
+    """
+    try:
+        renderer = fig.canvas.get_renderer()
+    except AttributeError:
+        return
+    from matplotlib import rcParams  # noqa: PLC0415
+
+    # matplotlib exposes no getter for a title's pad (``set_title(pad=…)`` is folded into
+    # a transform), so the running value is tracked here. Reading it back off the axes was
+    # the bug in the first attempt: the getter always returned the rcParam default, so each
+    # round recomputed from scratch instead of adding to the pad it had just applied.
+    pads: dict[Any, float] = {}
+    for _round in range(5):
+        if fig.get_layout_engine() is not None:
+            fig.get_layout_engine().execute(fig)
+        moved = False
+        for ax in fig.get_axes():
+            legend = ax.get_legend()
+            title = ax.get_title(loc="left")
+            if legend is None or not title:
+                continue
+            gap = legend.get_window_extent(renderer).y1 - ax.get_window_extent().y1
+            if gap <= 0:
+                continue
+            current = pads.get(ax, float(rcParams["axes.titlepad"]))
+            pads[ax] = current + (gap + 6.0) * 72.0 / _DPI  # px → points, set_title's unit
+            ax.set_title(title, loc="left", fontsize=13, pad=pads[ax])
+            moved = True
+        if not moved:
+            return
+
+
+def _settle_panel_annotations(fig: Any) -> None:
+    """Re-place, on the finished figure, the labels whose position depends on the layout.
+
+    Two kinds of text are positioned during the draw from measurements of an axes that
+    later changes size: the glyph key under a box plot (offset to clear the x tick labels)
+    and a bar's value label (headroom above the tallest bar). A panel's axes is a fraction
+    of the canvas the draw assumed, so both landed in the wrong place — the box key ran
+    into its own tick labels, and a column's top value pushed into the title band.
+
+    Rather than re-deriving each chart's own logic here, the fix is the two things that
+    always work after the fact: give the data extra headroom so value labels stay inside
+    the axes, and drop a glyph key that no longer has room below the ticks. Both are
+    checked against measured pixels, not chart type.
+    """
+    try:
+        renderer = fig.canvas.get_renderer()
+    except AttributeError:
+        return
+    if fig.get_layout_engine() is not None:
+        fig.get_layout_engine().execute(fig)
+    for ax in fig.get_axes():
+        _raise_ylim_for_top_labels(ax, renderer)
+        _fit_donut_centre(ax, renderer)
+    # Thinning has to come after the ylim work, which changes how many ticks the locator
+    # emits, and it re-runs the same logic the draw already applied — the draw measured a
+    # full-size axes, while a panel gets a fraction of that height, so ticks that cleared
+    # each other there overlap here (measured: 25px of pitch for 35px-tall labels).
+    if fig.get_layout_engine() is not None:
+        fig.get_layout_engine().execute(fig)
+    for ax in fig.get_axes():
+        _clip_ticks_to_view(ax)
+        _thin_tick_labels(ax)
+    if fig.get_layout_engine() is not None:
+        fig.get_layout_engine().execute(fig)
+    for ax in fig.get_axes():
+        _drop_note_colliding_with_ticks(ax, renderer)
+
+
+def _raise_ylim_for_top_labels(ax: Any, renderer: Any) -> None:
+    """Grow the y range until every value label sits inside the axes.
+
+    A bar label is drawn a few points above its bar, so on a short panel the tallest bar's
+    label ends up above the axes — in the title's band. Raising the top limit moves the
+    bars down within the same axes instead of moving the text, which keeps the label
+    attached to its bar. Only ever grows, and only for vertical bars: the y axis is what
+    the labels stick out of.
+    """
+    # The glyph key hangs *below* the axes by design, so it must not drive headroom above.
+    labels = [t for t in ax.texts if t.get_text().strip() and t.get_gid() != _GLYPH_KEY_GID]
+    if not labels or ax.get_yscale() != "linear":
+        return
+    top = ax.get_window_extent().y1
+    overflow = max((t.get_window_extent(renderer).y1 - top for t in labels), default=0.0)
+    if overflow <= 0:
+        return
+    low, high = ax.get_ylim()
+    span = high - low
+    height = ax.get_window_extent().height
+    if span <= 0 or height <= 0:
+        return
+    # Convert the overflow into data units and add it, plus a small margin.
+    ax.set_ylim(low, high + span * (overflow + 8.0) / height)
+
+
+def _drop_note_colliding_with_ticks(ax: Any, renderer: Any) -> None:
+    """Hide a glyph key that has come to overlap the tick labels it was placed under.
+
+    The key is a convenience ("◇ 均值 — 中位数"), while a tick label names the data, so if
+    only one can be legible it must be the tick. The alternative — pushing the key further
+    down — walks it off the panel, where a reader sees a clipped half-line.
+    """
+    keys = [t for t in ax.texts if t.get_gid() == _GLYPH_KEY_GID and t.get_visible()]
+    ticks = [t for t in ax.get_xticklabels() if t.get_text().strip() and t.get_visible()]
+    if not keys or not ticks:
+        return
+    boxes = [t.get_window_extent(renderer) for t in ticks]
+    for note in keys:
+        box = note.get_window_extent(renderer)
+        if any(box.x0 < b.x1 and b.x0 < box.x1 and box.y0 < b.y1 and b.y0 < box.y1 for b in boxes):
+            note.set_visible(False)
 
 
 def _legend_note(ax: Any, note: str) -> None:
@@ -273,7 +416,7 @@ def _legend_note(ax: Any, note: str) -> None:
         for text in ax.get_xticklabels():
             if text.get_text().strip() and text.get_visible():
                 drop = max(drop, floor - text.get_window_extent(renderer=renderer).y0)
-    ax.annotate(
+    placed = ax.annotate(
         note,
         xy=(1.0, 0),
         xycoords="axes fraction",
@@ -284,6 +427,10 @@ def _legend_note(ax: Any, note: str) -> None:
         ha="right",
         va="top",
     )
+    # Tagged so the panel closing pass can find this specific annotation. It can't be
+    # identified by position or content: a funnel's in-bar text and a heatmap's cell values
+    # are also axes texts, and hiding one of those would delete data from the chart.
+    placed.set_gid(_GLYPH_KEY_GID)
 
 
 def _clip_ticks_to_view(ax: Any) -> None:
@@ -988,6 +1135,9 @@ def _render_panels_sync(
             fig.suptitle(figure_title, x=0.01, ha="left", fontsize=18, fontweight="bold", color=_INK)
         if source:
             fig.supxlabel(f"数据来源：{source}", fontsize=10, color=_MUTED, ha="left", x=0.01)  # noqa: RUF001
+        # After the tags and the figure-level text, so it measures the final layout.
+        _lift_panel_titles_above_legends(fig)
+        _settle_panel_annotations(fig)
         fig.savefig(out_path, format="png", facecolor="white")
     finally:
         _panel_mode.reset(token)
@@ -1018,6 +1168,65 @@ def _fold_tail(
     out_labels = [labels[i] for i in head] + [other_name]
     out_values = [values[i] for i in head] + [sum(values[i] for i in tail)]
     return out_labels, out_values, len(tail)
+
+
+def _fit_donut_centre(ax: Any, renderer: Any) -> None:
+    """Shrink a donut's centre total until it fits inside the hole.
+
+    The total is written at a fixed 20pt, which suits a full-size chart: at 1600x900 the
+    hole is far wider than "1,010". In a panel the axes shrinks to a fraction of that (207px
+    across, against a 156px-wide total), so the same string overflowed the hole and inked
+    the slice percentages and its own "合计" label.
+
+    Both centre labels scale by the same ratio so the pair keeps its proportions. The
+    floor keeps the total legible; a donut squeezed below it is better reported as too
+    small than silently made unreadable.
+
+    The re-stack runs whether or not the shrink fired. Width is what decides the shrink,
+    but the two labels sit at offsets in *data* units, which a short axes makes taller in
+    pixels: a 2x2 grid gave a 1455x274 axes whose hole cleared "1,010" by 3px, so no
+    shrink, while the original offsets put the 59px total straight through 合计.
+    """
+    total = next((t for t in ax.texts if t.get_gid() == _DONUT_TOTAL_GID), None)
+    unit = next((t for t in ax.texts if t.get_gid() == _DONUT_UNIT_GID), None)
+    if total is None or unit is None:
+        return
+    # The ring is 0.42 of the radius wide, so the hole spans the remaining 0.58 across the
+    # centre. The pie is drawn to fill the axes, whose extent is known once laid out.
+    axes_box = ax.get_window_extent()
+    hole = min(axes_box.width, axes_box.height) * 0.58
+    widest = max(t.get_window_extent(renderer).width for t in (total, unit))
+    if hole > 0 and widest > hole:
+        ratio = max(0.4, hole / widest)
+        for text in (total, unit):
+            text.set_fontsize(text.get_fontsize() * ratio)
+    _stack_donut_centre(ax, renderer, total, unit)
+
+
+def _stack_donut_centre(ax: Any, renderer: Any, total: Any, unit: Any) -> None:
+    """Stack the donut's total over its "合计" using their measured heights.
+
+    The two offsets can't be constants (nor constants scaled by the shrink ratio, which
+    was the first attempt): the gap they need is a text height, and a height in *data*
+    units depends on how many pixels tall the axes currently is. Scaling the offsets down
+    alongside the font pulled the two labels into each other — a 45px-tall total centred
+    0.08*ratio above the middle, over a "合计" only 0.16*ratio below it, left the pair
+    overlapping by 22px.
+
+    So the gap is derived: convert each label's rendered height into data units and place
+    the pair symmetrically about the centre with a small margin between them.
+    """
+    origin = ax.transData.transform((0, 0))
+    per_unit = ax.transData.transform((0, 1))[1] - origin[1]
+    if per_unit <= 0:
+        return
+    total_h = total.get_window_extent(renderer).height / per_unit
+    unit_h = unit.get_window_extent(renderer).height / per_unit
+    margin = total_h * 0.12
+    # Centre the block on the hole's middle, total above the divide and 合计 below it.
+    half = (total_h + unit_h + margin) / 2
+    total.set_position((0, half - total_h / 2))
+    unit.set_position((0, -half + unit_h / 2))
 
 
 def _fit_pie_pcts(ax: Any, autotexts: list[Any]) -> None:
@@ -1116,10 +1325,15 @@ def draw_pie(
         if donut:
             # The hole is prime real estate: put the total there instead of leaving a
             # blank circle the reader has to mentally sum.
-            ax.text(
+            total_text = ax.text(
                 0, 0.08, _fmt_number(total, unit), ha="center", va="center", fontsize=20, color=_INK, fontweight="bold"
             )
-            ax.text(0, -0.16, "合计", ha="center", va="center", fontsize=12, color=_MUTED)
+            unit_text = ax.text(0, -0.16, "合计", ha="center", va="center", fontsize=12, color=_MUTED)
+            # Tagged for the closing pass to resize. Fitting it here would measure an axes
+            # that constrained layout has not sized yet (it reports the full canvas, then
+            # shrinks to ~207px in a panel), so the check would always pass and never fire.
+            total_text.set_gid(_DONUT_TOTAL_GID)
+            unit_text.set_gid(_DONUT_UNIT_GID)
         ax.set_aspect("equal")
         if title:
             ax.set_title(title, loc="left")
@@ -2250,19 +2464,33 @@ def _panel_part_of_whole(p: _Panel, title: str, source: str) -> Any:
 def _panel_trend(p: _Panel, title: str, source: str) -> Any:
     """line / area / stacked_area."""
     labels, series = p.labels("labels"), p.series("series")
-    shared = {
-        "title": title,
-        "x_label": p.text("x_label"),
-        "y_label": p.text("y_label"),
-        "unit": p.text("unit"),
-        "source": source,
-    }
+    # Spelled out rather than passed as **kwargs: a dict unpack hides which keyword each
+    # value lands on, so a typo would reach the chart instead of the type checker.
+    x_label, y_label, unit = p.text("x_label"), p.text("y_label"), p.text("unit")
     if p.kind == "stacked_area":
-        return draw_stacked_area(labels, series, percent=p.flag("percent"), **shared)
-    if p.kind == "area":
-        # Same builder as `line`, with the fill and a zero baseline the area implies.
-        return draw_line(labels, series, smooth_area=True, zero_baseline=True, **shared)
-    return draw_line(labels, series, zero_baseline=p.flag("zero_baseline"), **shared)
+        return draw_stacked_area(
+            labels,
+            series,
+            title=title,
+            x_label=x_label,
+            y_label=y_label,
+            unit=unit,
+            percent=p.flag("percent"),
+            source=source,
+        )
+    # `area` is the same builder as `line`, with the fill and zero baseline it implies.
+    area = p.kind == "area"
+    return draw_line(
+        labels,
+        series,
+        title=title,
+        x_label=x_label,
+        y_label=y_label,
+        unit=unit,
+        smooth_area=area,
+        zero_baseline=True if area else p.flag("zero_baseline"),
+        source=source,
+    )
 
 
 def _panel_comparison(p: _Panel, title: str, source: str) -> Any:
@@ -2278,14 +2506,9 @@ def _panel_comparison(p: _Panel, title: str, source: str) -> Any:
             source=source,
         )
     labels = p.labels("labels")
-    x_label, y_label = p.text("x_label"), p.text("y_label")
-    shared = {
-        "title": title,
-        "x_label": x_label,
-        "y_label": y_label,
-        "unit": p.text("unit"),
-        "source": source,
-    }
+    # Spelled out rather than passed as **kwargs: a dict unpack hides which keyword each
+    # value lands on, so a typo would reach the chart instead of the type checker.
+    x_label, y_label, unit = p.text("x_label"), p.text("y_label"), p.text("unit")
     if p.kind in ("column", "bar"):
         values = p.values("values")
         p.matched(labels, values)
@@ -2296,19 +2519,27 @@ def _panel_comparison(p: _Panel, title: str, source: str) -> Any:
         return draw_bar(
             labels,
             [(name, values)],
+            title=title,
+            x_label=x_label,
+            y_label=y_label,
+            unit=unit,
             horizontal=horizontal,
             sort_desc=p.flag("sort_desc"),
             highlight=int(p.number("highlight", -1)),
-            **shared,
+            source=source,
         )
     series = p.series("series")
     return draw_bar(
         labels,
         series,
+        title=title,
+        x_label=x_label,
+        y_label=y_label,
+        unit=unit,
         horizontal=p.flag("horizontal"),
         stacked=p.kind == "stacked_column",
         percent=p.flag("percent") if p.kind == "stacked_column" else False,
-        **shared,
+        source=source,
     )
 
 

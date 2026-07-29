@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib
 import io
+import itertools
 import json
 import sys
 from pathlib import Path
@@ -916,28 +917,50 @@ async def test_failed_upload_deletes_the_placeholder_without_an_index(
 # One panel spec per chart kind, in the shape `panels_json` accepts. Kept exhaustive on
 # purpose: a panel builder that forgets a chart kind, or drifts from that chart's tool
 # arguments, only shows up when every kind is actually built.
+#
+# The data is deliberately realistic rather than minimal — units on the values, CJK labels
+# of the length a real report uses, and two or more series where the chart supports them.
+# A two-point single-series panel draws a one-item legend and short labels, which is
+# exactly the case that has room to spare and hides every crowding defect.
 _PANEL_SPECS: dict[str, dict[str, Any]] = {
-    "pie": {"labels": ["研发", "市场"], "values": [3, 2]},
-    "donut": {"labels": ["研发", "市场"], "values": [3, 2]},
-    "funnel": {"stages": ["访问", "下单"], "values": [100, 40]},
-    "line": {"labels": ["1月", "2月"], "series": {"营收": [1, 2]}},
-    "area": {"labels": ["1月", "2月"], "series": {"营收": [1, 2]}},
-    "stacked_area": {"labels": ["1月", "2月"], "series": {"A": [1, 2], "B": [2, 1]}},
-    "column": {"labels": ["华东", "华北"], "values": [3, 2]},
-    "bar": {"labels": ["华东", "华北"], "values": [3, 2]},
-    "grouped_column": {"labels": ["华东", "华北"], "series": {"X": [1, 2], "Y": [2, 1]}},
-    "stacked_column": {"labels": ["华东", "华北"], "series": {"X": [1, 2], "Y": [2, 1]}},
-    "waterfall": {"labels": ["期初", "新增"], "deltas": [100, 20]},
-    "histogram": {"values": [1, 2, 2, 3, 3, 3, 4]},
-    "box": {"groups": {"A": [1, 2, 3], "B": [2, 3, 4]}},
-    "scatter": {"points": [[1, 2], [3, 4]]},
-    "bubble": {"points": [[1, 2, 30], [3, 4, 50]]},
-    "heatmap": {"row_labels": ["r1", "r2"], "col_labels": ["c1", "c2"], "values": [[1, 2], [3, 4]]},
-    "radar": {"axes": ["质量", "速度", "成本"], "series": {"A": [4, 3, 5]}},
-    "pareto": {"labels": ["登录失败", "支付超时"], "values": [80, 20]},
-    "combo": {"labels": ["1月", "2月"], "bar_series": {"营收": [10, 20]}, "line_series": {"毛利率": [30, 35]}},
-    "gantt": {"tasks": [{"name": "设计", "start": "2026-08-01", "days": 5}]},
-    "progress": {"items": {"华东": 80, "华北": 120}, "target": 100},
+    "pie": {"labels": ["研发", "市场", "销售"], "values": [42, 28, 19]},
+    "donut": {"labels": ["华东", "华北", "华南"], "values": [520, 310, 180]},
+    "funnel": {"stages": ["访问", "注册", "下单", "复购"], "values": [1000, 420, 180, 60]},
+    "line": {
+        "labels": ["1月", "2月", "3月", "4月"],
+        "series": {"营收": [120, 145, 138, 170], "成本": [80, 90, 88, 95]},
+    },
+    "area": {"labels": ["1月", "2月", "3月"], "series": {"累计营收": [120, 265, 403]}},
+    "stacked_area": {"labels": ["1月", "2月", "3月"], "series": {"直销": [60, 70, 66], "线上": [60, 75, 72]}},
+    "column": {"labels": ["华东", "华北", "华南", "西南"], "values": [118, 92, 76, 54], "unit": "万元"},
+    "bar": {"labels": ["华东区域", "华北区域", "华南区域"], "values": [118, 92, 76], "unit": "万元"},
+    "grouped_column": {"labels": ["Q1", "Q2", "Q3"], "series": {"2025": [10, 20, 15], "2026": [14, 25, 19]}},
+    "stacked_column": {"labels": ["Q1", "Q2", "Q3"], "series": {"直销": [10, 20, 15], "线上": [14, 25, 19]}},
+    "waterfall": {"labels": ["期初", "新增", "流失", "期末"], "deltas": [100, 40, -25, 0]},
+    "histogram": {"values": [1, 2, 2, 3, 3, 3, 4, 4, 5, 6, 3, 3, 2, 4, 5]},
+    "box": {"groups": {"A组": [1, 2, 3, 4], "B组": [2, 3, 4, 5], "C组": [3, 4, 5, 6]}},
+    "scatter": {"points": [[1, 2], [3, 4], [5, 3], [2, 5]], "x_label": "投入（万元）", "y_label": "产出（万元）"},  # noqa: RUF001
+    "bubble": {"points": [[1, 2, 30], [3, 4, 50], [5, 3, 80]]},
+    "heatmap": {
+        "row_labels": ["线上", "线下"],
+        "col_labels": ["华东", "华北", "华南"],
+        "values": [[12, 5, 3], [4, 9, 6]],
+    },
+    "radar": {"axes": ["质量", "速度", "成本", "服务"], "series": {"A组": [4, 3, 5, 4], "B组": [3, 5, 3, 5]}},
+    "pareto": {"labels": ["登录失败", "支付超时", "页面卡顿"], "values": [120, 85, 42]},
+    "combo": {
+        "labels": ["1月", "2月", "3月"],
+        "bar_series": {"营收": [120, 145, 138]},
+        "line_series": {"毛利率": [32, 35, 33]},
+        "line_percent": True,
+    },
+    "gantt": {
+        "tasks": [
+            {"name": "设计", "start": "2026-08-01", "days": 5},
+            {"name": "开发", "start": "2026-08-04", "days": 8},
+        ]
+    },
+    "progress": {"items": {"华东": 118, "华北": 92, "华南": 76}, "target": 100},
 }
 
 
@@ -1046,11 +1069,46 @@ def test_panel_titles_and_sources_stay_on_their_own_panel() -> None:
             draw(fig, ax)
     finally:
         _cr._panel_mode.reset(token)
-    assert fig._suptitle is None  # nothing was promoted to the shared figure slot
+    assert fig.get_suptitle() == ""  # nothing was promoted to the shared figure slot
     assert [ax.get_title(loc="left") for ax in flat] == ["标题左", "标题右"]
     labelled = [ax.get_xlabel().endswith(f"来源{side}") for ax, side in zip(flat, ("左", "右"), strict=True)]
     assert labelled == [True, True]
     plt.close(fig)
+
+
+def _build_figure(kinds: tuple[str, ...], layout: str) -> Any:
+    """A combined figure built exactly the way ``_render_panels_sync`` builds one.
+
+    Mirrors the real path step for step — panel mode, tags, figure title/source, then both
+    closing passes — because the layout defects this guards against only appear in the
+    finished figure, after those passes have moved things.
+    """
+    # Before any figure exists: the house style installs the CJK font stack, and glyph
+    # widths are what decide whether two labels collide. Measuring with matplotlib's
+    # default font would size every Chinese label as a tofu box and test a layout no user
+    # ever sees.
+    _cr._apply_style()
+    rows, cols = _cr.panel_grid(len(kinds), layout)
+    size = _cr.figure_size(rows, cols)
+    token = _cr._panel_mode.set(True)
+    try:
+        fig, axes = plt.subplots(rows, cols, figsize=size, layout="constrained", squeeze=False)
+        flat = [ax for row in axes for ax in row]
+        draws, _titles = _cr.parse_panels(_panels_json(*kinds))
+        for index, (draw, ax) in enumerate(zip(draws, flat, strict=False)):
+            before = set(fig.get_axes())
+            draw(fig, ax)
+            live = ax if ax in fig.get_axes() else next(iter(set(fig.get_axes()) - before), ax)
+            _cr._tag_panel(live, index)
+        for ax in flat[len(draws) :]:
+            ax.set_visible(False)
+        fig.suptitle("整图标题", x=0.01, ha="left", fontsize=18, fontweight="bold")
+        fig.supxlabel("数据来源：台账", fontsize=10, ha="left", x=0.01)  # noqa: RUF001
+        _cr._lift_panel_titles_above_legends(fig)
+        _cr._settle_panel_annotations(fig)
+    finally:
+        _cr._panel_mode.reset(token)
+    return fig
 
 
 def test_panels_are_tagged_a_b_c_and_do_not_collide() -> None:
@@ -1059,19 +1117,45 @@ def test_panels_are_tagged_a_b_c_and_do_not_collide() -> None:
     The tag is prefixed into the panel's title rather than placed beside it — as a
     separate left-aligned artist above the axes it inked the same pixels as the title.
     """
-    token = _cr._panel_mode.set(True)
-    try:
-        fig, axes = plt.subplots(1, 3, figsize=(24, 4.5), layout="constrained", squeeze=False)
-        flat = [ax for row in axes for ax in row]
-        draws, _titles = _cr.parse_panels(_panels_json("line", "pie", "bar"))
-        for index, (draw, ax) in enumerate(zip(draws, flat, strict=True)):
-            draw(fig, ax)
-            _cr._tag_panel(ax, index)
-    finally:
-        _cr._panel_mode.reset(token)
-    assert [ax.get_title(loc="left") for ax in flat] == ["(a) 面板line", "(b) 面板pie", "(c) 面板bar"]
+    fig = _build_figure(("line", "pie", "bar"), "grid")
+    tagged = [t for t in (ax.get_title(loc="left") for ax in fig.get_axes()) if t]
+    assert tagged == ["(a) 面板line", "(b) 面板pie", "(c) 面板bar"]
     assert _collisions(fig) == []
     plt.close(fig)
+
+
+# Every ordered pair of chart kinds, in both a row and a column. One combination is not
+# enough coverage: the first version of the panel code was checked against line+pie+bar
+# only, and 245 of these 420 pairs had text over text — a panel title struck through by
+# its legend, a box plot's glyph key sitting on its tick labels, a column's top value
+# label pushed into the title band. Each is invisible in the one combination that happened
+# to be tested, and obvious in the matrix.
+_PANEL_PAIRS = [(a, b) for a, b in itertools.combinations(sorted(_PANEL_SPECS), 2)]
+
+
+@pytest.mark.parametrize("layout", ["horizontal", "vertical"])
+@pytest.mark.parametrize(("first", "second"), _PANEL_PAIRS)
+def test_no_two_labels_overlap_in_any_two_panel_figure(first: str, second: str, layout: str) -> None:
+    fig = _build_figure((first, second), layout)
+    overlaps = _collisions(fig)
+    plt.close(fig)
+    assert overlaps == []
+
+
+@pytest.mark.parametrize("start", range(len(_PANEL_SPECS)))
+def test_no_two_labels_overlap_in_a_four_panel_grid(start: int) -> None:
+    """Grids add their own failure mode: a panel is half-height, so labels sit closer.
+
+    The window slides one kind at a time and wraps, rather than stepping in blocks of
+    four: block-stepping only ever built 5 of the 21 possible groupings, and the donut's
+    centre total striking through its 合计 lived in a grouping no block reached.
+    """
+    ordered = sorted(_PANEL_SPECS)
+    kinds = tuple(ordered[(start + offset) % len(ordered)] for offset in range(4))
+    fig = _build_figure(kinds, "grid")
+    overlaps = _collisions(fig)
+    plt.close(fig)
+    assert overlaps == []
 
 
 def test_a_panel_without_a_title_still_gets_its_tag() -> None:
