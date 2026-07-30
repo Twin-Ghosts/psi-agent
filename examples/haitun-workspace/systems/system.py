@@ -80,6 +80,7 @@ from prompt_sections import (
     SILENT_REPLIES_SECTION,
     SILENT_TOKEN,
     SESSION_MANAGEMENT_SECTION,
+    SKILL_AUTHORING_SECTION,
     SYSTEM_CLI_TOOLS_SECTION,
     STRUCTURED_TABLES_SECTION,
     TASK_PLANNING_SECTION,
@@ -980,10 +981,12 @@ workspace. Never silently rewrite user-authored assets.
 
 Rules:
 1. Keep `skills/fusion-flow/` immutable - it is the runtime bundle, not a generated skill.
-2. Treat skills without `created_by: agent` as read-only.
-3. New learned procedures -> `skills/<skill-name>/SKILL.md` via `skill_manage(action="create")`.
-4. Reusable workflow templates -> `flows/curated/<flow-name>/FLOW.md` via `flow_manage`.
-5. One-off task executions -> `flows/<task-slug>/`.
+2. Treat skills without `created_by: agent` and without `agent_editable: true` as read-only.
+3. Before create: `skill_manage(list)` — if a similar domain skill exists, `patch` it (never parallel skills).
+4. New learned procedures only when nothing similar exists -> `skill_manage(action="create")`.
+5. Reusable workflow templates -> `flows/curated/<flow-name>/FLOW.md` via `flow_manage`.
+6. One-off task executions -> `flows/<task-slug>/`.
+Follow `skills/skill-authoring-when` then `skill-authoring-how` (prefer update over create, before self-evolution invents a new skill).
 
 ### Engine defaults
 Fusion Flow may call external agent CLI engines. Prefer the psi engine; do not call this same
@@ -1095,6 +1098,9 @@ Never write API keys into this workspace, generated `.flow.ts` files, or committ
 
         if "todo" in tools:
             stable_parts += ["", TASK_PLANNING_SECTION]
+
+        if "skill_manage" in tools:
+            stable_parts += ["", SKILL_AUTHORING_SECTION]
 
         skills_section = build_skills_section(skills_xml)
         if skills_section:
