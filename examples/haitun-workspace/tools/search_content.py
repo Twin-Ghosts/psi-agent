@@ -15,6 +15,7 @@ import fnmatch
 import re
 import shutil
 
+import _private_space
 import anyio
 
 # Directories skipped by the Python fallback walk (rg already honors .gitignore
@@ -53,6 +54,11 @@ async def search_content(
     """
     if not pattern:
         return "[Error] Empty search pattern."
+
+    # 直接指向别人私密区 → 拒。搜公共区时另在遍历/输出层剔掉私密子树 (见下)。
+    denial = _private_space.denial_reason(path)
+    if denial:
+        return f"[Error] {denial}"
 
     root = anyio.Path(path)
     if not await root.exists():
@@ -113,8 +119,13 @@ async def _search_with_ripgrep(
     truncated = len(lines) > max_results
     out: list[str] = []
     for ln in lines[:max_results]:
+        # rg 不认私密区, 所以按 "file:line:text" 的 file 段过滤掉越界命中。
+        if _private_space.denial_reason(ln.split(":", 1)[0]):
+            continue
         # rg output is already "file:line:text"; just cap absurdly long lines.
         out.append(ln[:_MAX_LINE_CHARS])
+    if not out:
+        return f"(no matches for {pattern!r} under {path})"
     listing = "\n".join(out)
     if truncated:
         listing += f"\n[Truncated at {max_results} matches]"
@@ -154,6 +165,8 @@ async def _search_with_python(
         nonlocal truncated
         if name_re is not None and not name_re.match(file_path.name):
             return
+        if _private_space.denial_reason(file_path):
+            return  # 别人的私密文件, 不读不报。
         try:
             content = await file_path.read_text(encoding="utf-8", errors="strict")
         except UnicodeDecodeError, OSError:
@@ -175,6 +188,8 @@ async def _search_with_python(
             if await child.is_dir():
                 if child.name in _SKIP_DIRS:
                     continue
+                if _private_space.denial_reason(child):
+                    continue  # 整棵别人的私密子树不进。
                 await walk(child)
             else:
                 await scan_file(child)

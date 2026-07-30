@@ -6,6 +6,7 @@ import os
 import shutil
 from pathlib import Path
 
+import _private_space
 import _runtime_paths as _paths
 import anyio
 
@@ -42,6 +43,12 @@ async def bash(command: str, timeout_seconds: int = 30) -> str:
     Returns:
         Combined stdout and stderr output, with exit code appended on failure.
     """
+    # shell 绕开所有路径解析, 所以在这里前置扫一遍命令串。这层是启发式而非沙箱
+    # (见 ``_private_space`` 模块说明): 挡真实误访, 挡不住刻意构造的绕过。
+    denial = _private_space.scan_command(command)
+    if denial:
+        return f"[Error] {denial}"
+
     bash = _find_bash()
     if not bash:
         return (

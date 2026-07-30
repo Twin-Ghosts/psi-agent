@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import _private_space
 import _runtime_paths as _paths
 import anyio
 from loguru import logger
@@ -56,6 +57,11 @@ async def powershell(command: str, *, cwd: str | None = None) -> str:
         command: The PowerShell command to execute. Use with caution.
         cwd: Working directory. Defaults to the workspace root.
     """
+    # 与 bash.py 同理: shell 绕开路径解析, 前置扫命令串与 cwd (启发式, 非沙箱)。
+    denial = _private_space.scan_command(command) or (_private_space.denial_reason(cwd) if cwd is not None else None)
+    if denial:
+        return f"[Error] {denial}"
+
     if cwd is None:
         cwd = _paths.workspace_dir()
 

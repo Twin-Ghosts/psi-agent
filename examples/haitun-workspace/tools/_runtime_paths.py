@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import _private_space
 import anyio
 
 try:
@@ -69,12 +70,17 @@ def resolve_agent(raw: str = "") -> anyio.Path:
 
 
 def resolve_under(root: str | anyio.Path | Path, path: str) -> anyio.Path:
-    """Join *path* under *root* when relative; keep absolute paths as-is."""
+    """Join *path* under *root* when relative; keep absolute paths as-is.
+
+    单一收口点: 解析完即过私密空间守卫 (``_private_space``), 越界抛
+    ``PermissionError``。所有走本函数的工具因此一次全覆盖。未登记私密用户时守卫
+    是空操作。
+    """
     raw = (path or "").strip() or "."
     candidate = Path(raw)
-    if candidate.is_absolute():
-        return anyio.Path(str(candidate))
-    return anyio.Path(str(root)) / raw
+    resolved = anyio.Path(str(candidate)) if candidate.is_absolute() else anyio.Path(str(root)) / raw
+    _private_space.check_access(resolved)
+    return resolved
 
 
 def resolve_user_path(path: str, *, workspace_raw: str = "") -> anyio.Path:
