@@ -389,13 +389,34 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
     if (card && card.id !== "overview") void ensureHistory(card.id);
   }, [cards, chatExpanded, collapseChat, currentIndex, ensureHistory]);
 
+  /** Sidebar / search: jump straight into split focus chat (not the swipe card surface). */
   const selectTask = (task: Task) => {
     const index = tasks.findIndex((item) => item.id === task.id);
-    if (index >= 0) goTo(index + 1);
+    if (index < 0) return;
+    const next = index + 1;
     setMainView("workspace");
     setSidebarOpen(false);
     setSearchOpen(false);
     setGlobalSearch("");
+    if (next !== currentIndex) {
+      if (transitionTimer.current) window.clearTimeout(transitionTimer.current);
+      if (!prefersReducedMotion()) {
+        setCardTransition({
+          from: currentIndex,
+          direction: next > currentIndex ? "next" : "previous",
+          token: Date.now(),
+          fromExpanded: chatExpanded,
+        });
+        transitionTimer.current = window.setTimeout(() => setCardTransition(null), 470);
+      } else {
+        setCardTransition(null);
+      }
+      setCurrentIndex(next);
+      setDragX(0);
+      void ensureHistory(task.id);
+    }
+    setContextPanelCollapsed(false);
+    setChatExpanded(true);
   };
 
   const togglePanel = (panel: SidebarPanel) => {
@@ -896,30 +917,45 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
     if (!chatExpanded) setChatExpanded(true);
   };
 
+  const suppressCardOpenRef = useRef(false);
+
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.pointerType === "mouse" && event.button !== 0) return;
-    if ((event.target as HTMLElement).closest("button, input, textarea, a")) return;
+    if ((event.target as HTMLElement).closest("button, input, textarea, a, [data-card-interactive]")) return;
     dragOrigin.current = event.clientX;
+    suppressCardOpenRef.current = false;
     setIsDragging(true);
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (dragOrigin.current === null) return;
-    setDragX(Math.max(-120, Math.min(120, event.clientX - dragOrigin.current)));
+    const dx = event.clientX - dragOrigin.current;
+    if (Math.abs(dx) > 12) suppressCardOpenRef.current = true;
+    setDragX(Math.max(-120, Math.min(120, dx)));
   };
 
   const handlePointerUp = () => {
     if (dragX < -58) {
       mobileHaptic(8);
+      suppressCardOpenRef.current = true;
       goTo(currentIndex + 1);
     } else if (dragX > 58) {
       mobileHaptic(8);
+      suppressCardOpenRef.current = true;
       goTo(currentIndex - 1);
     }
     else setDragX(0);
     dragOrigin.current = null;
     setIsDragging(false);
+  };
+
+  const openChatFromCard = () => {
+    if (suppressCardOpenRef.current) {
+      suppressCardOpenRef.current = false;
+      return;
+    }
+    if (!chatExpanded) setChatExpanded(true);
   };
 
   const createTask = async (description: string, category: string, files: File[] = []) => {
@@ -1133,10 +1169,12 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
   }, []);
 
-  const visibleSidebarTasks = sidebarPanel === "pending" ? pendingTasks : sidebarPanel === "deliveries" ? deliveryTasks : tasks;
-  const renderCardAt = (index: number) => {
+  const visibleSidebarTasks = sidebarView === "pending" ? pendingTasks : sidebarView === "deliveries" ? deliveryTasks : tasks;
+  const renderCardAt = (index: number, openChat?: () => void) => {
     const task = index === 0 ? null : tasks[index - 1];
-    return task ? <TaskCard task={task} onOpenArtifact={openArtifact} onDelete={deleteTask} /> : <OverviewCard tasks={tasks} />;
+    return task
+      ? <TaskCard task={task} onOpenArtifact={openArtifact} onDelete={deleteTask} onOpenChat={openChat} />
+      : <OverviewCard tasks={tasks} onOpenChat={openChat} />;
   };
 
   const renderTaskUnit = (index: number, interactive: boolean, visualExpanded = false) => {
@@ -1157,12 +1195,12 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
                 type="button"
                 className="context-panel-toggle"
                 onClick={() => setContextPanelCollapsed(true)}
-                aria-label="收起任务卡片栏"
+                aria-label="收起任务上下文栏"
                 aria-expanded={!contextPanelCollapsed}
               >
                 <PanelLeftClose size={15} />
               </button>
-              <span className="context-panel-toolbar-label">任务卡片</span>
+              <span className="context-panel-toolbar-label">任务上下文</span>
             </div>
           )}
           <div className="card-transition-frame">
@@ -1175,7 +1213,7 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
               aria-hidden={expanded || undefined}
               inert={expanded ? true : undefined}
             >
-              {renderCardAt(index)}
+              {renderCardAt(index, interactive ? openChatFromCard : undefined)}
             </div>
             <div className="compact-card-layer" aria-hidden={!expanded} inert={!expanded ? true : undefined}>
               {expanded ? (
@@ -1228,23 +1266,39 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
           <div className="chat-context-row">
             <div>
               {expanded && interactive && contextPanelCollapsed && (
-                <button
-                  type="button"
-                  className="context-panel-toggle context-panel-toggle-in-chat"
-                  onClick={() => setContextPanelCollapsed(false)}
-                  aria-label="展开任务卡片栏"
-                  aria-expanded={false}
-                >
-                  <PanelLeftOpen size={15} />
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className="context-panel-toggle context-panel-toggle-in-chat"
+                    onClick={() => setContextPanelCollapsed(false)}
+                    aria-label="展开任务上下文栏"
+                    aria-expanded={false}
+                  >
+                    <PanelLeftOpen size={15} />
+                  </button>
+                  <button
+                    type="button"
+                    className="context-panel-new-task context-panel-new-task-in-chat"
+                    onClick={() => openNewTask()}
+                    aria-label="新建任务"
+                  >
+                    <Plus size={15} />
+                    <span>新建任务</span>
+                  </button>
+                </>
               )}
               <AgentMark /><span>{expanded ? "任务工作区" : "关于"} <strong>{unitCard.title}</strong>{!expanded && " 的对话"}</span>
             </div>
             <div className="quick-actions">
               {expanded && (
-                <button type="button" className="chat-collapse" onClick={collapseChat}>
-                  <ChevronDown size={13} /> 收起
-                </button>
+                <>
+                  <button type="button" className="chat-new-task" onClick={() => openNewTask()}>
+                    <Plus size={13} /> 新建任务
+                  </button>
+                  <button type="button" className="chat-collapse" onClick={collapseChat}>
+                    <ChevronDown size={13} /> 收起
+                  </button>
+                </>
               )}
               {!expanded && QUICK_ACTIONS.map((action) => (
                 <button

@@ -27,7 +27,7 @@
 | 账户区 | 头像菜单合一 | 头像菜单仅资料/登录；**模型池**与**设置**为侧栏独立快捷入口 |
 | 默认工作区 | 无 / 必须先选 | 启动读 ``GET /defaults``.workspace（Gateway 软默认 `{Desktop}/haitun交付`，**只宣布不建目录**；首个 Session/对话时服务端再 mkdir）；遗留 `*-workspace` / 字面量 `workspace` / `haitun-workspace` 会忽略 |
 | 工作区切换 | 侧栏打开 PathPicker | 设置「切换工作区」→ 选择页；**浏览**按钮走 `/workspace/places` + `/browse`（对齐 v1） |
-| 顶栏新建 | — | 右上角「新建任务」+ 侧栏同入口（`⌘/Ctrl N`） |
+| 顶栏新建 | — | 右上角「新建任务」+ 侧栏同入口（`⌘/Ctrl N`）；**分屏聚焦**时对话栏「收起」旁也有同款入口（左栏收起后展开钮旁再补一枚） |
 | Agent 包 | 与 workspace 合一 | ``GET /defaults``.agent → 新建任务 ``POST /sessions`` 带 `agent`（可与用户工作区不同） |
 
 设置弹窗暂时只保留**切换工作区**（真实功能）；通知/交付位置等占位项已去掉，避免空壳菜单。
@@ -56,13 +56,13 @@ Workbench boot   → GET /sessions + /titles + /summaries
                  → hydrateAiForSessions(session.ai_id…)
                       purgePlaceholderAis
                       reviveMissingSessionAis（同 id 复活免费后端）
-                 → setTasks（**从不**因空 AI 池跳过 sessions；summary 来自 /summaries）
+                 → setTasks（**从不**因空 AI 池跳过 sessions）
                  → 仅池仍空时 openModelsOnce
 Hub「使用免费模型」→ clearAiPool → hydrateAiForSessions(全部 session) → 无 session 才 ensureDefaultAi
 发消息           → ensureSessionAi（同 id 复活，腰带）
 ```
 
-不盲选 `ais[0]`。池里若已有真实 key，清掉残留 `haitun-default`；优先 localStorage 选中 AI。Gateway **不**级联删 Session——AI 被清后 Session 仍挂旧 `ai_id`；boot / 免费切换必须 **同 id 复活**，刷新后任务卡与可聊性不变。workspace 过滤用 `sessionMatchesWorkspace`（空 workspace 视为本工作区）。Session 创建时固定 `ai_id`。
+不盲选 `ais[0]`。池里若已有真实 key，清掉残留 `haitun-default`；优先 localStorage 选中 AI。Gateway **不**级联删 Session——AI 被清后 Session 仍挂旧 `ai_id`；boot / 免费切换必须 **同 id 复活**，刷新后任务卡与可聊性不变。workspace 过滤用 `sessionMatchesWorkspace`（空 workspace 视为本工作区）。
 
 ### 任务卡三步进度（分层）
 
@@ -77,6 +77,11 @@ Hub「使用免费模型」→ clearAiPool → hydrateAiForSessions(全部 sessi
 **刻意为之（todo 策略不在前端）**：何时建 `todo` 由 agent 包 `skills/task-planning/SKILL.md` 判定；前端**只读** `GET …/todos`。侧栏语义：**有清单报步数，没清单报忙闲**。
 
 **任务卡布局（首页 / 左栏）**：角标圆环已去掉；右上角放**宝箱**；底部为**直线进度条**（有 todo → `N/M` 填充；无 todo 忙时 indeterminate 扫条）。中间步骤区固定 **3×2** 视口高度，超出用小翻页（每页 6 项），视口内仍可纵向滚动；不挤占下方进度条。
+
+**导航（刻意）**：
+- **侧栏 / 搜索选任务** → 直接进入分屏聚焦（`chatExpanded`），不再停在中间卡片面。
+- **任务总览左右划** → 仍是卡片面；点卡片主体（除宝箱 / 删除 / 步骤翻页）= 与点对话栏相同，进入分屏。
+- **分屏「收起」旁** + **左栏收起后展开钮旁** → 「新建任务」（顶栏新建在聚焦态仍隐藏，由这两处补入口）。
 
 - 流式中：无 todo → `正在处理` + indeterminate；有交付物生成中可进 `deliver`（「正在整理交付」）。
 - 有 todo 且全部 completed 仍在流式 → `deliver`（追加「产出与确认」）。

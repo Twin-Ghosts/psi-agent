@@ -4510,6 +4510,53 @@ textarea:focus-visible {
 }
 
 .quick-actions .chat-collapse { display: inline-flex; align-items: center; gap: 3px; color: var(--brand-600); border-color: var(--brand-200); background: var(--brand-50); }
+.quick-actions .chat-new-task {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: #1f3b57;
+  border: 1px solid rgba(11, 47, 91, 0.12);
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.quick-actions .chat-new-task:hover {
+  color: var(--brand-600);
+  border-color: var(--brand-200);
+  background: var(--brand-50);
+}
+.context-panel-new-task {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 10px;
+  color: #1f3b57;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(11, 47, 91, 0.12);
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+  flex: none;
+}
+.context-panel-new-task:hover {
+  color: var(--brand-600);
+  background: #fff;
+}
+.context-panel-new-task-in-chat {
+  margin-right: 4px;
+}
+.focus-card.card-open-chat {
+  cursor: pointer;
+}
+.focus-card.card-open-chat:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--brand-500) 55%, transparent);
+  outline-offset: 3px;
+}
 .quick-actions .chat-top-icon {
   position: relative;
   width: 32px;
