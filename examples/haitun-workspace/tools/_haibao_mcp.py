@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import ipaddress
 import json
 import logging
@@ -150,6 +151,19 @@ def _is_loopback(hostname: str) -> bool:
         return False
 
 
+def _read_timeout_arg(timeout_seconds: float) -> Any:
+    """按当前 mcp 版本给出 read_timeout_seconds 的实参类型。
+
+    mcp<2 要求 datetime.timedelta, mcp>=2 改成了 float | None。传错类型不会在
+    ClientSession 构造时报错, 而是等到 anyio.fail_after(float + timedelta) 才炸
+    TypeError, 极难定位。
+    """
+    annotation = inspect.signature(ClientSession.__init__).parameters["read_timeout_seconds"].annotation
+    if "timedelta" in str(annotation):
+        return timedelta(seconds=timeout_seconds)
+    return timeout_seconds
+
+
 @asynccontextmanager
 async def _production_connector(config: Config) -> AsyncIterator[Any]:
     timeout = httpx.Timeout(config.timeout)
@@ -207,7 +221,7 @@ async def _production_connector(config: Config) -> AsyncIterator[Any]:
                 streamable_http_client(config.url, http_client=http_client)
             )
             session = await stack.enter_async_context(
-                ClientSession(read, write, read_timeout_seconds=timedelta(seconds=config.timeout))
+                ClientSession(read, write, read_timeout_seconds=_read_timeout_arg(config.timeout))
             )
             try:
                 yield _StatusAwareSession(session, consume_status)
