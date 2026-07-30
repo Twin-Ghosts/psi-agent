@@ -139,6 +139,7 @@ export function FocusChatThread({
   title,
   progressLog,
   workspaceRoot = "",
+  loadingHistory = false,
   onFeedback,
   onRegenerate,
   onRetry,
@@ -150,6 +151,8 @@ export function FocusChatThread({
   progressLog?: ProgressLog | null;
   /** Session workspace — used to resolve relative SEND paths after refresh. */
   workspaceRoot?: string;
+  /** Sidebar jump before GET /history resolves — avoid empty-prompt flash. */
+  loadingHistory?: boolean;
   onFeedback?: (index: number, kind: Exclude<MessageFeedback, "">) => void;
   onRegenerate?: (index: number) => void;
   onRetry?: (index: number) => void;
@@ -232,7 +235,18 @@ export function FocusChatThread({
       aria-label={`${title} 的对话`}
       onClick={(e) => void handleTableAction(e)}
     >
-      {!hasContent && (
+      {!hasContent && loadingHistory && (
+        <div className="focus-chat-empty" aria-busy="true">
+          <div className="focus-chat-avatar agent" aria-hidden="true">
+            <BrandLogo size="mini" />
+          </div>
+          <p>
+            正在同步对话…
+            <span className="typing" aria-label="加载中"><i /><i /><i /></span>
+          </p>
+        </div>
+      )}
+      {!hasContent && !loadingHistory && (
         <div className="focus-chat-empty">
           <div className="focus-chat-avatar agent" aria-hidden="true">
             <BrandLogo size="mini" />

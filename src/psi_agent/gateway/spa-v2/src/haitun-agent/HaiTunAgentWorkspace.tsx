@@ -173,6 +173,8 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
   /** After Stop, block submit briefly — Stop↔Send swap under the same click would re-send the restored draft. */
   const suppressSubmitUntilRef = useRef(0);
   const historyLoadedRef = useRef<Set<string>>(new Set(["overview"]));
+  /** Task ids with an in-flight GET /history (sidebar → focus empty-state spinner). */
+  const [historyLoadingIds, setHistoryLoadingIds] = useState(() => new Set<string>());
   /** Invalidate in-flight todo polls so a late streaming refresh cannot reopen 「产出与确认」. */
   const todoRefreshSeqRef = useRef<Record<string, number>>({});
   const workspaceNorm = normalizeWorkspacePath(workspace);
@@ -237,6 +239,12 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
   const ensureHistory = useCallback(async (taskId: string) => {
     if (taskId === "overview" || historyLoadedRef.current.has(taskId)) return;
     historyLoadedRef.current.add(taskId);
+    setHistoryLoadingIds((prev) => {
+      if (prev.has(taskId)) return prev;
+      const next = new Set(prev);
+      next.add(taskId);
+      return next;
+    });
     try {
       const hist = await fetchHistory(taskId);
       const chat = normalizeFailedTurns(historyToChat(hist));
@@ -282,6 +290,13 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
     } catch (e) {
       historyLoadedRef.current.delete(taskId);
       showToast(e instanceof Error ? e.message : "加载历史失败");
+    } finally {
+      setHistoryLoadingIds((prev) => {
+        if (!prev.has(taskId)) return prev;
+        const next = new Set(prev);
+        next.delete(taskId);
+        return next;
+      });
     }
   }, [refreshTodos, refreshTaskSummary, showToast]);
 
@@ -357,6 +372,20 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
     };
   }, [workspaceNorm, showToast]);
 
+  // Warm a few recent histories so sidebar → focus matches dialogue-bar snappiness.
+  const historyWarmBootRef = useRef(false);
+  useEffect(() => {
+    if (!bootReady) {
+      historyWarmBootRef.current = false;
+      return;
+    }
+    if (historyWarmBootRef.current) return;
+    historyWarmBootRef.current = true;
+    for (const task of tasks.slice(0, 8)) {
+      void ensureHistory(task.id);
+    }
+  }, [bootReady, ensureHistory, tasks]);
+
   const collapseChat = useCallback(() => {
     setChatExpanded(false);
     setContextPanelCollapsed(false);
@@ -398,23 +427,14 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
     setSidebarOpen(false);
     setSearchOpen(false);
     setGlobalSearch("");
+    // Skip card swipe theater — dual exit/enter layers for ~470ms felt laggy vs dialogue-bar expand.
+    if (transitionTimer.current) window.clearTimeout(transitionTimer.current);
+    setCardTransition(null);
     if (next !== currentIndex) {
-      if (transitionTimer.current) window.clearTimeout(transitionTimer.current);
-      if (!prefersReducedMotion()) {
-        setCardTransition({
-          from: currentIndex,
-          direction: next > currentIndex ? "next" : "previous",
-          token: Date.now(),
-          fromExpanded: chatExpanded,
-        });
-        transitionTimer.current = window.setTimeout(() => setCardTransition(null), 470);
-      } else {
-        setCardTransition(null);
-      }
       setCurrentIndex(next);
       setDragX(0);
-      void ensureHistory(task.id);
     }
+    void ensureHistory(task.id);
     setContextPanelCollapsed(false);
     setChatExpanded(true);
   };
@@ -1337,6 +1357,7 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
               title={unitCard.title}
               progressLog={typingCard === unitCard.id ? turnProgressLog : null}
               workspaceRoot={workspace}
+              loadingHistory={historyLoadingIds.has(unitCard.id)}
               onFeedback={(index, kind) => setMessageFeedback(unitCard.id, index, kind)}
               onRegenerate={(index) => void regenerateAgentMessage(unitCard.id, index)}
               onRetry={(index) => void retryFailedMessage(unitCard.id, index)}
@@ -1539,7 +1560,12 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
             <div className="global-search-results">
               {taskSearchResults.length > 0 && <span className="search-group-title">历史任务</span>}
               {taskSearchResults.map((task) => (
-                <button type="button" key={task.id} onClick={() => selectTask(task)}>
+                <button
+                  type="button"
+                  key={task.id}
+                  onPointerEnter={() => void ensureHistory(task.id)}
+                  onClick={() => selectTask(task)}
+                >
                   <History size={14} /><span><strong>{task.shortTitle}</strong><em>{task.category} · {task.statusLabel}</em></span><ChevronRight size={13} />
                 </button>
               ))}
@@ -1582,6 +1608,7 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
                   task={task}
                   active={currentTask?.id === task.id}
                   onSelect={() => selectTask(task)}
+                  onPrefetch={() => void ensureHistory(task.id)}
                   onOpenArtifact={openArtifact}
                   onDelete={deleteTask}
                 />

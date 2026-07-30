@@ -54,17 +54,22 @@ export function TaskRow({
   task,
   active,
   onSelect,
+  onPrefetch,
   onOpenArtifact,
   onDelete,
 }: {
   task: Task;
   active: boolean;
   onSelect: () => void;
+  onPrefetch?: () => void;
   onOpenArtifact: (task: Task, fileName?: string) => void;
   onDelete?: (task: Task) => void;
 }) {
   return (
-    <div className={`task-row ${active ? "active" : ""}`}>
+    <div
+      className={`task-row ${active ? "active" : ""}`}
+      onPointerEnter={onPrefetch}
+    >
       <button type="button" className="task-row-select" onClick={onSelect} aria-label={`打开任务：${task.title}`}>
         <span className="task-row-main">
           <span className="task-row-progress-line">
