@@ -918,11 +918,13 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
   };
 
   const suppressCardOpenRef = useRef(false);
+  const dragXRef = useRef(0);
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.pointerType === "mouse" && event.button !== 0) return;
     if ((event.target as HTMLElement).closest("button, input, textarea, a, [data-card-interactive]")) return;
     dragOrigin.current = event.clientX;
+    dragXRef.current = 0;
     suppressCardOpenRef.current = false;
     setIsDragging(true);
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -930,27 +932,38 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (dragOrigin.current === null) return;
-    const dx = event.clientX - dragOrigin.current;
+    const dx = Math.max(-120, Math.min(120, event.clientX - dragOrigin.current));
     if (Math.abs(dx) > 12) suppressCardOpenRef.current = true;
-    setDragX(Math.max(-120, Math.min(120, dx)));
+    dragXRef.current = dx;
+    setDragX(dx);
   };
 
   const handlePointerUp = () => {
-    if (dragX < -58) {
+    // setPointerCapture on the swipe surface often suppresses child `click`,
+    // so open focus on tap-up here (not only via TaskCard onClick).
+    const dx = dragXRef.current;
+    const wasTracking = dragOrigin.current !== null;
+    const suppressOpen = suppressCardOpenRef.current;
+    if (dx < -58) {
       mobileHaptic(8);
-      suppressCardOpenRef.current = true;
       goTo(currentIndex + 1);
-    } else if (dragX > 58) {
+    } else if (dx > 58) {
       mobileHaptic(8);
-      suppressCardOpenRef.current = true;
       goTo(currentIndex - 1);
+    } else {
+      setDragX(0);
+      dragXRef.current = 0;
+      if (wasTracking && !suppressOpen && !chatExpanded) {
+        setChatExpanded(true);
+      }
     }
-    else setDragX(0);
     dragOrigin.current = null;
+    suppressCardOpenRef.current = false;
     setIsDragging(false);
   };
 
   const openChatFromCard = () => {
+    // Keyboard / leftover click path (pointer tap already handled in handlePointerUp).
     if (suppressCardOpenRef.current) {
       suppressCardOpenRef.current = false;
       return;
