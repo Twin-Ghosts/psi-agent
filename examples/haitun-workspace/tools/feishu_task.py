@@ -54,6 +54,29 @@ async def feishu_task_create(
     )
 
 
+async def _feishu_task_create_once(
+    summary: str,
+    description: str = "",
+    due: str = "",
+    assignees: str = "",
+    followers: str = "",
+    user_key: str = "",
+    identity: str = "",
+) -> str:
+    return _f.dumps_result(
+        await _f.create_task_impl(
+            summary,
+            description,
+            due,
+            assignees,
+            followers,
+            user_key,
+            identity,
+            retry_rate_limits=False,
+        )
+    )
+
+
 async def feishu_task_get(task_guid: str) -> str:
     """Get a task's detail, including whether it's completed and who completed it.
 

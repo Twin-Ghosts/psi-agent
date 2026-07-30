@@ -253,6 +253,7 @@ async def _invoke(
     prefer: str = "tenant",
     identity: str = "",
     capabilities: list[str] | None = None,
+    retry_rate_limits: bool = True,
 ) -> dict[str, Any]:
     """Send a request, retrying while Feishu is rate-limiting us.
 
@@ -269,7 +270,9 @@ async def _invoke(
             request, user_key=user_key, prefer=prefer, identity=identity, capabilities=capabilities
         )
 
-    return await _retrying_rate_limits(send)
+    if retry_rate_limits:
+        return await _retrying_rate_limits(send)
+    return await send()
 
 
 # Which capability an API path needs, matched by URI prefix (longest first, so the
@@ -7280,7 +7283,15 @@ def _build_create_task_request(body: dict[str, Any]) -> BaseRequest:
 
 
 async def create_task_impl(
-    summary: str, description: str, due: str, assignees: str, followers: str, user_key: str = "", identity: str = ""
+    summary: str,
+    description: str,
+    due: str,
+    assignees: str,
+    followers: str,
+    user_key: str = "",
+    identity: str = "",
+    *,
+    retry_rate_limits: bool = True,
 ) -> dict[str, Any]:
     """Create a task, optionally with a due date and assignee/follower open_ids."""
     if not summary.strip():
@@ -7302,7 +7313,17 @@ async def create_task_impl(
         body["due"] = {"timestamp": due_ms, "is_all_day": False}
     if members:
         body["members"] = members
-    res = await _invoke(_build_create_task_request(body), user_key=user_key, prefer="user", identity=identity)
+    request = _build_create_task_request(body)
+    if retry_rate_limits:
+        res = await _invoke(request, user_key=user_key, prefer="user", identity=identity)
+    else:
+        res = await _invoke(
+            request,
+            user_key=user_key,
+            prefer="user",
+            identity=identity,
+            retry_rate_limits=False,
+        )
     if not res["ok"]:
         return res
     data = res["data"] if isinstance(res["data"], dict) else {}

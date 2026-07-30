@@ -4115,6 +4115,22 @@ async def test_create_task_no_due_no_members(monkeypatch: pytest.MonkeyPatch) ->
     assert "members" not in cap.request.body
 
 
+@pytest.mark.asyncio
+async def test_assignment_task_create_disables_rate_limit_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = importlib.import_module("feishu_task")
+    captured: dict[str, Any] = {}
+
+    async def create_once(*args: Any, retry_rate_limits: bool = True, **kwargs: Any) -> dict[str, Any]:
+        captured["retry_rate_limits"] = retry_rate_limits
+        return {"ok": True, "task_guid": "g1", "url": "http://t/g1"}
+
+    monkeypatch.setattr(mod._f, "create_task_impl", create_once)
+    result = json.loads(await mod._feishu_task_create_once("任务"))
+
+    assert result["ok"] is True
+    assert captured["retry_rate_limits"] is False
+
+
 def test_due_to_ms_parsing() -> None:
     assert _impl._due_to_ms("") is None
     assert _impl._due_to_ms("not a date") is None
@@ -6550,6 +6566,23 @@ async def test_invoke_retries_while_rate_limited(monkeypatch: pytest.MonkeyPatch
     # Backoff grows, so a throttled batch spreads out instead of hammering.
     assert len(slept) == 2
     assert slept[1] > slept[0]
+
+
+@pytest.mark.asyncio
+async def test_invoke_can_disable_rate_limit_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    attempts = 0
+
+    async def once(request: Any, user_key: Any = None, prefer: str = "tenant", **_kw: Any) -> dict[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        return {"ok": False, "code": None, "http_status": 429, "msg": "too many"}
+
+    monkeypatch.setattr(_impl, "_invoke_once", once)
+    res = await _impl._invoke(object(), retry_rate_limits=False)
+
+    assert res["ok"] is False
+    assert res["http_status"] == 429
+    assert attempts == 1
 
 
 @pytest.mark.asyncio
