@@ -166,9 +166,7 @@ def test_looks_self_referential() -> None:
 
 
 @pytest.mark.anyio
-async def test_write_self_ref_returns_warnings(
-    tmp_path: Path, _todo_appdata: Path
-) -> None:
+async def test_write_self_ref_returns_warnings(tmp_path: Path, _todo_appdata: Path) -> None:
     result = await todo_store.write_todos(
         todos=[
             {"id": "1", "content": "写文件", "status": "completed"},

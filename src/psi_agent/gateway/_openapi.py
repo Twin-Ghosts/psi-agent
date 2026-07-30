@@ -296,9 +296,7 @@ OPENAPI_SPEC = {
                 ],
                 "responses": {
                     "200": {
-                        "description": (
-                            "Array of {id, label, created_at, updated_at, closed_at, source, summary}"
-                        )
+                        "description": ("Array of {id, label, created_at, updated_at, closed_at, source, summary}")
                     },
                     "404": {"$ref": "#/components/responses/Error"},
                 },
@@ -323,11 +321,7 @@ OPENAPI_SPEC = {
                     },
                 ],
                 "responses": {
-                    "200": {
-                        "description": (
-                            "Object with id, label, todos[], summary, closed_at, …"
-                        )
-                    },
+                    "200": {"description": ("Object with id, label, todos[], summary, closed_at, …")},
                     "404": {"$ref": "#/components/responses/Error"},
                 },
             },
