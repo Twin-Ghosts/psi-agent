@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import _private_space
 import anyio
 from openpyxl import Workbook
 from openpyxl.styles import Font
@@ -63,6 +64,10 @@ async def write_excel(file_path: str, rows_json: str, sheet_name: str = "Sheet1"
         return '[Error] rows_json must be a 2D array, e.g. [["A", "B"], [1, 2]]'
     if not rows:
         return "[Error] rows_json is empty; provide at least one row"
+
+    denial = _private_space.denial_reason(file_path)
+    if denial:
+        return f"[Error] {denial}"
 
     path = anyio.Path(file_path)
     parent = path.parent

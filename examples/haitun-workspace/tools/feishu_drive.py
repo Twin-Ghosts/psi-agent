@@ -16,6 +16,7 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 import _feishu_impl as _f
+import _private_space
 
 
 async def feishu_drive_add_comment(
@@ -112,6 +113,10 @@ async def feishu_file_download(source: str, save_path: str, is_url: bool = False
             to download as that user — needed for files the bot can't see; empty uses
             the bot's tenant token. Ignored for direct-URL downloads.
     """
+    denial = _private_space.denial_reason(save_path)
+    if denial:
+        return _f.dumps_result({"ok": False, "message": denial})
+
     return _f.dumps_result(await _f.download_file_impl(source, save_path, is_url, user_key))
 
 
@@ -170,6 +175,11 @@ async def feishu_drive_upload(
             folder generally needs that user's identity.
         identity: ``"user"`` / ``"bot"`` — who owns the result (see add_comment).
     """
+    # 上传 = 把本地文件送出去, 是外泄口, 故过守卫 (本工具不经 _runtime_paths)。
+    denial = _private_space.denial_reason(file_path)
+    if denial:
+        return _f.dumps_result({"ok": False, "message": denial})
+
     return _f.dumps_result(
         await _f.upload_media_impl(file_path, parent_type, parent_node, file_name, extra_json, user_key, identity)
     )

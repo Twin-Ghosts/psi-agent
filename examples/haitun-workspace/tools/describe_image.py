@@ -10,6 +10,7 @@ TOOLS_DIR = Path(__file__).resolve().parent
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
+import _private_space
 import _vision as _v
 
 
@@ -35,5 +36,10 @@ async def describe_image(image_path: str, question: str = "") -> str:
     Returns:
         JSON with ok, text, backend, message, image_path.
     """
+    # 本工具自己读字节, 不经 _runtime_paths, 故单独过守卫。
+    denial = _private_space.denial_reason(image_path)
+    if denial:
+        return _v.dumps_result({"ok": False, "message": denial, "image_path": image_path})
+
     result = await _v.describe_image_impl(image_path=image_path, question=question)
     return _v.dumps_result(result)

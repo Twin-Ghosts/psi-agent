@@ -30,6 +30,7 @@ from psi_agent.channel._core import ChannelCore
 from psi_agent.channel._types import FileChunk, InputChunk, ReasoningChunk, TextChunk
 from psi_agent.channel.feishu._agent_events import register_feishu_agent_events
 
+from . import _private_space
 from ._card_action import handle_card_action
 
 _EMOJI_PROCESSING = "Typing"
@@ -308,6 +309,7 @@ async def _stream_reply(
     *,
     reply_to: str | None,
     suppress_silent_reply: bool = False,
+    sender_open_id: str | None = None,
 ) -> None:
     """Stream agent text and files into one Feishu chat."""
 
@@ -350,6 +352,10 @@ async def _stream_reply(
                             checking_silent_reply = True
                     elif isinstance(chunk, FileChunk):
                         logger.debug(f"received FileChunk ({chunk.path})")
+                        # [SEND:] 能把任意本地文件传到飞书, 是私密区最直接的外泄口。
+                        if _private_space.blocks_send(chunk.path, sender_open_id):
+                            logger.warning(f"blocked FileChunk from private space ({chunk.path}) for {sender_open_id}")
+                            continue
                         await _send_file(channel, chat_id, chunk.path)
         except Exception:
             await flush_silent_candidate()
@@ -397,7 +403,9 @@ async def _handle_and_stream(
             logger.debug(f"posting {len(chunks)} chunk(s) to ChannelCore")
 
             try:
-                await _stream_reply(channel, core, ctx.chat_id, chunks, reply_to=ctx.message_id)
+                await _stream_reply(
+                    channel, core, ctx.chat_id, chunks, reply_to=ctx.message_id, sender_open_id=ctx.sender_id
+                )
                 logger.debug("stream completed")
             except Exception as e:
                 logger.error(f"Message handling error — {e!r}")
