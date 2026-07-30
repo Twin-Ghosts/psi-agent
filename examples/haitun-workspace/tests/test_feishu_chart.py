@@ -1092,36 +1092,87 @@ def _build_figure(kinds: tuple[str, ...], layout: str) -> Any:
     size = _cr.figure_size(rows, cols)
     token = _cr._panel_mode.set(True)
     try:
-        fig, axes = plt.subplots(rows, cols, figsize=size, layout="constrained", squeeze=False)
-        flat = [ax for row in axes for ax in row]
+        fig = plt.figure(figsize=size, layout="constrained")
+        cells = fig.subfigures(rows, cols, squeeze=False)
+        flat_cells = [cell for row in cells for cell in row]
         draws, _titles = _cr.parse_panels(_panels_json(*kinds))
-        for index, (draw, ax) in enumerate(zip(draws, flat, strict=False)):
-            before = set(fig.get_axes())
-            draw(fig, ax)
-            live = ax if ax in fig.get_axes() else next(iter(set(fig.get_axes()) - before), ax)
+        for index, (draw, cell) in enumerate(zip(draws, flat_cells, strict=False)):
+            ax = cell.subplots()
+            before = set(cell.get_axes())
+            draw(cell, ax)
+            live = ax if ax in cell.get_axes() else next(iter(set(cell.get_axes()) - before), ax)
             _cr._tag_panel(live, index)
-        for ax in flat[len(draws) :]:
-            ax.set_visible(False)
         fig.suptitle("整图标题", x=0.01, ha="left", fontsize=18, fontweight="bold")
         fig.supxlabel("数据来源：台账", fontsize=10, ha="left", x=0.01)  # noqa: RUF001
-        _cr._lift_panel_titles_above_legends(fig)
+        _cr._promote_panel_titles(fig)
         _cr._settle_panel_annotations(fig)
+        _cr._align_panel_plot_boxes(fig)
     finally:
         _cr._panel_mode.reset(token)
     return fig
 
 
-def test_panels_are_tagged_a_b_c_and_do_not_collide() -> None:
-    """Every panel is labelled (a)/(b)/(c), and no two labels ink the same pixels.
+def test_panels_are_tagged_a_b_c_below_the_axes_and_do_not_collide() -> None:
+    """Every panel carries its (a)/(b)/(c) key, centred under the panel, ink-free.
 
-    The tag is prefixed into the panel's title rather than placed beside it — as a
-    separate left-aligned artist above the axes it inked the same pixels as the title.
+    The tag is its panel's subfigure supxlabel: a real layout band below the axes, which
+    is where a paper puts a sub-figure key and what makes the tags line up with each other
+    across a row. Prefixing it into the title (an earlier version) left them ragged, each
+    starting wherever its title did.
     """
     fig = _build_figure(("line", "pie", "bar"), "grid")
-    tagged = [t for t in (ax.get_title(loc="left") for ax in fig.get_axes()) if t]
-    assert tagged == ["(a) 面板line", "(b) 面板pie", "(c) 面板bar"]
+    cells = [ax.get_figure() for ax in fig.get_axes() if ax.get_subplotspec() is not None]
+    tags = [cell._supxlabel for cell in cells]
+    assert [tag.get_text() for tag in tags] == ["(a)", "(b)", "(c)"]
+    assert {tag.get_ha() for tag in tags} == {"center"}
+    # Below its own plot box, not above it.
+    for cell, tag in zip(cells, tags, strict=True):
+        axes_box = next(ax for ax in cell.get_axes() if ax.get_subplotspec() is not None).get_window_extent()
+        assert tag.get_window_extent(fig.canvas.get_renderer()).y1 <= axes_box.y0
     assert _collisions(fig) == []
     plt.close(fig)
+
+
+def test_panel_titles_leave_the_plot_box_its_full_height() -> None:
+    """A panel's title must not be bought with plot height.
+
+    The first fix for "title struck through by the legend" padded the title. Constrained
+    layout answers a pad by shrinking the axes, so the loop chased its own tail and left a
+    207px-tall plot box where 589px was available — the panels came out flattened. The
+    title now goes in the subfigure's own title band, which costs the plot box nothing.
+    """
+    fig = _build_figure(("line", "column"), "horizontal")
+    for ax in fig.get_axes():
+        cell = ax.get_figure()
+        box, cell_box = ax.get_window_extent(), cell.bbox
+        assert box.height > cell_box.height * 0.45, f"plot box squeezed to {box.height:.0f}px"
+        # The promoted title sits above the legend band, and only one copy of it exists.
+        assert ax.get_title(loc="left") == ""
+        assert cell._suptitle.get_window_extent(fig.canvas.get_renderer()).y0 >= box.y1
+    plt.close(fig)
+
+
+@pytest.mark.parametrize(
+    "kinds",
+    [("line", "column"), ("donut", "line"), ("radar", "heatmap"), ("funnel", "progress", "gantt", "bubble")],
+)
+def test_every_panel_gets_the_same_plot_box_size(kinds: tuple[str, ...]) -> None:
+    """Panels of different chart kinds must still look the same size.
+
+    Constrained layout sizes each panel around its own decorations, so a chart with a
+    two-line legend got a 1409x588 box beside its neighbour's 1468x515 — side by side the
+    charts read as different sizes, which is what a reader notices before any detail. A
+    square chart (pie, heatmap) keeps its aspect *inside* an equal allocation.
+    """
+    layout = "grid" if len(kinds) > 2 else "horizontal"
+    fig = _build_figure(kinds, layout)
+    boxes = {
+        (round(ax.get_window_extent().width, 1), round(ax.get_window_extent().height, 1))
+        for ax in fig.get_axes()
+        if ax.get_subplotspec() is not None
+    }
+    plt.close(fig)
+    assert len(boxes) == 1, f"panels differ in size: {boxes}"
 
 
 # Every ordered pair of chart kinds, in both a row and a column. One combination is not
@@ -1162,12 +1213,14 @@ def test_a_panel_without_a_title_still_gets_its_tag() -> None:
     """The caption refers to panels by tag, so an untitled panel can't go unlabelled."""
     token = _cr._panel_mode.set(True)
     try:
-        fig, ax = plt.subplots(figsize=(8, 4.5), layout="constrained")
-        _cr.draw_line(["1月", "2月"], [("营收", [1, 2])])(fig, ax)
+        fig = plt.figure(figsize=(8, 4.5), layout="constrained")
+        cell = fig.subfigures(1, 1, squeeze=False)[0][0]
+        ax = cell.subplots()
+        _cr.draw_line(["1月", "2月"], [("营收", [1, 2])])(cell, ax)
         _cr._tag_panel(ax, 1)
     finally:
         _cr._panel_mode.reset(token)
-    assert ax.get_title(loc="left") == "(b)"
+    assert cell.get_supxlabel() == "(b)"
     plt.close(fig)
 
 

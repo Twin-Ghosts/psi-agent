@@ -189,6 +189,22 @@ class ChartDataError(ValueError):
     """
 
 
+def _settle_layout(fig: Any) -> None:
+    """Run the layout engine so the next measurement sees final positions.
+
+    Takes whatever figure it is handed, including a ``SubFigure``: in a combined figure the
+    draw helpers are given one, and only the root figure owns a layout engine (a subfigure
+    has no ``get_size_inches``, so calling ``execute`` on it raises). Walking up to the root
+    is also correct rather than merely safe — a panel's space is decided by the whole grid.
+    """
+    root = getattr(fig, "figure", fig) or fig
+    while getattr(root, "figure", root) is not root:
+        root = root.figure
+    engine = root.get_layout_engine()
+    if engine is not None:
+        engine.execute(root)
+
+
 # ── Panel mode ─────────────────────────────────────────────────────────────────
 # A combined figure (see ``render_panels_to_png``) draws several charts as subplots of
 # one canvas. The 20 ``draw_*`` closures work unchanged in a subplot — except for the
@@ -240,12 +256,11 @@ def _set_title(ax: Any, title: str, *, has_legend: bool) -> None:
     band. Without a legend, the plain axes title is still the right thing — it stays
     tied to the axes and needs no extra reserved space.
 
-    Panel mode never promotes: ``suptitle`` belongs to the figure, and in a combined
-    figure that slot holds the figure's own title (or nothing) — a panel writing there
-    would erase its neighbour's. Instead the title is padded clear of the legend by the
-    legend's own measured height (``_pad_title_above_legend``). A *fixed* pad can't do it:
-    the legend is one to three rows depending on how many series the panel has, and a pad
-    that clears three rows leaves a chasm above a panel with one.
+    Panel mode never promotes to the *root* figure's slot: that one holds the combined
+    figure's own title, and a panel writing there would erase its neighbour's. It is left
+    as a plain axes title here and moved into the panel's own subfigure title band by
+    ``_promote_panel_titles`` once the tags are on — which is a band of its own, so unlike
+    a pad it clears the legend without costing the plot box any height.
     """
     if not title:
         return
@@ -260,53 +275,78 @@ def _set_title(ax: Any, title: str, *, has_legend: bool) -> None:
         ax.set_title(title, loc="left")
 
 
-def _lift_panel_titles_above_legends(fig: Any) -> None:
-    """Raise each panel's title until it clears the legend sitting above that panel.
+def _align_panel_plot_boxes(fig: Any) -> None:
+    """Give every panel a plot box of identical size, so the panels read as one figure.
 
-    In a single chart the two never meet: a title competing with a legend is promoted to
-    ``fig.suptitle`` and constrained layout stacks title / legend / axes into separate
-    bands. A panel can't use that figure-level slot, so both land just above the axes and
-    the legend swatches struck through the title — measured at 1600x900: legend spanning
-    821-884px with the title at 836-874px, entirely inside it.
+    Constrained layout sizes each panel's plot box around that panel's own decorations, so
+    a chart with a two-line legend and a long y label ends up with a visibly smaller box
+    than its neighbour (measured 1409x588 next to 1468x515). Side by side the charts then
+    look like different sizes — which is what a reader notices first, before any single
+    panel's internals.
 
-    Runs as a closing pass over the finished figure rather than from ``_set_title``,
-    because ``_tag_panel`` re-sets each title to prefix its "(a)" and would discard a pad
-    set earlier. Iterates to a fixed point: raising a title shrinks the axes, which moves
-    the legend that the next pad is measured against.
+    The common box is the *intersection*: the largest rectangle that fits inside every
+    panel's own allocation, so no panel is grown into the space its labels need. Applied as
+    a position in each panel's subfigure fraction, after the engine has run and been
+    switched off; leaving the engine on would let the next draw reflow it all back.
 
-    The pad is each legend's *measured* height plus a gap, never a constant — a legend is
-    one to three rows depending on the panel's series count, and a pad that clears three
-    rows leaves a chasm above a single-row one.
+    An axes with a fixed aspect (a pie, a heatmap) keeps its aspect: matplotlib re-derives
+    its box from the aspect, so it is given the same allocation and stays square inside it.
     """
-    try:
-        renderer = fig.canvas.get_renderer()
-    except AttributeError:
+    # A heatmap's colourbar is an axes as well, but it isn't a panel: it has no subplotspec,
+    # and pulling its narrow strip into the intersection would size every plot box to it.
+    axes = [ax for ax in fig.get_axes() if ax.get_subplotspec() is not None]
+    if len(axes) < 2:
         return
-    from matplotlib import rcParams  # noqa: PLC0415
+    _settle_layout(fig)
+    fig.set_layout_engine("none")
+    # `original=True`: on an aspect-locked axes the plain getter returns the square
+    # matplotlib shrank the allocation into (a donut reported 0.36 wide inside a 0.98-wide
+    # cell), and intersecting that would starve every other panel down to a pie's width.
+    boxes = [ax.get_position(original=True) for ax in axes]
+    # In subfigure fractions each panel spans its whole cell, so the fractions are directly
+    # comparable across panels regardless of where the cell sits on the canvas.
+    x0 = max(b.x0 for b in boxes)
+    y0 = max(b.y0 for b in boxes)
+    x1 = min(b.x1 for b in boxes)
+    y1 = min(b.y1 for b in boxes)
+    if x1 <= x0 or y1 <= y0:
+        return
+    for ax in axes:
+        ax.set_position((x0, y0, x1 - x0, y1 - y0))
 
-    # matplotlib exposes no getter for a title's pad (``set_title(pad=…)`` is folded into
-    # a transform), so the running value is tracked here. Reading it back off the axes was
-    # the bug in the first attempt: the getter always returned the rcParam default, so each
-    # round recomputed from scratch instead of adding to the pad it had just applied.
-    pads: dict[Any, float] = {}
-    for _round in range(5):
-        if fig.get_layout_engine() is not None:
-            fig.get_layout_engine().execute(fig)
-        moved = False
-        for ax in fig.get_axes():
-            legend = ax.get_legend()
-            title = ax.get_title(loc="left")
-            if legend is None or not title:
-                continue
-            gap = legend.get_window_extent(renderer).y1 - ax.get_window_extent().y1
-            if gap <= 0:
-                continue
-            current = pads.get(ax, float(rcParams["axes.titlepad"]))
-            pads[ax] = current + (gap + 6.0) * 72.0 / _DPI  # px → points, set_title's unit
-            ax.set_title(title, loc="left", fontsize=13, pad=pads[ax])
-            moved = True
-        if not moved:
-            return
+
+def _promote_panel_titles(fig: Any) -> None:
+    """Move each panel's axes title up into its subfigure's own title band.
+
+    A panel title and a legend anchored at ``bbox_to_anchor=(0, 1.02)`` both land just
+    above the axes, so the legend swatches struck through the title (measured at 1600x900:
+    legend 821-884px, title 836-874px, entirely inside it).
+
+    Padding the title was the wrong instrument, and made the charts worse: ``pad`` moves
+    the title but constrained layout answers by shrinking the axes to make room, so the
+    loop chased its own tail and left a 1455x207 plot box out of an available 1455x589 —
+    the panels came out flattened, and a square chart like a donut no longer matched its
+    neighbour's shape.
+
+    A subfigure has its own ``suptitle`` slot, which constrained layout stacks *above* the
+    legend row as a separate band. The plot box keeps its full height, every panel's box
+    ends up the same size, and no measurement or iteration is involved.
+
+    Runs after ``_tag_panel`` because that re-sets the title to prefix its "(a)".
+    """
+    for ax in fig.get_axes():
+        title = ax.get_title(loc="left")
+        if not title:
+            continue
+        parent = ax.get_figure()
+        # Only a subfigure's slot is free to take it; a top-level figure's suptitle holds
+        # the combined figure's own title, which a panel must not overwrite.
+        if parent is None or parent is fig:
+            continue
+        # With `loc`, or the left-aligned title stays put and the figure carries two
+        # copies of it: `set_title("")` defaults to the centre slot and clears nothing.
+        ax.set_title("", loc="left")
+        parent.suptitle(title, x=0.0, ha="left", fontsize=13, color=_INK)
 
 
 def _settle_panel_annotations(fig: Any) -> None:
@@ -327,8 +367,7 @@ def _settle_panel_annotations(fig: Any) -> None:
         renderer = fig.canvas.get_renderer()
     except AttributeError:
         return
-    if fig.get_layout_engine() is not None:
-        fig.get_layout_engine().execute(fig)
+    _settle_layout(fig)
     for ax in fig.get_axes():
         _raise_ylim_for_top_labels(ax, renderer)
         _fit_donut_centre(ax, renderer)
@@ -336,13 +375,11 @@ def _settle_panel_annotations(fig: Any) -> None:
     # emits, and it re-runs the same logic the draw already applied — the draw measured a
     # full-size axes, while a panel gets a fraction of that height, so ticks that cleared
     # each other there overlap here (measured: 25px of pitch for 35px-tall labels).
-    if fig.get_layout_engine() is not None:
-        fig.get_layout_engine().execute(fig)
+    _settle_layout(fig)
     for ax in fig.get_axes():
         _clip_ticks_to_view(ax)
         _thin_tick_labels(ax)
-    if fig.get_layout_engine() is not None:
-        fig.get_layout_engine().execute(fig)
+    _settle_layout(fig)
     for ax in fig.get_axes():
         _drop_note_colliding_with_ticks(ax, renderer)
 
@@ -543,8 +580,7 @@ def _thin_tick_labels(ax: Any) -> None:
             text.set_va(va)
 
     for _round in range(5):
-        if fig.get_layout_engine() is not None:
-            fig.get_layout_engine().execute(fig)
+        _settle_layout(fig)
         changed = False
         for axis, (ticks, labels) in full.items():
             shown = [t for t in getters[axis]() if t.get_text().strip()]
@@ -715,8 +751,7 @@ def _fit_column_labels(ax: Any, labels: list[Any]) -> None:
     if len(shown) < 2:
         return
     for _round in range(6):
-        if fig.get_layout_engine() is not None:
-            fig.get_layout_engine().execute(fig)
+        _settle_layout(fig)
         boxes = [t.get_window_extent(renderer=renderer) for t in shown]
         centres = sorted((box.x0 + box.x1) / 2 for box in boxes)
         pitch = min(b - a for a, b in pairwise(centres))
@@ -1048,23 +1083,33 @@ def figure_size(rows: int, cols: int) -> tuple[float, float]:
     return width, height
 
 
+def _panel_tag(index: int) -> str:
+    return f"({_PANEL_TAGS[index]})" if index < len(_PANEL_TAGS) else f"({index + 1})"
+
+
 def _tag_panel(ax: Any, index: int) -> None:
-    """Prefix the panel's title with its ``(a)`` / ``(b)`` tag.
+    """Label the panel "(a)" / "(b)", centred beneath it, as a paper sets sub-figures.
 
-    The tag goes *into* the title rather than beside it. A separately-placed label has to
-    be positioned relative to a title whose length, wrapping and presence vary per panel,
-    and it collided with the title text whenever the two were both left-aligned above the
-    axes. Prefixing is also how a paper writes it — "(a) 营收趋势" reads as one label, and
-    the caption's panel key uses the same form.
+    The tag is the panel's own subfigure ``supxlabel``: that is a real layout band, so
+    constrained layout reserves the strip instead of letting the axes draw over it, and it
+    centres on the panel's width so the tags across a row line up with each other.
 
-    A panel with no title still gets its bare tag, since the caption refers to it by tag.
+    Earlier versions put the tag above the axes — first as a separate artist beside the
+    title (it collided with the title, both being left-aligned in the same band), then
+    prefixed into the title text. Prefixing avoided the collision but left the tags
+    ragged: each sat wherever its title started, so they neither aligned with one another
+    nor read as sub-figure keys.
+
+    The panel's own descriptive title keeps its band above the axes (see
+    ``_promote_panel_titles``); this is only the key the caption refers to.
     """
-    tag = f"({_PANEL_TAGS[index]})" if index < len(_PANEL_TAGS) else f"({index + 1})"
-    title = ax.get_title(loc="left") or ax.get_title()
-    if title:
-        ax.set_title(f"{tag} {title}", loc="left", fontsize=13)
-    else:
-        ax.set_title(tag, loc="left", fontsize=13, fontweight="bold")
+    parent = ax.get_figure()
+    if parent is None:
+        return
+    tag = _panel_tag(index)
+    # A per-panel source note is the axes' xlabel, so the tag can't share that slot; the
+    # subfigure's supxlabel sits below it, which is also where a paper puts the key.
+    parent.supxlabel(tag, fontsize=13, color=_INK, fontweight="bold")
 
 
 async def render_panels_to_png(
@@ -1117,27 +1162,35 @@ def _render_panels_sync(
     import matplotlib.pyplot as plt  # noqa: PLC0415
 
     token = _panel_mode.set(True)
-    fig, axes = plt.subplots(rows, cols, figsize=size, layout="constrained", squeeze=False)
-    flat = [ax for row in axes for ax in row]
+    fig = plt.figure(figsize=size, layout="constrained")
+    # One subfigure per cell rather than one axes per cell. A subfigure carries its own
+    # suptitle/supxlabel bands, which is what lets a panel's title sit above its legend and
+    # its "(a)" sit below its axes without either stealing height from the plot box — see
+    # `_promote_panel_titles`. Every cell gets an equal share, so all the plot boxes come
+    # out the same size whatever each chart puts around itself.
+    cells = fig.subfigures(rows, cols, squeeze=False)
+    flat_cells = [cell for row in cells for cell in row]
     try:
-        for index, (draw, ax) in enumerate(zip(draws, flat, strict=False)):
-            before = set(fig.get_axes())
-            draw(fig, ax)
+        for index, (draw, cell) in enumerate(zip(draws, flat_cells, strict=False)):
+            ax = cell.subplots()
+            before = set(cell.get_axes())
+            draw(cell, ax)
             # A radar removes the axes it was handed and adds a polar one in the same
             # cell, so the tag belongs on whichever axes now holds that panel — tagging
             # the original would attach the label to a detached object that never draws.
-            live = ax if ax in fig.get_axes() else next(iter(set(fig.get_axes()) - before), ax)
+            live = ax if ax in cell.get_axes() else next(iter(set(cell.get_axes()) - before), ax)
             _tag_panel(live, index)
-        # Unused cells in a grid (5 panels in a 2x3) would otherwise draw empty frames.
-        for ax in flat[len(draws) :]:
-            ax.set_visible(False)
+        # Unused cells in a grid (5 panels in a 2x3) hold no axes, so nothing to hide.
         if figure_title:
             fig.suptitle(figure_title, x=0.01, ha="left", fontsize=18, fontweight="bold", color=_INK)
         if source:
             fig.supxlabel(f"数据来源：{source}", fontsize=10, color=_MUTED, ha="left", x=0.01)  # noqa: RUF001
         # After the tags and the figure-level text, so it measures the final layout.
-        _lift_panel_titles_above_legends(fig)
+        _promote_panel_titles(fig)
         _settle_panel_annotations(fig)
+        # Last: it freezes the layout, and the passes above rely on the engine reflowing
+        # after they change ylim or drop tick labels.
+        _align_panel_plot_boxes(fig)
         fig.savefig(out_path, format="png", facecolor="white")
     finally:
         _panel_mode.reset(token)
@@ -1251,8 +1304,7 @@ def _fit_pie_pcts(ax: Any, autotexts: list[Any]) -> None:
         # An equal-aspect pie is squared up during the draw, not when the wedges are
         # added: before this settles, the labels report positions from a full-width axes
         # and sit ~65px away from where they will land.
-        if fig.get_layout_engine() is not None:
-            fig.get_layout_engine().execute(fig)
+        _settle_layout(fig)
         ax.apply_aspect()
         boxes = [(t, t.get_window_extent(renderer=renderer)) for t in shown if t.get_visible()]
         clashing = {id(a) for (a, box_a), (b, box_b) in pairwise(boxes) if box_a.overlaps(box_b) for a in (a, b)}
@@ -2054,7 +2106,9 @@ def draw_radar(
         polar.spines["polar"].set_color(_GRID)
         polar.grid(color=_GRID)
         if title and _panel_mode.get():
-            polar.set_title(title, loc="left", pad=24, fontsize=13)
+            # No pad: `_promote_panel_titles` lifts this into the subfigure's title band,
+            # and a pad here would only shrink the plot box before that happens.
+            polar.set_title(title, loc="left", fontsize=13)
         elif title:
             polar.set_title(title, loc="left", pad=24)
         if len(series) > 1:
