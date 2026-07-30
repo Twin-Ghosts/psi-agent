@@ -132,10 +132,11 @@ async def write_word(
     if not blocks and not title:
         return "[Error] provide a title or at least one block"
 
-    # 同 write_excel: 相对路径此前落在进程 cwd 而非本会话 workspace, 一并收口 + 判权。
+    # Same as write_excel: relative paths used to land under the process cwd rather than
+    # this session's workspace — funnelled here, with the authority check.
     try:
-        path = _paths.resolve_user_path(file_path)
-        _paths.guard_write(path)
+        path = await _paths.resolve_user_path(file_path)
+        await _paths.guard_write(path)
     except _paths.PrivateSpaceDeniedError as e:
         return str(e)
     file_path = str(path)

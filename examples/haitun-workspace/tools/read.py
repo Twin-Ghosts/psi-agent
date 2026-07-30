@@ -20,7 +20,7 @@ async def read(file_path: str, offset: int = 0, limit: int = 0) -> str:
         File contents as a string, or an error message if the file cannot be read.
     """
     try:
-        path = _paths.resolve_user_path(file_path)
+        path = await _paths.resolve_user_path(file_path)
     except _paths.PrivateSpaceDeniedError as e:
         return str(e)
     if not await path.exists():

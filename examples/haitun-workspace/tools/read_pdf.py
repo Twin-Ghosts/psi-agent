@@ -46,9 +46,9 @@ async def read_pdf(
         total_pages, backend, message, pdf_path, and a per-page list
         (page, source ["text-layer"|"vision-ocr"|"error"], chars, message).
     """
-    # 自己做 IO 不经 _runtime_paths, 显式判读权。
+    # Does its own IO outside _runtime_paths, so read authority is checked explicitly.
     try:
-        _paths.resolve_user_path(pdf_path)
+        await _paths.resolve_user_path(pdf_path)
     except _paths.PrivateSpaceDeniedError as e:
         return _p.dumps_result(
             _p.PdfResult(

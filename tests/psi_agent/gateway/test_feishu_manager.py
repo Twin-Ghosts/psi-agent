@@ -331,8 +331,12 @@ def test_workspace_dirname_matches_guard_owner(open_id: str, chat_id: str, chat_
     这是隔离能不能用的**唯一耦合点**: 守卫判权靠「``owner_from_session_id(sid)`` ==
     路径首段」。两边命名规则一旦漂移(比如一边转义 ``-`` 一边不转), 后果不是放行而是
     所有人都读不到自己的文件 —— 静默失效, 故用测试钉死。
+
+    三个被测方法都是纯路径运算, 不碰 ``_sm``, 故用 ``__new__`` 绕过构造 —— 既不必起
+    真的 SessionManager, 也不用给 ``_sm`` 传 None 去骗类型检查。
     """
-    fm = FeishuManager(_sm=None, _workspace_root=os.sep + "ws")  # ty: ignore[invalid-argument-type]
+    fm = FeishuManager.__new__(FeishuManager)
+    fm._workspace_root = os.sep + "ws"
     key = fm._route_key(open_id, chat_id, chat_type)
     sid = fm._session_id(key)
     assert os.path.basename(fm._workspace_for(key)) == _private_space.owner_from_session_id(sid)

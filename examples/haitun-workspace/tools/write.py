@@ -19,8 +19,8 @@ async def write(file_path: str, content: str) -> str:
         Success message or error message.
     """
     try:
-        path = _paths.resolve_user_path(file_path)
-        _paths.guard_write(path)
+        path = await _paths.resolve_user_path(file_path)
+        await _paths.guard_write(path)
     except _paths.PrivateSpaceDeniedError as e:
         return str(e)
     parent = path.parent

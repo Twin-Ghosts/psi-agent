@@ -103,12 +103,32 @@ service tools:
 | `workspace_dir()` / `resolve_workspace()` | 显式参数 → `get_workspace()` → `WORKSPACE_DIR` → 本包父目录 | 相对路径读写、`bash`/`powershell` cwd、`schedules/`、`flows/`、feishu UAT |
 | `agent_dir()` / `resolve_agent()` | 显式参数 → `get_agent()` → 回落 `workspace_dir()` | `skills/`（`skill_manage`） |
 | system prompt「Workspace」段 | `system_prompt_builder` 经 `get_workspace()` 注入用户打开目录（**刻意为之**：勿用 `__file__` 当文件 IO 根，否则 agent≠workspace 时模型会把产出写进能力包） | 引导模型相对路径 / `[SEND:]` 落在用户工作区 |
-| `resolve_user_path(path)` | 相对 → 拼到 workspace；绝对路径原样 | `read` / `write` / `edit` / `list_dir` / `find_files` |
+| `await resolve_user_path(path)` | 相对 → 拼到 workspace；绝对路径保留原值，但**都要过隔离守卫**（见下节） | `read` / `write` / `edit` / `list_dir` / `find_files` |
 | AppData todos（第 4B） | `resolve_appdata_root()` → `{appdata}/todos/{session_id}.json`；读时双读 legacy `{workspace}/.psi/todos/` | `todo` tool / Gateway `GET …/todos` |
 | AppData history（第 4C） | 同上根 → `{appdata}/histories/{session_id}.jsonl`；读时双读 legacy `{workspace}/histories/` | Session JSONL / `sessions_list` / `GET …/history` |
 | AppData Gateway state（第 4D） | 同上根 → `{appdata}/state/latest.json`；读时双读 cwd `state/latest.json` | Gateway 重启恢复 AI/Session/Title |
 
 **刻意为之**：AppData 路径用 `platformdirs` / `--appdata` / `PSI_APPDATA`，禁止手写死 `%AppData%`；不把 AppData 塞进 Session ContextVar。
+
+### 飞书按人文件隔离（`PSI_WORKSPACE_ROOT` 非空时生效）
+
+飞书每个会话本来就有独立 workspace 子目录，但那只是**归类**：`resolve_under()` 对绝对路径原样返回、`bash` 只设 `cwd`，任何会话都能读别人的文件；AppData 的 `histories/` 更是全局的，跨 session 历史工具能全文搜到所有人的对话原文。边界检查由 `psi_agent._private_space` 提供，工具侧经 `_runtime_paths` 的包装层调用。
+
+**七个收口点**（少一个就漏，改动时对照检查）：
+
+| # | 收口点 | 判定 |
+|---|--------|------|
+| 1 | `_runtime_paths.resolve_under()` | 22 个路径工具的公共出口；越界抛 `PrivateSpaceDeniedError`，工具 `except` 后把 `str(e)` 当错误串返回。写类工具（`write`/`edit`/`write_excel`/`write_word`）另加 `guard_write()` |
+| 2 | `bash` / `powershell` | shell 绕开路径解析，只能对命令串做**字符串启发式**扫描；`powershell` 的显式 `cwd` 参数另判读权 |
+| 3 | `search_content` / `find_files` / `list_dir` | 遍历整棵跳过他人子树；`rg` 命中结果还要按真实前缀**再过一遍**（`--glob` 排除只是加速，按末段匹配会漏），且部署环境没装 `rg`、走的是纯 Python walk 分支 |
+| 4 | `feishu_drive` 上传/下载、`write_excel`、`write_word`、`describe_image`、`read_pdf` | 这些自己做 IO 不经 `_runtime_paths`，须显式判权；上传是最直接的外泄口 |
+| 5 | `[SEND:]` | 在 channel 侧按会话事实判权（见 `channel/AGENTS.md`） |
+| 6 | `_session_helpers` 的跨 session 历史工具 | `_scan_one_histories_dir` / `_ensure_session_row` / `_resolve_history_path` 三处按 owner 过滤；显式传别人的 `session_id` 也拒 |
+| 7 | `FeishuManager._workspace_for()` | 目录名复用守卫推导，保证命名一致（见 `gateway/AGENTS.md`） |
+
+**守卫函数是 `async` 的（刻意为之）**：判权要解析真实路径（展开 symlink 与 `..`）才有意义，那是磁盘 IO，按「一切异步」必须用 `anyio.Path.resolve()` 而非 `os.path.realpath`。因此 `resolve_under` / `resolve_user_path` / `guard_read` / `guard_write` / `forbidden_dirs` / `scan_command` 全部要 `await`；只有 `owns_session()` 是纯字符串比较，保持同步。
+
+默认关闭、读松写紧、无主 session 放行三条反直觉点，以及 shell 层只能启发式的能力边界，见根 `AGENTS.md` 第 22 条。
 
 | Tool | Notes |
 |---|---|

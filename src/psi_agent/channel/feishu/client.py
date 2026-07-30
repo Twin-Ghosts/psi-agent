@@ -162,7 +162,7 @@ async def _send_file(
     缀, 不依赖 workspace 内容。
     """
     logger.debug(f"path={path}")
-    if _private_space.blocks_send(path, open_id=open_id or "", chat_id=chat_id, chat_type=chat_type):
+    if await _private_space.blocks_send(path, open_id=open_id or "", chat_id=chat_id, chat_type=chat_type):
         logger.warning(f"[SEND] blocked cross-user file: {path}")
         return
     result = await channel.send(chat_id, {"image": {"source": path}})

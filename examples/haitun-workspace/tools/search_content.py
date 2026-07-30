@@ -20,20 +20,23 @@ import _runtime_paths as _paths
 import anyio
 
 
-def _blocked_hit(line: str, blocked: list[str]) -> bool:
-    """rg 输出行 ``file:line:text`` 的 file 段是否落在他人空间。
+async def _blocked_hit(line: str, blocked: list[str]) -> bool:
+    """Whether the ``file`` part of an rg output line ``file:line:text`` is another's.
 
-    rg 自己不认隔离边界, 故命中结果必须再过一遍。冒号在 Windows 盘符里也出现
-    (``C:\\x``), 所以按最后一个 ``:<数字>:`` 之前的部分取文件名, 而不是 split(":")[0]。
+    rg knows nothing about the isolation boundary, so its hits must be filtered again.
+    Colons also appear in Windows drive letters (``C:\\x``), hence taking the filename as
+    everything before the last ``:<digits>:`` rather than ``split(":")[0]``.
+
+    Async because resolving the real path touches the disk (see the all-async rule).
     """
     if not blocked:
         return False
     match = re.match(r"^(.*?):\d+:", line)
     path = match.group(1) if match else line
     try:
-        real = os.path.realpath(path)
+        real = str(await anyio.Path(path).resolve())
     except OSError:
-        return True  # 判不出就保守剔除。
+        return True  # Undecidable — drop it conservatively.
     return any(real == b or real.startswith(b + os.sep) for b in blocked)
 
 
@@ -74,10 +77,11 @@ async def search_content(
     if not pattern:
         return "[Error] Empty search pattern."
 
-    # 此前 path 直接当 anyio.Path 用(相对路径靠进程 cwd), 既不过 workspace 解析也不
-    # 判权; 现在统一收口到 resolve_user_path, 越界直接拒。
+    # ``path`` used to be handed straight to anyio.Path (relative paths riding on the
+    # process cwd), with neither workspace resolution nor an authority check; it now
+    # funnels through resolve_user_path and out-of-bounds paths are refused.
     try:
-        root = _paths.resolve_user_path(path)
+        root = await _paths.resolve_user_path(path)
     except _paths.PrivateSpaceDeniedError as e:
         return str(e)
     if not await root.exists():
@@ -90,7 +94,7 @@ async def search_content(
         except re.error as e:
             return f"[Error] Invalid regex {pattern!r}: {e}"
 
-    blocked = _paths.forbidden_dirs()
+    blocked = await _paths.forbidden_dirs()
 
     rg = shutil.which("rg")
     if rg:
@@ -122,7 +126,8 @@ async def _search_with_ripgrep(
         args.append("--fixed-strings")
     if glob:
         args += ["--glob", glob]
-    # 让 rg 尽量别走进去(省 IO); 准确性不依赖它 —— 见下面对输出的前缀过滤。
+    # Keep rg from descending where possible (saves IO); correctness does not depend on
+    # it — see the prefix filter on the output below.
     for b in blocked:
         args += ["--glob", f"!**/{os.path.basename(b)}/**"]
     args += ["--regexp", pattern, "--", path]
@@ -139,10 +144,12 @@ async def _search_with_ripgrep(
         return None  # Unexpected error -> fall back to Python.
 
     stdout = proc.stdout.decode("utf-8", errors="replace")
-    # 排除 glob 只是加速: rg 的 --glob 按**路径末段**匹配, 边界目录给的是绝对路径, 拼
-    # 出来的模式未必命中(实测确实漏)。故命中结果一律再按真实前缀过滤一遍 —— 这才是
-    # 准确的那一层, 别把它当冗余删掉。
-    lines = [ln for ln in stdout.splitlines() if ln and not _blocked_hit(ln, blocked)]
+    # The exclude glob above is only a shortcut: rg's --glob matches on the **trailing
+    # path segment**, while boundary directories are absolute paths, so the assembled
+    # pattern may not match (it did miss in practice). Hits are therefore always
+    # re-filtered by real prefix — that is the layer that is actually correct, so do not
+    # delete it as redundant.
+    lines = [ln for ln in stdout.splitlines() if ln and not await _blocked_hit(ln, blocked)]
     if not lines:
         return f"(no matches for {pattern!r} under {path})"
 
@@ -180,7 +187,8 @@ async def _search_with_python(
 ) -> str:
     """Pure-Python fallback: walk files and match with ``re``.
 
-    部署环境(214 容器)**没装 rg**, 走的就是这条分支 —— 这里的边界过滤不是可选项。
+    The deployment environment (the 214 container) has **no rg installed**, so this is
+    the branch that actually runs — the boundary filter here is not optional.
     """
     flags = 0 if case_sensitive else re.IGNORECASE
     needle = pattern if is_regex else re.escape(pattern)
@@ -215,7 +223,8 @@ async def _search_with_python(
             if await child.is_dir():
                 if child.name in _SKIP_DIRS:
                     continue
-                # 别人的空间整棵不进(realpath 比较, 故 symlink 也拦得住)。
+                # Never descend into another user's space (compared on resolved paths,
+                # so symlinks are caught too).
                 if blocked and str(await child.resolve()) in blocked:
                     continue
                 await walk(child)

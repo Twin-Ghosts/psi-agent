@@ -113,9 +113,10 @@ async def feishu_file_download(source: str, save_path: str, is_url: bool = False
             to download as that user — needed for files the bot can't see; empty uses
             the bot's tenant token. Ignored for direct-URL downloads.
     """
-    # 自己做 IO 不经 _runtime_paths, 故显式判权: 写别人空间 = 投毒/覆写。
+    # Does its own IO outside _runtime_paths; writing another user's space would mean
+    # planting or overwriting files, so authority is checked explicitly.
     try:
-        _paths.guard_write(_paths.resolve_user_path(save_path))
+        await _paths.guard_write(await _paths.resolve_user_path(save_path))
     except _paths.PrivateSpaceDeniedError as e:
         return str(e)
     return _f.dumps_result(await _f.download_file_impl(source, save_path, is_url, user_key))
@@ -176,9 +177,10 @@ async def feishu_drive_upload(
             folder generally needs that user's identity.
         identity: ``"user"`` / ``"bot"`` — who owns the result (see add_comment).
     """
-    # 上传是最直接的外泄口(把别人空间的文件推到自己能看见的云盘), 必须判读权。
+    # Upload is the most direct exfiltration path (push another user's file to a drive
+    # you can see), so read authority must be checked.
     try:
-        _paths.resolve_user_path(file_path)
+        await _paths.resolve_user_path(file_path)
     except _paths.PrivateSpaceDeniedError as e:
         return str(e)
     return _f.dumps_result(

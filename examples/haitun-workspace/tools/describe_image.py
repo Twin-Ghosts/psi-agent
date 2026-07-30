@@ -36,9 +36,10 @@ async def describe_image(image_path: str, question: str = "") -> str:
     Returns:
         JSON with ok, text, backend, message, image_path.
     """
-    # 自己做 IO 不经 _runtime_paths, 显式判读权(别人空间的图片不许喂给视觉模型)。
+    # Does its own IO outside _runtime_paths, so read authority is checked explicitly
+    # (another user's image must not be fed to the vision model).
     try:
-        _paths.resolve_user_path(image_path)
+        await _paths.resolve_user_path(image_path)
     except _paths.PrivateSpaceDeniedError as e:
         return _v.dumps_result(_v.VisionResult(ok=False, text="", backend="", message=str(e), image_path=image_path))
     result = await _v.describe_image_impl(image_path=image_path, question=question)

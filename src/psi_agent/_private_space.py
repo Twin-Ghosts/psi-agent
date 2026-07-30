@@ -1,20 +1,25 @@
-"""对称隔离守卫 —— 每个飞书会话只能读写自己那块 workspace。
+"""Symmetric per-user file isolation for Feishu sessions.
 
-**为什么在应用层做**, Gateway 把所有 Session 跑成同一进程内的 async 任务、同一
-uid, 文件权限位 / setuid / 容器边界一个都用不上。唯一能判权的地方是工具调用的入
-口, 故这里提供纯函数守卫, 由各收口点主动调用。
+Gateway runs every Session as an async task in **one process under one uid**, so
+file permission bits / setuid / container boundaries are all unavailable. The only
+place authority can be decided is the tool-call entry point, hence these pure
+predicates that each chokepoint calls explicitly.
 
-**对称模型**(与"白名单少数人私密"相对): 每个路由键得到 ``<root>/<owner>/``, 谁都
-只能碰自己那个前缀; ``<root>`` 下的 ``PUBLIC_DIRNAME`` 子目录所有人可读, 供公共
-材料共用。群聊的 owner 是 ``chat-<chat_id>`` —— 整群共用一块空间, 与群 Session 共
-用上下文一致。
+**Symmetric model** (as opposed to "a few whitelisted private users"): every
+routing key owns ``<root>/<owner>/`` and may only touch that prefix; the
+``PUBLIC_DIRNAME`` subdirectory under ``<root>`` is readable by everyone so shared
+material has a home. A group chat's owner is ``chat-<chat_id>`` — one space for the
+whole group, matching the fact that a group shares one Session context.
 
-**能力边界(如实声明)**: 路径类工具经 ``resolve_under`` 收口, 是确定性判定; ``bash``
-/ ``powershell`` 只能对命令串做**启发式**扫描, 挡得住误用与顺手一 ``cat``, 挡不住
-刻意的变量拼接 / base64 / 中转文件。要强隔离须每人独立容器。
+**Capability boundary (stated plainly)**: path tools funnel through
+``resolve_under`` and are decided deterministically; ``bash`` / ``powershell`` can
+only be scanned **heuristically** — that stops a stray ``cat`` of someone else's
+directory but not deliberate variable splicing / base64 / relay files. Strong
+isolation needs one container per user.
 
-守卫默认**关闭**: ``PSI_WORKSPACE_ROOT`` 未配时 ``enabled()`` 为 False, 所有函数退
-化成放行, 行为与改动前逐字节一致 —— 故可以先部署再开关。
+The guard is **off by default**: with ``PSI_WORKSPACE_ROOT`` unset ``enabled()`` is
+False and every function degrades to a no-op, byte-identical to the behaviour
+before this module existed — so it can be deployed first and switched on later.
 """
 
 from __future__ import annotations
@@ -22,13 +27,18 @@ from __future__ import annotations
 import os
 import re
 
-# 环境变量: 隔离生效的父目录(通常等于 Gateway --feishu-workspace-root)。
+import anyio
+
+# Env var: the parent directory isolation applies under (normally equals the
+# Gateway ``--feishu-workspace-root``).
 _ROOT_ENV = "PSI_WORKSPACE_ROOT"
 
-# ``<root>`` 下这个子目录是公共区, 所有会话可读(写仍只限自己区, 免得互相覆盖)。
+# This subdirectory of ``<root>`` is the shared area: readable by every session
+# (writes stay confined to one's own space so nobody can overwrite it).
 PUBLIC_DIRNAME = "public"
 
-# 会话历史 / todos 等 AppData 文件按 session_id 命名, owner 从中反解。
+# History / todo files under AppData are named by session_id; owner is derived back
+# out of that name.
 _SESSION_PREFIX = "feishu-"
 _GROUP_SESSION_PREFIX = "feishu-chat-"
 
@@ -36,26 +46,27 @@ _UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 
 
 def workspace_root() -> str:
-    """隔离父目录; 空字符串 = 守卫未启用。"""
+    """Isolation parent directory; empty string means the guard is disabled."""
     return os.environ.get(_ROOT_ENV, "").strip()
 
 
 def enabled() -> bool:
-    """守卫是否生效。未配 ``PSI_WORKSPACE_ROOT`` 时全部放行。"""
+    """Whether the guard is active. Unset ``PSI_WORKSPACE_ROOT`` allows everything."""
     return bool(workspace_root())
 
 
 def sanitize(token: str) -> str:
-    """把 open_id / chat_id 净化成安全目录段(与 FeishuManager 同款)。"""
+    """Reduce an open_id / chat_id to a safe path segment (same rule as FeishuManager)."""
     return _UNSAFE.sub("_", token or "")
 
 
 def owner_from_session_id(session_id: str) -> str:
-    """从 session_id 反解 owner 目录名; 非飞书 session 返回 ``""``。
+    """Derive the owner directory name from *session_id*; ``""`` when not a Feishu one.
 
-    ``feishu-chat-<chat_id>`` → ``chat-<chat_id>``(群),
-    ``feishu-<open_id>`` → ``<open_id>``(私聊)。SPA 手建的 session 不带
-    ``feishu-`` 前缀, 无主 → 不受限(它们是本机用户自己的会话)。
+    ``feishu-chat-<chat_id>`` maps to ``chat-<chat_id>`` (group) and
+    ``feishu-<open_id>`` to ``<open_id>`` (direct message). Sessions created from the
+    SPA carry no ``feishu-`` prefix, so they are ownerless and stay unrestricted —
+    those are the local user's own sessions.
     """
     sid = (session_id or "").strip()
     if sid.startswith(_GROUP_SESSION_PREFIX):
@@ -65,79 +76,95 @@ def owner_from_session_id(session_id: str) -> str:
     return ""
 
 
-def owner_dir(owner: str) -> str:
-    """owner 的空间绝对路径; owner 或 root 为空时返回 ``""``。"""
+async def owner_dir(owner: str) -> str:
+    """Absolute path of *owner*'s space; ``""`` when owner or root is empty."""
     root = workspace_root()
     if not root or not owner:
         return ""
-    return os.path.realpath(os.path.join(root, owner))
+    return str(await anyio.Path(root, owner).resolve())
 
 
-def public_dir() -> str:
-    """公共区绝对路径; 未启用时 ``""``。"""
+async def public_dir() -> str:
+    """Absolute path of the shared area; ``""`` when disabled."""
     root = workspace_root()
-    return os.path.realpath(os.path.join(root, PUBLIC_DIRNAME)) if root else ""
+    return str(await anyio.Path(root, PUBLIC_DIRNAME).resolve()) if root else ""
 
 
 def _is_within(path: str, base: str) -> bool:
-    """*path* 是否在 *base* 之内(含相等)。两侧都必须已 realpath。"""
+    """Whether *path* sits inside *base* (inclusive). Both must already be resolved."""
     if not base:
         return False
     try:
         return os.path.commonpath([path, base]) == base
     except ValueError:
-        # 不同盘符 (Windows) → 必然不在其内。
+        # Different drive letters (Windows) — necessarily not inside.
         return False
 
 
-def owner_of(path: str) -> str:
-    """*path* 落在谁的空间里; 公共区与 root 外一律 ``""``(无主)。
+def _first_segment(real: str, real_root: str) -> str:
+    """First path segment of *real* relative to *real_root*; ``""`` when it is the root.
 
-    先 ``realpath`` 再判, 故 symlink 与 ``..`` 都被展开 —— 这是不可绕的前提。
+    Pure string math (no IO), split out as a sync helper because ruff's ASYNC240
+    rejects ``os.path`` calls inside async functions even when they never touch the
+    disk — extracting is cleaner than a noqa (see the zero-suppression rule).
+    """
+    rel = os.path.relpath(real, real_root)
+    if rel in (".", os.curdir):
+        return ""
+    return rel.replace("\\", "/").split("/")[0]
+
+
+async def owner_of(path: str) -> str:
+    """Who owns *path*; the shared area and anything outside root are ``""`` (ownerless).
+
+    Resolves the real path first, so symlinks and ``..`` are both expanded — that is
+    the non-negotiable precondition for prefix comparison to mean anything.
+
+    Uses ``anyio.Path.resolve()`` rather than ``os.path.realpath``: the latter stats
+    the disk, which is synchronous IO inside an async context and violates the
+    all-async rule (same call made in ``gateway/_scheduler_manager._workspace_key``).
     """
     root = workspace_root()
     if not root:
         return ""
-    real_root = os.path.realpath(root)
+    real_root = str(await anyio.Path(root).resolve())
     try:
-        real = os.path.realpath(path)
+        real = str(await anyio.Path(path).resolve())
     except OSError:
         return ""
     if not _is_within(real, real_root):
-        return ""  # root 之外(系统目录 / agent 包)不属任何人, 由别的机制管。
-    rel = os.path.relpath(real, real_root)
-    if rel in (".", os.curdir):
-        return ""
-    first = rel.replace("\\", "/").split("/")[0]
-    if first == PUBLIC_DIRNAME:
-        return ""  # 公共区无主。
+        return ""  # Outside root (system dirs / agent package) belongs to nobody.
+    first = _first_segment(real, real_root)
+    if not first or first == PUBLIC_DIRNAME:
+        return ""  # Root itself and the shared area are ownerless.
     return first
 
 
-def check_read(path: str, *, session_id: str) -> str | None:
-    """可读则 ``None``, 否则返回拒绝原因(给工具直接当错误串返回)。
+async def check_read(path: str, *, session_id: str) -> str | None:
+    """``None`` when readable, else the refusal text (tools return it as their error).
 
-    读: 自己的空间 + 公共区 + root 之外(agent 包 / 系统路径)都放行; 只拦**别人**
-    名下的路径。
+    Reads are permissive: one's own space, the shared area, and anything outside root
+    (agent package / system paths) all pass. Only **another** user's paths are denied.
     """
     if not enabled():
         return None
-    target_owner = owner_of(path)
+    target_owner = await owner_of(path)
     if not target_owner:
         return None
     me = owner_from_session_id(session_id)
     if not me:
-        # 无主 session(SPA 手建 / 本机直跑)不受隔离约束。
+        # Ownerless session (SPA-created / run locally) is not subject to isolation.
         return None
     if target_owner == me:
         return None
     return f"[Error] 拒绝访问: {path} 属于另一个用户的私有空间。每位用户的文件互相隔离, 只能访问自己的空间与公共区。"
 
 
-def check_write(path: str, *, session_id: str) -> str | None:
-    """可写则 ``None``, 否则返回拒绝原因。
+async def check_write(path: str, *, session_id: str) -> str | None:
+    """``None`` when writable, else the refusal text.
 
-    写比读严: 公共区也**不允许**写 —— 否则一个人能覆盖公共材料影响所有人。
+    Writes are stricter than reads: the shared area is **not** writable either, or one
+    user could overwrite common material and affect everyone.
     """
     if not enabled():
         return None
@@ -146,49 +173,49 @@ def check_write(path: str, *, session_id: str) -> str | None:
         return None
     root = workspace_root()
     try:
-        real = os.path.realpath(path)
+        real = str(await anyio.Path(path).resolve())
     except OSError:
         return None
-    if not _is_within(real, os.path.realpath(root)):
-        return None  # root 之外交给既有逻辑(agent 包等)。
-    mine = owner_dir(me)
+    if not _is_within(real, str(await anyio.Path(root).resolve())):
+        return None  # Outside root stays with the pre-existing logic (agent package…).
+    mine = await owner_dir(me)
     if mine and _is_within(real, mine):
         return None
     return f"[Error] 拒绝写入: {path} 不在你的私有空间内。请写到自己的空间(相对路径即可), 公共区与他人空间均为只读。"
 
 
-def forbidden_dirs(session_id: str) -> list[str]:
-    """遍历类工具应整棵跳过的目录(root 下除自己与公共区外的所有 owner 目录)。
+async def forbidden_dirs(session_id: str) -> list[str]:
+    """Directories a walking tool must skip wholesale (every owner but self and public).
 
-    用于 ``search_content`` / ``find_files``: 与逐个 ``check_read`` 等价, 但省掉
-    对每个候选文件调一次 realpath 的开销。
+    Used by ``search_content`` / ``find_files``: equivalent to calling ``check_read``
+    per candidate, without resolving every single file.
     """
     if not enabled():
         return []
     me = owner_from_session_id(session_id)
     if not me:
         return []
-    root = workspace_root()
+    out: list[str] = []
     try:
-        entries = sorted(os.listdir(root))
+        async for child in anyio.Path(workspace_root()).iterdir():
+            if child.name in (me, PUBLIC_DIRNAME):
+                continue
+            if await child.is_dir():
+                out.append(str(await child.resolve()))
     except OSError:
         return []
-    out: list[str] = []
-    for name in entries:
-        if name in (me, PUBLIC_DIRNAME):
-            continue
-        full = os.path.join(root, name)
-        if os.path.isdir(full):
-            out.append(os.path.realpath(full))
-    return out
+    return sorted(out)
 
 
 def owns_session(candidate_session_id: str, *, session_id: str) -> bool:
-    """*candidate_session_id* 的历史是否属于当前会话本人。
+    """Whether *candidate_session_id*'s history belongs to the current session's owner.
 
-    跨 session 历史工具(``sessions_list`` / ``session_keyword_search`` 等)扫的是
-    全局 AppData ``histories/*.jsonl``, 不分 workspace —— 对话原文往往比文件更敏
-    感, 必须按此过滤成只见自己。
+    Cross-session history tools (``sessions_list`` / ``session_keyword_search`` …) scan
+    the **global** AppData ``histories/*.jsonl``, which is not partitioned by
+    workspace. Raw transcripts are often more sensitive than generated files, so they
+    must be filtered down to one's own.
+
+    Pure string comparison (no IO), hence sync.
     """
     if not enabled():
         return True
@@ -198,33 +225,27 @@ def owns_session(candidate_session_id: str, *, session_id: str) -> bool:
     return owner_from_session_id(candidate_session_id) == me
 
 
-def scan_command(command: str, *, session_id: str) -> str | None:
-    """shell 命令串启发式扫描: 命中他人空间则返回拒绝原因, 否则 ``None``。
+async def scan_command(command: str, *, session_id: str) -> str | None:
+    """Heuristic shell scan: refusal text when another user's space is referenced.
 
-    **这一层是启发式, 不是沙箱** —— 显式写出别人的 open_id / 目录名会被挡, 但变量
-    拼接(``d=ou_x; cat /ws/$d/f``)、base64、`eval` 之类绕得过去。之所以仍然做: 真实
-    泄露几乎都是「顺手 ls 一下别人目录」这种直白形态, 挡住它价值很高; 真正的强隔离
-    需要每人独立容器。
+    **This layer is a heuristic, not a sandbox** — spelling out someone else's open_id
+    or directory name is caught, but variable splicing (``d=ou_x; cat /ws/$d/f``),
+    base64, or ``eval`` get through. It is still worth having: real leaks are almost
+    always the blunt "just ls that person's folder" shape. Strong isolation requires
+    one container per user.
 
-    判定方式是「别人的目录名作为独立路径段出现」, 而不是裸子串包含 —— 后者会把
-    ``/ws/me/ou_other_notes.md`` 这种自己空间里的正常文件名误伤。
+    Matching requires the other party's directory name to appear as a **whole path
+    segment**, not a bare substring — the latter would false-positive on a legitimate
+    file like ``/ws/me/ou_other_notes.md`` inside one's own space.
     """
     if not enabled() or not command:
         return None
     me = owner_from_session_id(session_id)
     if not me:
         return None
-    root = workspace_root()
-    try:
-        siblings = [
-            name
-            for name in os.listdir(root)
-            if name not in (me, PUBLIC_DIRNAME) and os.path.isdir(os.path.join(root, name))
-        ]
-    except OSError:
-        return None
-    for name in siblings:
-        # 前后是路径分隔符/引号/空白/串首尾, 才算命中一个完整目录段。
+    for full in await forbidden_dirs(session_id):
+        name = os.path.basename(full)
+        # Only count a hit when flanked by separators / quotes / whitespace / ends.
         if re.search(rf"(^|[\s'\"/\\=:]){re.escape(name)}([\s'\"/\\]|$)", command):
             return (
                 f"[Error] 拒绝执行: 命令中引用了另一个用户的私有空间 ({name})。"
@@ -233,18 +254,19 @@ def scan_command(command: str, *, session_id: str) -> str | None:
     return None
 
 
-def blocks_send(path: str, *, open_id: str, chat_id: str = "", chat_type: str = "") -> bool:
-    """``[SEND:]`` 侧判权: True = 该文件不许发给这个会话。
+async def blocks_send(path: str, *, open_id: str, chat_id: str = "", chat_type: str = "") -> bool:
+    """``[SEND:]`` side check: True means this file must not go to this conversation.
 
-    channel 是独立进程, 没有 ``runtime_context``, 但有会话事实 —— 故这里按
-    open_id / chat 事实自行推导 owner, **不依赖 workspace 内容**。
+    The channel is a separate process with no ``runtime_context``, but it does have the
+    conversation facts — so the owner is derived from open_id / chat here, **without
+    depending on workspace contents**.
     """
     if not enabled():
         return False
     me = f"chat-{sanitize(chat_id)}" if chat_type in ("group", "topic") and chat_id else sanitize(open_id)
     if not me:
-        return True  # 认不出收件人 → 保守拒发。
-    target_owner = owner_of(path)
+        return True  # Unidentifiable recipient — refuse conservatively.
+    target_owner = await owner_of(path)
     if not target_owner:
-        return False  # 公共区 / root 外的产物可发。
+        return False  # Shared-area / outside-root artifacts are fine to send.
     return target_owner != me

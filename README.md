@@ -379,6 +379,7 @@ uv run psi-agent channel feishu \
 - 支持文本、图片、文件、音频
 - 文档评论回复：`--respond-to-comments`（默认开）文档评论区 @机器人 时，用 agent 的回答回复该评论（需后台订阅 `drive.notice.comment_add_v1`）
 - 按会话独立 Session：`--gateway-url http://127.0.0.1:8080` 接上 Gateway 后，首次收到某会话消息时由 Gateway 幂等 spawn 一个独立 Session（独立 workspace 子目录、独立历史）。路由键分两类：**私聊按发送者 open_id**（一人一个，workspace `<root>/<open_id>`），**群聊按 chat_id**（`chat_type` 为 group/topic，整群共用一个 Session，workspace `<root>/chat-<chat_id>`）——于是机器人在群里对全体成员有连贯上下文，群与群、群与私聊之间互不串味。所挂 AI 与 workspace 父目录由 Gateway 的 `--feishu-ai-id` / `--feishu-workspace-root` 决定。不设 `--gateway-url` 时全体共用 `--session-socket`（行为不变）。Gateway 不可达时自动回退共享 socket
+- 按人文件隔离：配了 `--feishu-workspace-root` 后，各会话的文件与会话历史**互相不可见**——每人只能读写自己那块 `<root>/<owner>/`，`<root>/public/` 全体可读但不可写，群按 `chat-<chat_id>` 整群共用。**目录分开本身只是归类，隔离靠工具层的边界检查**（22 个路径工具的公共出口、shell 命令扫描、遍历类工具、自做 IO 的工具、`[SEND:]`、跨 session 历史工具）。注意两点：shell 那层是字符串启发式而非沙箱，挡得住顺手 `cat` 别人目录，挡不住刻意的变量拼接／base64；且**隔离只覆盖开启之后新建的文件**，此前堆在共享目录里的存量文件仍需另行迁移。要强隔离请每人一个容器
 
 ## 示例 Workspace
 

@@ -65,11 +65,12 @@ async def write_excel(file_path: str, rows_json: str, sheet_name: str = "Sheet1"
     if not rows:
         return "[Error] rows_json is empty; provide at least one row"
 
-    # 此前 anyio.Path(file_path) 让相对路径落在**进程 cwd**(gateway 的 cwd)而非本会话
-    # workspace —— 顺带修掉。判权同时防写他人空间。
+    # Previously anyio.Path(file_path) put relative paths under the **process cwd**
+    # (the gateway's) rather than this session's workspace — fixed in passing. The
+    # authority check also keeps writes out of other users' spaces.
     try:
-        path = _paths.resolve_user_path(file_path)
-        _paths.guard_write(path)
+        path = await _paths.resolve_user_path(file_path)
+        await _paths.guard_write(path)
     except _paths.PrivateSpaceDeniedError as e:
         return str(e)
     file_path = str(path)

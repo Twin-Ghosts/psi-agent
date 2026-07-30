@@ -104,6 +104,8 @@ schedules → `{workspace}/schedules/`（归 workspace，非 agent 包 / 非 App
 
 路径助手：``psi_agent._appdata``（Session / Gateway / haitun 共用；**刻意**放在 gateway 包外以免循环导入）。``gateway._defaults`` 再导出同名助手。Gateway 启动把解析后的根写入 ``PSI_APPDATA``，同进程工具与 ``GET /defaults.appdata`` 一致。**禁止**把 AppData 根塞进 Session ContextVar。
 
+同理 ``psi_agent._private_space``（飞书按人隔离守卫）也**刻意**放在 gateway 包外——gateway、channel、workspace 工具三方共用，放包内会造成循环导入。Gateway 启动时若 `--feishu-workspace-root` 非空，把解析后的绝对路径写入 ``PSI_WORKSPACE_ROOT``（与 ``PSI_APPDATA`` 同一处），守卫据此启用。
+
 | 已合 | 内容 |
 |------|------|
 | ✅ #472 | Session 可选 `agent`；加载能力包；ContextVar **API** |
@@ -323,14 +325,15 @@ REST ``DELETE /sessions/{id}`` 在 SessionManager.delete 之后还会：
 **字段**：
 - `_sm: SessionManager` — 复用其 spawn/查询能力管理 Session 生命周期
 - `_ai_id: str` — 飞书 Session 默认挂载的 AI 实例 id（`create_app(..., feishu_ai_id=...)` 注入，来自 `Gateway.feishu_ai_id`）
-- `_workspace_root: str` — 各会话独立 workspace 的父目录（来自 `Gateway.feishu_workspace_root`；空则以 cwd 为父）
+- `_workspace_root: str` — 各会话独立 workspace 的父目录（来自 `Gateway.feishu_workspace_root`；空则以 cwd 为父）。**非空时已被 `Gateway.run()` 解析成绝对路径**，且与 `os.environ["PSI_WORKSPACE_ROOT"]` 逐字节相同——隔离守卫按解析后的路径前缀判权，两者不一致会让 `owner_of()` 认不出任何人自己的目录
 - `_routes: dict[str, str]` — 路由键 → session_id 映射（内存态）
 - `_lock: anyio.Lock` — 首次路由才走，频率低，可接受串行
 
 **派生规则**：
 - 加 `feishu-` 前缀与 SPA 手建 session 命名空间隔离；`sanitize` 用正则 `[^A-Za-z0-9._-] → _`（飞书 id 本身即安全字符，此为防御层）
 - 路由键加 `chat:` 前缀隔离两个命名空间（open_id 里不会有冒号）
-- **私聊侧把 `-` 转义成 `_`（刻意为之，勿"简化"掉）**：`sanitize` 的白名单**允许** `-`，若不转义，某人 open_id 恰为 `chat-oc_x` 时派生出的 `feishu-chat-oc_x` 会与群 `oc_x` 的 session id **逐字节相同**——两个陌生人共享同一份上下文与 workspace，是隐私事故而非美观问题。`_session_id` 与 `_workspace_for` 两处必须同步转义，否则 session 分开了 workspace 还是同一个目录。飞书真实 open_id 不含 `-`，这纯属防御层
+- **私聊侧把 `-` 转义成 `_`（刻意为之，勿"简化"掉）**：`sanitize` 的白名单**允许** `-`，若不转义，某人 open_id 恰为 `chat-oc_x` 时派生出的 `feishu-chat-oc_x` 会与群 `oc_x` 的 session id **逐字节相同**——两个陌生人共享同一份上下文与 workspace，是隐私事故而非美观问题。飞书真实 open_id 不含 `-`，这纯属防御层
+- **`_workspace_for()` 不再自己拼目录名，而是复用 `_private_space.owner_from_session_id(_session_id(key))`（刻意为之）**：隔离守卫判权靠「从 session_id 反解出的 owner **等于** 路径首段」，所以目录名必须与守卫的推导逐字符一致。原先「`_session_id` 与 `_workspace_for` 两处同步转义」的要求已由此替代为**单一来源**——后者从前者派生，不可能漂移。若强行改回各算一份，失效形态是**所有人都读不到自己的文件**（不是放行），且静默无报错；`test_workspace_dirname_matches_guard_owner` 就是钉这条的
 - **`chat_id` 为空时不按群路由（刻意为之）**：`_is_group` 要求 `chat_type in {group, topic}` **且** `chat_id` 非空，否则退回按 `open_id`。宁可这条消息不隔离，也不要建出 `feishu-chat-` 这种无主 session
 
 **route(open_id, *, chat_id="", chat_type="", ai_id=None, workspace=None) → (channel_socket, session_id) 流程**（持 lock）：
@@ -344,7 +347,9 @@ REST ``DELETE /sessions/{id}`` 在 SessionManager.delete 之后还会：
 
 **list_routes() → list[FeishuRoute]**：`[{open_id, chat_id, session_id}]`，供观测（`GET /feishu/routes`）。群聊记录填 `chat_id` 而 `open_id` 留空，私聊反之——一条记录只有一个键有值。
 
-**未定义（已知留白）**：群 Session 的 workspace 只有一份，而 `user_access_token`（UAT）按发送者 `open_id` 存。群里多人时「以谁的身份写文档」由 workspace 侧工具按每条消息的 `sender_open_id` 决定（见 `examples/haitun-workspace/TOOLS.md`），Gateway 不做约定。
+**未定义（已知留白）**：群 Session 的 workspace 只有一份，而 `user_access_token`（UAT）按发送者 `open_id` 存。群里多人时「以谁的身份写文档」由 workspace 侧工具按每条消息的 `sender_open_id` 决定（见 `examples/haitun-workspace/TOOLS.md`），Gateway 不做约定。**文件可见性这一半已由隔离守卫定义**：群的 owner 是 `chat-<chat_id>`，整群共用一块空间（与共用上下文一致）；身份归属那一半仍是留白。
+
+**按人对称隔离（`--feishu-workspace-root` 非空时生效）**：目录分开只是「归类」，边界检查在 `psi_agent._private_space`。每个会话只能读写自己那块 `<root>/<owner>/`，`<root>/public/` 全体可读但**不可写**；`PSI_WORKSPACE_ROOT` 未配时守卫全程空操作、行为与开启前逐字节一致。守卫是**工具调用层**的判定，不覆盖 `REST /workspace/*` 那几个端点（它们对 `path` 本就不加限制，见下文 WorkspaceManager 的说明）。完整语义、默认关闭 / 读松写紧 / 无主 session 放行三条反直觉点，以及 shell 层只能启发式的能力边界，见根 `AGENTS.md` 第 22 条。
 
 ## OAuthRelay
 
@@ -720,7 +725,7 @@ psi-agent.exe gateway --tray --browser --icon haitun.ico --verbose
 
 `{app}` / 桌面路径在运行时解析（安装目录 + `SHGetFolderPath`），**禁止**写死本机用户路径。`--appdata` 可不传（软默认 `platformdirs`）。另：Gateway 软默认在 cwd 含 `tools/`+`skills/` 时也会把 cwd 当 agent（兜底直接跑 `psi-agent.exe`）。
 
-`--feishu-ai-id ID` 指定飞书 Session（经 `POST /feishu/route` 按需 spawn）默认挂载的 AI 实例 id。未配时若请求也不带 `ai_id`，`/feishu/route` 返回 400。`--feishu-workspace-root DIR` 指定各飞书会话独立 workspace 的父目录（私聊每个 open_id 得 `<root>/<open_id>`，群聊每个 chat_id 得 `<root>/chat-<chat_id>`）；空则以 Gateway 进程 cwd 为父。两者均为飞书多会话独立渠道服务（配合飞书 channel 的 `--gateway-url`，见 `channel/AGENTS.md`）。
+`--feishu-ai-id ID` 指定飞书 Session（经 `POST /feishu/route` 按需 spawn）默认挂载的 AI 实例 id。未配时若请求也不带 `ai_id`，`/feishu/route` 返回 400。`--feishu-workspace-root DIR` 指定各飞书会话独立 workspace 的父目录（私聊每个 open_id 得 `<root>/<open_id 中 - 转 _>`，群聊每个 chat_id 得 `<root>/chat-<chat_id>`）；空则以 Gateway 进程 cwd 为父。**这个参数同时是按人文件隔离的总开关**：非空时 `run()` 把它解析成绝对路径并写入 `os.environ["PSI_WORKSPACE_ROOT"]`，同进程的 workspace 工具与 channel 侧守卫据此判权；空则守卫全程空操作（见 `FeishuManager`「按人对称隔离」与根 `AGENTS.md` 第 22 条）。两者均为飞书多会话独立渠道服务（配合飞书 channel 的 `--gateway-url`，见 `channel/AGENTS.md`）。
 
 Gateway 不在 `_run.py` 的批量启动中。
 

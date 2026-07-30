@@ -27,7 +27,7 @@ async def list_dir(dir_path: str = ".", recursive: bool = False, max_entries: in
         cannot be listed.
     """
     try:
-        path = _paths.resolve_user_path(dir_path)
+        path = await _paths.resolve_user_path(dir_path)
     except _paths.PrivateSpaceDeniedError as e:
         return str(e)
     if not await path.exists():
@@ -37,9 +37,10 @@ async def list_dir(dir_path: str = ".", recursive: bool = False, max_entries: in
 
     entries: list[str] = []
     truncated = False
-    # 列隔离父目录本身是允许的(root 无主), 但那一层的兄弟目录是别人的空间 —— 逐个
-    # 跳过, 否则光看目录名就泄露了「有哪些人、各自有什么文件」。
-    blocked = {str(p) for p in _paths.forbidden_dirs()}
+    # Listing the isolation root itself is allowed (the root is ownerless), but its
+    # sibling directories are other users' spaces — skip them one by one, or the names
+    # alone leak who exists and what each of them has.
+    blocked = {str(p) for p in await _paths.forbidden_dirs()}
 
     async def collect(base: anyio.Path, prefix: str) -> None:
         nonlocal truncated

@@ -99,6 +99,7 @@ Channel 层是 psi-agent 的用户界面层，负责连接 Session socket 并通
 - `<audio key="..."/>` inline 标签通过 `message_resource.aget()` API 下载
 - 通过 `channel.stream()`  + `stream.append()` 实现卡片流式渲染
 - FileChunk 通过 `channel.send()` 发送文件；用户文件下载至 `Downloads/.psi/<date>/`
+- **`[SEND:]` 按会话事实判权（配 Gateway `--feishu-workspace-root` 时生效）**：`[SEND:]` 能把**任意本地路径**上传到飞书，是最直接的外泄口——路径工具全堵上之后，只要 agent 猜到别人的文件名，一句 marker 就能把文件发给自己。故 `_send_file` 先过 `psi_agent._private_space.blocks_send()`，越界文件**直接丢弃并记 WARNING**（不回错给用户：这是防御动作，不是用户操作失败）。channel 是独立进程、没有 `runtime_context`，所以判权只用**会话事实**（`open_id` / `chat_id` / `chat_type`）自行推导 owner，**不依赖 workspace 内容**。为此 `_stream_reply` 增了 `open_id` / `chat_type` 两个 keyword-only 参数，`_card_action.StreamReply` Protocol 同步声明——卡片回调按**操作者** `open_id` 判权，与它 `resolve_core(operator_open_id)` 的路由保持一致。未配 `PSI_WORKSPACE_ROOT` 时 `blocks_send` 恒为 False，行为与开启前一致。详见根 `AGENTS.md` 第 22 条
 - 认证：`--app-id` + `--app-secret` CLI args > `PSI_FEISHU_APP_ID` / `PSI_FEISHU_APP_SECRET` env
 - 用户白名单：`--allowed-user-ids` 参数或 `None`（不限制）
 - 处理状态表情（参考 Hermes）：收到白名单消息后立即在该消息上加 `Typing` 表情（`message_reaction.acreate`），回复完成后移除；处理失败则替换为 `CrossMark`。表情操作失败安全，不影响回复

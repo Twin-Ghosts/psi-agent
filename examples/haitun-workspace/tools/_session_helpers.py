@@ -27,10 +27,11 @@ except ImportError:
 
 
 def _deny_to_result(func: Any) -> Any:
-    """把 ``PrivateSpaceDeniedError`` 转成常规失败结果 dict, 而不是抛穿到模型面前。
+    """Turn ``PrivateSpaceDeniedError`` into a normal failure dict instead of raising.
 
-    历史读取的判权在 ``_resolve_history_path`` 一处(唯一漏斗), 但它有 6 个内部调用点;
-    在公开入口统一兜一层, 比在每个调用点写 try 更不容易漏。
+    History authority is checked in one place (``_resolve_history_path``, the single
+    funnel), but that has six internal call sites; wrapping the public entry points once
+    is less error-prone than a try at each of them.
     """
 
     @wraps(func)
@@ -137,9 +138,11 @@ async def _scan_one_histories_dir(histories_dir: anyio.Path) -> dict[str, dict[s
         session_id = entry.name.removesuffix(".jsonl").strip()
         if not session_id:
             continue
-        # AppData 的 histories/ 是**全局**的(不分 workspace), 故这里必须按主过滤 ——
-        # 否则 sessions_list / session_keyword_search / sessions_history 会列出并全文
-        # 搜索所有人的对话原文, 那比文件更敏感。这是所有历史发现路径的唯一漏斗。
+        # AppData's histories/ is **global** (not partitioned by workspace), so it must
+        # be filtered by owner here — otherwise sessions_list / session_keyword_search /
+        # sessions_history would list and full-text search every user's raw transcript,
+        # which is more sensitive than the files. This is the single funnel for all
+        # history discovery.
         if not _paths.owns_session(session_id):
             continue
         try:
@@ -172,10 +175,11 @@ async def _scan_history_sessions(workspace: anyio.Path) -> dict[str, dict[str, A
 
 
 def _ensure_session_row(rows: dict[str, dict[str, Any]], session_id: str) -> dict[str, Any] | None:
-    """取/建一行; 越界 session 返回 ``None`` 由调用方跳过。
+    """Get or create a row; returns ``None`` for out-of-bounds sessions (caller skips).
 
-    后台进程注册表与 Gateway ``/sessions`` 两条合并路径会**重新引入**历史过滤已经剔掉
-    的 session, 故在这个共同创建点再判一次 —— 一处覆盖两条路径。
+    The background-process registry and the Gateway ``/sessions`` merge paths would
+    **re-introduce** sessions the history filter already dropped, so the check is
+    repeated at this shared creation point — one place covering both paths.
     """
     row = rows.get(session_id)
     if row is not None:
@@ -320,9 +324,10 @@ def resolve_session_id(session_id: str) -> str:
 async def _resolve_history_path(workspace: anyio.Path, session_id: str) -> anyio.Path:
     """Dual-read: AppData histories preferred, else legacy workspace histories.
 
-    显式传 ``session_id`` 能直接指定要读谁的历史, 绕过列表侧过滤 —— 故这里判权。
-    这是「按 id 读某条历史」的唯一漏斗(``sessions_history`` / ``sessions_export`` /
-    ``session_keyword_search`` 单会话模式都经它)。
+    Passing ``session_id`` explicitly names whose history to read and bypasses the
+    listing-side filter, hence the authority check here. This is the single funnel for
+    "read one history by id" (``sessions_history`` / ``sessions_export`` and
+    ``session_keyword_search`` in single-session mode all go through it).
     """
     if not _paths.owns_session(session_id):
         raise _paths.PrivateSpaceDeniedError(
@@ -747,8 +752,9 @@ async def keyword_search_sessions(
                 "session_id_scope": scope,
                 "hits": [],
             }
-        # 走到这里 _resolve_history_path 已判过权, 故 _ensure_session_row 不会拒;
-        # 它现在可能返回 None(越界), 用 {"session_id": scope} 兜住类型。
+        # _resolve_history_path has already checked authority by this point, so
+        # _ensure_session_row will not refuse; it can now return None (out of bounds),
+        # so {"session_id": scope} keeps the type sound.
         session_row = row or _ensure_session_row(rows, scope) or {"session_id": scope}
         hit = await _keyword_search_file(path, query=query, session_row=session_row)
         hits = [hit] if hit is not None else []

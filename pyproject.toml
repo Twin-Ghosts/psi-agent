@@ -94,13 +94,16 @@ asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 addopts = ["--strict-markers", "-ra", "--cov"]
 markers = ["schedule: schedule-based tests (> 30s)"]
+# 扁平工具模块(examples/haitun-workspace/tools/, 无 __init__.py, 运行时靠 sys.path
+# 插入互相 import)。让 pytest 直接把它加进 sys.path, 测试便能在**文件顶部**正常
+# import 这些模块 —— 否则要先写一段 sys.path.insert 再 import, 触发 E402/PLC0415
+# 两类 lint, 只能靠 noqa 压制, 违反「零抑制」。
+pythonpath = ["examples/haitun-workspace/tools"]
 
 [tool.coverage.run]
 source = ["src/psi_agent"]
 
-
 [tool.ty.environment]
-# 扁平工具模块(examples/haitun-workspace/tools/, 无 __init__.py, 运行时靠 sys.path
-# 插入互相 import)。测试要导它们做隔离验证, 故让 ty 也认这条搜索路径 —— 否则只能给
-# 每处 import 加 ty: ignore, 违反仓库的零抑制原则。
+# 同 pytest 的 pythonpath: 让 ty 也认这条搜索路径, 否则测试里每处 import 扁平工具
+# 模块都要加 ty: ignore[unresolved-import], 同样违反「零抑制」。
 extra-paths = ["examples/haitun-workspace/tools"]

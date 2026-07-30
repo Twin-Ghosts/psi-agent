@@ -40,7 +40,7 @@ async def find_files(
         root cannot be used.
     """
     try:
-        base = _paths.resolve_user_path(dir_path)
+        base = await _paths.resolve_user_path(dir_path)
     except _paths.PrivateSpaceDeniedError as e:
         return str(e)
     if not await base.exists():
@@ -50,8 +50,9 @@ async def find_files(
 
     matches: list[tuple[float, str]] = []
     truncated = False
-    # 从隔离父目录起 glob 时, ``**`` 会走进别人的空间 —— 命中项按前缀剔掉。
-    blocked = _paths.forbidden_dirs()
+    # Globbing from the isolation root lets ``**`` descend into other users' spaces —
+    # drop the hits by prefix.
+    blocked = await _paths.forbidden_dirs()
 
     async for match in base.glob(pattern):
         if not await match.is_file():
