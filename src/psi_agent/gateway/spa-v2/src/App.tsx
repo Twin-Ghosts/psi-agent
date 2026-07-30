@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
-import WorkspaceGate from './components/WorkspaceGate'
+import WorkspaceGate, { type PathPickKind } from './components/WorkspaceGate'
 import HaiTunAgentWorkspace from './haitun-agent/HaiTunAgentWorkspace'
 import { browseWorkspace, fetchDefaults } from './services/api'
 import { BrandLogo } from './haitun-agent/primitives'
 
 const LS_WORKSPACE = 'gw-v2-workspace'
+const LS_AGENT = 'gw-v2-agent'
 
 /** Paths that were agent packages, not user workspaces — treat as unset. */
 function isLegacyWorkspacePath(path: string): boolean {
@@ -26,6 +27,24 @@ function readSavedWorkspace(): string {
   }
 }
 
+function readSavedAgent(): string {
+  try {
+    return window.localStorage.getItem(LS_AGENT)?.trim() || ''
+  } catch {
+    return ''
+  }
+}
+
+function writeSavedAgent(path: string) {
+  try {
+    const clean = path.trim()
+    if (clean) window.localStorage.setItem(LS_AGENT, clean)
+    else window.localStorage.removeItem(LS_AGENT)
+  } catch {
+    /* ignore quota */
+  }
+}
+
 async function pathExistsAsDir(path: string): Promise<boolean> {
   try {
     await browseWorkspace(path, { kind: 'directory' })
@@ -36,16 +55,16 @@ async function pathExistsAsDir(path: string): Promise<boolean> {
 }
 
 /**
- * spa-v2 root (Step 2 wiring):
- * - Boot from GET /defaults.workspace (not hardcoded cwd / haitun-workspace).
- * - Pass defaults.agent into POST /sessions via HaiTunAgentWorkspace.
- * - Does NOT change how tools resolve relative paths (later PR).
+ * spa-v2 root:
+ * - Boot from GET /defaults (+ localStorage overrides for workspace / agent).
+ * - Pass agent into POST /sessions via HaiTunAgentWorkspace.
+ * - Settings can switch workspace or agent package (same PathPicker flow).
  */
 export default function App() {
   const [workspace, setWorkspace] = useState('')
   const [defaultAgent, setDefaultAgent] = useState('')
   const [bootstrapping, setBootstrapping] = useState(true)
-  const [picking, setPicking] = useState(false)
+  const [pickingKind, setPickingKind] = useState<PathPickKind | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -53,7 +72,17 @@ export default function App() {
       try {
         const d = await fetchDefaults()
         if (cancelled) return
-        if (d.agent) setDefaultAgent(d.agent)
+
+        const savedAgent = readSavedAgent()
+        let agent = ''
+        if (savedAgent && (await pathExistsAsDir(savedAgent))) {
+          agent = savedAgent
+        } else if ((d.agent || '').trim()) {
+          agent = d.agent.trim()
+          if (savedAgent && savedAgent !== agent) writeSavedAgent('')
+        }
+        if (!cancelled) setDefaultAgent(agent)
+
         const fromDefaults = (d.workspace || '').trim()
         const saved = readSavedWorkspace()
         let chosen = ''
@@ -76,15 +105,15 @@ export default function App() {
         if (chosen) {
           setWorkspace(chosen)
           setBootstrapping(false)
-          setPicking(false)
+          setPickingKind(null)
           return
         }
         setBootstrapping(false)
-        setPicking(true)
+        setPickingKind('workspace')
       } catch {
         if (cancelled) return
         setBootstrapping(false)
-        setPicking(true)
+        setPickingKind('workspace')
       }
     })()
     return () => {
@@ -92,7 +121,7 @@ export default function App() {
     }
   }, [])
 
-  const ready = useCallback((path: string) => {
+  const readyWorkspace = useCallback((path: string) => {
     const clean = path.trim()
     try {
       window.localStorage.setItem(LS_WORKSPACE, clean)
@@ -100,12 +129,23 @@ export default function App() {
       /* ignore quota */
     }
     setWorkspace(clean)
-    setPicking(false)
+    setPickingKind(null)
     setBootstrapping(false)
   }, [])
 
+  const readyAgent = useCallback((path: string) => {
+    const clean = path.trim()
+    writeSavedAgent(clean)
+    setDefaultAgent(clean)
+    setPickingKind(null)
+  }, [])
+
   const changeWorkspace = useCallback(() => {
-    setPicking(true)
+    setPickingKind('workspace')
+  }, [])
+
+  const changeAgent = useCallback(() => {
+    setPickingKind('agent')
   }, [])
 
   if (bootstrapping) {
@@ -119,12 +159,24 @@ export default function App() {
     )
   }
 
-  if (picking) {
+  if (pickingKind === 'workspace') {
     return (
       <WorkspaceGate
+        kind="workspace"
         initialPath={workspace}
-        onReady={ready}
-        onCancel={workspace ? () => setPicking(false) : undefined}
+        onReady={readyWorkspace}
+        onCancel={workspace ? () => setPickingKind(null) : undefined}
+      />
+    )
+  }
+
+  if (pickingKind === 'agent') {
+    return (
+      <WorkspaceGate
+        kind="agent"
+        initialPath={defaultAgent}
+        onReady={readyAgent}
+        onCancel={() => setPickingKind(null)}
       />
     )
   }
@@ -135,6 +187,7 @@ export default function App() {
       workspace={workspace}
       defaultAgent={defaultAgent}
       onChangeWorkspace={changeWorkspace}
+      onChangeAgent={changeAgent}
     />
   )
 }

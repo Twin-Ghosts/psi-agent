@@ -645,9 +645,14 @@
 
 .hub-settings-foot {
   margin: 8px 0 0;
-  text-align: center;
+  text-align: left;
   font-size: 11px;
+  line-height: 1.45;
   color: var(--ink-soft);
+}
+
+.hub-settings-section .hub-settings-workspace + .hub-settings-workspace {
+  margin-top: 6px;
 }
 
 @media (max-width: 520px) {

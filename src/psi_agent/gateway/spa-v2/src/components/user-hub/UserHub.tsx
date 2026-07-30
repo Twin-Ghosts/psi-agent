@@ -17,6 +17,8 @@ type Props = {
   onSelectAi: (id: string | null) => void
   workspace?: string
   onChangeWorkspace?: () => void
+  agent?: string
+  onChangeAgent?: () => void
   onToast?: (message: string) => void
   onAisChanged?: (ais: AiInfo[]) => void
   /** Open models panel on first mount (e.g. empty AI pool). */
@@ -33,6 +35,8 @@ export default function UserHub({
   onSelectAi,
   workspace,
   onChangeWorkspace,
+  agent,
+  onChangeAgent,
   onToast,
   onAisChanged,
   openModelsOnMount = false,
@@ -173,6 +177,8 @@ export default function UserHub({
         onClose={() => setPanel(null)}
         workspace={workspace}
         onChangeWorkspace={onChangeWorkspace}
+        agent={agent}
+        onChangeAgent={onChangeAgent}
       />
       <HubAdvancedPanel
         show={panel === 'advanced'}

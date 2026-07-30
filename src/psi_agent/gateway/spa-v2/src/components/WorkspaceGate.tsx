@@ -1,19 +1,29 @@
-import { FolderOpen, Loader2 } from 'lucide-react'
+import { FolderOpen, Loader2, Package } from 'lucide-react'
 import { FormEvent, useEffect, useState } from 'react'
 import { BrandLogo } from '../haitun-agent/primitives'
 import { fetchCwd, fetchDefaults } from '../services/api'
 import PathPickerDialog from './PathPickerDialog'
 
+export type PathPickKind = 'workspace' | 'agent'
+
 type Props = {
-  /** Prefill when switching from an existing workspace. */
+  /** Prefill when switching from an existing path. */
   initialPath?: string
-  onReady: (workspace: string) => void
-  /** Return to previous workspace without changing (settings → 切换). */
+  /** workspace = user open folder; agent = capability pack (tools/schedules/systems). */
+  kind?: PathPickKind
+  onReady: (path: string) => void
+  /** Return without changing (settings → 切换). */
   onCancel?: () => void
 }
 
-/** Pick / confirm a workspace directory (used when switching; first-run defaults to Gateway cwd). */
-export default function WorkspaceGate({ initialPath = '', onReady, onCancel }: Props) {
+/** Pick / confirm a directory (workspace gate or agent-package gate). */
+export default function WorkspaceGate({
+  initialPath = '',
+  kind = 'workspace',
+  onReady,
+  onCancel,
+}: Props) {
+  const isAgent = kind === 'agent'
   const [path, setPath] = useState(initialPath)
   const [loading, setLoading] = useState(!initialPath)
   const [error, setError] = useState<string | null>(null)
@@ -29,7 +39,10 @@ export default function WorkspaceGate({ initialPath = '', onReady, onCancel }: P
     ;(async () => {
       try {
         const d = await fetchDefaults().catch(() => null)
-        if (!cancelled && d?.workspace) {
+        if (isAgent) {
+          if (!cancelled && d?.agent) setPath(d.agent)
+          else if (!cancelled) setPath('')
+        } else if (!cancelled && d?.workspace) {
           setPath(d.workspace)
         } else {
           const cwd = await fetchCwd()
@@ -44,34 +57,45 @@ export default function WorkspaceGate({ initialPath = '', onReady, onCancel }: P
     return () => {
       cancelled = true
     }
-  }, [initialPath])
+  }, [initialPath, isAgent])
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
     const clean = path.trim()
     if (!clean) {
-      setError('请选择或输入工作区路径')
+      setError(isAgent ? '请选择或输入 Agent 包路径' : '请选择或输入工作区路径')
       return
     }
     onReady(clean)
   }
+
+  const ConfirmIcon = isAgent ? Package : FolderOpen
 
   return (
     <div className="workspace-gate">
       <div className="workspace-gate-card">
         <BrandLogo size="hero" />
         <span className="eyebrow">HaiTun Agent</span>
-        <h1>打开工作区</h1>
+        <h1>{isAgent ? '选择 Agent 包' : '打开工作区'}</h1>
         <p>
-          任务绑定到 Gateway Session。请选择本机<strong>用户工作区</strong>（工程目录）。
-          Agent 能力包由 Gateway 默认路径指定，可与工作区不同。
+          {isAgent ? (
+            <>
+              Agent 包是能力根目录（<code>tools/</code>、<code>schedules/</code>、<code>systems/</code>）。
+              可与用户工作区不同；切换后<strong>新建任务</strong>会挂上此包，已有任务仍用创建时绑定的包。
+            </>
+          ) : (
+            <>
+              任务绑定到 Gateway Session。请选择本机<strong>用户工作区</strong>（工程目录）。
+              Agent 能力包可在设置中单独切换，可与工作区不同。
+            </>
+          )}
         </p>
         {loading ? (
           <div className="workspace-gate-loading"><Loader2 className="spin" size={22} /> 正在连接 Gateway…</div>
         ) : (
           <form onSubmit={submit}>
             <label>
-              <span>工作区路径</span>
+              <span>{isAgent ? 'Agent 包路径' : '工作区路径'}</span>
               <div className="workspace-gate-path-row">
                 <button
                   type="button"
@@ -85,7 +109,11 @@ export default function WorkspaceGate({ initialPath = '', onReady, onCancel }: P
                 <input
                   value={path}
                   onChange={(e) => setPath(e.target.value)}
-                  placeholder="例如 D:\Projects\my-folder"
+                  placeholder={
+                    isAgent
+                      ? '例如 D:\\Haitun\\examples\\haitun-workspace'
+                      : '例如 D:\\Projects\\my-folder'
+                  }
                   autoFocus
                 />
               </div>
@@ -98,7 +126,7 @@ export default function WorkspaceGate({ initialPath = '', onReady, onCancel }: P
                 </button>
               )}
               <button type="submit" className="primary-button" disabled={!path.trim()}>
-                <FolderOpen size={16} /> 进入任务工作台
+                <ConfirmIcon size={16} /> {isAgent ? '使用此 Agent 包' : '进入任务工作台'}
               </button>
             </div>
           </form>
@@ -108,9 +136,13 @@ export default function WorkspaceGate({ initialPath = '', onReady, onCancel }: P
       <PathPickerDialog
         open={pickerOpen}
         initialPath={path}
-        title="打开工作区"
-        confirmLabel="打开"
-        hint="选择本地文件夹作为 Agent 工作区。"
+        title={isAgent ? '选择 Agent 包' : '打开工作区'}
+        confirmLabel={isAgent ? '选择' : '打开'}
+        hint={
+          isAgent
+            ? '选择含 tools / schedules / systems 的 Agent 能力包目录。'
+            : '选择本地文件夹作为用户工作区。'
+        }
         onCancel={() => setPickerOpen(false)}
         onConfirm={(picked) => {
           setPath(picked)
