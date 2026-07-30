@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import queue
 import sys
@@ -160,6 +161,10 @@ class MemoryMcpClient:
         with self._thread_lock:
             if self._closed:
                 return
+            # 线程已经退出(崩了)就得重开: 否则 _terminal_error 一旦写上, 后面每次
+            # call_tool 都直接返回缓存的错误, 整个进程生命周期内 memory 永久不可用。
+            if self._thread is not None and not self._thread.is_alive():
+                self._thread = None
             if self._thread is None:
                 self._started.clear()
                 self._terminal_error = None
@@ -174,6 +179,7 @@ class MemoryMcpClient:
         try:
             anyio.run(self._supervisor_main)
         except BaseException:
+            logger.exception("Fusion Memory MCP supervisor thread crashed")
             self._mark_terminal(self._thread_terminal_result())
         else:
             self._mark_terminal(self._thread_terminal_result())
@@ -321,13 +327,26 @@ class MemoryMcpClient:
         return headers
 
 
+def _read_timeout_arg(timeout_seconds: float) -> Any:
+    """按当前 mcp 版本给出 read_timeout_seconds 的实参类型。
+
+    mcp<2 要求 datetime.timedelta, mcp>=2 改成了 float | None。传错类型不会在
+    ClientSession 构造时报错, 而是等到 anyio.fail_after(float + timedelta) 才炸
+    TypeError, 且异常在 cancel scope 退栈时被 RuntimeError 掩盖, 极难定位。
+    """
+    annotation = inspect.signature(ClientSession.__init__).parameters["read_timeout_seconds"].annotation
+    if "timedelta" in str(annotation):
+        return timedelta(seconds=timeout_seconds)
+    return timeout_seconds
+
+
 @asynccontextmanager
 async def _production_connector(url: str, headers: dict[str, str], timeout_seconds: float) -> AsyncIterator[Any]:
     timeout = httpx.Timeout(timeout_seconds)
     async with (
         httpx.AsyncClient(headers=headers, timeout=timeout) as http_client,
         streamable_http_client(url, http_client=http_client) as (read, write, *_),
-        ClientSession(read, write, read_timeout_seconds=timedelta(seconds=timeout_seconds)) as session,
+        ClientSession(read, write, read_timeout_seconds=_read_timeout_arg(timeout_seconds)) as session,
     ):
         yield session
 
