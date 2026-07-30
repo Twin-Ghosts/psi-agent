@@ -80,7 +80,7 @@ export type ChatMessage = {
   stopped?: boolean;
 };
 
-export type SidebarPanel = "pending" | "deliveries" | "history" | null;
+export type SidebarPanel = "working" | "pending" | "deliveries" | "history" | null;
 export type MainView = "workspace" | "new-task" | "templates";
 
 export type TaskTemplate = {

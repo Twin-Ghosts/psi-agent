@@ -5,10 +5,11 @@ import {
   ChevronRight,
   Trash2,
 } from "lucide-react";
-import { type CSSProperties, useEffect, useState } from "react";
+import { type CSSProperties, useEffect, useState, type MouseEvent } from "react";
 import { plainTextFromMarkdown } from "../services/assistantDisplay";
 import { DELIVERY_LABEL, OVERVIEW_LABEL, PENDING_LABEL, type Task, type TaskStep } from "./model";
 import { ProgressRing, TreasureButton, TreasureVisual } from "./primitives";
+import { WORKING_LABEL, filterTasksBySignal, type TaskSignalKind } from "./taskSignals";
 
 /** 3 columns × 2 rows — middle step viewport stays fixed; overflow pages. */
 const STEPS_COLS = 3;
@@ -113,9 +114,12 @@ export function TaskRow({
 export function OverviewCard({
   tasks,
   onOpenChat,
+  onOpenSignal,
 }: {
   tasks: Task[];
   onOpenChat?: () => void;
+  /** Same inbox API as sidebar topline signals (working / pending / deliveries). */
+  onOpenSignal?: (kind: TaskSignalKind) => void;
 }) {
   const dayLabel = useLiveOverviewDay();
   const finiteTasks = tasks.filter((task) => task.status !== "continuous");
@@ -123,10 +127,15 @@ export function OverviewCard({
   const overall = tracked.length
     ? Math.round(tracked.reduce((sum, task) => sum + task.progress, 0) / tracked.length)
     : Math.round((finiteTasks.filter((task) => task.phase === "done" || task.status === "completed").length / Math.max(finiteTasks.length, 1)) * 100);
-  const working = tasks.filter((task) => ["working", "continuous"].includes(task.status)).length;
-  const attention = tasks.filter((task) => task.status === "attention").length;
+  const working = filterTasksBySignal(tasks, "working").length;
+  const attention = filterTasksBySignal(tasks, "pending").length;
   const completed = tasks.filter((task) => task.status === "completed").length;
-  const newDeliveries = tasks.filter((task) => task.deliveryState === "ready").length;
+  const newDeliveries = filterTasksBySignal(tasks, "deliveries").length;
+
+  const openSignal = (kind: TaskSignalKind) => (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    onOpenSignal?.(kind);
+  };
 
   return (
     <article
@@ -162,19 +171,40 @@ export function OverviewCard({
         </div>
       </div>
 
-      <div className="overview-metrics">
-        <div className="metric-cell">
+      <div className="overview-metrics" role="group" aria-label="任务信号">
+        <button
+          type="button"
+          className="metric-cell"
+          data-card-interactive
+          disabled={!onOpenSignal}
+          onClick={openSignal("working")}
+          aria-label={`${WORKING_LABEL} ${working}`}
+        >
           <span className="metric-icon working"><ProgressRing value={overall} size="sm" showValue={false} /></span>
-          <div><strong>{working}</strong><span>运行中</span></div>
-        </div>
-        <div className="metric-cell attention">
+          <div><strong>{working}</strong><span>{WORKING_LABEL}</span></div>
+        </button>
+        <button
+          type="button"
+          className="metric-cell attention"
+          data-card-interactive
+          disabled={!onOpenSignal}
+          onClick={openSignal("pending")}
+          aria-label={`${PENDING_LABEL} ${attention}`}
+        >
           <span className="metric-icon"><AlertCircle size={16} /></span>
           <div><strong>{attention}</strong><span>{PENDING_LABEL}</span></div>
-        </div>
-        <div className="metric-cell delivery">
+        </button>
+        <button
+          type="button"
+          className="metric-cell delivery"
+          data-card-interactive
+          disabled={!onOpenSignal}
+          onClick={openSignal("deliveries")}
+          aria-label={`${DELIVERY_LABEL} ${newDeliveries}`}
+        >
           <span className="metric-icon treasure-metric"><TreasureVisual state="ready" size="mini" /></span>
           <div><strong>{newDeliveries}</strong><span>{DELIVERY_LABEL}</span></div>
-        </div>
+        </button>
       </div>
     </article>
   );
@@ -395,12 +425,14 @@ export function CompactTaskContext({
 
 export function CompactOverviewContext({
   tasks,
+  onOpenSignal,
 }: {
   tasks: Task[];
+  onOpenSignal?: (kind: TaskSignalKind) => void;
 }) {
   return (
     <div className="compact-card-shell">
-      <OverviewCard tasks={tasks} />
+      <OverviewCard tasks={tasks} onOpenSignal={onOpenSignal} />
     </div>
   );
 }
