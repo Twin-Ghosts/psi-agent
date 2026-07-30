@@ -187,8 +187,7 @@ textarea:focus-visible {
 .signal-controls {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
-  flex-wrap: wrap;
+  gap: 14px;
 }
 
 .signal-controls > button {
@@ -268,11 +267,6 @@ textarea:focus-visible {
 .signal-orb.red {
   background: radial-gradient(circle at 35% 28%, #ffb09f 0%, #ff6b57 43%, #c6362e 100%);
   box-shadow: 0 0 14px rgba(255, 85, 68, 0.26), inset -2px -3px 5px rgba(85, 0, 0, 0.25), inset 2px 2px 4px rgba(255, 255, 255, 0.5);
-}
-
-.signal-orb.blue {
-  background: radial-gradient(circle at 35% 28%, #9fd0ff 0%, var(--brand-400) 46%, var(--brand-700) 100%);
-  box-shadow: 0 0 14px rgba(var(--brand-rgb), 0.28), inset -2px -3px 5px rgba(0, 40, 100, 0.28), inset 2px 2px 4px rgba(255, 255, 255, 0.5);
 }
 
 .signal-orb.gold {

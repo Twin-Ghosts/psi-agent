@@ -40,7 +40,6 @@ import {
   type TaskTemplate,
 } from "./model";
 import {
-  WORKING_LABEL,
   filterTasksBySignal,
   signalLabel,
   type TaskSignalKind,
@@ -1565,10 +1564,6 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
       <aside id="main-sidebar" className={`sidebar ${sidebarOpen ? "open" : ""}`}>
         <div className="sidebar-topline">
           <div className="signal-controls" aria-label="任务提醒">
-            <button type="button" className={sidebarPanel === "working" ? "active" : ""} onClick={() => openSignal("working", { toggle: true })}>
-              <span className="signal-orb blue"><span>{workingTasks.length}</span></span>
-              <span>{WORKING_LABEL}</span>
-            </button>
             <button type="button" className={sidebarPanel === "pending" ? "active" : ""} onClick={() => openSignal("pending", { toggle: true })}>
               <span className="signal-orb red"><span>{pendingTasks.length}</span></span>
               <span>{PENDING_LABEL}</span>
