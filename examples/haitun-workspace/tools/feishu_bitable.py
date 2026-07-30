@@ -203,6 +203,87 @@ async def feishu_bitable_create_record(
     return _f.dumps_result(await _f.create_bitable_record_impl(app_token, table_id, fields_json, user_key, identity))
 
 
+async def feishu_bitable_update_record(
+    app_token: str,
+    table_id: str,
+    record_id: str,
+    fields_json: str,
+    user_key: str = "",
+    identity: str = "",
+    validate_fields: bool = True,
+) -> str:
+    """Change cell values in an existing record (row) of a Feishu bitable table.
+
+    This is the tool for "改一下某一行的某个格子" — updating a status, correcting a
+    number, filling a blank. The update is **incremental**: only the columns you pass
+    are written and every other cell on that row keeps its value. Pass ``null`` as a
+    value to clear a cell.
+
+    Find the ``record_id`` with ``feishu_bitable_list_records`` (optionally with its
+    ``filter`` to locate the row by its key column). To change the same or different
+    cells on many rows, use ``feishu_bitable_update_records`` instead — one call
+    rather than one per row.
+
+    Values follow the column's type: text as a plain string, 数字 as a number,
+    单选 as the option name, 多选 as an array of names, 日期 as a **millisecond**
+    epoch timestamp, 复选框 as true/false, 人员 as ``[{"id":"ou_..."}]``,
+    超链接 as ``{"text":"...","link":"https://..."}``, 附件 as
+    ``[{"file_token":"..."}]``, 关联 as an array of record ids, 地理位置 as
+    ``"lat,lng"``. Computed columns (公式, 查找引用, 创建时间, 自动编号) cannot be
+    written.
+
+    Args:
+        app_token: The base's app_token.
+        table_id: The table's id (from ``feishu_bitable_list_tables``).
+        record_id: The row to change (from ``feishu_bitable_list_records``).
+        fields_json: A JSON object of the columns to change and their new values, e.g.
+            '{"状态":"已完成","评分":5}'. Columns you leave out are not touched.
+        user_key: The sender's open_id (from ``<feishu_context>``).
+        identity: ``"user"`` / ``"bot"`` — who performs the edit (see create_record).
+        validate_fields: Check the column names against the table first (default true).
+            Feishu silently ignores unknown column names and still reports success, so
+            this is what catches "wrote it, cell unchanged". Turn off only when the
+            names are already known good.
+    """
+    return _f.dumps_result(
+        await _f.update_bitable_record_impl(
+            app_token, table_id, record_id, fields_json, user_key, identity, validate_fields
+        )
+    )
+
+
+async def feishu_bitable_update_records(
+    app_token: str,
+    table_id: str,
+    records_json: str,
+    user_key: str = "",
+    identity: str = "",
+    validate_fields: bool = True,
+) -> str:
+    """Update cells across MANY records of a Feishu bitable table in one call.
+
+    Same semantics as ``feishu_bitable_update_record`` (incremental — untouched
+    columns keep their values, ``null`` clears a cell) but each row can get its own
+    set of changes. Use this for sweeps like "把这 20 行的状态改成已完成" instead of
+    looping the single-record tool. Updates in batches of 1000 (Feishu's per-call
+    limit).
+
+    Args:
+        app_token: The base's app_token.
+        table_id: The table's id (from ``feishu_bitable_list_tables``).
+        records_json: JSON array of ``{"record_id": ..., "fields": {...}}`` objects,
+            e.g. '[{"record_id":"recA","fields":{"状态":"已完成"}},
+            {"record_id":"recB","fields":{"状态":"进行中","负责人":[{"id":"ou_x"}]}}]'.
+        user_key: The sender's open_id (from ``<feishu_context>``).
+        identity: ``"user"`` / ``"bot"`` — who performs the edit (see create_record).
+        validate_fields: Check every column name against the table first (default
+            true) — Feishu drops unknown names silently and still returns success.
+    """
+    return _f.dumps_result(
+        await _f.update_bitable_records_impl(app_token, table_id, records_json, user_key, identity, validate_fields)
+    )
+
+
 async def feishu_bitable_delete_records(
     app_token: str, table_id: str, record_ids: str, user_key: str = "", identity: str = ""
 ) -> str:

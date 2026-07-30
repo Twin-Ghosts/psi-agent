@@ -314,3 +314,20 @@ message_id / sender_open_id）。需要群里之前的上下文时：
     此时传群主的 `user_key` 并让其授权才行。撤回还有**时限**（企业管理员配置），超时报 230009。
     这两类失败工具都会在结果里带一句 `hint` 说明卡在哪，**如实转告用户**，别反复重试或谎称已撤回。
     撤回不是编辑：内容写错就"撤回旧的 + 重发一条新的"。
+19. **改多维表格里已有的格子（改状态/改错的值/补空格，不是新增一行）**：用户说"把张三那行状态改成
+    已完成""金额写错了改成 12000""把这几行都标记成已归档"时，**别用 `feishu_bitable_create_record`**
+    （那会多出一行重复数据），按三步改：
+    1. `feishu_bitable_list_fields(app_token, table_id)` 拿**真实列名**——飞书对不认识的列名**静默丢弃
+       还照样返回 code:0**，列名对不上就是"报成功但格子没变"（这是历史上真翻过的车）。
+    2. `feishu_bitable_list_records(app_token, table_id, filter=...)` 按主键/条件定位到那行，拿 `record_id`。
+    3. 改一行用 `feishu_bitable_update_record(app_token, table_id, record_id, fields_json)`；一次改多行用
+       `feishu_bitable_update_records(app_token, table_id, records_json)`，`records_json` 是
+       `[{"record_id":"recA","fields":{"状态":"已完成"}},{"record_id":"recB","fields":{"金额":12000}}]`
+       （单次上限 1000 行，别 for 循环单条调）。
+    **增量语义**：只写传进去的列，同一行其它格子保持原值，所以改一个单元格只传那一个列名就够，
+    不用把整行重发。要**清空**一个格子传 `null`（`{"备注":null}`）。值的形状按列类型走：数字给数字、
+    单选给选项名、多选给数组、**日期给毫秒时间戳**、复选框 true/false、人员给 `[{"id":"ou_..."}]`、
+    超链接给 `{"text":...,"link":...}`、附件给 `[{"file_token":...}]`、地理位置给 `"纬度,经度"`。
+    公式/查找引用/创建时间/自动编号是**计算列，写不进去**，用户要改这些得改它依赖的列。
+    两个工具默认 `validate_fields=True` 会先核列名、写完再比对飞书回显，发现没落值就在结果里给
+    `dropped_fields` + `warning`——**看到这个别报"已改好"**，如实说哪几个值没写进去。

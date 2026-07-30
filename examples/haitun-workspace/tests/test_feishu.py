@@ -1761,6 +1761,153 @@ async def test_create_bitable_record_non_object() -> None:
 
 
 @pytest.mark.asyncio
+async def test_update_bitable_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    paged = _PagedInvoke(
+        [
+            {"items": [{"field_id": "f1", "field_name": "状态", "type": 3}], "has_more": False},
+            {"record": {"record_id": "rec1", "fields": {"状态": "已完成"}}},
+        ]
+    )
+    monkeypatch.setattr(_impl, "_invoke", paged)
+    result = await _impl.update_bitable_record_impl("appX", "tbl1", "rec1", '{"状态":"已完成"}')
+    req = paged.requests[-1]
+    assert req.http_method.name == "PUT"
+    assert req.uri == "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/:record_id"
+    assert req.paths["record_id"] == "rec1"
+    assert req.body["fields"] == {"状态": "已完成"}
+    assert result["ok"] is True
+    assert result["updated_fields"] == ["状态"]
+    assert "dropped_fields" not in result
+
+
+@pytest.mark.asyncio
+async def test_update_bitable_record_skips_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"record": {"record_id": "rec1", "fields": {"任意列": 1}}})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.update_bitable_record_impl("appX", "tbl1", "rec1", '{"任意列":1}', validate_fields=False)
+    # Only one call — no field listing when validation is off.
+    assert cap.request.http_method.name == "PUT"
+    assert result["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_update_bitable_record_rejects_unknown_column(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"items": [{"field_id": "f1", "field_name": "状态", "type": 3}], "has_more": False})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.update_bitable_record_impl("appX", "tbl1", "rec1", '{"Status":"done"}')
+    assert result["ok"] is False
+    assert result["unknown_fields"] == ["Status"]
+    assert result["valid_fields"] == ["状态"]
+
+
+@pytest.mark.asyncio
+async def test_update_bitable_record_warns_on_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    paged = _PagedInvoke(
+        [
+            {
+                "items": [
+                    {"field_id": "f1", "field_name": "状态", "type": 3},
+                    {"field_id": "f2", "field_name": "评分", "type": 2},
+                ],
+                "has_more": False,
+            },
+            {"record": {"record_id": "rec1", "fields": {"状态": "已完成"}}},
+        ]
+    )
+    monkeypatch.setattr(_impl, "_invoke", paged)
+    result = await _impl.update_bitable_record_impl("appX", "tbl1", "rec1", '{"状态":"已完成","评分":5}')
+    assert result["ok"] is True
+    assert result["dropped_fields"] == ["评分"]
+    assert "评分" in result["warning"]
+
+
+@pytest.mark.asyncio
+async def test_update_bitable_record_allows_null_clear(monkeypatch: pytest.MonkeyPatch) -> None:
+    paged = _PagedInvoke(
+        [
+            {"items": [{"field_id": "f1", "field_name": "备注", "type": 1}], "has_more": False},
+            {"record": {"record_id": "rec1", "fields": {}}},
+        ]
+    )
+    monkeypatch.setattr(_impl, "_invoke", paged)
+    result = await _impl.update_bitable_record_impl("appX", "tbl1", "rec1", '{"备注":null}')
+    assert paged.requests[-1].body["fields"] == {"备注": None}
+    # A cleared cell is absent from the echo by design — not a dropped write.
+    assert result["ok"] is True
+    assert "dropped_fields" not in result
+
+
+@pytest.mark.asyncio
+async def test_update_bitable_record_bad_input() -> None:
+    assert (await _impl.update_bitable_record_impl("appX", "tbl1", "rec1", "not json"))["ok"] is False
+    assert (await _impl.update_bitable_record_impl("appX", "tbl1", "rec1", "{}"))["ok"] is False
+    assert (await _impl.update_bitable_record_impl("appX", "tbl1", "", '{"a":1}'))["ok"] is False
+    assert (await _impl.update_bitable_record_impl("", "tbl1", "rec1", '{"a":1}'))["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_update_bitable_records_batch(monkeypatch: pytest.MonkeyPatch) -> None:
+    paged = _PagedInvoke(
+        [
+            {"items": [{"field_id": "f1", "field_name": "状态", "type": 3}], "has_more": False},
+            {"records": [{"record_id": "recA", "fields": {"状态": "已完成"}}, {"record_id": "recB", "fields": {}}]},
+        ]
+    )
+    monkeypatch.setattr(_impl, "_invoke", paged)
+    result = await _impl.update_bitable_records_impl(
+        "appX",
+        "tbl1",
+        '[{"record_id":"recA","fields":{"状态":"已完成"}},{"record_id":"recB","fields":{"状态":"进行中"}}]',
+    )
+    req = paged.requests[-1]
+    assert req.http_method.name == "POST"
+    assert req.uri.endswith("/records/batch_update")
+    assert req.body["records"][1]["record_id"] == "recB"
+    assert result["updated"] == ["recA", "recB"]
+    assert result["count"] == 2
+    # recB came back with no fields written at all.
+    assert result["dropped_fields"] == ["recB.状态"]
+
+
+@pytest.mark.asyncio
+async def test_update_bitable_records_bad_input() -> None:
+    assert (await _impl.update_bitable_records_impl("appX", "tbl1", "not json"))["ok"] is False
+    assert (await _impl.update_bitable_records_impl("appX", "tbl1", "[]"))["ok"] is False
+    assert (await _impl.update_bitable_records_impl("appX", "tbl1", '[{"fields":{"a":1}}]'))["ok"] is False
+    assert (await _impl.update_bitable_records_impl("appX", "tbl1", '[{"record_id":"recA"}]'))["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_update_bitable_records_survives_unreadable_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed field-list check must not block the write itself."""
+
+    class _Invoke:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        async def __call__(
+            self,
+            request: Any,
+            user_key: str | None = None,
+            prefer: str = "tenant",
+            identity: str = "",
+            capabilities: list[str] | None = None,
+        ) -> dict[str, Any]:
+            req = request() if callable(request) else request
+            self.requests.append(req)
+            if req.http_method.name == "GET":
+                return {"ok": False, "message": "no permission to list fields"}
+            echo = {"records": [{"record_id": "recA", "fields": {"状态": "x"}}]}
+            return {"ok": True, "code": 0, "msg": "", "data": echo}
+
+    inv = _Invoke()
+    monkeypatch.setattr(_impl, "_invoke", inv)
+    result = await _impl.update_bitable_records_impl("appX", "tbl1", '[{"record_id":"recA","fields":{"状态":"x"}}]')
+    assert result["ok"] is True
+    assert result["updated"] == ["recA"]
+
+
+@pytest.mark.asyncio
 async def test_delete_bitable_records(monkeypatch: pytest.MonkeyPatch) -> None:
     cap = _CapturedInvoke({})
     monkeypatch.setattr(_impl, "_invoke", cap)

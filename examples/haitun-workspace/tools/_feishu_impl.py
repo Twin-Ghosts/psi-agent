@@ -2922,6 +2922,190 @@ async def create_bitable_record_impl(
     return {"ok": True, "record_id": record.get("record_id", ""), "fields": record.get("fields", {})}
 
 
+# ── Bitable record updates — change cell values in existing rows ──────────────
+#
+# The update APIs are *incremental*: only the field names present in `fields` are
+# written, everything else on the row keeps its value, and an explicit null blanks
+# a cell. That is what makes "改一个单元格" possible without re-sending the row.
+#
+# The hazard these two impls guard against: Feishu **silently drops** field names
+# the table doesn't have and still answers code:0. A caller who writes "Mentor"
+# into a table whose column is "导师" gets a cheerful success and an unchanged
+# cell. So the column names are checked against the table's real fields before the
+# write, and the response is compared with what was asked for afterwards.
+
+
+def _build_update_record_request(app_token: str, table_id: str, record_id: str, fields: dict[str, Any]) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.PUT
+    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/:record_id"
+    req.paths["app_token"] = app_token
+    req.paths["table_id"] = table_id
+    req.paths["record_id"] = record_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    req.body = {"fields": fields}
+    return req
+
+
+def _build_batch_update_records_request(app_token: str, table_id: str, records: list[dict[str, Any]]) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.POST
+    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/batch_update"
+    req.paths["app_token"] = app_token
+    req.paths["table_id"] = table_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    req.body = {"records": records}
+    return req
+
+
+async def _check_bitable_columns(app_token: str, table_id: str, names: list[str]) -> dict[str, Any] | None:
+    """Reject column names the table doesn't have; return an error dict, or None if fine.
+
+    Returns None as well when the field list can't be read (e.g. the bot may write but
+    not list fields) — a failed *check* must not block a write the user asked for.
+    """
+    listed = await list_bitable_fields_impl(app_token, table_id)
+    if not listed.get("ok"):
+        return None
+    valid = [f.get("name", "") for f in listed.get("fields", [])]
+    unknown = [n for n in names if n not in valid]
+    if not unknown:
+        return None
+    return _error(
+        f"These column names are not in the table and would be silently ignored by Feishu: "
+        f"{', '.join(unknown)}. Existing columns: {', '.join(valid)}.",
+        unknown_fields=unknown,
+        valid_fields=valid,
+    )
+
+
+def _dropped_fields(requested: dict[str, Any], written: Any) -> list[str]:
+    """Field names asked for but missing from Feishu's echo of the updated record."""
+    if not isinstance(written, dict):
+        return []
+    return [k for k, v in requested.items() if v is not None and k not in written]
+
+
+async def update_bitable_record_impl(
+    app_token: str,
+    table_id: str,
+    record_id: str,
+    fields_json: str,
+    user_key: str = "",
+    identity: str = "",
+    validate_fields: bool = True,
+) -> dict[str, Any]:
+    """Update cells in one existing record. Only the given columns change; null clears one."""
+    if not app_token.strip():
+        return _error("No app_token provided (the segment in a feishu.cn/base/<app_token> URL).")
+    if not table_id.strip():
+        return _error("No table_id provided (get it from feishu_bitable_list_tables).")
+    if not record_id.strip():
+        return _error("No record_id provided (get it from feishu_bitable_list_records).")
+    try:
+        fields = json.loads(fields_json)
+    except ValueError as exc:
+        return _error(f"fields_json is not valid JSON: {exc}")
+    if not isinstance(fields, dict) or not fields:
+        return _error(
+            "fields_json must be a non-empty JSON object mapping column names to new values, "
+            'e.g. \'{"状态":"已完成"}\'.'
+        )
+    if validate_fields:
+        problem = await _check_bitable_columns(app_token.strip(), table_id.strip(), list(fields))
+        if problem:
+            return problem
+    res = await _invoke(
+        _build_update_record_request(app_token.strip(), table_id.strip(), record_id.strip(), fields),
+        user_key=user_key,
+        prefer="user",
+        identity=identity,
+    )
+    if not res["ok"]:
+        return res
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    record = data.get("record", {}) if isinstance(data.get("record"), dict) else {}
+    written = record.get("fields", {})
+    result = {
+        "ok": True,
+        "record_id": record.get("record_id", "") or record_id.strip(),
+        "updated_fields": list(fields),
+        "fields": written,
+    }
+    dropped = _dropped_fields(fields, written)
+    if dropped:
+        result["dropped_fields"] = dropped
+        result["warning"] = (
+            f"Feishu accepted the call but did not write {', '.join(dropped)} — check the column names and value types."
+        )
+    return result
+
+
+async def update_bitable_records_impl(
+    app_token: str,
+    table_id: str,
+    records_json: str,
+    user_key: str = "",
+    identity: str = "",
+    validate_fields: bool = True,
+) -> dict[str, Any]:
+    """Update many records in one go. records_json is [{record_id, fields}]; batches of 1000."""
+    if not app_token.strip():
+        return _error("No app_token provided (the segment in a feishu.cn/base/<app_token> URL).")
+    if not table_id.strip():
+        return _error("No table_id provided (get it from feishu_bitable_list_tables).")
+    try:
+        records = json.loads(records_json)
+    except ValueError as exc:
+        return _error(f"records_json is not valid JSON: {exc}")
+    if not isinstance(records, list) or not records:
+        return _error(
+            'records_json must be a non-empty JSON array, e.g. \'[{"record_id":"recA","fields":{"状态":"已完成"}}]\'.'
+        )
+    names: list[str] = []
+    for i, rec in enumerate(records):
+        if not isinstance(rec, dict):
+            return _error(f"records_json[{i}] must be a JSON object with record_id and fields.")
+        if not str(rec.get("record_id", "")).strip():
+            return _error(f"records_json[{i}] is missing a non-empty record_id.")
+        fields = rec.get("fields")
+        if not isinstance(fields, dict) or not fields:
+            return _error(f"records_json[{i}].fields must be a non-empty object of column → new value.")
+        names.extend(k for k in fields if k not in names)
+    if validate_fields:
+        problem = await _check_bitable_columns(app_token.strip(), table_id.strip(), names)
+        if problem:
+            return problem
+    updated: list[str] = []
+    dropped: list[str] = []
+    for i in range(0, len(records), 1000):
+        batch = records[i : i + 1000]
+        res = await _invoke(
+            _build_batch_update_records_request(app_token.strip(), table_id.strip(), batch),
+            user_key=user_key,
+            prefer="user",
+            identity=identity,
+        )
+        if not res["ok"]:
+            return {**res, "updated": updated, "count": len(updated)}
+        data = res["data"] if isinstance(res["data"], dict) else {}
+        echoed = data.get("records", []) if isinstance(data.get("records"), list) else []
+        by_id = {r.get("record_id", ""): r.get("fields", {}) for r in echoed if isinstance(r, dict)}
+        for rec in batch:
+            rid = str(rec["record_id"]).strip()
+            updated.append(rid)
+            if rid in by_id:
+                dropped.extend(f"{rid}.{n}" for n in _dropped_fields(rec["fields"], by_id[rid]))
+    result: dict[str, Any] = {"ok": True, "updated": updated, "count": len(updated)}
+    if dropped:
+        result["dropped_fields"] = dropped
+        result["warning"] = (
+            f"Feishu accepted the call but did not write {len(dropped)} value(s) — "
+            "check the column names and value types."
+        )
+    return result
+
+
 def _build_batch_delete_records_request(app_token: str, table_id: str, record_ids: list[str]) -> BaseRequest:
     req = BaseRequest()
     req.http_method = HttpMethod.POST
