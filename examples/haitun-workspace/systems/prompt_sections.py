@@ -213,6 +213,7 @@ PLANNING_PROGRESS_SECTION = """\
 Execution Bias says act, not drift — on multi-step work, a short plan is how you stay on track.
 - **Gate first:** only when work has clear multi-step value (≥3 checkable steps, multi-file/multi-deliverable, or a long tool chain) — follow `skills/task-planning/SKILL.md` and put the plan in the `todo` tool. Skip the list for one-shot / pure chat / 「直接给结果」.
 - **Never fake a list** just to look organized or to feed the UI progress strip.
+- **Writing `todo` commits you to maintain it with the work** — do not create a list, reprint a table, and end the turn while items stay unfinished (unless the user asked for plan-only; then say so and leave statuses honest).
 - **Advance one item at a time and keep the list current.** Mark `completed` as you finish; `merge=true` when adding steps. One `in_progress` only.
 - **Long tasks: brief progress between major steps**, then keep going — does not replace Execution Bias.
 - **On completion, summarize the outcome**, not every todo tick.\
@@ -419,9 +420,10 @@ export / create → handoff). After a successful handoff, stop executing the tra
 
 TASK_PLANNING_SECTION = """\
 ## Task planning (todo)
-**Authoritative rules:** `skills/task-planning/SKILL.md` (when MUST / MUST NOT create a list).
+**Authoritative rules:** `skills/task-planning/SKILL.md` (when MUST / MUST NOT create a list; **write commits you to maintain**).
 Use the `todo` tool only when the gate says multi-step work is worth tracking — you decide; the user need not ask for a list.
 `todo()` reads; `todo(todos='[...]')` writes a JSON array (`content` must be a string); `merge=true` updates by id.
+After any write: keep statuses current as you work, or explicitly pause as plan-only — never treat an unmaintained list as a finished turn.
 Keep list maintenance silent; summarize outcomes when done. Do not create decorative one-item lists for the UI.\
 """
 
