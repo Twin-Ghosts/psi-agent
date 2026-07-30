@@ -171,7 +171,12 @@ export function OverviewCard({
         </div>
       </div>
 
-      <div className="overview-metrics" role="group" aria-label="任务信号">
+      <div
+        className="overview-metrics"
+        role="group"
+        aria-label="任务信号"
+        data-card-interactive
+      >
         <button
           type="button"
           className="metric-cell"
