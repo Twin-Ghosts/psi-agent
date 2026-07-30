@@ -4794,3 +4794,268 @@ def test_read_tools_do_not_take_identity() -> None:
     ]:
         mod = importlib.import_module(mod_name)
         assert "identity" not in inspect.signature(getattr(mod, tool)).parameters, tool
+
+
+# ── Block-level editing: list / update / delete ──────────────────────────────────
+
+
+class _ScriptedInvoke:
+    """An ``_invoke`` stand-in that records every call and replays queued responses.
+
+    ``_CapturedInvoke`` keeps only the last request, which is no use for the delete
+    flow (list children, then one delete per block) where the *order* of the calls is
+    the behaviour under test.
+    """
+
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        self._responses = list(responses)
+        self.requests: list[Any] = []
+        self.prefers: list[str] = []
+
+    async def __call__(
+        self,
+        request: Any,
+        user_key: str | None = None,
+        prefer: str = "tenant",
+        identity: str = "",
+        capabilities: list[str] | None = None,
+    ) -> dict[str, Any]:
+        self.requests.append(request() if callable(request) else request)
+        self.prefers.append(prefer)
+        if self._responses:
+            return self._responses.pop(0)
+        return {"ok": True, "code": 0, "msg": "", "data": {}}
+
+
+def _block(block_id: str, block_type: int, text: str = "", parent_id: str = "doc1") -> dict[str, Any]:
+    raw: dict[str, Any] = {"block_id": block_id, "block_type": block_type, "parent_id": parent_id}
+    key = _impl._TEXTUAL_BLOCK_KEYS.get(block_type)
+    if key:
+        raw[key] = {"elements": [{"text_run": {"content": text}}]}
+    return raw
+
+
+@pytest.mark.asyncio
+async def test_list_doc_blocks_builds_document_blocks_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"items": [_block("b1", 4, "标题"), _block("b2", 2, "正文")], "page_token": ""})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.list_doc_blocks_impl("doc1")
+    assert result["ok"] is True
+    req = cap.request
+    assert req.http_method.name == "GET"
+    assert req.uri == "/open-apis/docx/v1/documents/:document_id/blocks"
+    assert req.paths["document_id"] == "doc1"
+    # page_size asks for no more than the caller's remaining budget (default 200)
+    assert _qdict(req).get("page_size") == "200"
+    # a read authorizes as the bot first, so a doc it can see needs no user grant
+    assert cap.prefer == "tenant"
+
+
+@pytest.mark.asyncio
+async def test_list_doc_blocks_reports_type_and_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"items": [_block("b1", 4, "标题"), _block("b9", 27)], "page_token": ""})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.list_doc_blocks_impl("doc1")
+    heading, image = result["blocks"]
+    assert (heading["block_id"], heading["type_name"], heading["text"]) == ("b1", "heading2", "标题")
+    assert heading["editable_text"] is True
+    # an image block has no text runs, so update_block can't rewrite it
+    assert (image["type_name"], image["text"], image["editable_text"]) == ("image", "", False)
+
+
+@pytest.mark.asyncio
+async def test_list_doc_blocks_trims_long_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"items": [_block("b1", 2, "x" * 500)], "page_token": ""})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.list_doc_blocks_impl("doc1")
+    assert result["blocks"][0]["text"] == "x" * 200 + "…"
+
+
+@pytest.mark.asyncio
+async def test_list_doc_blocks_follows_pagination(monkeypatch: pytest.MonkeyPatch) -> None:
+    scripted = _ScriptedInvoke(
+        [
+            {"ok": True, "data": {"items": [_block("b1", 2, "one")], "page_token": "pt2"}},
+            {"ok": True, "data": {"items": [_block("b2", 2, "two")], "page_token": ""}},
+        ]
+    )
+    monkeypatch.setattr(_impl, "_invoke", scripted)
+    result = await _impl.list_doc_blocks_impl("doc1")
+    assert [b["block_id"] for b in result["blocks"]] == ["b1", "b2"]
+    assert result["truncated"] is False
+    assert _qdict(scripted.requests[1]).get("page_token") == "pt2"
+
+
+@pytest.mark.asyncio
+async def test_list_doc_blocks_marks_truncation(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"items": [_block("b1", 2, "a"), _block("b2", 2, "b")], "page_token": ""})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.list_doc_blocks_impl("doc1", max_blocks=1)
+    assert result["count"] == 1
+    assert result["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_list_doc_blocks_requires_document_id() -> None:
+    assert (await _impl.list_doc_blocks_impl("  "))["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_update_doc_block_patches_text_elements(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.update_doc_block_impl("doc1", "b2", "改好的正文")
+    assert result["ok"] is True
+    req = cap.request
+    assert req.http_method.name == "PATCH"
+    assert req.uri == "/open-apis/docx/v1/documents/:document_id/blocks/:block_id"
+    assert req.paths["block_id"] == "b2"
+    els = req.body["update_text_elements"]["elements"]
+    assert els == [{"text_run": {"content": "改好的正文"}}]
+    # a write goes as the user when there is one, so the edit is attributable
+    assert cap.prefer == "user"
+
+
+@pytest.mark.asyncio
+async def test_update_doc_block_rejects_root_block() -> None:
+    """The document_id doubles as the root block_id, and the root holds no text."""
+    result = await _impl.update_doc_block_impl("doc1", "doc1", "text")
+    assert result["ok"] is False
+    assert "root" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_update_doc_block_requires_block_and_text() -> None:
+    assert (await _impl.update_doc_block_impl("doc1", "", "t"))["ok"] is False
+    assert (await _impl.update_doc_block_impl("", "b1", "t"))["ok"] is False
+    empty = await _impl.update_doc_block_impl("doc1", "b1", "")
+    assert empty["ok"] is False
+    # an empty rewrite is a delete in disguise; point at the tool that really does it
+    assert "delete_blocks" in empty["message"]
+
+
+@pytest.mark.asyncio
+async def test_delete_doc_blocks_resolves_id_to_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    children = {"items": [_block("b1", 2, "a"), _block("b2", 2, "b"), _block("b3", 2, "c")]}
+    scripted = _ScriptedInvoke([{"ok": True, "data": children}, {"ok": True, "data": {}}])
+    monkeypatch.setattr(_impl, "_invoke", scripted)
+    result = await _impl.delete_doc_blocks_impl("doc1", '["b2"]')
+    assert result["ok"] is True
+    assert result["deleted"] == ["b2"]
+    delete_req = scripted.requests[1]
+    assert delete_req.http_method.name == "DELETE"
+    assert delete_req.uri.endswith("/children/batch_delete")
+    # b2 sits at index 1, and the range is half-open
+    assert delete_req.body == {"start_index": 1, "end_index": 2}
+    assert delete_req.paths["block_id"] == "doc1"
+
+
+@pytest.mark.asyncio
+async def test_delete_doc_blocks_deletes_highest_index_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deleting low-to-high would shift later siblings down and hit the wrong blocks."""
+    children = {"items": [_block("b1", 2, "a"), _block("b2", 2, "b"), _block("b3", 2, "c")]}
+    scripted = _ScriptedInvoke([{"ok": True, "data": children}, {"ok": True, "data": {}}, {"ok": True, "data": {}}])
+    monkeypatch.setattr(_impl, "_invoke", scripted)
+    result = await _impl.delete_doc_blocks_impl("doc1", '["b1","b3"]')
+    assert result["deleted"] == ["b3", "b1"]
+    assert [r.body["start_index"] for r in scripted.requests[1:]] == [2, 0]
+
+
+@pytest.mark.asyncio
+async def test_delete_doc_blocks_reports_unknown_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    children = {"items": [_block("b1", 2, "a")]}
+    scripted = _ScriptedInvoke([{"ok": True, "data": children}, {"ok": True, "data": {}}])
+    monkeypatch.setattr(_impl, "_invoke", scripted)
+    result = await _impl.delete_doc_blocks_impl("doc1", '["b1","nope"]')
+    assert result["ok"] is True
+    assert result["deleted"] == ["b1"]
+    assert result["not_found"] == ["nope"]
+
+
+@pytest.mark.asyncio
+async def test_delete_doc_blocks_errors_when_nothing_matches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No index is ever guessed: an unlocatable id is refused, not deleted blind."""
+    scripted = _ScriptedInvoke([{"ok": True, "data": {"items": [_block("b1", 2, "a")]}}])
+    monkeypatch.setattr(_impl, "_invoke", scripted)
+    result = await _impl.delete_doc_blocks_impl("doc1", '["ghost"]')
+    assert result["ok"] is False
+    assert result["not_found"] == ["ghost"]
+    # nothing was sent beyond the lookup
+    assert len(scripted.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_doc_blocks_uses_parent_for_nested(monkeypatch: pytest.MonkeyPatch) -> None:
+    children = {"items": [_block("c1", 2, "cell text", parent_id="cell1")]}
+    scripted = _ScriptedInvoke([{"ok": True, "data": children}, {"ok": True, "data": {}}])
+    monkeypatch.setattr(_impl, "_invoke", scripted)
+    result = await _impl.delete_doc_blocks_impl("doc1", '["c1"]', parent_block_id="cell1")
+    assert result["ok"] is True
+    assert result["parent_block_id"] == "cell1"
+    assert all(r.paths["block_id"] == "cell1" for r in scripted.requests)
+
+
+@pytest.mark.asyncio
+async def test_delete_doc_blocks_refuses_root_block() -> None:
+    result = await _impl.delete_doc_blocks_impl("doc1", '["doc1"]')
+    assert result["ok"] is False
+    assert "root" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_delete_doc_blocks_validates_input() -> None:
+    assert (await _impl.delete_doc_blocks_impl("", '["b1"]'))["ok"] is False
+    assert (await _impl.delete_doc_blocks_impl("doc1", "not json"))["ok"] is False
+    assert (await _impl.delete_doc_blocks_impl("doc1", "[]"))["ok"] is False
+    assert (await _impl.delete_doc_blocks_impl("doc1", '["  "]'))["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_delete_doc_blocks_accepts_bare_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A single id is a common agent slip; accept it rather than erroring on a typo."""
+    scripted = _ScriptedInvoke([{"ok": True, "data": {"items": [_block("b1", 2, "a")]}}, {"ok": True, "data": {}}])
+    monkeypatch.setattr(_impl, "_invoke", scripted)
+    result = await _impl.delete_doc_blocks_impl("doc1", '"b1"')
+    assert result["deleted"] == ["b1"]
+
+
+@pytest.mark.asyncio
+async def test_delete_doc_blocks_stops_and_reports_partial_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    children = {"items": [_block("b1", 2, "a"), _block("b2", 2, "b")]}
+    scripted = _ScriptedInvoke(
+        [
+            {"ok": True, "data": children},
+            {"ok": True, "data": {}},
+            {"ok": False, "message": "permission denied", "code": 99991672},
+        ]
+    )
+    monkeypatch.setattr(_impl, "_invoke", scripted)
+    result = await _impl.delete_doc_blocks_impl("doc1", '["b1","b2"]')
+    assert result["ok"] is False
+    # b2 (the higher index) went first, so the caller learns exactly what survived
+    assert result["deleted"] == ["b2"]
+
+
+def test_block_editing_tools_are_async_with_docstrings() -> None:
+    doc_mod = importlib.import_module("feishu_doc")
+    for fn in (doc_mod.feishu_doc_list_blocks, doc_mod.feishu_doc_update_block, doc_mod.feishu_doc_delete_blocks):
+        assert inspect.iscoroutinefunction(fn)
+        assert (inspect.getdoc(fn) or "").strip()
+
+
+def test_block_write_tools_expose_identity_and_list_does_not() -> None:
+    doc_mod = importlib.import_module("feishu_doc")
+    for tool in ("feishu_doc_update_block", "feishu_doc_delete_blocks"):
+        params = inspect.signature(getattr(doc_mod, tool)).parameters
+        assert params["identity"].default == ""
+    # listing blocks owns nothing, so it takes no ownership knob
+    assert "identity" not in inspect.signature(doc_mod.feishu_doc_list_blocks).parameters
+
+
+@pytest.mark.asyncio
+async def test_block_editing_tools_return_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    doc_mod = importlib.import_module("feishu_doc")
+    monkeypatch.setattr(_impl, "_invoke", _CapturedInvoke({"items": [_block("b1", 2, "hi")], "page_token": ""}))
+    assert json.loads(await doc_mod.feishu_doc_list_blocks("doc1"))["ok"] is True
+    monkeypatch.setattr(_impl, "_invoke", _CapturedInvoke({}))
+    assert json.loads(await doc_mod.feishu_doc_update_block("doc1", "b1", "new"))["ok"] is True

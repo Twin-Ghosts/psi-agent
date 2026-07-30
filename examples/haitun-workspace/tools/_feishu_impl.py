@@ -5724,3 +5724,307 @@ async def _locate_child_index(document_id: str, block_id: str, user_key: str, id
                 if isinstance(item, dict) and item.get("block_id") == block_id:
                     return position
     return -1
+
+
+# ── Block-level editing — revise a doc in place instead of only appending ────────
+# Everything above only ever *adds* to a document, so fixing one wrong sentence meant
+# rewriting the whole doc. These three close that loop: list the blocks to learn their
+# block_ids and current text, rewrite one block's text, or delete blocks outright.
+#
+# The block_id is the unit of address, never a line number: Feishu's delete endpoint
+# takes a *child index range* under a parent, and indexes shift as soon as anything is
+# added or removed. So delete resolves block_id → current index right before deleting,
+# and refuses rather than guessing when the block can't be found — a wrong index here
+# deletes someone else's paragraph, which no retry can undo.
+_BLOCK_TYPE_NAMES = {
+    1: "page",
+    2: "text",
+    3: "heading1",
+    4: "heading2",
+    5: "heading3",
+    6: "heading4",
+    7: "heading5",
+    8: "heading6",
+    9: "heading7",
+    10: "heading8",
+    11: "heading9",
+    12: "bullet",
+    13: "ordered",
+    14: "code",
+    15: "quote",
+    17: "todo",
+    19: "callout",
+    22: "divider",
+    23: "file",
+    24: "grid",
+    25: "grid_column",
+    27: "image",
+    28: "iframe",
+    30: "sheet",
+    31: "table",
+    32: "table_cell",
+    34: "quote_container",
+    999: "unsupported",
+}
+
+# The typed payload key holding a block's text elements, per block_type. Text lives
+# under the block's own kind name (a heading2's runs are in "heading2"), which is why
+# reading a block's text needs the type→key mapping rather than one fixed field.
+_TEXTUAL_BLOCK_KEYS = {
+    2: "text",
+    3: "heading1",
+    4: "heading2",
+    5: "heading3",
+    6: "heading4",
+    7: "heading5",
+    8: "heading6",
+    9: "heading7",
+    10: "heading8",
+    11: "heading9",
+    12: "bullet",
+    13: "ordered",
+    14: "code",
+    15: "quote",
+    17: "todo",
+}
+
+
+def _build_document_blocks_list_request(document_id: str, page_size: int, page_token: str) -> BaseRequest:
+    """GET every block of a document (flat, with parent_id/children), not just one level."""
+    req = BaseRequest()
+    req.http_method = HttpMethod.GET
+    req.uri = "/open-apis/docx/v1/documents/:document_id/blocks"
+    req.paths["document_id"] = document_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    req.add_query("page_size", page_size)
+    if page_token:
+        req.add_query("page_token", page_token)
+    return req
+
+
+def _build_block_text_patch_request(document_id: str, block_id: str, elements: list[dict[str, Any]]) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.PATCH
+    req.uri = "/open-apis/docx/v1/documents/:document_id/blocks/:block_id"
+    req.paths["document_id"] = document_id
+    req.paths["block_id"] = block_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    req.body = {"update_text_elements": {"elements": elements}}
+    return req
+
+
+def _build_blocks_batch_delete_request(document_id: str, block_id: str, start: int, end: int) -> BaseRequest:
+    """Delete children [start, end) of ``block_id`` — the range is half-open."""
+    req = BaseRequest()
+    req.http_method = HttpMethod.DELETE
+    req.uri = "/open-apis/docx/v1/documents/:document_id/blocks/:block_id/children/batch_delete"
+    req.paths["document_id"] = document_id
+    req.paths["block_id"] = block_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    req.body = {"start_index": start, "end_index": end}
+    return req
+
+
+def _block_plain_text(block: dict[str, Any]) -> str:
+    """The block's visible text, joined from its text_run/equation/mention elements."""
+    key = _TEXTUAL_BLOCK_KEYS.get(block.get("block_type") or 0, "")
+    payload = block.get(key) if key else None
+    if not isinstance(payload, dict):
+        return ""
+    parts: list[str] = []
+    for element in payload.get("elements") or []:
+        if not isinstance(element, dict):
+            continue
+        run = element.get("text_run")
+        if isinstance(run, dict):
+            parts.append(str(run.get("content", "")))
+            continue
+        equation = element.get("equation")
+        if isinstance(equation, dict):
+            parts.append(str(equation.get("content", "")))
+            continue
+        mention = element.get("mention_doc")
+        if isinstance(mention, dict):
+            parts.append(str(mention.get("title", "")))
+            continue
+        mention_user = element.get("mention_user")
+        if isinstance(mention_user, dict):
+            parts.append("@" + str(mention_user.get("user_id", "")))
+    return "".join(parts)
+
+
+_BLOCKS_LIST_PAGE_MAX = 500
+
+
+async def list_doc_blocks_impl(
+    document_id: str,
+    max_blocks: int = 200,
+    user_key: str = "",
+    identity: str = "",
+) -> dict[str, Any]:
+    """List a docx's blocks as ``{block_id, block_type, type_name, text, parent_id}``.
+
+    The prerequisite for editing anything: ``update_doc_block`` / ``delete_doc_blocks``
+    address content by ``block_id``, and this is the only way to learn those ids. Text
+    is trimmed to a preview so listing a long document doesn't flood the context; read
+    the full body with ``read_doc_impl`` when that's what's wanted.
+
+    ``prefer="tenant"`` because this is a read — a doc the bot can already see needs no
+    user authorization — with the user's identity used when one is available.
+    """
+    doc = document_id.strip()
+    if not doc:
+        return _error("document_id is required.")
+    limit = max(1, min(int(max_blocks or 200), 2000))
+    items: list[dict[str, Any]] = []
+    page_token = ""
+    truncated = False
+    while True:
+        remaining = limit - len(items)
+        page_size = min(_BLOCKS_LIST_PAGE_MAX, max(remaining, 1))
+        res = await _invoke(
+            _build_document_blocks_list_request(doc, page_size, page_token),
+            user_key=user_key,
+            prefer="tenant",
+            identity=identity,
+        )
+        if not res["ok"]:
+            return res
+        data = res["data"] if isinstance(res["data"], dict) else {}
+        for raw in data.get("items") or []:
+            if not isinstance(raw, dict):
+                continue
+            if len(items) >= limit:
+                truncated = True
+                break
+            block_type = raw.get("block_type") or 0
+            text = _block_plain_text(raw)
+            items.append(
+                {
+                    "block_id": raw.get("block_id", ""),
+                    "block_type": block_type,
+                    "type_name": _BLOCK_TYPE_NAMES.get(block_type, str(block_type)),
+                    "parent_id": raw.get("parent_id", ""),
+                    "text": text if len(text) <= 200 else text[:200] + "…",
+                    "editable_text": block_type in _TEXTUAL_BLOCK_KEYS,
+                }
+            )
+        page_token = str(data.get("page_token") or "")
+        if truncated or not page_token or len(items) >= limit:
+            truncated = truncated or bool(page_token)
+            break
+    return {"ok": True, "document_id": doc, "count": len(items), "truncated": truncated, "blocks": items}
+
+
+async def update_doc_block_impl(
+    document_id: str,
+    block_id: str,
+    text: str,
+    user_key: str = "",
+    identity: str = "",
+) -> dict[str, Any]:
+    """Replace the text of one docx block, keeping the block itself (and its type).
+
+    Rewriting a heading leaves it a heading, a bullet stays a bullet: only the text runs
+    are replaced. Structural blocks (image/table/divider/page) carry no text runs to
+    replace and are rejected up front with the reason, rather than sent off to fail as
+    an opaque Feishu error.
+    """
+    doc = document_id.strip()
+    block = block_id.strip()
+    if not doc:
+        return _error("document_id is required.")
+    if not block:
+        return _error("block_id is required — get it from feishu_doc_list_blocks.")
+    if block == doc:
+        return _error(
+            "block_id is the document's root block, which holds no text. "
+            "Pass the block_id of a paragraph/heading from feishu_doc_list_blocks."
+        )
+    if text == "":
+        return _error("text is required — to remove a block entirely use feishu_doc_delete_blocks.")
+    res = await _invoke(
+        _build_block_text_patch_request(doc, block, [{"text_run": {"content": text}}]),
+        user_key=user_key,
+        prefer="user",
+        identity=identity,
+    )
+    if not res["ok"]:
+        return res
+    return {"ok": True, "document_id": doc, "block_id": block, "text": text}
+
+
+async def delete_doc_blocks_impl(
+    document_id: str,
+    block_ids_json: str,
+    parent_block_id: str = "",
+    user_key: str = "",
+    identity: str = "",
+) -> dict[str, Any]:
+    """Delete one or more blocks, addressed by block_id, from a docx.
+
+    Feishu deletes by child-index range under a parent, so each id is resolved to its
+    current index first. Deletions run highest-index-first: removing a block shifts
+    every later sibling down, so deleting low-to-high would make each subsequent index
+    point one block too far. Ids that can't be located are reported as ``not_found``
+    instead of being guessed at.
+    """
+    doc = document_id.strip()
+    if not doc:
+        return _error("document_id is required.")
+    try:
+        raw_ids = json.loads(block_ids_json or "[]")
+    except json.JSONDecodeError as exc:
+        return _error(f"block_ids_json is not valid JSON: {exc}")
+    if isinstance(raw_ids, str):
+        raw_ids = [raw_ids]
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return _error("block_ids_json must be a non-empty JSON array of block_ids, e.g. '[\"abc123\"]'.")
+    wanted = [str(item).strip() for item in raw_ids if str(item).strip()]
+    if not wanted:
+        return _error("block_ids_json contained no usable block_id.")
+    parent = parent_block_id.strip() or doc
+    if doc in wanted:
+        return _error("refusing to delete the document's root block — delete the file with feishu_drive_delete_file.")
+    listed = await _invoke(
+        _build_block_children_list_request(doc, parent),
+        user_key=user_key,
+        prefer="user",
+        identity=identity,
+    )
+    if not listed["ok"]:
+        return listed
+    ldata = listed["data"] if isinstance(listed["data"], dict) else {}
+    positions: dict[str, int] = {}
+    for position, item in enumerate(ldata.get("items") or []):
+        if isinstance(item, dict) and item.get("block_id"):
+            positions[str(item["block_id"])] = position
+    targets = sorted(((positions[bid], bid) for bid in wanted if bid in positions), reverse=True)
+    not_found = [bid for bid in wanted if bid not in positions]
+    deleted: list[str] = []
+    for index, bid in targets:
+        res = await _invoke(
+            _build_blocks_batch_delete_request(doc, parent, index, index + 1),
+            user_key=user_key,
+            prefer="user",
+            identity=identity,
+        )
+        if not res["ok"]:
+            res["deleted"] = deleted
+            res["not_found"] = not_found
+            return res
+        deleted.append(bid)
+    if not deleted:
+        return _error(
+            f"none of those block_ids are children of {parent} — "
+            "re-check them with feishu_doc_list_blocks (nested blocks need their own parent_block_id).",
+            not_found=not_found,
+        )
+    return {
+        "ok": True,
+        "document_id": doc,
+        "parent_block_id": parent,
+        "deleted": deleted,
+        "deleted_count": len(deleted),
+        "not_found": not_found,
+    }

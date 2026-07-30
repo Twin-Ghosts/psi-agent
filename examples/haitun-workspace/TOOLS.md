@@ -156,6 +156,22 @@ message_id / sender_open_id）。需要群里之前的上下文时：
   三个都收 `caption`（表题）：**只写内容不写「表N：」**，工具读文档已有的「表 N」自动续号，
   按学术体例写在**表格上方**（图注在下、表题在上），且「表」和「图」是两条互不干扰的序列。
   一句话：用户要「表格/流程图/泳道图」时别再往正文里塞纯文本，改用这三个工具。
+- **改文档里已有的内容（不是追加）**：上面的 `append_*` 只会往末尾加，写错一段不必重开一篇——
+  用这三个「块级编辑」工具改稿（都吃 docx 的 `document_id` 或 wiki 节点的 `obj_token`）：
+  - 先列块拿 id：`feishu_doc_list_blocks(document_id, max_blocks, user_key)` 返回
+    `{block_id, block_type, type_name, parent_id, text, editable_text}`。**这是拿到 `block_id`
+    的唯一途径**，另两个工具都按 `block_id` 定位。`text` 是 200 字预览（要读全文仍用
+    `feishu_doc_read`）；`editable_text=false` 表示该块（图片/表格/分割线）没有文字可改。
+  - 改一段：`feishu_doc_update_block(document_id, block_id, text)`——只换文字，块的 id 和类型
+    都保留（标题还是标题、项目符号还是项目符号）。注意 `text` 是**整段替换而非追加**，要传该块
+    完整的新内容。文档根块（其 id 就等于 `document_id`）没有文字，工具会直接拒绝。
+  - 删块：`feishu_doc_delete_blocks(document_id, block_ids_json, parent_block_id)`——
+    `block_ids_json` 是 id 数组，如 `["doxcnAAA","doxcnBBB"]`。飞书的删除接口按
+    **父块下的子块序号区间**删而不是按 id 删，所以工具在删之前把每个 id 解析成当前序号，并
+    **从大序号往小删**（若从小往大删，删掉一个后面兄弟节点全体前移，后续序号就会打偏删错块）；
+    定位不到的 id 一律以 `not_found` 回报，**绝不猜序号**。块若是嵌套的（在表格单元格、
+    高亮块里，看列块结果的 `parent_id`）要传 `parent_block_id`，留空即文档根。
+    删除经 API 不可撤销，动手前先用 `list_blocks` 核对一下要删的正是那段文字。
 - **列出电子表格的工作表**：`feishu_sheet_tabs(token)` 返回每个工作表的
   `sheet_id`/`title`/行列数。**`SHEET_ID` 不在表格 URL 里**，而所有区域都写成
   `"SHEET_ID!A1:B2"`，所以不知道 `SHEET_ID` 时先调它，再去读写区域。
