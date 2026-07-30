@@ -1259,7 +1259,7 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
     const task = index === 0 ? null : tasks[index - 1];
     return task
       ? <TaskCard task={task} onOpenArtifact={openArtifact} onDelete={deleteTask} onOpenChat={openChat} />
-      : <OverviewCard tasks={tasks} onOpenChat={openChat} onOpenSignal={(kind) => openSignal(kind)} />;
+      : <OverviewCard tasks={tasks} onOpenChat={openChat} onOpenSignal={(kind) => openSignal(kind, { toggle: true })} />;
   };
 
   const renderTaskUnit = (index: number, interactive: boolean, visualExpanded = false) => {
@@ -1314,7 +1314,7 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
               ) : (
                 <CompactOverviewContext
                   tasks={tasks}
-                  onOpenSignal={(kind) => openSignal(kind)}
+                  onOpenSignal={(kind) => openSignal(kind, { toggle: true })}
                 />
               )}
             </div>
