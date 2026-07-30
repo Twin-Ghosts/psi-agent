@@ -3162,7 +3162,8 @@ async def create_bitable_records_impl(
     for i, row in enumerate(rows):
         if not isinstance(row, dict):
             return _error(f"records_json[{i}] must be a JSON object of column → value.")
-        fields = row["fields"] if isinstance(row.get("fields"), dict) else row
+        wrapped = row.get("fields")
+        fields = _as_field_map(wrapped) if isinstance(wrapped, dict) else _as_field_map(row)
         if not fields:
             return _error(f"records_json[{i}] has no column values.")
         records.append({"fields": fields})
@@ -3237,6 +3238,17 @@ def _build_batch_update_records_request(app_token: str, table_id: str, records: 
     return req
 
 
+def _as_field_map(value: Any) -> dict[str, Any]:
+    """Read a parsed-JSON object as a {column: value} map.
+
+    ``json.loads`` is typed as ``Any``, so an ``isinstance(x, dict)`` check leaves the
+    key type unknown and every column name downstream types as ``object``. JSON object
+    keys are always strings, so restating that here keeps the callers plainly typed
+    instead of casting at each use.
+    """
+    return {str(k): v for k, v in value.items()} if isinstance(value, dict) else {}
+
+
 async def _check_bitable_columns(app_token: str, table_id: str, names: list[str]) -> dict[str, Any] | None:
     """Reject column names the table doesn't have; return an error dict, or None if fine.
 
@@ -3282,14 +3294,15 @@ async def update_bitable_record_impl(
     if not record_id.strip():
         return _error("No record_id provided (get it from feishu_bitable_list_records).")
     try:
-        fields = json.loads(fields_json)
+        parsed = json.loads(fields_json)
     except ValueError as exc:
         return _error(f"fields_json is not valid JSON: {exc}")
-    if not isinstance(fields, dict) or not fields:
+    if not isinstance(parsed, dict) or not parsed:
         return _error(
             "fields_json must be a non-empty JSON object mapping column names to new values, "
             'e.g. \'{"状态":"已完成"}\'.'
         )
+    fields = _as_field_map(parsed)
     if validate_fields:
         problem = await _check_bitable_columns(app_token.strip(), table_id.strip(), list(fields))
         if problem:
@@ -3334,22 +3347,26 @@ async def update_bitable_records_impl(
     if not table_id.strip():
         return _error("No table_id provided (get it from feishu_bitable_list_tables).")
     try:
-        records = json.loads(records_json)
+        parsed = json.loads(records_json)
     except ValueError as exc:
         return _error(f"records_json is not valid JSON: {exc}")
-    if not isinstance(records, list) or not records:
+    if not isinstance(parsed, list) or not parsed:
         return _error(
             'records_json must be a non-empty JSON array, e.g. \'[{"record_id":"recA","fields":{"状态":"已完成"}}]\'.'
         )
+    records: list[dict[str, Any]] = []
     names: list[str] = []
-    for i, rec in enumerate(records):
+    for i, rec in enumerate(parsed):
         if not isinstance(rec, dict):
             return _error(f"records_json[{i}] must be a JSON object with record_id and fields.")
-        if not str(rec.get("record_id", "")).strip():
+        record_id = str(rec.get("record_id", "")).strip()
+        if not record_id:
             return _error(f"records_json[{i}] is missing a non-empty record_id.")
-        fields = rec.get("fields")
-        if not isinstance(fields, dict) or not fields:
+        raw_fields = rec.get("fields")
+        if not isinstance(raw_fields, dict) or not raw_fields:
             return _error(f"records_json[{i}].fields must be a non-empty object of column → new value.")
+        fields = _as_field_map(raw_fields)
+        records.append({"record_id": record_id, "fields": fields})
         names.extend(k for k in fields if k not in names)
     if validate_fields:
         problem = await _check_bitable_columns(app_token.strip(), table_id.strip(), names)
@@ -3371,10 +3388,10 @@ async def update_bitable_records_impl(
         echoed = data.get("records", []) if isinstance(data.get("records"), list) else []
         by_id = {r.get("record_id", ""): r.get("fields", {}) for r in echoed if isinstance(r, dict)}
         for rec in batch:
-            rid = str(rec["record_id"]).strip()
+            rid = str(rec["record_id"])
             updated.append(rid)
             if rid in by_id:
-                dropped.extend(f"{rid}.{n}" for n in _dropped_fields(rec["fields"], by_id[rid]))
+                dropped.extend(f"{rid}.{n}" for n in _dropped_fields(_as_field_map(rec["fields"]), by_id[rid]))
     result: dict[str, Any] = {"ok": True, "updated": updated, "count": len(updated)}
     if dropped:
         result["dropped_fields"] = dropped
