@@ -63,7 +63,7 @@ Hub「使用免费模型」→ clearAiPool → hydrateAiForSessions(全部 sessi
 发消息           → ensureSessionAi（同 id 复活，腰带）
 ```
 
-不盲选 `ais[0]`。池里若已有真实 key，清掉残留 `haitun-default`；优先 localStorage 选中 AI。Gateway **不**级联删 Session——AI 被清后 Session 仍挂旧 `ai_id`；boot / 免费切换必须 **同 id 复活**，刷新后任务卡与可聊性不变。workspace 过滤用 `sessionMatchesWorkspace`（空 workspace 视为本工作区）。
+不盲选 `ais[0]`。池里若已有真实 key，清掉残留 `haitun-default`；优先 localStorage 选中 AI。Gateway **不**级联删 Session——AI 被清后 Session 仍挂旧 `ai_id`；boot / 免费切换必须 **同 id 复活**，刷新后任务卡与可聊性不变。模型池「已连接」按 `provider+model+api_key+base_url` **折叠展示**（仅 id 不同只显示一行；key 不同则分列）；无显式 id 的 `POST /ais` 同配置复用已有实例。workspace 过滤用 `sessionMatchesWorkspace`（空 workspace 视为本工作区）。
 
 ### 任务卡三步进度（分层）
 

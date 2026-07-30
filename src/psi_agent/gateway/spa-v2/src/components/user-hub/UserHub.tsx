@@ -3,6 +3,7 @@ import { Bot, LogIn, Settings2, UserRound } from 'lucide-react'
 import type { AiInfo } from '../../services/api'
 import { listAis } from '../../services/api'
 import { readStoredAvatar, readStoredName } from '../../services/userProfile'
+import { dedupeAisForDisplay, readStoredAiId } from '../../services/bootstrapAi'
 import HubAdvancedPanel from './HubAdvancedPanel'
 import HubLoginPanel from './HubLoginPanel'
 import HubModelsPanel from './HubModelsPanel'
@@ -57,9 +58,12 @@ export default function UserHub({
 
   useEffect(() => {
     void listAis()
-      .then((ais) => setAiCount(ais.length))
+      .then((list) => {
+        const shown = dedupeAisForDisplay(list, selectedAiId ?? readStoredAiId())
+        setAiCount(shown.length)
+      })
       .catch(() => {})
-  }, [])
+  }, [selectedAiId])
 
   useEffect(() => {
     const onDoc = (event: MouseEvent) => {
@@ -167,7 +171,7 @@ export default function UserHub({
         onOpenAdvanced={() => setPanel('advanced')}
         onToast={onToast}
         onAisChanged={(ais) => {
-          setAiCount(ais.length)
+          setAiCount(dedupeAisForDisplay(ais, selectedAiId).length)
           onAisChanged?.(ais)
         }}
       />
@@ -187,7 +191,7 @@ export default function UserHub({
         onSelectAi={onSelectAi}
         onToast={onToast}
         onAisChanged={(ais) => {
-          setAiCount(ais.length)
+          setAiCount(dedupeAisForDisplay(ais, selectedAiId).length)
           onAisChanged?.(ais)
         }}
       />

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AiInfo } from './api'
 import {
+  dedupeAisForDisplay,
   hydrateAiForSessions,
   isPlaceholderAi,
   pickPreferredAi,
@@ -23,6 +24,33 @@ const ai = (partial: Partial<AiInfo> & Pick<AiInfo, 'id' | 'api_key'>): AiInfo =
   model: partial.model ?? 'deepseek-v4-flash',
   api_key: partial.api_key,
   base_url: partial.base_url ?? 'https://api.deepseek.com/v1',
+})
+
+describe('dedupeAisForDisplay', () => {
+  it('collapses same config different ids; keeps preferred', () => {
+    const a = ai({
+      id: 'a',
+      api_key: PLACEHOLDER_API_KEY,
+      provider: 'openai',
+      model: 'deepseek-v4-flash',
+      base_url: 'https://misakamikoto.genuineknowledge.cn/',
+    })
+    const b = ai({
+      id: 'b',
+      api_key: PLACEHOLDER_API_KEY,
+      provider: 'openai',
+      model: 'deepseek-v4-flash',
+      base_url: 'https://misakamikoto.genuineknowledge.cn',
+    })
+    expect(dedupeAisForDisplay([a, b]).map((x) => x.id)).toEqual(['a'])
+    expect(dedupeAisForDisplay([a, b], 'b').map((x) => x.id)).toEqual(['b'])
+  })
+
+  it('keeps rows that differ by api_key', () => {
+    const free = ai({ id: 'free', api_key: PLACEHOLDER_API_KEY, provider: 'openai' })
+    const real = ai({ id: 'real', api_key: 'sk-real', provider: 'openai' })
+    expect(dedupeAisForDisplay([free, real]).map((x) => x.id).sort()).toEqual(['free', 'real'])
+  })
 })
 
 describe('isPlaceholderAi', () => {

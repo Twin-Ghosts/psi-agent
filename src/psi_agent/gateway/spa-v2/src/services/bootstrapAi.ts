@@ -21,6 +21,38 @@ export const PLACEHOLDER_API_KEY = 'haitun-default'
 
 const LS_SELECTED_AI = 'spa-v2-selected-ai'
 
+/** Config fingerprint — same provider/model/key/base ⇒ one row in the Hub list. */
+export function aiConfigKey(
+  ai: Pick<AiInfo, 'provider' | 'model' | 'api_key' | 'base_url'>,
+): string {
+  const base = (ai.base_url ?? '').trim().replace(/\/+$/, '')
+  return [ai.provider ?? '', ai.model ?? '', ai.api_key ?? '', base].join('\0')
+}
+
+/**
+ * Collapse AIs that differ only by instance id (e.g. free-path revive under
+ * multiple Session ``ai_id``s). Different ``api_key`` (or model/base) stay separate.
+ * When ``preferredId`` is in a duplicate group, that instance is the survivor.
+ */
+export function dedupeAisForDisplay(
+  ais: AiInfo[],
+  preferredId?: string | null,
+): AiInfo[] {
+  if (!Array.isArray(ais) || ais.length === 0) return []
+  const prefer = preferredId?.trim() || ''
+  const byKey = new Map<string, AiInfo>()
+  for (const a of ais) {
+    const key = aiConfigKey(a)
+    const prev = byKey.get(key)
+    if (!prev) {
+      byKey.set(key, a)
+      continue
+    }
+    if (prefer && a.id === prefer) byKey.set(key, a)
+  }
+  return [...byKey.values()]
+}
+
 /** True for free-path / broken placeholder entries (must not win over real keys). */
 export function isPlaceholderAi(ai: Pick<AiInfo, 'api_key'> | null | undefined): boolean {
   const key = (ai?.api_key ?? '').trim()

@@ -221,7 +221,7 @@ def _socket_path(prefix: str, kind: str, entity_id: str) -> str:
 
 **create(provider, model, api_key, base_url, *, id="", max_context_tokens=-1) 流程**：
 1. 获取 lock
-2. 若已有 **完全相同** 的配置（`provider`/`model`/`api_key`/`base_url`，base_url 忽略尾部 `/`），先停掉旧实例再创建；无显式 `id` 时复用旧 `ai_id`（避免 session 悬空）。显式 `id` 已存在且配置不同 → `ValueError`
+2. 无显式 ``id`` 且已有 **完全相同** 配置（`provider`/`model`/`api_key`/`base_url`，base_url 忽略尾部 `/`）→ **直接返回已有** `AiInfo`，不新建实例（防模型池堆同款）。带显式 ``id``（如 Session 复活悬空 `ai_id`）时仍可再建一条同配置不同 id——spa-v2 模型池按配置指纹折叠展示。显式 `id` 已存在 → `ValueError`
 3. `_socket_path(prefix, "ais", ai_id)` 生成 socket 路径
 4. `_ensure_socket_dir(socket)` 创建父目录（anyio 异步）
 5. 构造 `Ai(...)`（传入 api_key + base_url + `max_context_tokens`），创建 `CancelScope`，`task_group.start_soon`
