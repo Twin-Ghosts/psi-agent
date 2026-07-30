@@ -471,6 +471,16 @@ textarea:focus-visible {
   min-width: 0;
 }
 
+.task-list-empty {
+  padding: 14px 12px;
+  color: #7d8f9a;
+  font-size: 11px;
+  line-height: 1.45;
+  border: 1px dashed rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
 .task-row {
   width: 100%;
   min-width: 0;
@@ -1362,6 +1372,27 @@ textarea:focus-visible {
   align-items: center;
   gap: 11px;
   padding: 15px 17px;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  cursor: pointer;
+  transition: background 160ms ease;
+}
+button.metric-cell:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.07);
+}
+button.metric-cell:focus-visible {
+  outline: 2px solid rgba(143, 200, 255, 0.55);
+  outline-offset: -2px;
+  z-index: 1;
+}
+button.metric-cell:disabled {
+  cursor: default;
+  opacity: 0.85;
 }
 
 .metric-cell + .metric-cell { border-left: 1px solid rgba(255, 255, 255, 0.08); }

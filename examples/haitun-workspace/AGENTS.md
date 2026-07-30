@@ -112,6 +112,7 @@ service tools:
 
 | Tool | Notes |
 |---|---|
+| `profile_update` | Manually update the workspace-local topic-aware learner profile; successful `finish_reason="stop"` turns are aggregated automatically by `system_after_turn`. Only per-topic dimensions and statistics are persisted, not raw transcripts. This profile is keyed by workspace, not by channel user identity. |
 | `bash` | Shell commands (anyio, Windows-aware bash detection). On Windows the installer bundles MSYS2 at `{app}\msys64`, added to PATH by the launcher, so bash works out-of-the-box. **cwd = workspace**. |
 | `powershell` | Windows-native shell. **默认 cwd = workspace**. |
 | `read` / `write` / `edit` | Async file ops；相对路径相对 **workspace**. |
@@ -144,6 +145,7 @@ service tools:
 | `todo` (`todo.py` + `_todo_store.py`) | **本 Session 执行步骤清单**（非跨会话 goal、非飞书个人看板）。权威约定：`skills/task-planning/SKILL.md` — 有分拆价值才写；**写即承诺随进程维护**（禁止建表复读后空过不勾就当结束；仅计划则须声明且 status 诚实）。禁止为 UI 进度凑装饰清单。`todo()` 读；`todo(todos='[...]')` 写（`content` 必须是字符串）；`merge=true` 按 id 更新。落盘 AppData `todos/{session_id}.json`（legacy `.psi/todos` 双读）。Gateway `GET …/todos` / spa-v2 `N/M` **只消费**已有清单。 |
 | `goal` (`goal.py` + `_goal_impl.py`) | Define and track **high-level goals** for the agent — durable intent that outlives one task (e.g. "ship payments v2", "reach 90% coverage"), which neither `todo` (one session's steps) nor the `taskflow` skill (a task/project board) captures. Tools `goal_set`, `goal_progress`, `goal_get`, `goal_list`, `goal_delete`. Each goal is a Markdown file under `<workspace>/goals/` with YAML frontmatter (title/slug/status[active,paused,achieved,abandoned]/priority/progress 0-100/target_date/tags/timestamps) + an append-only progress `log`, and a body that links related/sub-goals with `[[slug]]`. `goal_progress` records a dated log entry and moves %/status (100% ⇒ achieved); `goal_list` rolls up status counts. Async `anyio` file IO + `pyyaml` frontmatter, both already core deps — no extra packages. |
 | `clarify` | Ask the user a question when you need clarification, feedback, or a decision before proceeding. Two modes: multiple choice (up to 4 `options` + an auto-appended "Other" free-text) or open-ended (omit `options`). Returns a formatted question block to show the user; then **end the turn** and wait — the reply arrives as the next message (the runtime has no blocking-input primitive). Pure-Python, no extra deps. |
+| `c_drive_cleanup` (`c_drive_cleanup.py` + `_c_drive_cleanup_impl.py`) | Windows C-drive `scan` / `status` / `clean` tool. The first scan in a Session requires confirmation; cleanup requires the user's affirmation and deletes only unchanged candidates from allowlisted temporary/cache locations. Large files, exact duplicates, and stale Downloads are report-only. See `skills/windows-c-drive-cleanup/SKILL.md` for the agent workflow. |
 
 ## Skills (`skills/`)
 
@@ -282,11 +284,19 @@ service tools:
 
 ## ⚠️ Intentionally-kept un-wired code (future extension)
 
-psi-agent's session loader only ever calls the module-level `system_prompt_builder()`,
-`system_prompt_rebuild_checker()`, `turn_context_builder()` and `compact_history()`
-(all but the first optional), loads `tools/*.py`, and runs `schedules/*/TASK.md`. The
-following are deliberately included as **future-extension hooks** and are **NOT** invoked by
-the current framework — do not "clean them up" as dead code:
+psi-agent's session loader calls `system_before_turn()` (when defined, excluding `schedule.*`
+turns), `system_prompt_builder()`, an optional `system_prompt_rebuild_checker()`, and
+`turn_context_builder()`, `compact_history()`, and `system_after_turn()` after a committed
+visible answer; it also loads `tools/*.py` and runs `schedules/*/TASK.md`. Before-turn advice
+is ephemeral and must never enter history. Haitun's hook calls the isolated supervisor with an allowlisted payload
+only: current question, hashed identities, profile/stage summary, map/heatmap summaries, and
+prior advice. It must never supply main-answer text, reasoning, drafts, tool calls, or tool
+results. The first eligible learning turn is warmed after the answer; subsequent eligible
+turns may use a validated cache or live advice, and ordinary failures degrade to the normal
+answer path. The supervisor workspace has no lifecycle hooks or tools, preventing recursion.
+
+The following remain deliberately included as **future-extension hooks** and are **NOT**
+invoked by the current framework — do not "clean them up" as dead code:
 
 - `systems/system.py`: `System.compact_history()`, `System.after_turn()`, and the
   `_run_self_evolution_review` / self-evolution helpers. (The **module-level**

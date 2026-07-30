@@ -39,6 +39,11 @@ import {
   type Task,
   type TaskTemplate,
 } from "./model";
+import {
+  filterTasksBySignal,
+  signalLabel,
+  type TaskSignalKind,
+} from "./taskSignals";
 
 import {
   INITIAL_TEMPLATES,
@@ -188,8 +193,9 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
   const currentTask = currentIndex === 0 ? null : tasks[currentIndex - 1];
   const currentCard = cards[currentIndex] ?? cards[0];
   const currentChatDraft = chatDrafts[currentCard.id] ?? "";
-  const pendingTasks = tasks.filter((task) => task.status === "attention");
-  const deliveryTasks = tasks.filter((task) => task.newDeliverables.length > 0);
+  const pendingTasks = filterTasksBySignal(tasks, "pending");
+  const deliveryTasks = filterTasksBySignal(tasks, "deliveries");
+  const workingTasks = filterTasksBySignal(tasks, "working");
   const normalizedSearch = globalSearch.trim().toLocaleLowerCase("zh-CN");
   const taskSearchResults = normalizedSearch
     ? tasks.filter((task) => `${task.title}${task.shortTitle}${task.category}${task.summary}${task.statusLabel}${task.deliverables.join(" ")}`.toLocaleLowerCase("zh-CN").includes(normalizedSearch)).slice(0, 4)
@@ -470,10 +476,19 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
     });
   };
 
-  const togglePanel = (panel: SidebarPanel) => {
-    setSidebarPanel((current) => (current === panel ? null : panel));
+  /**
+   * Shared inbox entry for overview metrics + sidebar topline.
+   * pending 目前几乎恒空（attention 未接线）；filter 已集中在 taskSignals，后续填协议即可。
+   */
+  const openSignal = useCallback((kind: TaskSignalKind, opts?: { toggle?: boolean }) => {
+    setMainView("workspace");
     setSidebarOpen(true);
-  };
+    setSidebarCollapsed(false);
+    setSidebarPanel((current) => {
+      if (opts?.toggle && current === kind) return null;
+      return kind;
+    });
+  }, []);
 
   const goHome = useCallback(() => {
     setMainView("workspace");
@@ -1235,12 +1250,16 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
     expandFocusGenRef.current += 1;
   }, []);
 
-  const visibleSidebarTasks = sidebarPanel === "pending" ? pendingTasks : sidebarPanel === "deliveries" ? deliveryTasks : tasks;
+  const visibleSidebarTasks =
+    sidebarPanel === "pending" ? pendingTasks
+    : sidebarPanel === "deliveries" ? deliveryTasks
+    : sidebarPanel === "working" ? workingTasks
+    : tasks;
   const renderCardAt = (index: number, openChat?: () => void) => {
     const task = index === 0 ? null : tasks[index - 1];
     return task
       ? <TaskCard task={task} onOpenArtifact={openArtifact} onDelete={deleteTask} onOpenChat={openChat} />
-      : <OverviewCard tasks={tasks} onOpenChat={openChat} />;
+      : <OverviewCard tasks={tasks} onOpenChat={openChat} onOpenSignal={(kind) => openSignal(kind, { toggle: true })} />;
   };
 
   const renderTaskUnit = (index: number, interactive: boolean, visualExpanded = false) => {
@@ -1295,6 +1314,7 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
               ) : (
                 <CompactOverviewContext
                   tasks={tasks}
+                  onOpenSignal={(kind) => openSignal(kind, { toggle: true })}
                 />
               )}
             </div>
@@ -1544,11 +1564,11 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
       <aside id="main-sidebar" className={`sidebar ${sidebarOpen ? "open" : ""}`}>
         <div className="sidebar-topline">
           <div className="signal-controls" aria-label="任务提醒">
-            <button type="button" className={sidebarPanel === "pending" ? "active" : ""} onClick={() => togglePanel("pending")}>
+            <button type="button" className={sidebarPanel === "pending" ? "active" : ""} onClick={() => openSignal("pending", { toggle: true })}>
               <span className="signal-orb red"><span>{pendingTasks.length}</span></span>
               <span>{PENDING_LABEL}</span>
             </button>
-            <button type="button" className={sidebarPanel === "deliveries" ? "active" : ""} onClick={() => togglePanel("deliveries")}>
+            <button type="button" className={sidebarPanel === "deliveries" ? "active" : ""} onClick={() => openSignal("deliveries", { toggle: true })}>
               <span className="signal-treasure"><TreasureVisual state="ready" size="mini" /><span>{deliveryTasks.length}</span></span>
               <span>{DELIVERY_LABEL}</span>
             </button>
@@ -1623,18 +1643,31 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
           <button type="button" className={mainView === "workspace" && currentIndex === 0 && !sidebarPanel ? "active" : ""} onClick={goHome}>
             <Grid2X2 size={18} /> {OVERVIEW_LABEL} <ChevronRight size={15} />
           </button>
-          <button type="button" className={mainView === "workspace" && (sidebarPanel === "history" || sidebarPanel === "pending" || sidebarPanel === "deliveries") ? "active" : ""} onClick={() => { setMainView("workspace"); setSidebarPanel((current) => current === "history" ? null : "history"); }}>
-            <History size={18} /> 历史任务 {(sidebarPanel === "history" || sidebarPanel === "pending" || sidebarPanel === "deliveries") ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+          <button type="button" className={mainView === "workspace" && (sidebarPanel === "history" || sidebarPanel === "pending" || sidebarPanel === "deliveries" || sidebarPanel === "working") ? "active" : ""} onClick={() => { setMainView("workspace"); setSidebarPanel((current) => current === "history" ? null : "history"); }}>
+            <History size={18} /> 历史任务 {(sidebarPanel === "history" || sidebarPanel === "pending" || sidebarPanel === "deliveries" || sidebarPanel === "working") ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
           </button>
 
           <div className={`sidebar-task-panel ${sidebarPanel ? "visible" : ""}`}>
             <div className="panel-heading">
               <span>
-                {sidebarPanel === "pending" ? PENDING_LABEL : sidebarPanel === "deliveries" ? DELIVERY_LABEL : "最近任务"}
+                {sidebarPanel === "working" || sidebarPanel === "pending" || sidebarPanel === "deliveries"
+                  ? signalLabel(sidebarPanel)
+                  : "最近任务"}
               </span>
               <em>{visibleSidebarTasks.length}</em>
             </div>
             <div className="task-list">
+              {visibleSidebarTasks.length === 0 && (
+                <div className="task-list-empty">
+                  {sidebarPanel === "pending"
+                    ? "暂无待处理事项（Agent 澄清 / 权限申请接入后会出现在这里）"
+                    : sidebarPanel === "deliveries"
+                      ? "暂无未确认的新交付物"
+                      : sidebarPanel === "working"
+                        ? "暂无运行中的任务"
+                        : "暂无任务"}
+                </div>
+              )}
               {visibleSidebarTasks.map((task) => (
                 <TaskRow
                   key={task.id}
