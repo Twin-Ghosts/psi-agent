@@ -157,12 +157,17 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
   const [dragX, setDragX] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [cardTransition, setCardTransition] = useState<CardTransition | null>(null);
+  /** Soft fade when switching tasks while already in focus (not the heavy swipe theater). */
+  const [focusSoftEnter, setFocusSoftEnter] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [globalSearch, setGlobalSearch] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [templateSearchSeed, setTemplateSearchSeed] = useState("");
   const dragOrigin = useRef<number | null>(null);
   const transitionTimer = useRef<number | null>(null);
+  const softEnterTimer = useRef<number | null>(null);
+  /** Bumped to cancel a pending double-rAF expand after sidebar select. */
+  const expandFocusGenRef = useRef(0);
   const toastTimer = useRef<number | null>(null);
   const globalSearchRef = useRef<HTMLInputElement | null>(null);
   const activeChatInputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -418,7 +423,7 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
     if (card && card.id !== "overview") void ensureHistory(card.id);
   }, [cards, chatExpanded, collapseChat, currentIndex, ensureHistory]);
 
-  /** Sidebar / search: jump straight into split focus chat (not the swipe card surface). */
+  /** Sidebar / search: jump into split focus with the same expand morph as the dialogue strip. */
   const selectTask = (task: Task) => {
     const index = tasks.findIndex((item) => item.id === task.id);
     if (index < 0) return;
@@ -427,16 +432,42 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
     setSidebarOpen(false);
     setSearchOpen(false);
     setGlobalSearch("");
-    // Skip card swipe theater — dual exit/enter layers for ~470ms felt laggy vs dialogue-bar expand.
+    // Never use card swipe exit/enter here — that dual-layer ~470ms path felt laggy.
     if (transitionTimer.current) window.clearTimeout(transitionTimer.current);
     setCardTransition(null);
-    if (next !== currentIndex) {
+    expandFocusGenRef.current += 1;
+
+    const needsSwitch = next !== currentIndex;
+    if (needsSwitch) {
       setCurrentIndex(next);
       setDragX(0);
     }
     void ensureHistory(task.id);
     setContextPanelCollapsed(false);
-    setChatExpanded(true);
+
+    if (chatExpanded) {
+      // Already in focus: light content fade instead of swipe theater.
+      if (needsSwitch && !prefersReducedMotion()) {
+        setFocusSoftEnter(true);
+        if (softEnterTimer.current) window.clearTimeout(softEnterTimer.current);
+        softEnterTimer.current = window.setTimeout(() => setFocusSoftEnter(false), 320);
+      }
+      return;
+    }
+
+    if (!needsSwitch || prefersReducedMotion()) {
+      setChatExpanded(true);
+      return;
+    }
+
+    // Mount the target card collapsed first, then expand — same CSS morph as clicking the dialogue strip.
+    const gen = expandFocusGenRef.current;
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (gen !== expandFocusGenRef.current) return;
+        setChatExpanded(true);
+      });
+    });
   };
 
   const togglePanel = (panel: SidebarPanel) => {
@@ -1199,7 +1230,9 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
 
   useEffect(() => () => {
     if (transitionTimer.current) window.clearTimeout(transitionTimer.current);
+    if (softEnterTimer.current) window.clearTimeout(softEnterTimer.current);
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
+    expandFocusGenRef.current += 1;
   }, []);
 
   const visibleSidebarTasks = sidebarPanel === "pending" ? pendingTasks : sidebarPanel === "deliveries" ? deliveryTasks : tasks;
@@ -1694,7 +1727,7 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
               )}
               <div
                 key={`current-${currentCard.id}`}
-                className={`card-chat-unit-layer ${isDragging ? "dragging" : ""} ${cardTransition ? `card-motion-enter ${cardTransition.direction}` : ""}`}
+                className={`card-chat-unit-layer ${isDragging ? "dragging" : ""} ${cardTransition ? `card-motion-enter ${cardTransition.direction}` : ""} ${focusSoftEnter ? "focus-soft-enter" : ""}`}
                 style={{ transform: `translateX(${dragX}px) rotate(${dragX * 0.012}deg)` }}
               >
                 {renderTaskUnit(currentIndex, true)}
