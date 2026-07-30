@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 from datetime import UTC, datetime
 
@@ -49,8 +48,10 @@ async def _atomic_write(path: anyio.Path, content: str) -> None:
     await path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.parent / f"{path.name}.tmp"
     await tmp.write_text(content, encoding="utf-8")
-    # Windows: Path.rename fails when the destination already exists; os.replace is atomic.
-    await anyio.to_thread.run_sync(os.replace, str(tmp), str(path))
+    # Windows: Path.rename fails when the destination already exists.
+    if await path.exists():
+        await path.unlink()
+    await tmp.rename(path)
 
 
 async def skill_manage(

@@ -36,7 +36,8 @@ _STATUS_IDENTITY_KEYS = frozenset(
 
 
 def map_event(raw: dict[str, Any]) -> list[dict[str, Any]]:
-    header = raw.get("header") if isinstance(raw.get("header"), dict) else {}
+    header_raw = raw.get("header")
+    header: dict[str, Any] = header_raw if isinstance(header_raw, dict) else {}
     event = raw.get("event") if isinstance(raw.get("event"), dict) else raw
     if not isinstance(event, dict):
         return []
