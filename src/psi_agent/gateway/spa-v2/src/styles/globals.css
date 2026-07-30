@@ -3450,8 +3450,10 @@ button.metric-cell:disabled {
 
 .template-builder-layer {
   position: fixed;
-  z-index: 75;
+  z-index: 90;
   inset: 0;
+  display: block;
+  pointer-events: none;
 }
 
 .template-builder-scrim {
@@ -3459,22 +3461,39 @@ button.metric-cell:disabled {
   inset: 0;
   width: 100%;
   height: 100%;
+  margin: 0;
   padding: 0;
   border: 0;
-  background: rgba(8, 21, 28, 0.32);
-  backdrop-filter: blur(3px);
-  animation: fade-in 180ms ease both;
+  border-radius: 0;
+  background:
+    radial-gradient(ellipse at 78% 18%, rgba(var(--brand-rgb), 0.18), transparent 42%),
+    rgba(4, 14, 32, 0.52);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  pointer-events: auto;
+  cursor: pointer;
+  animation: fade-in 200ms ease both;
 }
 
 .template-builder {
   position: absolute;
-  inset: 0 0 0 auto;
-  width: min(430px, 94vw);
-  padding: 23px;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(440px, 100vw);
+  margin: 0;
+  padding: 28px 24px max(24px, env(safe-area-inset-bottom));
   color: #21323e;
-  background: #f9faf7;
-  box-shadow: -24px 0 65px rgba(10, 28, 36, 0.21);
-  animation: drawer-in 300ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  background:
+    linear-gradient(180deg, #fbfdff 0%, #f4f8fc 100%);
+  border: 0;
+  border-left: 1px solid rgba(11, 47, 91, 0.08);
+  border-radius: 0;
+  box-shadow: -28px 0 80px rgba(4, 24, 56, 0.28);
+  pointer-events: auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  animation: drawer-in 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 .template-builder > header { display: flex; align-items: flex-start; justify-content: space-between; }
@@ -4080,7 +4099,7 @@ button.metric-cell:disabled {
 .template-builder-note { background: var(--brand-50); }
 .template-card:hover { border-color: rgba(var(--brand-rgb), 0.28); box-shadow: 0 16px 35px rgba(18, 77, 139, 0.1); }
 .template-toolbar label:focus-within { color: var(--brand-600); border-color: var(--brand-200); background: #fff; }
-.template-builder { background: #f7faff; }
+.template-builder { background: linear-gradient(180deg, #fbfdff 0%, #f4f8fc 100%); }
 .document-preview { background: #e9f0f8; }
 .toast { color: #eef7ff; background: rgba(7, 31, 57, 0.96); box-shadow: 0 12px 34px rgba(3, 24, 47, 0.3); }
 
