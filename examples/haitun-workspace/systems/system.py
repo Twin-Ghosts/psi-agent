@@ -43,7 +43,7 @@ import os
 import platform
 import re
 import types
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -1283,7 +1283,10 @@ def _get_supervisor_manager(workspace: anyio.Path) -> Any:
     return manager
 
 
-def _build_profile_policy(topic_profile: dict[str, Any]) -> str:
+def _build_profile_policy(topic_profile: Mapping[str, Any]) -> str:
+    # Mapping 而非 dict: 实参是 TopicProfile (TypedDict), 而 TypedDict 不可赋给
+    # dict[..] —— dict 允许 clear() 之类的破坏性操作。本函数只读 (.get()), 故
+    # Mapping 才是准确的契约; 测试传普通 dict 也照样兼容。
     current_turn = int(topic_profile.get("turns", 0)) + 1
     socratic = "3. **苏格拉底提问**: 本轮必须提问!" if current_turn % 3 == 0 else "3. 本轮不强制提问。"
     return (
