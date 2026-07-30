@@ -40,8 +40,6 @@ async def describe_image(image_path: str, question: str = "") -> str:
     try:
         _paths.resolve_user_path(image_path)
     except _paths.PrivateSpaceDeniedError as e:
-        return _v.dumps_result(
-            _v.VisionResult(ok=False, text="", backend="", message=str(e), image_path=image_path)
-        )
+        return _v.dumps_result(_v.VisionResult(ok=False, text="", backend="", message=str(e), image_path=image_path))
     result = await _v.describe_image_impl(image_path=image_path, question=question)
     return _v.dumps_result(result)
