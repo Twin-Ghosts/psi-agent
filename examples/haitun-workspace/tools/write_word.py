@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import _runtime_paths as _paths
 import anyio
 from docx import Document
 from docx.oxml.ns import qn
@@ -129,7 +130,13 @@ async def write_word(
     if not blocks and not title:
         return "[Error] provide a title or at least one block"
 
-    path = anyio.Path(file_path)
+    # 同 write_excel: 相对路径此前落在进程 cwd 而非本会话 workspace, 一并收口 + 判权。
+    try:
+        path = _paths.resolve_user_path(file_path)
+        _paths.guard_write(path)
+    except _paths.PrivateSpaceDeniedError as e:
+        return str(e)
+    file_path = str(path)
     parent = path.parent
     if not await parent.exists():
         await parent.mkdir(parents=True, exist_ok=True)

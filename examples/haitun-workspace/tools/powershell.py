@@ -56,8 +56,18 @@ async def powershell(command: str, *, cwd: str | None = None) -> str:
         command: The PowerShell command to execute. Use with caution.
         cwd: Working directory. Defaults to the workspace root.
     """
+    # 前置扫描命令串(启发式), 另外 cwd 是显式参数 —— 它自己就是一条绕过路径解析的
+    # 口子, 必须判权, 否则 cwd 指到别人空间后一句 ``ls`` 就读完了。
+    denied = _paths.scan_command(command)
+    if denied:
+        return denied
     if cwd is None:
         cwd = _paths.workspace_dir()
+    else:
+        try:
+            _paths.guard_read(cwd)
+        except _paths.PrivateSpaceDeniedError as e:
+            return str(e)
 
     pwsh = _find_powershell()
     # -NoProfile: skip user profile for predictable, fast startup.

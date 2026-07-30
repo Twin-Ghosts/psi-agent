@@ -98,3 +98,9 @@ markers = ["schedule: schedule-based tests (> 30s)"]
 [tool.coverage.run]
 source = ["src/psi_agent"]
 
+
+[tool.ty.environment]
+# 扁平工具模块(examples/haitun-workspace/tools/, 无 __init__.py, 运行时靠 sys.path
+# 插入互相 import)。测试要导它们做隔离验证, 故让 ty 也认这条搜索路径 —— 否则只能给
+# 每处 import 加 ty: ignore, 违反仓库的零抑制原则。
+extra-paths = ["examples/haitun-workspace/tools"]

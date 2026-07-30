@@ -22,7 +22,11 @@ async def edit(file_path: str, old_string: str, new_string: str) -> str:
     Returns:
         Success message or error message describing what went wrong.
     """
-    path = _paths.resolve_user_path(file_path)
+    try:
+        path = _paths.resolve_user_path(file_path)
+        _paths.guard_write(path)
+    except _paths.PrivateSpaceDeniedError as e:
+        return str(e)
     if not await path.exists():
         return f"[Error] File not found: {path}"
 

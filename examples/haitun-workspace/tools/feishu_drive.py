@@ -16,6 +16,7 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 import _feishu_impl as _f
+import _runtime_paths as _paths
 
 
 async def feishu_drive_add_comment(
@@ -112,6 +113,11 @@ async def feishu_file_download(source: str, save_path: str, is_url: bool = False
             to download as that user — needed for files the bot can't see; empty uses
             the bot's tenant token. Ignored for direct-URL downloads.
     """
+    # 自己做 IO 不经 _runtime_paths, 故显式判权: 写别人空间 = 投毒/覆写。
+    try:
+        _paths.guard_write(_paths.resolve_user_path(save_path))
+    except _paths.PrivateSpaceDeniedError as e:
+        return str(e)
     return _f.dumps_result(await _f.download_file_impl(source, save_path, is_url, user_key))
 
 
@@ -170,6 +176,11 @@ async def feishu_drive_upload(
             folder generally needs that user's identity.
         identity: ``"user"`` / ``"bot"`` — who owns the result (see add_comment).
     """
+    # 上传是最直接的外泄口(把别人空间的文件推到自己能看见的云盘), 必须判读权。
+    try:
+        _paths.resolve_user_path(file_path)
+    except _paths.PrivateSpaceDeniedError as e:
+        return str(e)
     return _f.dumps_result(
         await _f.upload_media_impl(file_path, parent_type, parent_node, file_name, extra_json, user_key, identity)
     )

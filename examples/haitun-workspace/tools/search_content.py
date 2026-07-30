@@ -12,10 +12,30 @@ works in any environment.
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 import shutil
 
+import _runtime_paths as _paths
 import anyio
+
+
+def _blocked_hit(line: str, blocked: list[str]) -> bool:
+    """rg 输出行 ``file:line:text`` 的 file 段是否落在他人空间。
+
+    rg 自己不认隔离边界, 故命中结果必须再过一遍。冒号在 Windows 盘符里也出现
+    (``C:\\x``), 所以按最后一个 ``:<数字>:`` 之前的部分取文件名, 而不是 split(":")[0]。
+    """
+    if not blocked:
+        return False
+    match = re.match(r"^(.*?):\d+:", line)
+    path = match.group(1) if match else line
+    try:
+        real = os.path.realpath(path)
+    except OSError:
+        return True  # 判不出就保守剔除。
+    return any(real == b or real.startswith(b + os.sep) for b in blocked)
+
 
 # Directories skipped by the Python fallback walk (rg already honors .gitignore
 # and skips .git itself).
@@ -54,7 +74,12 @@ async def search_content(
     if not pattern:
         return "[Error] Empty search pattern."
 
-    root = anyio.Path(path)
+    # 此前 path 直接当 anyio.Path 用(相对路径靠进程 cwd), 既不过 workspace 解析也不
+    # 判权; 现在统一收口到 resolve_user_path, 越界直接拒。
+    try:
+        root = _paths.resolve_user_path(path)
+    except _paths.PrivateSpaceDeniedError as e:
+        return str(e)
     if not await root.exists():
         return f"[Error] Path not found: {path}"
 
@@ -65,14 +90,18 @@ async def search_content(
         except re.error as e:
             return f"[Error] Invalid regex {pattern!r}: {e}"
 
+    blocked = _paths.forbidden_dirs()
+
     rg = shutil.which("rg")
     if rg:
-        result = await _search_with_ripgrep(rg, pattern, path, glob, case_sensitive, is_regex, max_results)
+        result = await _search_with_ripgrep(
+            rg, pattern, str(root), glob, case_sensitive, is_regex, max_results, blocked
+        )
         if result is not None:
             return result
         # rg failed unexpectedly (not just "no matches") -> fall through to Python.
 
-    return await _search_with_python(pattern, root, glob, case_sensitive, is_regex, max_results)
+    return await _search_with_python(pattern, root, glob, case_sensitive, is_regex, max_results, blocked)
 
 
 async def _search_with_ripgrep(
@@ -83,6 +112,7 @@ async def _search_with_ripgrep(
     case_sensitive: bool,
     is_regex: bool,
     max_results: int,
+    blocked: list[str],
 ) -> str | None:
     """Run ripgrep and format its output. Returns None if rg errored unexpectedly."""
     args = [rg, "--line-number", "--no-heading", "--color", "never", "--max-count", str(max_results)]
@@ -92,6 +122,9 @@ async def _search_with_ripgrep(
         args.append("--fixed-strings")
     if glob:
         args += ["--glob", glob]
+    # 让 rg 尽量别走进去(省 IO); 准确性不依赖它 —— 见下面对输出的前缀过滤。
+    for b in blocked:
+        args += ["--glob", f"!**/{os.path.basename(b)}/**"]
     args += ["--regexp", pattern, "--", path]
 
     try:
@@ -106,7 +139,10 @@ async def _search_with_ripgrep(
         return None  # Unexpected error -> fall back to Python.
 
     stdout = proc.stdout.decode("utf-8", errors="replace")
-    lines = [ln for ln in stdout.splitlines() if ln]
+    # 排除 glob 只是加速: rg 的 --glob 按**路径末段**匹配, 边界目录给的是绝对路径, 拼
+    # 出来的模式未必命中(实测确实漏)。故命中结果一律再按真实前缀过滤一遍 —— 这才是
+    # 准确的那一层, 别把它当冗余删掉。
+    lines = [ln for ln in stdout.splitlines() if ln and not _blocked_hit(ln, blocked)]
     if not lines:
         return f"(no matches for {pattern!r} under {path})"
 
@@ -140,8 +176,12 @@ async def _search_with_python(
     case_sensitive: bool,
     is_regex: bool,
     max_results: int,
+    blocked: list[str],
 ) -> str:
-    """Pure-Python fallback: walk files and match with ``re``."""
+    """Pure-Python fallback: walk files and match with ``re``.
+
+    部署环境(214 容器)**没装 rg**, 走的就是这条分支 —— 这里的边界过滤不是可选项。
+    """
     flags = 0 if case_sensitive else re.IGNORECASE
     needle = pattern if is_regex else re.escape(pattern)
     matcher = re.compile(needle, flags)
@@ -174,6 +214,9 @@ async def _search_with_python(
                 return
             if await child.is_dir():
                 if child.name in _SKIP_DIRS:
+                    continue
+                # 别人的空间整棵不进(realpath 比较, 故 symlink 也拦得住)。
+                if blocked and str(await child.resolve()) in blocked:
                     continue
                 await walk(child)
             else:

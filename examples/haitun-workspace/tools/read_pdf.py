@@ -11,6 +11,7 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 import _pdf_ocr as _p
+import _runtime_paths as _paths
 
 
 async def read_pdf(
@@ -45,6 +46,22 @@ async def read_pdf(
         total_pages, backend, message, pdf_path, and a per-page list
         (page, source ["text-layer"|"vision-ocr"|"error"], chars, message).
     """
+    # 自己做 IO 不经 _runtime_paths, 显式判读权。
+    try:
+        _paths.resolve_user_path(pdf_path)
+    except _paths.PrivateSpaceDeniedError as e:
+        return _p.dumps_result(
+            _p.PdfResult(
+                ok=False,
+                text="",
+                pages_processed=0,
+                total_pages=0,
+                backend="",
+                message=str(e),
+                pdf_path=pdf_path,
+                pages=[],
+            )
+        )
     result = await _p.read_pdf_impl(
         pdf_path=pdf_path,
         pages=pages,

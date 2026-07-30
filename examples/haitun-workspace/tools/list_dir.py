@@ -26,7 +26,10 @@ async def list_dir(dir_path: str = ".", recursive: bool = False, max_entries: in
         A newline-separated listing of entries, or an error message if the path
         cannot be listed.
     """
-    path = _paths.resolve_user_path(dir_path)
+    try:
+        path = _paths.resolve_user_path(dir_path)
+    except _paths.PrivateSpaceDeniedError as e:
+        return str(e)
     if not await path.exists():
         return f"[Error] Path not found: {path}"
     if not await path.is_dir():
@@ -34,6 +37,9 @@ async def list_dir(dir_path: str = ".", recursive: bool = False, max_entries: in
 
     entries: list[str] = []
     truncated = False
+    # 列隔离父目录本身是允许的(root 无主), 但那一层的兄弟目录是别人的空间 —— 逐个
+    # 跳过, 否则光看目录名就泄露了「有哪些人、各自有什么文件」。
+    blocked = {str(p) for p in _paths.forbidden_dirs()}
 
     async def collect(base: anyio.Path, prefix: str) -> None:
         nonlocal truncated
@@ -45,6 +51,8 @@ async def list_dir(dir_path: str = ".", recursive: bool = False, max_entries: in
                 truncated = True
                 return
             is_dir = await child.is_dir()
+            if is_dir and blocked and str(await child.resolve()) in blocked:
+                continue
             display = f"{prefix}{child.name}{'/' if is_dir else ''}"
             entries.append(display)
             if recursive and is_dir:

@@ -18,7 +18,11 @@ async def write(file_path: str, content: str) -> str:
     Returns:
         Success message or error message.
     """
-    path = _paths.resolve_user_path(file_path)
+    try:
+        path = _paths.resolve_user_path(file_path)
+        _paths.guard_write(path)
+    except _paths.PrivateSpaceDeniedError as e:
+        return str(e)
     parent = path.parent
     if not await parent.exists():
         await parent.mkdir(parents=True, exist_ok=True)

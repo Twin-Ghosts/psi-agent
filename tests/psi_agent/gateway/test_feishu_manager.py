@@ -5,6 +5,7 @@ import os
 import anyio
 import pytest
 
+from psi_agent import _private_space
 from psi_agent.gateway._ai_manager import AIManager
 from psi_agent.gateway._feishu_manager import FeishuManager, _sanitize_open_id
 from psi_agent.gateway._session_manager import SessionManager
@@ -312,6 +313,29 @@ async def test_group_and_lookalike_open_id_do_not_collide(tmp_path: str) -> None
     finally:
         await _drain(sm, am)
         await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.parametrize(
+    ("open_id", "chat_id", "chat_type"),
+    [
+        ("ou_alice", "", ""),
+        ("ou_alice", "oc_team", "group"),
+        ("ou_alice", "oc_team", "topic"),
+        ("ou-with-dash", "", ""),
+        ("ou_alice", "oc/odd id", "group"),
+    ],
+)
+def test_workspace_dirname_matches_guard_owner(open_id: str, chat_id: str, chat_type: str) -> None:
+    """workspace 目录名必须与守卫从 session_id 反解出的 owner 逐字符相同。
+
+    这是隔离能不能用的**唯一耦合点**: 守卫判权靠「``owner_from_session_id(sid)`` ==
+    路径首段」。两边命名规则一旦漂移(比如一边转义 ``-`` 一边不转), 后果不是放行而是
+    所有人都读不到自己的文件 —— 静默失效, 故用测试钉死。
+    """
+    fm = FeishuManager(_sm=None, _workspace_root=os.sep + "ws")  # ty: ignore[invalid-argument-type]
+    key = fm._route_key(open_id, chat_id, chat_type)
+    sid = fm._session_id(key)
+    assert os.path.basename(fm._workspace_for(key)) == _private_space.owner_from_session_id(sid)
 
 
 @pytest.mark.anyio

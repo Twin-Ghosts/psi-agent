@@ -7,6 +7,7 @@ import re
 import shlex
 import sys
 from datetime import UTC, datetime, timedelta
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,23 @@ except ImportError:
 
     def _runtime_session_id() -> str:
         return ""
+
+
+def _deny_to_result(func: Any) -> Any:
+    """把 ``PrivateSpaceDeniedError`` 转成常规失败结果 dict, 而不是抛穿到模型面前。
+
+    历史读取的判权在 ``_resolve_history_path`` 一处(唯一漏斗), 但它有 6 个内部调用点;
+    在公开入口统一兜一层, 比在每个调用点写 try 更不容易漏。
+    """
+
+    @wraps(func)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await func(*args, **kwargs)
+        except _paths.PrivateSpaceDeniedError as e:
+            return {"ok": False, "message": str(e), "messages": [], "hits": [], "count": 0}
+
+    return wrapper
 
 
 def _argv_flag(argv: list[str], flag: str) -> str:
@@ -119,6 +137,11 @@ async def _scan_one_histories_dir(histories_dir: anyio.Path) -> dict[str, dict[s
         session_id = entry.name.removesuffix(".jsonl").strip()
         if not session_id:
             continue
+        # AppData 的 histories/ 是**全局**的(不分 workspace), 故这里必须按主过滤 ——
+        # 否则 sessions_list / session_keyword_search / sessions_history 会列出并全文
+        # 搜索所有人的对话原文, 那比文件更敏感。这是所有历史发现路径的唯一漏斗。
+        if not _paths.owns_session(session_id):
+            continue
         try:
             stat = await entry.stat()
             mtime = datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat()
@@ -148,10 +171,17 @@ async def _scan_history_sessions(workspace: anyio.Path) -> dict[str, dict[str, A
     return rows
 
 
-def _ensure_session_row(rows: dict[str, dict[str, Any]], session_id: str) -> dict[str, Any]:
+def _ensure_session_row(rows: dict[str, dict[str, Any]], session_id: str) -> dict[str, Any] | None:
+    """取/建一行; 越界 session 返回 ``None`` 由调用方跳过。
+
+    后台进程注册表与 Gateway ``/sessions`` 两条合并路径会**重新引入**历史过滤已经剔掉
+    的 session, 故在这个共同创建点再判一次 —— 一处覆盖两条路径。
+    """
     row = rows.get(session_id)
     if row is not None:
         return row
+    if not _paths.owns_session(session_id):
+        return None
     row = {
         "session_id": session_id,
         "sources": [],
@@ -193,6 +223,8 @@ async def _merge_background_sessions(
         if not session_id:
             continue
         row = _ensure_session_row(rows, session_id)
+        if row is None:
+            continue
         _add_source(row, "background")
         alive = bool(proc.get("alive"))
         if alive:
@@ -243,6 +275,8 @@ async def _merge_gateway_sessions(
         if ws and not _sub._workspaces_match(ws, workspace):
             continue
         row = _ensure_session_row(rows, session_id)
+        if row is None:
+            continue
         _add_source(row, "gateway")
         row["running"] = True
         row["gateway"] = {
@@ -284,7 +318,16 @@ def resolve_session_id(session_id: str) -> str:
 
 
 async def _resolve_history_path(workspace: anyio.Path, session_id: str) -> anyio.Path:
-    """Dual-read: AppData histories preferred, else legacy workspace histories."""
+    """Dual-read: AppData histories preferred, else legacy workspace histories.
+
+    显式传 ``session_id`` 能直接指定要读谁的历史, 绕过列表侧过滤 —— 故这里判权。
+    这是「按 id 读某条历史」的唯一漏斗(``sessions_history`` / ``sessions_export`` /
+    ``session_keyword_search`` 单会话模式都经它)。
+    """
+    if not _paths.owns_session(session_id):
+        raise _paths.PrivateSpaceDeniedError(
+            f"[Error] 拒绝访问: 会话 {session_id} 的历史属于另一个用户。每位用户的对话记录互相隔离。"
+        )
     appdata_root = await resolve_appdata_root()
     return await resolve_history_read_path(
         appdata_root=appdata_root,
@@ -417,6 +460,7 @@ async def get_session_status(
     }
 
 
+@_deny_to_result
 async def get_session_history(
     *,
     session_id: str = "",
@@ -668,6 +712,7 @@ async def _keyword_search_file(
     }
 
 
+@_deny_to_result
 async def keyword_search_sessions(
     *,
     query: str,
@@ -702,7 +747,9 @@ async def keyword_search_sessions(
                 "session_id_scope": scope,
                 "hits": [],
             }
-        session_row = row or _ensure_session_row(rows, scope)
+        # 走到这里 _resolve_history_path 已判过权, 故 _ensure_session_row 不会拒;
+        # 它现在可能返回 None(越界), 用 {"session_id": scope} 兜住类型。
+        session_row = row or _ensure_session_row(rows, scope) or {"session_id": scope}
         hit = await _keyword_search_file(path, query=query, session_row=session_row)
         hits = [hit] if hit is not None else []
     else:
@@ -728,6 +775,7 @@ async def keyword_search_sessions(
     }
 
 
+@_deny_to_result
 async def task_search_sessions(
     *,
     category: str,
@@ -898,6 +946,7 @@ def _format_export_jsonl(messages: list[dict[str, Any]]) -> str:
     return "".join(json.dumps(msg, ensure_ascii=False) + "\n" for msg in messages)
 
 
+@_deny_to_result
 async def export_session(
     *,
     session_id: str = "",
@@ -1236,6 +1285,7 @@ async def _resolve_handoff_source_session(
     return resolve_session_id(""), None
 
 
+@_deny_to_result
 async def build_handoff_context(
     *,
     source_session_id: str,

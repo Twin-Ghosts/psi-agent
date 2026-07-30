@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import _runtime_paths as _paths
 import anyio
 from openpyxl import Workbook
 from openpyxl.styles import Font
@@ -64,7 +65,14 @@ async def write_excel(file_path: str, rows_json: str, sheet_name: str = "Sheet1"
     if not rows:
         return "[Error] rows_json is empty; provide at least one row"
 
-    path = anyio.Path(file_path)
+    # 此前 anyio.Path(file_path) 让相对路径落在**进程 cwd**(gateway 的 cwd)而非本会话
+    # workspace —— 顺带修掉。判权同时防写他人空间。
+    try:
+        path = _paths.resolve_user_path(file_path)
+        _paths.guard_write(path)
+    except _paths.PrivateSpaceDeniedError as e:
+        return str(e)
+    file_path = str(path)
     parent = path.parent
     if not await parent.exists():
         await parent.mkdir(parents=True, exist_ok=True)

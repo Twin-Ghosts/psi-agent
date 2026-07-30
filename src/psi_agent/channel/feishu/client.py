@@ -26,6 +26,7 @@ from lark_channel.core.model import BaseRequest
 from lark_channel.event.custom import CustomizedEventProcessor
 from loguru import logger
 
+from psi_agent import _private_space
 from psi_agent.channel._core import ChannelCore
 from psi_agent.channel._types import FileChunk, InputChunk, ReasoningChunk, TextChunk
 from psi_agent.channel.feishu._agent_events import register_feishu_agent_events
@@ -146,8 +147,24 @@ class _GatewayRouteProvider:
             raise RuntimeError(f"Gateway POST /feishu/route failed (status={resp.status}): {body}")
 
 
-async def _send_file(channel: Any, chat_id: str, path: str) -> None:
+async def _send_file(
+    channel: Any,
+    chat_id: str,
+    path: str,
+    *,
+    open_id: str = "",
+    chat_type: str = "",
+) -> None:
+    """把 agent 产出的文件发到飞书会话; 越界文件直接丢弃。
+
+    ``[SEND:]`` 能把**任意本地路径**传到飞书, 是最直接的外泄口。channel 是独立进程,
+    没有 ``runtime_context``, 故按会话事实(open_id / chat)自行判权 —— 守卫只看路径前
+    缀, 不依赖 workspace 内容。
+    """
     logger.debug(f"path={path}")
+    if _private_space.blocks_send(path, open_id=open_id or "", chat_id=chat_id, chat_type=chat_type):
+        logger.warning(f"[SEND] blocked cross-user file: {path}")
+        return
     result = await channel.send(chat_id, {"image": {"source": path}})
     if result.success:
         logger.debug("OK as image")
@@ -308,8 +325,13 @@ async def _stream_reply(
     *,
     reply_to: str | None,
     suppress_silent_reply: bool = False,
+    open_id: str = "",
+    chat_type: str = "",
 ) -> None:
-    """Stream agent text and files into one Feishu chat."""
+    """Stream agent text and files into one Feishu chat.
+
+    ``open_id`` / ``chat_type`` 只为 ``[SEND:]`` 判权而传入(见 ``_send_file``)。
+    """
 
     async def _produce(stream: Any) -> None:
         silent_candidate = ""
@@ -350,7 +372,7 @@ async def _stream_reply(
                             checking_silent_reply = True
                     elif isinstance(chunk, FileChunk):
                         logger.debug(f"received FileChunk ({chunk.path})")
-                        await _send_file(channel, chat_id, chunk.path)
+                        await _send_file(channel, chat_id, chunk.path, open_id=open_id, chat_type=chat_type)
         except Exception:
             await flush_silent_candidate()
             raise
@@ -397,7 +419,15 @@ async def _handle_and_stream(
             logger.debug(f"posting {len(chunks)} chunk(s) to ChannelCore")
 
             try:
-                await _stream_reply(channel, core, ctx.chat_id, chunks, reply_to=ctx.message_id)
+                await _stream_reply(
+                    channel,
+                    core,
+                    ctx.chat_id,
+                    chunks,
+                    reply_to=ctx.message_id,
+                    open_id=ctx.sender_id or "",
+                    chat_type=chat_type,
+                )
                 logger.debug("stream completed")
             except Exception as e:
                 logger.error(f"Message handling error — {e!r}")

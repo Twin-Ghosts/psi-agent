@@ -30,6 +30,8 @@ class StreamReply(Protocol):
         *,
         reply_to: str | None,
         suppress_silent_reply: bool = False,
+        open_id: str = "",
+        chat_type: str = "",
     ) -> None: ...
 
 
@@ -338,6 +340,9 @@ async def handle_card_action(
             chunks,
             reply_to=message_id or None,
             suppress_silent_reply=True,
+            # 卡片点击按操作者 open_id 路由到其个人 session (群卡片同理), 故 [SEND:]
+            # 判权也用操作者身份 —— 与 resolve_core(operator_open_id) 保持一致。
+            open_id=operator_open_id,
         )
         logger.debug("card action stream completed")
     except Exception as e:

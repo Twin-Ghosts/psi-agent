@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 import anyio
 from loguru import logger
 
+from psi_agent import _private_space
 from psi_agent.gateway._session_manager import SessionManager
 
 _SOCKET_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
@@ -99,11 +100,13 @@ class FeishuManager:
 
         群聊 → ``<root>/chat-<chat_id>``, 私聊 → ``<root>/<open_id>`` (``-`` 同样转义,
         与 ``_session_id`` 一致, 免得两个键指到同一个 workspace 目录)。
+
+        目录名必须与 ``_private_space.owner_from_session_id(session_id)`` 逐字符一致 ——
+        隔离守卫靠「session_id 反解出的 owner」与「路径首段」相等来判权, 两边命名规则
+        一旦漂移, 结果是所有人都读不到自己的文件。故这里直接复用守卫的推导。
         """
         root = self._workspace_root or os.getcwd()
-        if key.startswith("chat:"):
-            return os.path.join(root, f"chat-{_sanitize_open_id(key.removeprefix('chat:'))}")
-        return os.path.join(root, _sanitize_open_id(key).replace("-", "_"))
+        return os.path.join(root, _private_space.owner_from_session_id(self._session_id(key)))
 
     async def route(
         self,

@@ -42,6 +42,12 @@ async def bash(command: str, timeout_seconds: int = 30) -> str:
     Returns:
         Combined stdout and stderr output, with exit code appended on failure.
     """
+    # shell 绕开所有路径解析(只吃 cwd), 故这里对命令串做前置扫描。启发式而非沙箱 ——
+    # 见 psi_agent._private_space.scan_command 的能力边界说明。
+    denied = _paths.scan_command(command)
+    if denied:
+        return denied
+
     bash = _find_bash()
     if not bash:
         return (

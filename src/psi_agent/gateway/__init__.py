@@ -122,8 +122,18 @@ class Gateway:
         agent_default = await resolve_default_agent(self.default_agent)
         workspace_default = await resolve_default_workspace(self.default_workspace)
         appdata_root = await resolve_appdata_root(self.appdata)
+        # 守卫按 realpath 前缀判权, FeishuManager 按这个 root 造目录 —— 两者必须是同一个
+        # 绝对路径, 否则 owner_of() 认不出自己的目录, 结果是谁都读不到自己的文件。
+        feishu_ws_root = (
+            str(await anyio.Path(self.feishu_workspace_root).resolve()) if self.feishu_workspace_root.strip() else ""
+        )
         # So in-process Session tools (todo, …) see the same root as GET /defaults.
         os.environ["PSI_APPDATA"] = appdata_root
+        # 隔离守卫的开关: 配了 --feishu-workspace-root 才启用 per-user 文件隔离。
+        # 空 = 守卫全程空操作, 行为与改动前一致(见 psi_agent._private_space)。
+        if feishu_ws_root:
+            os.environ["PSI_WORKSPACE_ROOT"] = feishu_ws_root
+            logger.info(f"Feishu per-user isolation enabled under: {feishu_ws_root}")
         logger.info(f"Default agent: {agent_default or '(same as workspace)'}")
         logger.info(f"Default workspace: {workspace_default}")
         logger.info(f"AppData root: {appdata_root}")
@@ -209,7 +219,7 @@ class Gateway:
                 app_name=self.app_name,
                 attention=attention,
                 feishu_ai_id=self.feishu_ai_id,
-                feishu_workspace_root=self.feishu_workspace_root,
+                feishu_workspace_root=feishu_ws_root or self.feishu_workspace_root,
                 default_agent=agent_default,
                 default_workspace=workspace_default,
                 appdata=appdata_root,

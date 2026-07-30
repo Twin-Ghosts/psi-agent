@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import _runtime_paths as _paths
@@ -38,7 +39,10 @@ async def find_files(
         modification time (newest first), or an error message if the search
         root cannot be used.
     """
-    base = _paths.resolve_user_path(dir_path)
+    try:
+        base = _paths.resolve_user_path(dir_path)
+    except _paths.PrivateSpaceDeniedError as e:
+        return str(e)
     if not await base.exists():
         return f"[Error] Path not found: {base}"
     if not await base.is_dir():
@@ -46,6 +50,8 @@ async def find_files(
 
     matches: list[tuple[float, str]] = []
     truncated = False
+    # 从隔离父目录起 glob 时, ``**`` 会走进别人的空间 —— 命中项按前缀剔掉。
+    blocked = _paths.forbidden_dirs()
 
     async for match in base.glob(pattern):
         if not await match.is_file():
@@ -53,8 +59,11 @@ async def find_files(
         try:
             stat = await match.stat()
             mtime = stat.st_mtime
+            real = str(await match.resolve())
         except OSError:
             # File vanished or is inaccessible between glob and stat; skip it.
+            continue
+        if any(real == b or real.startswith(b + os.sep) for b in blocked):
             continue
         matches.append((mtime, str(Path(match))))
 
