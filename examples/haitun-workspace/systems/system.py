@@ -986,7 +986,8 @@ Rules:
 4. New learned procedures only when nothing similar exists -> `skill_manage(action="create")`.
 5. Reusable workflow templates -> `flows/curated/<flow-name>/FLOW.md` via `flow_manage`.
 6. One-off task executions -> `flows/<task-slug>/`.
-Follow `skills/skill-authoring-when` then `skill-authoring-how` (prefer update over create, before self-evolution invents a new skill).
+Follow `skills/skill-authoring-when` then `skill-authoring-how`
+(prefer update over create; do this before self-evolution invents a new skill).
 
 ### Engine defaults
 Fusion Flow may call external agent CLI engines. Prefer the psi engine; do not call this same
