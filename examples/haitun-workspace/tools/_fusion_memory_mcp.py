@@ -179,7 +179,12 @@ class MemoryMcpClient:
         try:
             anyio.run(self._supervisor_main)
         except BaseException:
-            logger.exception("Fusion Memory MCP supervisor thread crashed")
+            # 关闭过程中的退栈竞态(如 lease 到期触发 request_close 时的 anyio.WouldBlock)
+            # 是预期的, 打 DEBUG 就够; 只有非关闭状态下崩才是真问题, 要 ERROR + 栈。
+            if self._closed:
+                logger.debug("Fusion Memory MCP supervisor thread exited during shutdown", exc_info=True)
+            else:
+                logger.exception("Fusion Memory MCP supervisor thread crashed")
             self._mark_terminal(self._thread_terminal_result())
         else:
             self._mark_terminal(self._thread_terminal_result())
