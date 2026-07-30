@@ -332,3 +332,56 @@ async def test_route_adopts_existing_session(tmp_path: str) -> None:
     finally:
         await _drain(sm, am)
         await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_route_private_user_gets_private_workspace(tmp_path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """白名单用户的 workspace 派生到 ``.private/<open_id>``, 其他人照旧。"""
+    monkeypatch.setenv("PSI_PRIVATE_OPEN_IDS", "ou_secret")
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        fm = FeishuManager(_sm=sm, _ai_id="ai1", _workspace_root=str(tmp_path))
+
+        _, priv_sid = await fm.route("ou_secret")
+        _, plain_sid = await fm.route("ou_plain")
+
+        priv_ws = sm.get_workspace(priv_sid)
+        assert priv_ws == os.path.join(str(tmp_path), ".private", "ou_secret")
+        assert sm.get_workspace(plain_sid) == os.path.join(str(tmp_path), "ou_plain")
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_route_group_chat_never_enters_private(tmp_path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """群是多人共用上下文 —— 即使发送者在白名单, 群 workspace 也不进私密区。"""
+    monkeypatch.setenv("PSI_PRIVATE_OPEN_IDS", "ou_secret")
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        fm = FeishuManager(_sm=sm, _ai_id="ai1", _workspace_root=str(tmp_path))
+        _, sid = await fm.route("ou_secret", chat_id="oc_team", chat_type="group")
+        assert sm.get_workspace(sid) == os.path.join(str(tmp_path), "chat-oc_team")
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_route_without_whitelist_unchanged(tmp_path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """未配置白名单 → 与改动前完全一致 (零行为变化)。"""
+    monkeypatch.delenv("PSI_PRIVATE_OPEN_IDS", raising=False)
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        fm = FeishuManager(_sm=sm, _ai_id="ai1", _workspace_root=str(tmp_path))
+        _, sid = await fm.route("ou_secret")
+        assert sm.get_workspace(sid) == os.path.join(str(tmp_path), "ou_secret")
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)

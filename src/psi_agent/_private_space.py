@@ -1,7 +1,12 @@
-"""私密文件空间守卫 (channel 侧) —— 拦住 ``[SEND:]`` 把私密文件传出去。
+"""私密文件空间守卫 (src 侧) —— 私密区路径约定与判权。
 
-Channel 是独立进程, 没有 session 的 ``runtime_context``, 但手里有发送者 open_id,
-所以这里按「发送者是不是该私密区的主人」判权, 比在 session 侧绕一圈更直接。
+两个用处:
+
+* **Gateway** ``_feishu_manager`` —— 白名单里的 open_id, workspace 直接派生到
+  ``<root>/.private/<open_id>/`` 而不是 ``<root>/<open_id>/``。
+* **Channel** ``feishu/client`` —— 拦住 ``[SEND:]`` 把私密文件传到飞书。channel 是
+  独立进程没有 session 的 ``runtime_context``, 但手里有发送者 open_id, 按「发送者
+  是不是该私密区的主人」判权比在 session 侧绕一圈更直接。
 
 与 workspace 侧 ``tools/_private_space.py`` 同一套约定 (``<root>/.private/<open_id>/``
 + ``PSI_PRIVATE_OPEN_IDS``), 两处刻意各自独立实现 —— src 不依赖 workspace 内容。
@@ -55,3 +60,13 @@ def blocks_send(path: str | os.PathLike[str], sender_open_id: str | None) -> boo
     if owner is None:
         return False  # 公共区文件, 照常发
     return owner != (sender_open_id or "")
+
+
+def is_private_user(open_id: str) -> bool:
+    """该 open_id 是否在私密白名单里。"""
+    return bool(open_id) and open_id in private_open_ids()
+
+
+def private_dir(root: str, open_id: str) -> str:
+    """白名单用户的私密 workspace: ``<root>/.private/<open_id>``。"""
+    return os.path.join(root, PRIVATE_DIRNAME, open_id)
