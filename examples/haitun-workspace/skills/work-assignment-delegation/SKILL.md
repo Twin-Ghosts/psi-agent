@@ -14,27 +14,36 @@ category: productivity
 - 不能把推测写成确定事实。
 - 不把场景限制在开发任务；不只限于开发任务，项目同步、交接、客户沟通、跨部门协作都适用。
 - 只在事实确认后写入 Memory。
-- 需要记录时，调用 `assignment_upsert` 创建或更新安排，调用 `assignment_transition` 记录确认接收、方案提交和结束状态。
+- 需要记录时，调用 `assignment_upsert` 创建或更新安排；接收者确认时调用 `assignment_accept`，方案提交和结束状态调用 `assignment_transition`。
 - 需要查回时，调用 `assignment_get` 或 `assignment_list`。
 
 推荐流程：
 
 1. 识别安排者、接收者、任务目标、背景、期望结果、截止时间、原始资料链接。
 2. 找出缺口，向用户确认。
-3. 在用户确认后，调用 `assignment_upsert` 记录安排。
-4. 需要通过飞书交给接收者时，优先调用 `assignment_send_card`，不要手写散落的工作安排卡片。
-5. 如果接收者确认收到，调用 `assignment_transition`。
+3. 在用户确认后，调用 `assignment_upsert` 记录安排并显式写入 `state: "assigned"`；如果已有记录仍是 `draft`，先调用 `assignment_transition` 执行 `transition_type: "assign"`。
+4. 需要通过飞书交给接收者时，调用 `assignment_send_card`。该工具从 Memory 拉取权威详情，卡片把“安排者原始内容”“Agent 分析整理 (非安排者原话)”和“参考资料”分区展示，只保留“确认接收并创建飞书任务”动作。
+5. 如果接收者确认收到，调用 `assignment_accept`。它校验当前飞书操作者是接收者，确认 Memory 状态，并通过 Memory 的原子发布 claim 创建、记录至多一个对应的飞书任务。
 6. 如果接收者需要形成可评审方案，先帮助整理方案，再记录 transition。
 
 接收者流程：
 
-1. 接收者查看任务详情时，先调用 `assignment_get` 拉取完整记录。
-2. 展示安排者原文、已确认背景、目标、期望结果、证据来源、缺口、风险、行动项和当前状态。
+1. 工作安排卡片已经分区包含安排者原始内容、Agent 整理的背景/目标/缺口/风险/行动项和参考资料；只有需要刷新状态或继续讨论时才调用 `assignment_get`。
+2. 不要重复输出卡片已经完整展示的详情，也不要让接收者等待模型重新组织同一份内容。
 3. 明确区分事实、假设和待确认事项；缺失信息只标成缺口，不补写成事实。
-4. 接收者确认收到时，调用 `assignment_transition`，其中 `transition_type: "confirm_receipt"`。
+4. 接收者确认收到时，调用 `assignment_accept`。成功后不再调用 `feishu_task_create` 或 `assignment_transition`，避免重复任务和重复状态迁移。
 5. 需要方案时，协助接收者形成可评审方案，至少包括目标理解、影响范围、关键步骤、风险、验证方式和需要评审的问题。
 6. 接收者确认方案后，调用 `assignment_transition`，其中 `transition_type: "submit_plan"`，并把方案写入 `plan`。
 7. 如果接收者明确不形成方案或任务不需要方案，调用 `assignment_transition`，其中 `transition_type: "close"`，并写入 `closure_reason`。不要调用 `closed_without_plan`，Memory 没有这个 transition。
+
+确认与发布语义：
+
+- Memory 的“已接收”和飞书原生任务的“已发布”是两个结果。
+- `assignment_accept` 先确认接收，再向 Memory 原子申请一次发布权；只有获得 claim 的 Gateway 可以创建飞书任务。不要直接调用底层发布协议。
+- 飞书任务发布成功或失败后，Memory 在同一事务中终结 claim、追加 `delivery_records` 和审计事件，但不借此改变工作安排的业务状态。
+- 飞书任务发布失败不撤销接收。若发布已被 claim、已经失败，或任务已创建但 Memory 未能完成记录，只能人工核对后补记，不要再次创建任务。
+- 不要自动重试飞书任务创建。飞书任务接口没有客户端幂等键，未经确认的重试可能创建重复任务。
+- 如果 `assignment_accept` 返回 `already_published=true`，直接视为成功，不再创建新任务。
 
 可评审方案要求：
 
@@ -64,6 +73,7 @@ category: productivity
 - `assignment_list`
 - `assignment_transition`
 - `assignment_send_card`
+- `assignment_accept`
 - `feishu_message_send`
 - `feishu_message_send_card` / 现有卡片发送工具（只有 `assignment_send_card` 不满足当前卡片需求时再直接使用）
 
