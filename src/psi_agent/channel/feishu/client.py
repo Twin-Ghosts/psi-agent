@@ -26,12 +26,12 @@ from lark_channel.core.model import BaseRequest
 from lark_channel.event.custom import CustomizedEventProcessor
 from loguru import logger
 
+from psi_agent import _private_space
 from psi_agent.channel._core import ChannelCore
 from psi_agent.channel._errors import ChannelError
 from psi_agent.channel._types import FileChunk, InputChunk, ReasoningChunk, TextChunk
 from psi_agent.channel.feishu._agent_events import register_feishu_agent_events
 
-from . import _private_space
 from ._card_action import CardActionBatcher, handle_card_action
 
 _EMOJI_PROCESSING = "Typing"

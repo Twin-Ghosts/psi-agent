@@ -21,7 +21,7 @@ import read as read_tool  # noqa: E402
 import search_content as sc_tool  # noqa: E402
 import write_excel as xl_tool  # noqa: E402
 
-from psi_agent.channel.feishu import _private_space as chan_ps  # noqa: E402
+from psi_agent import _private_space as chan_ps  # noqa: E402
 
 OWNER = "ou_private_owner"
 OTHER = "ou_other_person"
