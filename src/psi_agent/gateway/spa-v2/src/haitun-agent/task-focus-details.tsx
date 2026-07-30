@@ -44,8 +44,13 @@ export function TaskFocusDetails({
   onOpenArtifact: (task: Task, fileName?: string) => void;
 }) {
   const workingStep = task?.steps.find((step) => step.state === "working");
+  const checklistDone = !!task?.hasTodoTrack
+    && !!task.steps.length
+    && task.steps.every((step) => step.state === "done");
   const activeStep = task?.phase === "done"
-    ? (task.hasTodoTrack ? "全部执行步骤已完成" : "本轮已完成")
+    ? (task.hasTodoTrack
+      ? (checklistDone ? "全部执行步骤已完成" : (workingStep?.label || `清单 ${task.progressLabel || "未完成"}`))
+      : "本轮已完成")
     : task?.phase === "deliver"
       ? "正在整理交付"
       : task?.phase === "advance"
@@ -62,7 +67,11 @@ export function TaskFocusDetails({
       id: `status-${task.id}`,
       kind: "status" as const,
       title: task.hasTodoTrack
-        ? `${task.statusLabel} · ${task.progressLabel || `${task.progress}%`}`
+        ? (task.phase === "done"
+          ? (checklistDone
+            ? `本轮已完成 · ${task.progressLabel || `${task.progress}%`}`
+            : `本轮已回复 · ${task.progressLabel || `${task.progress}%`}`)
+          : `${task.statusLabel} · ${task.progressLabel || `${task.progress}%`}`)
         : (task.progressIndeterminate
           ? `${task.statusLabel} · 处理中`
           : task.phase === "done"

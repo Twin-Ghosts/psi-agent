@@ -52,11 +52,11 @@
 ```text
 GET /spa-v2/     → 302 → index.html（redirect 须先于 add_static，否则 403）
 App              → GET /defaults → 选定 workspace（localStorage / defaults）
-Workbench boot   → GET /sessions + /titles
+Workbench boot   → GET /sessions + /titles + /summaries
                  → hydrateAiForSessions(session.ai_id…)
                       purgePlaceholderAis
                       reviveMissingSessionAis（同 id 复活免费后端）
-                 → setTasks（**从不**因空 AI 池跳过 sessions）
+                 → setTasks（**从不**因空 AI 池跳过 sessions；summary 来自 /summaries）
                  → 仅池仍空时 openModelsOnce
 Hub「使用免费模型」→ clearAiPool → hydrateAiForSessions(全部 session) → 无 session 才 ensureDefaultAi
 发消息           → ensureSessionAi（同 id 复活，腰带）
@@ -80,8 +80,9 @@ Hub「使用免费模型」→ clearAiPool → hydrateAiForSessions(全部 sessi
 
 - 流式中：无 todo → `正在处理` + indeterminate；有交付物生成中可进 `deliver`（「正在整理交付」）。
 - 有 todo 且全部 completed 仍在流式 → `deliver`（追加「产出与确认」）。
-- 回合成功结束：`turnSettled=true` → `done`；有 todo 则步骤全勾，无 todo 则单行「本轮已完成」。
+- 回合成功结束：`turnSettled=true` → `phase=done`（本轮**对话**已结算）。**有 todo 时步骤勾选 / `progressLabel` / 进度条 % 一律跟 AppData 清单**，不因结算而强行画满 `N/N` 或绿勾（Agent 未维护则如实 `1/N`）；清单已全部 completed 时才显示「本轮已完成 · N/N」。无 todo → 单行「本轮已完成」。任务历史标题：清单未完成用「本轮已回复 · N/M」。
 - 空 todo 轮询**不会**把已 `done` 的卡打回推进中（保留 `turnSettled`）。
+- **进度条 CSS**：`.task-linear-progress.done` 会强制 `width:100%`，仅在清单真完成（或无 todo 且 phase=done）时加该类。
 
 ### 对话气泡操作（对齐 spa v1）
 

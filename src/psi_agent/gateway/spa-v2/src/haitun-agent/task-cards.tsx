@@ -240,6 +240,10 @@ function TaskStepsPanel({ task }: { task: Task }) {
 
 function TaskLinearProgress({ task }: { task: Task }) {
   const busy = !!task.progressIndeterminate;
+  // CSS `.done` forces bar width 100% — only apply when checklist (or no-todo turn) is truly complete.
+  const barComplete = task.hasTodoTrack
+    ? !!task.steps.length && task.steps.every((step) => step.state === "done")
+    : task.phase === "done";
   const label = task.hasTodoTrack
     ? "步骤进度"
     : busy
@@ -258,7 +262,7 @@ function TaskLinearProgress({ task }: { task: Task }) {
 
   return (
     <div
-      className={`task-linear-progress ${busy ? "indeterminate" : ""} ${task.phase === "done" ? "done" : ""}`}
+      className={`task-linear-progress ${busy ? "indeterminate" : ""} ${barComplete ? "done" : ""}`}
       aria-label={`${label} ${valueText}`}
     >
       <div className="task-linear-progress-meta">
