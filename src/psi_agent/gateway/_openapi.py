@@ -282,6 +282,91 @@ OPENAPI_SPEC = {
                 },
             },
         },
+        "/sessions/{session_id}/todo-segments": {
+            "get": {
+                "summary": "List todo sub-task segments (AppData *.segments.json, newest first)",
+                "operationId": "listTodoSegments",
+                "parameters": [
+                    {
+                        "name": "session_id",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string"},
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": (
+                            "Array of {id, label, created_at, updated_at, closed_at, source, summary}"
+                        )
+                    },
+                    "404": {"$ref": "#/components/responses/Error"},
+                },
+            },
+        },
+        "/sessions/{session_id}/todo-segments/{segment_id}": {
+            "get": {
+                "summary": "Get one todo segment including todos[]",
+                "operationId": "getTodoSegment",
+                "parameters": [
+                    {
+                        "name": "session_id",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string"},
+                    },
+                    {
+                        "name": "segment_id",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string"},
+                    },
+                ],
+                "responses": {
+                    "200": {
+                        "description": (
+                            "Object with id, label, todos[], summary, closed_at, …"
+                        )
+                    },
+                    "404": {"$ref": "#/components/responses/Error"},
+                },
+            },
+            "post": {
+                "summary": "Set todo segment label (P1 summary override)",
+                "operationId": "setTodoSegmentLabel",
+                "parameters": [
+                    {
+                        "name": "session_id",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string"},
+                    },
+                    {
+                        "name": "segment_id",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string"},
+                    },
+                ],
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": ["label"],
+                                "properties": {"label": {"type": "string"}},
+                            }
+                        }
+                    },
+                },
+                "responses": {
+                    "200": {"description": "Updated segment including todos[]"},
+                    "400": {"$ref": "#/components/responses/Error"},
+                    "404": {"$ref": "#/components/responses/Error"},
+                },
+            },
+        },
         "/titles": {
             "get": {
                 "summary": "List all session titles",

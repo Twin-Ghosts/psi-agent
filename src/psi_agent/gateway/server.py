@@ -243,6 +243,9 @@ async def create_app(
     app.router.add_post("/workspace/reveal", _reveal_workspace_path)
     app.router.add_get("/sessions/{session_id}/history", _get_history)
     app.router.add_get("/sessions/{session_id}/todos", _get_todos)
+    app.router.add_get("/sessions/{session_id}/todo-segments", _list_todo_segments)
+    app.router.add_get("/sessions/{session_id}/todo-segments/{segment_id}", _get_todo_segment)
+    app.router.add_post("/sessions/{session_id}/todo-segments/{segment_id}", _set_todo_segment_label)
     app.router.add_post("/sessions/{session_id}/chat", _handle_chat)
     app.router.add_post("/feishu/route", _feishu_route)
     app.router.add_get("/feishu/routes", _list_feishu_routes)
@@ -689,6 +692,56 @@ async def _get_todos(request: web.Request) -> web.Response:
         return _error(f"Session '{session_id}' not found", status=404)
     appdata = str(request.app.get("appdata") or "")
     return _json(await todom.get(workspace, session_id, appdata=appdata))
+
+
+async def _list_todo_segments(request: web.Request) -> web.Response:
+    """List todo sub-task segments for a session (newest first)."""
+    sm: SessionManager = request.app["sm"]
+    todom: TodoManager = request.app["todom"]
+    session_id = request.match_info["session_id"]
+    if not sm.has(session_id):
+        return _error(f"Session '{session_id}' not found", status=404)
+    appdata = str(request.app.get("appdata") or "")
+    return _json(await todom.list_segments(session_id, appdata=appdata))
+
+
+async def _get_todo_segment(request: web.Request) -> web.Response:
+    """Get one todo segment including todos[]."""
+    sm: SessionManager = request.app["sm"]
+    todom: TodoManager = request.app["todom"]
+    session_id = request.match_info["session_id"]
+    segment_id = request.match_info["segment_id"]
+    if not sm.has(session_id):
+        return _error(f"Session '{session_id}' not found", status=404)
+    appdata = str(request.app.get("appdata") or "")
+    seg = await todom.get_segment(session_id, segment_id, appdata=appdata)
+    if seg is None:
+        return _error(f"Todo segment '{segment_id}' not found", status=404)
+    return _json(seg)
+
+
+async def _set_todo_segment_label(request: web.Request) -> web.Response:
+    """P1: patch segment label (e.g. from turn summary). Body: {label}."""
+    sm: SessionManager = request.app["sm"]
+    todom: TodoManager = request.app["todom"]
+    session_id = request.match_info["session_id"]
+    segment_id = request.match_info["segment_id"]
+    if not sm.has(session_id):
+        return _error(f"Session '{session_id}' not found", status=404)
+    try:
+        body = await request.json()
+    except (ValueError, TypeError) as e:
+        return _error(f"Invalid request: {e}", status=400)
+    if not isinstance(body, dict):
+        return _error("Request body must be a JSON object", status=400)
+    label = body.get("label")
+    if not isinstance(label, str) or not label.strip():
+        return _error("label is required", status=400)
+    appdata = str(request.app.get("appdata") or "")
+    seg = await todom.set_segment_label(session_id, segment_id, label, appdata=appdata)
+    if seg is None:
+        return _error(f"Todo segment '{segment_id}' not found", status=404)
+    return _json(seg)
 
 
 async def _handle_chat(request: web.Request) -> web.StreamResponse:

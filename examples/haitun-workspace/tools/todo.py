@@ -44,6 +44,9 @@ async def todo(
     ``completed`` as soon as a step finishes; on failure ``cancelled`` + add a
     revised item with ``merge=true``.
 
+    Do **not** put self-referential steps in ``content`` (e.g.「更新清单」「回复
+    用户」)—writes still succeed but return ``warnings[]`` (soft advisory).
+
     Always returns the full list and summary counts.
 
     Args:

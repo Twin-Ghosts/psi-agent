@@ -43,6 +43,7 @@
 卡片内对话      ↔  POST /sessions/{id}/chat（multipart chunks）
 任务历史文案    ↔  GET /sessions/{id}/history（AppData `histories/` 优先 + legacy 双读）
 任务卡中间步 N/M ↔  GET /sessions/{id}/todos（``todo`` tool → AppData `todos/{id}.json`，legacy `.psi/todos` 双读）
+分屏「任务历史」 ↔  GET /sessions/{id}/todo-segments（`todos/{id}.segments.json`；点选回放该段步骤）
 路径默认        ↔  GET /defaults（agent + workspace + appdata）；workspace 软默认 `{Desktop}/haitun交付`（宣布路径；目录随首个 Session 创建）；UI 主要用 agent/workspace；appdata 为记忆区根（todos/history/Gateway state 已迁 AppData，前端仍走 REST，不直读盘）；打开即用 AI 仍走空池惰性 POST `/ais`
 ```
 
@@ -86,7 +87,7 @@ Hub「使用免费模型」→ clearAiPool → hydrateAiForSessions(全部 sessi
 
 - 流式中：无 todo → `正在处理` + indeterminate；有交付物生成中可进 `deliver`（「正在整理交付」）。
 - 有 todo 且全部 completed 仍在流式 → `deliver`（追加「产出与确认」）。
-- 回合成功结束：`turnSettled=true` → `phase=done`（本轮**对话**已结算）。**有 todo 时步骤勾选 / `progressLabel` / 进度条 % 一律跟 AppData 清单**，不因结算而强行画满 `N/N` 或绿勾（Agent 未维护则如实 `1/N`）；清单已全部 completed 时才显示「本轮已完成 · N/N」。无 todo → 单行「本轮已完成」。任务历史标题：清单未完成用「本轮已回复 · N/M」。
+- 回合成功结束：`turnSettled=true` → `phase=done`（本轮**对话**已结算）。**有 todo 时步骤勾选 / `progressLabel` / 进度条 % 一律跟 AppData 清单**，不因结算而强行画满 `N/N` 或绿勾（Agent 未维护则如实 `1/N`）；清单已全部 completed 时才显示「本轮已完成 · N/N」。无 todo → 单行「本轮已完成」。任务历史标题：清单未完成用「本轮已回复 · N/M」。**软提示（A）**：回合成功后若仍有 `in_progress`，toast 提醒用户可让 Agent 勾选——**不改磁盘**（与 haitun `todo` 的自指 `warnings[]`（C）配套；不做自动 completed）。
 - 空 todo 轮询**不会**把已 `done` 的卡打回推进中（保留 `turnSettled`）。
 - **进度条 CSS**：`.task-linear-progress.done` 会强制 `width:100%`，仅在清单真完成（或无 todo 且 phase=done）时加该类。
 
@@ -103,7 +104,7 @@ Hub「使用免费模型」→ clearAiPool → hydrateAiForSessions(全部 sessi
   - **尾行**：只活「规划下一步…」/「撰写回复…」；**刻意**永不把「规划下一步」推进 `lines`。
   - **`hideAgentProse`（刻意为之，对标 Cursor）**：仅在过程轴仍为「规划下一步…」（工具 / thinking）时藏正文，避免半截计划与过程轴抢戏；一旦 SSE `content` 到达、尾行切到「撰写回复…」，**正文必须边到边显示**（过程轴仍可挂在上方）。回合结束再收起过程轴。
   - **`preferResultBelowRule`（刻意为之）**：仅展示层——短计划在 `---` 之上时偏好渲染下半段结果；**不改** JSONL / 复制源可选策略以实现为准。
-  - **任务摘要 `summary`（刻意为之）**：不再截取助手末条回复。回合成功后（及历史缺摘要时）`POST /summaries/generate` 另开一轮模型写 1～2 句；Gateway `SummaryManager` 持久化到 AppData state（与 titles 同级）。左栏标题为「任务摘要」；任务卡正文同字段；「任务历史」合成行只显示状态/`updated`，不再复贴摘要。展示侧仍 `plainTextFromMarkdown` 兜底。对话气泡仍走完整 Markdown。
+  - **任务摘要 `summary`（刻意为之）**：不再截取助手末条回复。回合成功后（及历史缺摘要时）`POST /summaries/generate` 另开一轮模型写 1～2 句；Gateway `SummaryManager` 持久化到 AppData state（与 titles 同级）。左栏标题为「任务摘要」；任务卡正文同字段。展示侧仍 `plainTextFromMarkdown` 兜底。对话气泡仍走完整 Markdown。段标题（P1）可复用该 summary 写入 open todo-segment。
 
 - 流式进行中不显示助手操作栏。
 
@@ -113,7 +114,10 @@ Hub「使用免费模型」→ clearAiPool → hydrateAiForSessions(全部 sessi
 |----|------|
 | 「任务摘要」 | `task.summary` ← LLM `/summaries/generate`（持久化） |
 | 任务卡正文 | 同上 |
-| 「任务历史」 | 合成 status 行（`statusLabel` + `updated`）；**不是** `/history` 多轮时间线，后续可重设计 |
+| 「执行步骤」 | live：`GET …/todos`；点历史段：该段快照（只读） |
+| 「任务历史」 | `GET …/todo-segments`（``merge=false`` 开新子任务段；``merge=true`` 只更新当前段）。可点击切上方 checklist；当前 open 段点选等价 ``live``。P1：回合 summary 可 `POST …/todo-segments/{id}` 覆盖段标题。**不是**聊天 `/history` 时间线 |
+
+**刻意为之**：无 Agent 写 `todo` 则历史为空；不以每条 user 消息切段。新一轮 SSE 自动回到 live 清单。
 
 ### 历史展示隔离（对齐敲定协议 / spa v1）
 

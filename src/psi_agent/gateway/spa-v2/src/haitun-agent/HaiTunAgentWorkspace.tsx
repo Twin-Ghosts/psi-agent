@@ -56,13 +56,18 @@ import {
   deleteSession,
   fetchHistory,
   fetchSessionTodos,
+  fetchTodoSegment,
   generateSummary,
   generateTitle,
   listSessions,
   listSummaries,
   listTitles,
+  listTodoSegments,
   setTitle,
+  setTodoSegmentLabel,
   type AiInfo,
+  type TodoSegmentDetail,
+  type TodoSegmentSummary,
 } from "../services/api";
 import {
   ensureDefaultAi,
@@ -187,6 +192,11 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
   const [historyLoadingIds, setHistoryLoadingIds] = useState(() => new Set<string>());
   /** Invalidate in-flight todo polls so a late streaming refresh cannot reopen 「产出与确认」. */
   const todoRefreshSeqRef = useRef<Record<string, number>>({});
+  /** Todo sub-task segments per session (newest first). */
+  const [todoSegmentsByTask, setTodoSegmentsByTask] = useState<Record<string, TodoSegmentSummary[]>>({});
+  /** ``live`` or a closed segment id — controls left-pane checklist projection. */
+  const [todoSegmentSelection, setTodoSegmentSelection] = useState<Record<string, string>>({});
+  const segmentDetailCacheRef = useRef<Record<string, TodoSegmentDetail>>({});
   const workspaceNorm = normalizeWorkspacePath(workspace);
 
   const cards = useMemo(() => [{ id: "overview", title: OVERVIEW_LABEL }, ...tasks.map((task) => ({ id: task.id, title: task.shortTitle }))], [tasks]);
@@ -204,19 +214,19 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
     ? templates.filter((template) => `${template.title}${template.category}${template.description}${template.starterPrompt}${template.deliverables.join(" ")}`.toLocaleLowerCase("zh-CN").includes(normalizedSearch)).slice(0, 4)
     : [];
 
-  const showToast = useCallback((message: string) => {
+  const showToast = useCallback((message: string, ms = 2600) => {
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
     setToast(message);
-    toastTimer.current = window.setTimeout(() => setToast(null), 2600);
+    toastTimer.current = window.setTimeout(() => setToast(null), ms);
   }, []);
 
   const refreshTodos = useCallback(async (taskId: string, streaming = false) => {
-    if (taskId === "overview") return;
+    if (taskId === "overview") return null;
     const seq = (todoRefreshSeqRef.current[taskId] ?? 0) + 1;
     todoRefreshSeqRef.current[taskId] = seq;
     try {
       const data = await fetchSessionTodos(taskId);
-      if (todoRefreshSeqRef.current[taskId] !== seq) return;
+      if (todoRefreshSeqRef.current[taskId] !== seq) return null;
       const todos = Array.isArray(data.todos) ? data.todos : [];
       setTasks((current) =>
         current.map((task) => {
@@ -228,21 +238,82 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
           });
         }),
       );
+      return todos;
     } catch {
       // Missing file / transient — keep previous steps.
+      return null;
     }
   }, []);
+
+  const clearSegmentDetailCache = useCallback((taskId: string) => {
+    const prefix = `${taskId}:`;
+    for (const key of Object.keys(segmentDetailCacheRef.current)) {
+      if (key.startsWith(prefix)) delete segmentDetailCacheRef.current[key];
+    }
+  }, []);
+
+  const refreshTodoSegments = useCallback(async (taskId: string) => {
+    if (taskId === "overview") return;
+    try {
+      const segs = await listTodoSegments(taskId);
+      clearSegmentDetailCache(taskId);
+      setTodoSegmentsByTask((current) => ({ ...current, [taskId]: segs }));
+    } catch {
+      // Segments optional for older sessions.
+    }
+  }, [clearSegmentDetailCache]);
+
+  const selectTodoSegment = useCallback(async (taskId: string, segmentId: string) => {
+    if (segmentId === "live") {
+      setTodoSegmentSelection((current) => ({ ...current, [taskId]: "live" }));
+      return;
+    }
+    const cacheKey = `${taskId}:${segmentId}`;
+    try {
+      let detail = segmentDetailCacheRef.current[cacheKey];
+      if (!detail) {
+        detail = await fetchTodoSegment(taskId, segmentId);
+        segmentDetailCacheRef.current[cacheKey] = detail;
+      }
+      setTodoSegmentSelection((current) => ({ ...current, [taskId]: segmentId }));
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "加载子任务步骤失败");
+    }
+  }, [showToast]);
+
+  const focusChecklistTask = useCallback((task: Task | null): Task | null => {
+    if (!task) return null;
+    const sel = todoSegmentSelection[task.id] ?? "live";
+    if (sel === "live") return task;
+    const cached = segmentDetailCacheRef.current[`${task.id}:${sel}`];
+    if (!cached) return task;
+    return withTodoProgress(task, cached.todos, { streaming: false, turnSettled: true });
+  }, [todoSegmentSelection]);
 
   const refreshTaskSummary = useCallback((cardId: string, userText: string, assistantText: string) => {
     const user = userText.trim();
     const asst = assistantText.trim();
     if (!user && !asst) return;
     void generateSummary(cardId, user.slice(0, 800), asst.slice(0, 2000))
-      .then((res) => {
+      .then(async (res) => {
         if (!res?.summary?.trim()) return;
+        const summary = res.summary.trim();
         setTasks((current) =>
-          current.map((task) => (task.id === cardId ? { ...task, summary: res.summary!.trim() } : task)),
+          current.map((task) => (task.id === cardId ? { ...task, summary } : task)),
         );
+        // P1: reuse turn summary as the open segment label when present.
+        try {
+          const segs = await listTodoSegments(cardId);
+          setTodoSegmentsByTask((current) => ({ ...current, [cardId]: segs }));
+          const open = segs.find((s) => !s.closed_at);
+          if (!open) return;
+          const firstLine = summary.split(/[。！？\n]/u)[0]?.trim() || summary;
+          await setTodoSegmentLabel(cardId, open.id, firstLine);
+          const refreshed = await listTodoSegments(cardId);
+          setTodoSegmentsByTask((current) => ({ ...current, [cardId]: refreshed }));
+        } catch {
+          // Label patch is best-effort.
+        }
       })
       .catch(() => {});
   }, []);
@@ -286,6 +357,7 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
         }),
       );
       await refreshTodos(taskId);
+      await refreshTodoSegments(taskId);
       // Missing / placeholder summary → one LLM pass (not a raw reply slice).
       setTasks((current) => {
         const task = current.find((t) => t.id === taskId);
@@ -309,18 +381,20 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
         return next;
       });
     }
-  }, [refreshTodos, refreshTaskSummary, showToast]);
+  }, [refreshTodos, refreshTodoSegments, refreshTaskSummary, showToast]);
 
   // While Agent runs, poll todos so middle step updates mid-turn (tool writes file).
   // Pass streaming=true so 「产出与确认」 stays working until the turn ends.
   useEffect(() => {
     if (!typingCard || typingCard === "overview") return;
     void refreshTodos(typingCard, true);
+    void refreshTodoSegments(typingCard);
     const id = window.setInterval(() => {
       void refreshTodos(typingCard, true);
+      void refreshTodoSegments(typingCard);
     }, 2500);
     return () => window.clearInterval(id);
-  }, [typingCard, refreshTodos]);
+  }, [typingCard, refreshTodos, refreshTodoSegments]);
 
   const openArtifact = useCallback((task: Task, fileName?: string, listMode?: "new" | "history") => {
     const mode = listMode
@@ -675,6 +749,7 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
 
     setTypingCard(cardId);
     setTurnProgressLog(progressLogStart());
+    setTodoSegmentSelection((current) => ({ ...current, [cardId]: "live" }));
     const userVisible = titleSource ?? (text.trim() || "附件");
     let turnOk = false;
     let assistantFull = "";
@@ -822,12 +897,21 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
         if (abortRef.current === controller) abortRef.current = null;
       }
       void (async () => {
-        await refreshTodos(cardId, false);
+        const todosAfter = await refreshTodos(cardId, false);
+        await refreshTodoSegments(cardId);
         if (!turnOk || epoch !== streamEpochRef.current) return;
         setTasks((current) =>
           current.map((task) => (task.id === cardId ? withCompletedTurn(task) : task)),
         );
         refreshTaskSummary(cardId, userVisible, assistantFull);
+        // Soft A: do not rewrite disk; hint if Agent left in_progress after reply.
+        const stuck = (todosAfter ?? []).filter((t) => t.status === "in_progress");
+        if (stuck.length > 0) {
+          showToast(
+            `清单仍有 ${stuck.length} 项进行中。若本轮工作已结束，可再发一句让 Agent 勾选完成。`,
+            4200,
+          );
+        }
       })();
     }
   };
@@ -1265,6 +1349,7 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
   const renderTaskUnit = (index: number, interactive: boolean, visualExpanded = false) => {
     const unitCard = cards[index] ?? cards[0];
     const unitTask = index === 0 ? null : tasks[index - 1];
+    const focusTask = focusChecklistTask(unitTask);
     const unitMessages = messages[unitCard.id] ?? [];
     const unitDraft = chatDrafts[unitCard.id] ?? "";
     const expanded = interactive ? chatExpanded : visualExpanded;
@@ -1304,8 +1389,11 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
               {expanded ? (
                 <div className="compact-card-shell focus-info-shell">
                   <TaskFocusDetails
-                    task={unitTask}
+                    task={focusTask}
                     tasks={tasks}
+                    todoSegments={unitTask ? (todoSegmentsByTask[unitTask.id] ?? []) : []}
+                    selectedSegmentId={unitTask ? (todoSegmentSelection[unitTask.id] ?? "live") : "live"}
+                    onSelectTodoSegment={unitTask ? ((segId) => { void selectTodoSegment(unitTask.id, segId); }) : undefined}
                     onOpenArtifact={openArtifact}
                   />
                 </div>

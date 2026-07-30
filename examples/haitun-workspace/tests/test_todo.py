@@ -88,6 +88,102 @@ async def test_merge_updates_by_id(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_replace_opens_new_segment_and_closes_previous(
+    tmp_path: Path,
+    _todo_appdata: Path,
+) -> None:
+    first = await todo_store.write_todos(
+        todos=[
+            {"id": "1", "content": "读本地文档", "status": "in_progress"},
+            {"id": "2", "content": "整理摘要", "status": "pending"},
+        ],
+        merge=False,
+        workspace_raw=str(tmp_path),
+        session_id="sess-seg",
+    )
+    assert first["ok"] is True
+    assert first["segment_id"]
+    await todo_store.write_todos(
+        todos=[
+            {"id": "1", "content": "读本地文档", "status": "completed"},
+            {"id": "2", "content": "整理摘要", "status": "completed"},
+        ],
+        merge=True,
+        workspace_raw=str(tmp_path),
+        session_id="sess-seg",
+    )
+    second = await todo_store.write_todos(
+        todos=[
+            {"id": "a", "content": "改侧栏进度", "status": "in_progress"},
+            {"id": "b", "content": "补测试", "status": "pending"},
+        ],
+        merge=False,
+        workspace_raw=str(tmp_path),
+        session_id="sess-seg",
+    )
+    assert second["ok"] is True
+    assert second["segment_id"] != first["segment_id"]
+
+    seg_path = todo_store.appdata_todo_segments_path(str(_todo_appdata), "sess-seg")
+    assert await seg_path.exists()
+    payload = json.loads(await seg_path.read_text(encoding="utf-8"))
+    segments = payload["segments"]
+    assert len(segments) == 2
+    closed, opened = segments[0], segments[1]
+    assert closed["closed_at"]
+    assert closed["todos"][0]["status"] == "completed"
+    assert closed["label"].startswith("读本地文档") or "读本地文档" in closed["label"]
+    assert opened["closed_at"] is None
+    assert opened["todos"][0]["content"] == "改侧栏进度"
+    assert opened["id"] == second["segment_id"]
+
+
+@pytest.mark.anyio
+async def test_merge_keeps_single_open_segment(tmp_path: Path, _todo_appdata: Path) -> None:
+    await todo_store.write_todos(
+        todos=[{"id": "1", "content": "only", "status": "in_progress"}],
+        merge=False,
+        workspace_raw=str(tmp_path),
+        session_id="sess-merge-seg",
+    )
+    await todo_store.write_todos(
+        todos=[{"id": "1", "content": "only", "status": "completed"}],
+        merge=True,
+        workspace_raw=str(tmp_path),
+        session_id="sess-merge-seg",
+    )
+    seg_path = todo_store.appdata_todo_segments_path(str(_todo_appdata), "sess-merge-seg")
+    payload = json.loads(await seg_path.read_text(encoding="utf-8"))
+    assert len(payload["segments"]) == 1
+    assert payload["segments"][0]["closed_at"] is None
+    assert payload["segments"][0]["todos"][0]["status"] == "completed"
+
+
+def test_looks_self_referential() -> None:
+    assert todo_store.looks_self_referential("更新清单状态并回复用户")
+    assert todo_store.looks_self_referential("Reply to the user with results")
+    assert not todo_store.looks_self_referential("确认 segment-test-b.md 已落盘")
+
+
+@pytest.mark.anyio
+async def test_write_self_ref_returns_warnings(
+    tmp_path: Path, _todo_appdata: Path
+) -> None:
+    result = await todo_store.write_todos(
+        todos=[
+            {"id": "1", "content": "写文件", "status": "completed"},
+            {"id": "2", "content": "更新清单状态并回复用户", "status": "in_progress"},
+        ],
+        merge=False,
+        workspace_raw=str(tmp_path),
+        session_id="sess-warn",
+    )
+    assert result["ok"] is True
+    assert any("self-referential" in w for w in result["warnings"])
+    assert result["todos"][1]["status"] == "in_progress"
+
+
+@pytest.mark.anyio
 async def test_merge_appends_new_items(tmp_path: Path) -> None:
     await todo_store.write_todos(
         todos=[{"id": "1", "content": "only", "status": "in_progress"}],

@@ -214,9 +214,10 @@ Execution Bias says act, not drift — on multi-step work, a short plan is how y
 - **Gate first:** only when work has clear multi-step value (≥3 checkable steps, multi-file/multi-deliverable, or a long tool chain) — follow `skills/task-planning/SKILL.md` and put the plan in the `todo` tool. Skip the list for one-shot / pure chat / 「直接给结果」.
 - **Never fake a list** just to look organized or to feed the UI progress strip.
 - **Writing `todo` commits you to maintain it with the work** — do not create a list, reprint a table, and end the turn while items stay unfinished (unless the user asked for plan-only; then say so and leave statuses honest).
+- **No self-referential steps** — do not put 「更新清单 / 回复用户 / 同步进度」in `content`; only real deliverables. Mark `completed` with `merge=true` *before* the final user-facing summary.
 - **Advance one item at a time and keep the list current.** Mark `completed` as you finish; `merge=true` when adding steps. One `in_progress` only.
 - **Long tasks: brief progress between major steps**, then keep going — does not replace Execution Bias.
-- **On completion, summarize the outcome**, not every todo tick.\
+- **On completion, summarize the outcome**, not every todo tick. Disk must match: no leftover `in_progress` if you claim the work is done.\
 """
 
 # ---------------------------------------------------------------------------
