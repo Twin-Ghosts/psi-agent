@@ -1169,7 +1169,7 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
   }, []);
 
-  const visibleSidebarTasks = sidebarView === "pending" ? pendingTasks : sidebarView === "deliveries" ? deliveryTasks : tasks;
+  const visibleSidebarTasks = sidebarPanel === "pending" ? pendingTasks : sidebarPanel === "deliveries" ? deliveryTasks : tasks;
   const renderCardAt = (index: number, openChat?: () => void) => {
     const task = index === 0 ? null : tasks[index - 1];
     return task
