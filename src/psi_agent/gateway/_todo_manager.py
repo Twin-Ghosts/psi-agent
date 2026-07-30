@@ -63,8 +63,7 @@ class TodoManager:
         segments = await self._load_segments(session_id, appdata=appdata)
         out: list[dict[str, Any]] = []
         for seg in reversed(segments):
-            todos = seg.get("todos") if isinstance(seg.get("todos"), list) else []
-            items = [t for t in todos if isinstance(t, dict)]
+            items = self._normalize_todos(seg.get("todos"))
             out.append(
                 {
                     "id": seg["id"],
@@ -73,19 +72,7 @@ class TodoManager:
                     "updated_at": seg.get("updated_at") or "",
                     "closed_at": seg.get("closed_at"),
                     "source": seg.get("source") or "",
-                    "summary": self._summary(
-                        [
-                            {
-                                "id": str(t.get("id", "")),
-                                "content": str(t.get("content", "")),
-                                "status": str(t.get("status", "")),
-                            }
-                            for t in items
-                            if str(t.get("id", "")).strip()
-                            and str(t.get("content", "")).strip()
-                            and str(t.get("status", "")).strip().lower() in _VALID_STATUSES
-                        ]
-                    ),
+                    "summary": self._summary(items),
                 }
             )
         logger.debug(f"Todo segments for session {session_id!r}: count={len(out)}")
