@@ -1,0 +1,20 @@
+
+  # 罗霖专用容器: 独立 volume + 独立进程, 不连飞书。
+  # 主容器 gateway 经 PSI_FEISHU_EXTERNAL_SESSIONS 把她的 open_id 指到这里的 8081,
+  # 消息由主容器转发进来、回复顺原路出去。同一飞书 app 只能维持一条 WS, 所以 WS 只留主容器。
+  # 隔离点: 这里的 /workspace 是另一个 volume, 主容器与其他用户的 agent 触不到 —— 不再只靠
+  # 工具层守卫拦路径, 而是两套文件系统。
+  private-luolin:
+    image: psi-agent-gateway:local      # 与主容器同镜像, 只换配置与 volume
+    container_name: psi-agent-luolin
+    restart: unless-stopped
+    userns_mode: "host"                 # 同主容器: 避免 bind mount 属主错位
+    working_dir: /workspace
+    volumes:
+      - ./workspace-luolin:/workspace   # 独立 workspace, 与主容器无交集
+    env_file:
+      - ./workspace-luolin/.env         # 只需 AI 凭据 PSI_AI_*, 不需要飞书凭据
+    environment:
+      - TZ=Asia/Shanghai
+    # 只跑 AI + 一个监听 TCP 的 Session; 端口不 publish 到宿主, 仅 compose 网络内可达
+    command: ["sh", "-c", "mkdir -p /tmp/psi && exec psi-agent run /workspace/config.yml"]

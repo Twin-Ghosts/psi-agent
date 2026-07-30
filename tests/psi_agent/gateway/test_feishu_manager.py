@@ -6,7 +6,7 @@ import anyio
 import pytest
 
 from psi_agent.gateway._ai_manager import AIManager
-from psi_agent.gateway._feishu_manager import FeishuManager, _sanitize_open_id
+from psi_agent.gateway._feishu_manager import FeishuManager, _sanitize_open_id, external_sessions
 from psi_agent.gateway._session_manager import SessionManager
 
 
@@ -382,6 +382,62 @@ async def test_route_without_whitelist_unchanged(tmp_path: str, monkeypatch: pyt
         fm = FeishuManager(_sm=sm, _ai_id="ai1", _workspace_root=str(tmp_path))
         _, sid = await fm.route("ou_secret")
         assert sm.get_workspace(sid) == os.path.join(str(tmp_path), "ou_secret")
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
+def test_external_sessions_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``<键>=<地址>`` 逗号/分号分隔; 缺 ``=`` 或半边为空的片段跳过。"""
+    monkeypatch.setenv(
+        "PSI_FEISHU_EXTERNAL_SESSIONS",
+        " ou_a=http://box:8081 ; chat:oc_x=http://box2:8082 ,, bad_no_eq, =http://x , ou_b= ",
+    )
+    assert external_sessions() == {
+        "ou_a": "http://box:8081",
+        "chat:oc_x": "http://box2:8082",
+    }
+
+
+def test_external_sessions_empty_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """未配置 → 空 dict, 所有键走本进程 spawn 老路径 (零行为变化)。"""
+    monkeypatch.delenv("PSI_FEISHU_EXTERNAL_SESSIONS", raising=False)
+    assert external_sessions() == {}
+
+
+@pytest.mark.anyio
+async def test_route_external_key_not_spawned(tmp_path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """登记为外部的键: 返回登记地址, 本进程一个 Session 都不建。"""
+    monkeypatch.setenv("PSI_FEISHU_EXTERNAL_SESSIONS", "ou_secret=http://psi-luolin:8081")
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        fm = FeishuManager(_sm=sm, _ai_id="ai1", _workspace_root=str(tmp_path))
+
+        socket, sid = await fm.route("ou_secret")
+        assert socket == "http://psi-luolin:8081"
+        assert sid == "feishu-ou_secret"
+        assert await sm.list_all() == []  # 未 spawn
+        assert fm.list_routes() == []  # 也不进本地路由表
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_route_others_unaffected_by_external(tmp_path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """只有登记的那个键走外部, 其他人照旧本进程 spawn。"""
+    monkeypatch.setenv("PSI_FEISHU_EXTERNAL_SESSIONS", "ou_secret=http://psi-luolin:8081")
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        fm = FeishuManager(_sm=sm, _ai_id="ai1", _workspace_root=str(tmp_path))
+
+        _, sid = await fm.route("ou_plain")
+        assert sm.get_workspace(sid) == os.path.join(str(tmp_path), "ou_plain")
+        assert len(await sm.list_all()) == 1
     finally:
         await _drain(sm, am)
         await tg.__aexit__(None, None, None)

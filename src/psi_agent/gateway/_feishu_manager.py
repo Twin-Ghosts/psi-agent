@@ -10,6 +10,10 @@
 
 两者都是**动态**的(事先不知道有哪些人/哪些群), 故某键首次路由时按需 spawn 一个 Session。
 
+例外是 ``PSI_FEISHU_EXTERNAL_SESSIONS`` 里登记的键 —— 它们的 Session 跑在**本进程之外**
+(另一个容器), 本模块只把地址透传给 channel, 不 spawn 也不管生命周期。用途见
+``external_sessions``: 给某人真正独立的容器, 换取进程/文件系统级隔离。
+
 本模块是 gateway 侧「飞书会话 → Session」的唯一权威 —— channel 只把 ``open_id``/``chat_id``/
 ``chat_type`` 交给 Gateway 换 socket, 不再自己决定路由键与 ``ai_id``/``workspace``。Session
 生命周期仍由 ``SessionManager`` 掌控。
@@ -31,6 +35,29 @@ _SOCKET_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 
 
 _GROUP_CHAT_TYPES = frozenset({"group", "topic"})
+
+_EXTERNAL_ENV_KEY = "PSI_FEISHU_EXTERNAL_SESSIONS"
+
+
+def external_sessions() -> dict[str, str]:
+    """读 ``PSI_FEISHU_EXTERNAL_SESSIONS``: ``<路由键>=<地址>`` 逗号/分号分隔。
+
+    地址是 ``_sockets`` 认得的传输地址, 跨容器场景填 ``http://host:port`` (TCP)。命中的键
+    **不 spawn 本进程 Session**, 直接把地址交给 channel —— 那边的 Session 跑在别的容器里,
+    有自己的文件系统, 于是本容器的 agent 连它的文件都看不见 (工具层守卫之外的真隔离)。
+
+    形如 ``ou_xxx=http://psi-agent-luolin:8081``。群聊键要写全 ``chat:oc_xxx``。解析失败的
+    片段静默跳过 —— 配置错字不该让整个 gateway 起不来, 未命中就退回本进程 spawn 的老路径。
+    """
+    raw = os.environ.get(_EXTERNAL_ENV_KEY, "") or ""
+    out: dict[str, str] = {}
+    for chunk in raw.replace(";", ",").split(","):
+        key, sep, addr = chunk.partition("=")
+        key, addr = key.strip(), addr.strip()
+        if not sep or not key or not addr:
+            continue
+        out[key] = addr
+    return out
 
 
 def _sanitize_open_id(open_id: str) -> str:
@@ -127,10 +154,18 @@ class FeishuManager:
         共用一个 Session; 其余按发送者 ``open_id`` 路由。首次见到某键时按需 spawn 一个
         Session; 之后命中缓存或 adopt 已存在 Session。``ai_id`` 最终为空时抛 ``ValueError``
         (由 handler 转 400); 私聊而 ``open_id`` 为空时同样抛 ``ValueError`` (群聊不要求)。
+
+        ``PSI_FEISHU_EXTERNAL_SESSIONS`` 命中的键例外: 直接返回登记地址, 本进程不 spawn。
         """
         key = self._route_key(open_id, chat_id, chat_type)
         if not key:
             raise ValueError("open_id must not be empty")
+        # 外部容器托管的键: 只透传地址。放在锁与 spawn 之前 —— 这类键在本进程既没有
+        # Session 也不该建, session_id 报路由键本身, 免得看着像本地 session。
+        external = external_sessions().get(key)
+        if external:
+            logger.debug(f"FeishuManager: {key!r} handled by external session at {external!r}")
+            return external, self._session_id(key)
         sid = self._session_id(key)
         async with self._lock:
             logger.debug(f"FeishuManager: acquired lock for route {key!r}")
