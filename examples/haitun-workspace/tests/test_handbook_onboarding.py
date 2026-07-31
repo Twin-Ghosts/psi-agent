@@ -7,7 +7,7 @@ import json
 import sys
 import textwrap
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import anyio
 import pytest
@@ -296,5 +296,24 @@ async def test_process_submit_pass_notifies(monkeypatch: pytest.MonkeyPatch) -> 
     assert ("ou_hr", "HR看王五") in texts
 
 
-# silence unused cast import if ruff complains — keep for typing clarity elsewhere
-_ = cast
+@pytest.mark.anyio
+async def test_configure_writes_links(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = _load_handbook_module()
+    agent_root = tmp_path / "agent"
+    await anyio.Path(agent_root / "config").mkdir(parents=True)
+    monkeypatch.setattr(mod._paths, "resolve_agent", lambda raw="": anyio.Path(agent_root))
+
+    out = json.loads(
+        await mod.handbook_onboarding_configure(
+            links_json='[{"title":"SOP","url":"https://feishu.cn/docx/abc"}]',
+            hr_notify_id="ou_hr_1",
+        )
+    )
+    assert out["ok"] is True
+    assert out["handbook_links"][0]["url"] == "https://feishu.cn/docx/abc"
+    assert out["hr_notify_id"] == "ou_hr_1"
+
+    shown = json.loads(await mod.handbook_onboarding_show_config())
+    assert shown["handbook_links"][0]["title"] == "SOP"
+    text = await (anyio.Path(agent_root) / "config" / "handbook_onboarding.yaml").read_text(encoding="utf-8")
+    assert "https://feishu.cn/docx/abc" in text

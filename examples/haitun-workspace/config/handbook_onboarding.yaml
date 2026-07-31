@@ -1,5 +1,6 @@
-# 入职管理制度确认卡 — 本地联调可改链接 / HR 通知目标。
-# 也可用环境变量覆盖：HAITUN_HANDBOOK_HR_NOTIFY_ID、HAITUN_HANDBOOK_HR_NOTIFY_ID_TYPE
+# 入职管理制度确认卡。
+# 优先让海豚 NL 调用 handbook_onboarding_configure 写入链接 / HR 通知，不要手改本文件。
+# 环境变量仍可覆盖：HAITUN_HANDBOOK_HR_NOTIFY_ID、HAITUN_HANDBOOK_HR_NOTIFY_ID_TYPE
 
 company_name: 海豚
 welcome_title: 欢迎加入 · 请确认管理制度

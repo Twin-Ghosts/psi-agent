@@ -16,6 +16,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+import anyio
 import yaml
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -28,6 +29,103 @@ from feishu_message import feishu_message_send, feishu_message_send_card
 _ACTION_SUBMIT = "handbook_submit"
 _HANDLER = "handbook_onboarding_process_submit"
 _DEFAULT_CONFIG = "config/handbook_onboarding.yaml"
+
+
+async def handbook_onboarding_configure(
+    links_json: str = "",
+    hr_notify_id: str = "",
+    hr_notify_id_type: str = "",
+    company_name: str = "",
+    welcome_intro: str = "",
+    replace_links: bool = True,
+) -> str:
+    """Save handbook URLs / HR notify target so HR never edits YAML by hand.
+
+    Call this when the user NL-configures onboarding: pastes SOP/doc links, says
+    "以后新人发这个", or "确认通过后通知我". Persists to
+    ``config/handbook_onboarding.yaml`` under the agent package.
+
+    Args:
+        links_json: JSON array of ``{"title","url"}`` objects, or a JSON array of
+            URL strings, or a single URL string. Empty = leave existing links.
+        hr_notify_id: open_id / chat_id to notify when a hire passes. Use the
+            speaker's ``ou_...`` from ``<feishu_context>`` when they say notify me.
+        hr_notify_id_type: ``open_id`` or ``chat_id`` (default open_id / auto).
+        company_name: Optional company display name on the card.
+        welcome_intro: Optional welcome markdown/text on the card.
+        replace_links: When true (default), ``links_json`` replaces
+            ``handbook_links``; when false, appends new URLs.
+    """
+    cfg = await _load_config()
+    changed: list[str] = []
+
+    parsed_links = _parse_links_arg(links_json)
+    if parsed_links is not None:
+        if replace_links:
+            cfg["handbook_links"] = parsed_links
+        else:
+            existing = cfg.get("handbook_links")
+            base: list[Any] = list(existing) if isinstance(existing, list) else []
+            seen = {str(item.get("url") or "").strip() for item in base if isinstance(item, dict)}
+            for item in parsed_links:
+                url = str(item.get("url") or "").strip()
+                if url and url not in seen:
+                    base.append(item)
+                    seen.add(url)
+            cfg["handbook_links"] = base
+        changed.append("handbook_links")
+
+    hr = (hr_notify_id or "").strip()
+    if hr:
+        cfg["hr_notify_id"] = hr
+        changed.append("hr_notify_id")
+    hr_type = (hr_notify_id_type or "").strip()
+    if hr_type:
+        cfg["hr_notify_id_type"] = hr_type
+        changed.append("hr_notify_id_type")
+    company = (company_name or "").strip()
+    if company:
+        cfg["company_name"] = company
+        changed.append("company_name")
+    intro = (welcome_intro or "").strip()
+    if intro:
+        cfg["welcome_intro"] = intro
+        changed.append("welcome_intro")
+
+    if not changed:
+        return _fail(
+            "nothing to update: pass links_json and/or hr_notify_id (and optional company_name / welcome_intro)"
+        )
+
+    path = await _save_config(cfg)
+    return json.dumps(
+        {
+            "ok": True,
+            "changed": changed,
+            "path": str(path),
+            "handbook_links": cfg.get("handbook_links"),
+            "hr_notify_id": cfg.get("hr_notify_id") or "",
+            "hr_notify_id_type": cfg.get("hr_notify_id_type") or "open_id",
+            "company_name": cfg.get("company_name") or "",
+        },
+        ensure_ascii=False,
+    )
+
+
+async def handbook_onboarding_show_config() -> str:
+    """Return the current handbook onboarding config (links + HR notify)."""
+    cfg = await _load_config()
+    return json.dumps(
+        {
+            "ok": True,
+            "handbook_links": cfg.get("handbook_links") if isinstance(cfg.get("handbook_links"), list) else [],
+            "hr_notify_id": cfg.get("hr_notify_id") or "",
+            "hr_notify_id_type": cfg.get("hr_notify_id_type") or "open_id",
+            "company_name": cfg.get("company_name") or "",
+            "welcome_title": cfg.get("welcome_title") or "",
+        },
+        ensure_ascii=False,
+    )
 
 
 async def handbook_onboarding_send_welcome(
@@ -326,6 +424,59 @@ async def _load_config() -> dict[str, Any]:
     except yaml.YAMLError:
         return {}
     return loaded if isinstance(loaded, dict) else {}
+
+
+async def _save_config(cfg: dict[str, Any]) -> anyio.Path:
+    path = _paths.resolve_agent() / _DEFAULT_CONFIG
+    await path.parent.mkdir(parents=True, exist_ok=True)
+    text = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False, default_flow_style=False)
+    # Windows: avoid replace-over-open; write temp then replace.
+    tmp = path.parent / f".{path.name}.tmp"
+    await tmp.write_text(text, encoding="utf-8")
+    with suppress(FileNotFoundError):
+        await path.unlink()
+    await tmp.rename(path)
+    return path
+
+
+def _parse_links_arg(raw: str) -> list[dict[str, str]] | None:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    items: list[Any]
+    if text.startswith("[") or text.startswith("{"):
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(parsed, dict):
+            items = [parsed]
+        elif isinstance(parsed, list):
+            items = parsed
+        else:
+            return None
+    elif "\n" in text or "," in text:
+        parts = [p.strip() for p in text.replace(",", "\n").splitlines() if p.strip()]
+        items = parts
+    else:
+        items = [text]
+
+    out: list[dict[str, str]] = []
+    for idx, item in enumerate(items, start=1):
+        if isinstance(item, str):
+            url = item.strip()
+            if not url:
+                continue
+            out.append({"title": f"管理制度 {idx}" if len(items) > 1 else "管理制度", "url": url})
+            continue
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or item.get("link") or "").strip()
+        if not url:
+            continue
+        title = str(item.get("title") or item.get("name") or f"管理制度 {idx}").strip()
+        out.append({"title": title or f"管理制度 {idx}", "url": url})
+    return out
 
 
 def _as_dict(raw: Any) -> dict[str, Any]:
