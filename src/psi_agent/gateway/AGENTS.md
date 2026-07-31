@@ -403,7 +403,7 @@ OAuth 回调中继（`_oauth_manager.py`）：让**授权码自己回到发起�
 | DELETE | `/sessions/{session_id}` | 删除 Session + history JSONL + 标题（200/404） |
 | GET | `/sessions` | 列出所有 Session（含 `agent`） |
 | POST | `/sessions/{session_id}/chat` | Web UI chat（SSE） |
-| GET | `/sessions/{session_id}/history` | 获取会话历史（AppData ``histories/`` 优先 + legacy 双读；``is_displayable_chat_message`` 白名单 + 剥 `[SEND:]`/`[RECV:]`；assistant 行另附 ``sends``；JSONL ``reasoning`` 透出供 SPA「已思考」。**刻意为之**：无正文的 tool_calls 轮不进气泡，但其 ``reasoning`` 折叠进下一（或上一）条可展示 assistant，刷新后仍可展开） |
+| GET | `/sessions/{session_id}/history` | 获取会话历史（AppData ``histories/`` 优先 + legacy 双读；``is_displayable_chat_message`` 白名单 + 剥 `[SEND:]`/`[RECV:]`；assistant 行另附 ``sends``；JSONL ``reasoning`` 透出供 SPA「已思考」。**刻意为之**：无正文的 tool_calls 轮不进气泡，但其 ``reasoning`` **与结构化 ``tool_calls`` 合成的 ``[Tool Call:…]`` 标记**一并折叠进下一（或上一）条可展示 assistant——Session 只把标记流给 SSE、不落盘，刷新后 SPA 工具列表靠此投影） |
 | GET | `/sessions/{session_id}/todos` | 读取 todos（AppData ``todos/{id}.json`` 优先，否则 legacy workspace ``.psi/todos``）；返回 ``{todos, summary}``，文件缺失则为空列表 |
 | GET | `/sessions/{session_id}/todo-segments` | 子任务分段列表（``todos/{id}.segments.json``，新→旧）；``merge=false`` 开新段；返回 ``[{id,label,closed_at,summary,…}]`` |
 | GET | `/sessions/{session_id}/todo-segments/{segment_id}` | 单段含 ``todos[]``（历史 checklist 回放） |

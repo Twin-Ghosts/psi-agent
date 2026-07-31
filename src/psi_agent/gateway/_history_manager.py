@@ -29,6 +29,38 @@ def _merge_reasoning(existing: object, extra: str) -> str:
     return "\n".join(parts)
 
 
+def _tool_calls_as_markers(msg: dict[str, object]) -> str:
+    """Rebuild SSE-style ``[Tool Call:…]`` markers from JSONL ``tool_calls``.
+
+    Session streams those markers live but does **not** persist them into
+    ``reasoning`` (only model thinking). SPA post-turn tool list parses markers,
+    so history projection synthesizes them from structured ``tool_calls``.
+    """
+    raw = msg.get("tool_calls")
+    if not isinstance(raw, list):
+        return ""
+    parts: list[str] = []
+    for tc in raw:
+        if not isinstance(tc, dict):
+            continue
+        fn = tc.get("function")
+        if not isinstance(fn, dict):
+            continue
+        name = fn.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        args = fn.get("arguments", "{}")
+        if not isinstance(args, str):
+            args = "{}"
+        parts.append(f"[Tool Call: {name}({args})]")
+    return "\n".join(parts)
+
+
+def _assistant_process_chunk(msg: dict[str, object], reasoning: str) -> str:
+    """Thinking prose + synthesized tool-call markers for one assistant JSONL row."""
+    return _merge_reasoning(reasoning, _tool_calls_as_markers(msg))
+
+
 class HistoryManager:
     async def get(self, workspace: str, session_id: str, *, appdata: str = "") -> list[dict[str, object]]:
         appdata_root = appdata.strip() or await resolve_appdata_root()
@@ -38,8 +70,8 @@ class HistoryManager:
             session_id=session_id,
         )
         messages: list[dict[str, object]] = []
-        # Reasoning from tool-call assistant rows (often empty ``content``) held until
-        # the next displayable assistant bubble — so SPA「已思考」survives refresh.
+        # Reasoning (+ synthesized tool markers) from tool-call assistant rows
+        # held until the next displayable assistant — SPA tools/thinking survive refresh.
         pending_reasoning = ""
         try:
             content = await path.read_text(encoding="utf-8")
@@ -69,13 +101,15 @@ class HistoryManager:
             )
 
             if not is_displayable_chat_message(msg):
-                # Tool rounds: assistant + tool_calls + reasoning, no chat content.
-                if role == "assistant" and kind == KIND_CHAT and reasoning:
-                    if messages and messages[-1].get("role") == "assistant":
-                        prev = messages[-1]
-                        prev["reasoning"] = _merge_reasoning(prev.get("reasoning"), reasoning)
-                    else:
-                        pending_reasoning = _merge_reasoning(pending_reasoning, reasoning)
+                # Tool rounds: assistant + tool_calls (+ optional thinking), no chat content.
+                if role == "assistant" and kind == KIND_CHAT:
+                    chunk = _assistant_process_chunk(msg, reasoning)
+                    if chunk:
+                        if messages and messages[-1].get("role") == "assistant":
+                            prev = messages[-1]
+                            prev["reasoning"] = _merge_reasoning(prev.get("reasoning"), chunk)
+                        else:
+                            pending_reasoning = _merge_reasoning(pending_reasoning, chunk)
                 continue
 
             text = msg.get("content", "")
@@ -133,7 +167,10 @@ class HistoryManager:
             if sends:
                 row["sends"] = sends
             if role == "assistant":
-                merged = _merge_reasoning(pending_reasoning, reasoning)
+                merged = _merge_reasoning(
+                    pending_reasoning,
+                    _assistant_process_chunk(msg, reasoning),
+                )
                 pending_reasoning = ""
                 if merged:
                     row["reasoning"] = merged

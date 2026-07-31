@@ -65,14 +65,18 @@ async def test_history_folds_tool_round_reasoning_into_next_assistant(
     tmp_path: Path,
     appdata: Path,
 ) -> None:
-    """Empty-content tool_calls rows are not bubbles, but their thinking must survive refresh."""
+    """Empty-content tool_calls rows are not bubbles; thinking + tools must survive refresh."""
     hm = HistoryManager()
     hist_dir = anyio.Path(str(appdata)) / "histories"
     await hist_dir.mkdir(parents=True)
     content = "\n".join(
         [
             '{"role": "user", "content": "\u505a\u4efb\u52a1", "kind": "chat"}',
-            '{"role": "assistant", "tool_calls": [{"id": "1"}], "reasoning": "\u5148\u8bfb\u6587\u4ef6", "kind": "chat"}',
+            (
+                '{"role": "assistant", "tool_calls": [{"id": "1", "type": "function", '
+                '"function": {"name": "read", "arguments": "{\\"path\\": \\"a.py\\"}"}}], '
+                '"reasoning": "\u5148\u8bfb\u6587\u4ef6", "kind": "chat"}'
+            ),
             '{"role": "tool", "content": "ok", "tool_call_id": "1"}',
             '{"role": "assistant", "content": "\u5b8c\u6210", "reasoning": "\u518d\u603b\u7ed3", "kind": "chat"}',
         ]
@@ -86,7 +90,46 @@ async def test_history_folds_tool_round_reasoning_into_next_assistant(
         {
             "role": "assistant",
             "text": "\u5b8c\u6210",
-            "reasoning": "\u5148\u8bfb\u6587\u4ef6\n\u518d\u603b\u7ed3",
+            "reasoning": (
+                "\u5148\u8bfb\u6587\u4ef6\n"
+                '[Tool Call: read({"path": "a.py"})]\n'
+                "\u518d\u603b\u7ed3"
+            ),
+        },
+    ]
+
+
+@pytest.mark.anyio
+async def test_history_folds_tool_calls_without_reasoning(
+    tmp_path: Path,
+    appdata: Path,
+) -> None:
+    """Structured tool_calls alone (no model thinking) still project as markers."""
+    hm = HistoryManager()
+    hist_dir = anyio.Path(str(appdata)) / "histories"
+    await hist_dir.mkdir(parents=True)
+    content = "\n".join(
+        [
+            '{"role": "user", "content": "go", "kind": "chat"}',
+            (
+                '{"role": "assistant", "tool_calls": [{"id": "1", "type": "function", '
+                '"function": {"name": "bash", "arguments": "{\\"command\\": \\"ls\\"}"}}], '
+                '"kind": "chat"}'
+            ),
+            '{"role": "tool", "content": "ok", "tool_call_id": "1"}',
+            '{"role": "assistant", "content": "done", "kind": "chat"}',
+        ]
+    )
+    await (hist_dir / "tools-only.jsonl").write_text(content, encoding="utf-8")
+
+    result = await hm.get(str(tmp_path / "ws"), "tools-only", appdata=str(appdata))
+
+    assert result == [
+        {"role": "user", "text": "go"},
+        {
+            "role": "assistant",
+            "text": "done",
+            "reasoning": '[Tool Call: bash({"command": "ls"})]',
         },
     ]
 
