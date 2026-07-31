@@ -71,6 +71,12 @@ export type ChatMessage = {
   role: "agent" | "user";
   text: string;
   files?: ChatFile[];
+  /**
+   * Raw Session ``reasoning`` for this assistant turn (thinking + tool markers).
+   * Expandable「已思考」shows prose after ``stripToolMarkersFromReasoning``.
+   * From live SSE accumulate and/or `/history` projection; not in localStorage.
+   */
+  reasoning?: string;
   /** Local-only: like / dislike on agent replies (spa v1 parity). */
   feedback?: MessageFeedback;
   /** User turn did not get a complete agent reply. */

@@ -11,12 +11,22 @@ from psi_agent._appdata import (
     resolve_history_read_path,
 )
 from psi_agent.session.history_display import (
+    KIND_CHAT,
     extract_send_paths,
     is_displayable_chat_message,
     message_kind,
     strip_transfer_markers,
     wire_role,
 )
+
+
+def _merge_reasoning(existing: object, extra: str) -> str:
+    parts: list[str] = []
+    if isinstance(existing, str) and existing.strip():
+        parts.append(existing.strip())
+    if extra.strip():
+        parts.append(extra.strip())
+    return "\n".join(parts)
 
 
 class HistoryManager:
@@ -28,6 +38,9 @@ class HistoryManager:
             session_id=session_id,
         )
         messages: list[dict[str, object]] = []
+        # Reasoning from tool-call assistant rows (often empty ``content``) held until
+        # the next displayable assistant bubble — so SPA「已思考」survives refresh.
+        pending_reasoning = ""
         try:
             content = await path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -45,14 +58,43 @@ class HistoryManager:
                 continue
             if not isinstance(msg, dict):
                 continue
-            if not is_displayable_chat_message(msg):
-                continue
+
             role = wire_role(msg.get("role"))
+            kind = message_kind(msg)
+            reasoning_raw = msg.get("reasoning")
+            reasoning = (
+                reasoning_raw.strip()
+                if isinstance(reasoning_raw, str) and reasoning_raw.strip()
+                else ""
+            )
+
+            if not is_displayable_chat_message(msg):
+                # Tool rounds: assistant + tool_calls + reasoning, no chat content.
+                if role == "assistant" and kind == KIND_CHAT and reasoning:
+                    if messages and messages[-1].get("role") == "assistant":
+                        prev = messages[-1]
+                        prev["reasoning"] = _merge_reasoning(prev.get("reasoning"), reasoning)
+                    else:
+                        pending_reasoning = _merge_reasoning(pending_reasoning, reasoning)
+                continue
+
             text = msg.get("content", "")
             if role not in ("user", "assistant") or not isinstance(text, str):
                 continue
             sends = extract_send_paths(text) if role == "assistant" else []
             cleaned = strip_transfer_markers(text)
+
+            if role == "user" and pending_reasoning:
+                # Orphan tool-round thinking before a new user turn: attach to last
+                # assistant if any, else drop (no bubble to hang on).
+                if messages and messages[-1].get("role") == "assistant":
+                    prev = messages[-1]
+                    prev["reasoning"] = _merge_reasoning(
+                        prev.get("reasoning"),
+                        pending_reasoning,
+                    )
+                pending_reasoning = ""
+
             # SEND-only assistant turns: fold paths into the previous assistant
             # bubble so spa v1 does not render an empty message.
             if not cleaned and sends:
@@ -62,18 +104,45 @@ class HistoryManager:
                     prev_sends = list(prev_raw) if isinstance(prev_raw, list) else []
                     prev_sends.extend(sends)
                     prev["sends"] = prev_sends
+                    if reasoning or pending_reasoning:
+                        prev["reasoning"] = _merge_reasoning(
+                            prev.get("reasoning"),
+                            _merge_reasoning(pending_reasoning, reasoning),
+                        )
+                        pending_reasoning = ""
                 else:
-                    messages.append({"role": role, "text": "", "sends": sends})
+                    row: dict[str, object] = {"role": role, "text": "", "sends": sends}
+                    merged = _merge_reasoning(pending_reasoning, reasoning)
+                    pending_reasoning = ""
+                    if merged:
+                        row["reasoning"] = merged
+                    messages.append(row)
                 continue
             if not cleaned:
+                if reasoning:
+                    if messages and messages[-1].get("role") == "assistant":
+                        prev = messages[-1]
+                        prev["reasoning"] = _merge_reasoning(prev.get("reasoning"), reasoning)
+                    else:
+                        pending_reasoning = _merge_reasoning(pending_reasoning, reasoning)
                 continue
-            row: dict[str, object] = {"role": role, "text": cleaned}
-            kind = message_kind(msg)
+
+            row = {"role": role, "text": cleaned}
             if kind != "chat":
                 row["kind"] = kind
             if sends:
                 row["sends"] = sends
+            if role == "assistant":
+                merged = _merge_reasoning(pending_reasoning, reasoning)
+                pending_reasoning = ""
+                if merged:
+                    row["reasoning"] = merged
             messages.append(row)
+
+        if pending_reasoning and messages and messages[-1].get("role") == "assistant":
+            prev = messages[-1]
+            prev["reasoning"] = _merge_reasoning(prev.get("reasoning"), pending_reasoning)
+
         logger.debug(f"History for session {session_id!r}: {len(messages)} displayable message(s)")
         return messages
 

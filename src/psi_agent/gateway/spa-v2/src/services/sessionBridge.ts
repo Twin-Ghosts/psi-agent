@@ -50,14 +50,22 @@ export function historyToChat(messages: HistoryMessage[]): ChatMessage[] {
     // Pure SEND bubble (no prose): still skip chat row; chest owns those files.
     if (!text.trim()) continue
     const role = m.role === 'assistant' ? 'agent' : 'user'
+    const reasoning =
+      role === 'agent' && typeof m.reasoning === 'string' && m.reasoning.trim()
+        ? m.reasoning
+        : undefined
     const last = out[out.length - 1]
     if (role === 'agent' && last?.role === 'agent') {
       const mergedText = [last.text, text].filter((t) => t.trim()).join('\n\n')
       const mergedFiles = mergeChatFiles(last.files, files)
+      const mergedReasoning = [last.reasoning, reasoning]
+        .filter((r): r is string => typeof r === 'string' && !!r.trim())
+        .join('\n')
       out[out.length - 1] = {
         ...last,
         text: mergedText,
         ...(mergedFiles.length ? { files: mergedFiles } : {}),
+        ...(mergedReasoning ? { reasoning: mergedReasoning } : {}),
       }
       continue
     }
@@ -65,6 +73,7 @@ export function historyToChat(messages: HistoryMessage[]): ChatMessage[] {
       role,
       text,
       ...(files.length ? { files } : {}),
+      ...(reasoning ? { reasoning } : {}),
     })
   }
   return out

@@ -259,7 +259,12 @@ OPENAPI_SPEC = {
                     }
                 ],
                 "responses": {
-                    "200": {"description": "Array of {role, text} messages"},
+                    "200": {
+                        "description": (
+                            "Array of {role, text, kind?, sends?, reasoning?} messages; "
+                            "assistant may include JSONL ``reasoning`` for SPA thinking expand"
+                        )
+                    },
                     "404": {"$ref": "#/components/responses/Error"},
                 },
             },

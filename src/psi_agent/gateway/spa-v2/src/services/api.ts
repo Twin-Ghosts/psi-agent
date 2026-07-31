@@ -126,6 +126,8 @@ export type HistoryMessage = {
   kind?: string
   /** ``[SEND:]`` paths extracted before marker strip (assistant turns). */
   sends?: string[]
+  /** Session JSONL ``reasoning`` (thinking + tool markers); SPA strips for display. */
+  reasoning?: string
 }
 
 export async function fetchHistory(sessionId: string) {

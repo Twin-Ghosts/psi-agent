@@ -113,6 +113,29 @@ describe('historyToChat', () => {
       { role: 'agent', text: '好的' },
     ])
   })
+
+  it('merges consecutive assistant reasoning for expandable thinking', () => {
+    expect(
+      historyToChat([
+        {
+          role: 'assistant',
+          text: 'Step 1',
+          reasoning: '先读文件',
+        },
+        {
+          role: 'assistant',
+          text: '最终回复',
+          reasoning: '再总结',
+        },
+      ]),
+    ).toEqual([
+      {
+        role: 'agent',
+        text: 'Step 1\n\n最终回复',
+        reasoning: '先读文件\n再总结',
+      },
+    ])
+  })
 })
 
 describe('historyToDeliverables', () => {

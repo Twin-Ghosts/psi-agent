@@ -1,4 +1,4 @@
-import { Check, Copy, FolderOpen, RefreshCw, RotateCcw, ThumbsDown, ThumbsUp } from "lucide-react";
+import { Check, ChevronRight, Copy, FolderOpen, RefreshCw, RotateCcw, ThumbsDown, ThumbsUp } from "lucide-react";
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import type { ChatFile, ChatMessage, MessageFeedback } from "./model";
 import { BrandLogo } from "./primitives";
@@ -8,6 +8,11 @@ import { stripTransferMarkers } from "../services/sendMarkers";
 import { downloadMatrixXlsx, matrixToTsv, tableToMatrix } from "../services/mdTable";
 import { preferResultBelowRule } from "../services/assistantDisplay";
 import { TURN_PROGRESS, type ProgressLog } from "../services/turnProgress";
+import {
+  hasDisplayableReasoning,
+  stripToolMarkersFromReasoning,
+  thinkingHeaderLabel,
+} from "../services/reasoningDisplay";
 import { FAILED_REASON_LABEL, isCompleteAgent } from "../services/messageTurn";
 import { ensureChatFileData, revealDeliverableInFolder } from "../utils/filePreviewUtils";
 import { isBlobPreviewable } from "../utils/renderBlobPreview";
@@ -132,6 +137,41 @@ function CopyButton({ text, className }: { text: string; className?: string }) {
     >
       {copied ? <Check size={16} aria-hidden /> : <Copy size={16} aria-hidden />}
     </button>
+  );
+}
+
+/**
+ * Cursor-style post-turn thinking disclosure.
+ * Live streaming still uses the process log; after the turn, expand「已思考」for prose.
+ */
+function ThinkingDisclosure({
+  reasoning,
+  streaming = false,
+}: {
+  reasoning: string;
+  streaming?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const body = stripToolMarkersFromReasoning(reasoning);
+  if (!body) return null;
+  const label = thinkingHeaderLabel({ streaming, hasBody: true });
+  return (
+    <div className={`focus-chat-thinking${open ? " is-open" : ""}`}>
+      <button
+        type="button"
+        className="focus-chat-thinking-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <ChevronRight size={14} className="focus-chat-thinking-chevron" aria-hidden />
+        <span>{label}</span>
+      </button>
+      {open ? (
+        <div className="focus-chat-thinking-body" role="region" aria-label="思考过程">
+          {body}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -357,6 +397,13 @@ export function FocusChatThread({
         return (
           <ChatBlock role={message.role} key={`${message.role}-${index}`}>
             {isLiveAgent && writing ? thinkingBubble : null}
+            {message.role === "agent"
+              && !isLiveAgent
+              && hasDisplayableReasoning(message.reasoning ?? "")
+              ? (
+                <ThinkingDisclosure reasoning={message.reasoning!} />
+              )
+              : null}
             <div className="focus-chat-bubble-wrap">
               {message.role === "user" && (
                 <div className={`focus-chat-side-actions${message.failed ? " has-retry" : ""}`}>

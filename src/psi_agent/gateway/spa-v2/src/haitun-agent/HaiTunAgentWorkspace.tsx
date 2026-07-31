@@ -191,6 +191,8 @@ export default function HaiTunAgentWorkspace({
   const abortRef = useRef<AbortController | null>(null);
   /** Bumped each runChatTurn so a superseded/aborted turn cannot keep appending deltas. */
   const streamEpochRef = useRef(0);
+  /** Accumulate SSE reasoning (thinking + tool markers) for post-turn「已思考」expand. */
+  const turnReasoningRef = useRef("");
   /** After Stop, block submit briefly — Stop↔Send swap under the same click would re-send the restored draft. */
   const suppressSubmitUntilRef = useRef(0);
   const historyLoadedRef = useRef<Set<string>>(new Set(["overview"]));
@@ -755,6 +757,7 @@ export default function HaiTunAgentWorkspace({
 
     setTypingCard(cardId);
     setTurnProgressLog(progressLogStart());
+    turnReasoningRef.current = "";
     setTodoSegmentSelection((current) => ({ ...current, [cardId]: "live" }));
     const userVisible = titleSource ?? (text.trim() || "附件");
     let turnOk = false;
@@ -808,6 +811,7 @@ export default function HaiTunAgentWorkspace({
           },
           onReasoning: (delta, kind) => {
             if (!live()) return;
+            if (delta) turnReasoningRef.current += delta;
             setTurnProgressLog((prev) =>
               applyProgressEvent(prev ?? progressLogStart(), kind, delta),
             );
@@ -898,6 +902,19 @@ export default function HaiTunAgentWorkspace({
       showToast(err);
     } finally {
       if (epoch === streamEpochRef.current) {
+        const reasoningRaw = turnReasoningRef.current.trim();
+        // Keep thinking for「已思考」when the agent bubble still exists (not Stop).
+        if (reasoningRaw && !controller.signal.aborted) {
+          setMessages((current) => {
+            const list = [...(current[cardId] ?? [])];
+            const last = list[list.length - 1];
+            if (last?.role === "agent") {
+              list[list.length - 1] = { ...last, reasoning: reasoningRaw };
+              return { ...current, [cardId]: list };
+            }
+            return current;
+          });
+        }
         setTypingCard((current) => (current === cardId ? null : current));
         setTurnProgressLog(null);
         if (abortRef.current === controller) abortRef.current = null;
