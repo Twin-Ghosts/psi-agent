@@ -133,9 +133,15 @@ type Props = {
   /** Step 2: from GET /defaults.agent — passed to POST /sessions (not tool I/O). */
   defaultAgent?: string;
   onChangeWorkspace?: () => void;
+  onChangeAgent?: () => void;
 };
 
-export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onChangeWorkspace }: Props) {
+export default function HaiTunAgentWorkspace({
+  workspace,
+  defaultAgent = "",
+  onChangeWorkspace,
+  onChangeAgent,
+}: Props) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [templates, setTemplates] = useState<TaskTemplate[]>(INITIAL_TEMPLATES);
   const [aiId, setAiId] = useState<string | null>(null);
@@ -1785,6 +1791,8 @@ export default function HaiTunAgentWorkspace({ workspace, defaultAgent = "", onC
             }}
             workspace={workspace}
             onChangeWorkspace={onChangeWorkspace}
+            agent={defaultAgent}
+            onChangeAgent={onChangeAgent}
             onToast={showToast}
             openModelsOnMount={bootReady && openModelsOnce}
             onModelsAutoOpened={() => setOpenModelsOnce(false)}

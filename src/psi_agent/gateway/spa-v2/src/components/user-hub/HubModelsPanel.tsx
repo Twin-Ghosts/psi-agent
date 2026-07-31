@@ -4,6 +4,7 @@ import type { AiInfo } from '../../services/api'
 import { createAi, listAis, listSessions } from '../../services/api'
 import {
   clearAiPool,
+  dedupeAisForDisplay,
   ensureDefaultAi,
   hydrateAiForSessions,
   purgePlaceholderAis,
@@ -44,6 +45,11 @@ export default function HubModelsPanel({
   const preset = useMemo(
     () => (presetId ? getModelPreset(presetId) : undefined),
     [presetId],
+  )
+
+  const visibleAis = useMemo(
+    () => dedupeAisForDisplay(ais, selectedAiId),
+    [ais, selectedAiId],
   )
 
   useEffect(() => {
@@ -156,11 +162,11 @@ export default function HubModelsPanel({
         </>
       )}
     >
-      {ais.length > 0 && (
+      {visibleAis.length > 0 && (
         <section className="hub-section">
           <h4>已连接</h4>
           <ul className="hub-ai-list">
-            {ais.map((a) => (
+            {visibleAis.map((a) => (
               <li key={a.id}>
                 <button
                   type="button"

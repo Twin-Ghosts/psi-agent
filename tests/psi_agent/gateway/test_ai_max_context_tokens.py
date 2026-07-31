@@ -56,6 +56,42 @@ async def test_explicit_value_is_recorded() -> None:
 
 
 @pytest.mark.anyio
+async def test_create_without_id_reuses_identical_config() -> None:
+    """Same provider/model/key/base (no explicit id) must not spawn a second AI."""
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        mgr = AIManager(_prefix="gw-dedupe", _tg=tg)
+        first = await mgr.create(
+            provider="openai",
+            model="deepseek-v4-flash",
+            api_key="haitun-default",
+            base_url="https://misakamikoto.genuineknowledge.cn/",
+        )
+        second = await mgr.create(
+            provider="openai",
+            model="deepseek-v4-flash",
+            api_key="haitun-default",
+            base_url="https://misakamikoto.genuineknowledge.cn",
+        )
+        assert second.id == first.id
+        assert len(await mgr.list_all()) == 1
+
+        # Explicit id still creates a parallel instance (Session revive).
+        other = await mgr.create(
+            provider="openai",
+            model="deepseek-v4-flash",
+            api_key="haitun-default",
+            base_url="https://misakamikoto.genuineknowledge.cn",
+            id="revived-session-ai",
+        )
+        assert other.id == "revived-session-ai"
+        assert len(await mgr.list_all()) == 2
+    finally:
+        await _close(tg)
+
+
+@pytest.mark.anyio
 async def test_zero_is_preserved_as_disable() -> None:
     """0 disables compaction and must survive as 0, not collapse into the default."""
     tg = anyio.create_task_group()
