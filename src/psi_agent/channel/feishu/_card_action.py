@@ -13,7 +13,7 @@ from psi_agent.channel._types import InputChunk, TextChunk
 
 from ._card_store import CardSnapshot, pop_card_snapshot
 
-_INTERACTIVE_CARD_TAGS = {"action", "form"}
+_INTERACTIVE_CARD_TAGS = {"action", "button", "form"}
 _REMOVED_CARD_ELEMENT = object()
 
 type ResolveCore = Callable[[str | None], Awaitable[ChannelCore]]
