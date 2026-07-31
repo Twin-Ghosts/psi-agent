@@ -1729,18 +1729,24 @@ async def test_auth_complete_accepts_full_callback_url(monkeypatch: pytest.Monke
     assert _impl._extract_code("  abc123  ") == "abc123"
 
 
-def _auth_card_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Any, mode: str = "gateway") -> dict[str, Any]:
+def _auth_card_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    mode: str = "gateway",
+    redirect_uri: str = "",
+) -> dict[str, Any]:
     """Configure an app + a receiver channel, and capture what gets sent."""
     monkeypatch.setenv("PSI_FEISHU_APP_ID", "cli_x")
     monkeypatch.setenv("PSI_FEISHU_APP_SECRET", "sec")
     monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(tmp_path / "pending.json"))
     monkeypatch.setattr(_impl, "_granted_scopes_path", lambda: str(tmp_path / "granted.json"))
+    default_redirect = "https://gw.example.com/oauth/callback" if mode == "gateway" else "http://localhost/"
     monkeypatch.setattr(
         _impl._oauth_rx,
         "plan_receiver",
         lambda explicit="": _impl._oauth_rx.ReceiverPlan(
             mode=mode,
-            redirect_uri="https://gw.example.com/oauth/callback" if mode == "gateway" else "http://localhost/",
+            redirect_uri=redirect_uri or default_redirect,
         ),
     )
     captured: dict[str, Any] = {}
@@ -1769,6 +1775,36 @@ def _auth_card_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Any, mode: str = "
 
 def _card_button(card: dict[str, Any]) -> dict[str, Any]:
     return next(e for e in card["body"]["elements"] if e.get("tag") == "button")
+
+
+@pytest.mark.asyncio
+async def test_auth_card_carries_private_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """卡片按钮 open_url 打开的是同一个内网 redirect, 所以第 1 级也得带后路。"""
+    _auth_card_env(monkeypatch, tmp_path, redirect_uri="http://192.168.60.214:8090/oauth/callback")
+    result = await _impl.auth_card_impl("ou_a", "docx_write", "写文档", "ou_a")
+    assert result["ok"] is True
+    assert result["callback_is_private"] is True
+    assert "feishu_auth_complete" in result["fallback_hint"]
+
+
+@pytest.mark.asyncio
+async def test_auth_card_public_callback_has_no_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """公网回调时卡片不该多挂那段内网提示。"""
+    _auth_card_env(monkeypatch, tmp_path)
+    result = await _impl.auth_card_impl("ou_a", "docx_write", "写文档", "ou_a")
+    assert result["ok"] is True
+    assert "callback_is_private" not in result
+    assert "fallback_hint" not in result
+
+
+@pytest.mark.asyncio
+async def test_auth_request_tier_card_mentions_private_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """走到第 1 级时, next_step 也要写明外网用户该怎么办。"""
+    _auth_card_env(monkeypatch, tmp_path, redirect_uri="http://192.168.60.214:8090/oauth/callback")
+    result = await _impl.auth_request_impl("ou_a", "docx_write", "写文档", "ou_a")
+    assert result["tier"] == _impl.TIER_CARD
+    assert result["callback_is_private"] is True
+    assert "feishu_auth_complete" in result["next_step"]
 
 
 @pytest.mark.asyncio

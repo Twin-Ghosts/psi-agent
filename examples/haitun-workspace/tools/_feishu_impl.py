@@ -2659,7 +2659,7 @@ async def auth_card_impl(
             "capabilities": granted,
             "fallback": "卡片没发出去: 可以把 authorize_url 直接发给用户, 再调 feishu_auth_wait 等回调.",
         }
-    return {
+    result = {
         "ok": True,
         "message_id": sent.get("message_id", ""),
         "receive_id": target,
@@ -2676,6 +2676,12 @@ async def auth_card_impl(
         ),
         "next_step": f"等卡片回调, 届时调 {_AUTH_CARD_HANDLER}",
     }
+    # 卡片按钮的 open_url 打开的就是这个 redirect 所属的授权页, 所以内网回调地址对
+    # 卡片同样成立: 外网用户点完「同意授权」照样跳不回来。第 1 级也得带上后路。
+    if started.get("callback_is_private"):
+        result["callback_is_private"] = True
+        result["fallback_hint"] = str(started.get("fallback_hint", ""))
+    return result
 
 
 # ── 授权方式的降级顺序 ────────────────────────────────────────────────────────
@@ -2742,7 +2748,13 @@ async def auth_request_impl(
     if not card_skip:
         card = await auth_card_impl(key, capabilities, reason, target)
         if card.get("ok"):
-            return {**card, "tier": TIER_CARD, "tier_label": _TIER_LABEL[TIER_CARD]}
+            tiered = {**card, "tier": TIER_CARD, "tier_label": _TIER_LABEL[TIER_CARD]}
+            if card.get("callback_is_private"):
+                tiered["next_step"] = (
+                    f"{card.get('next_step', '')}; 若用户在外网导致授权页跳不回来, "
+                    "改让他把地址栏整条网址发回来交给 feishu_auth_complete"
+                )
+            return tiered
         # manual_required means there is no automatic callback channel at all, so
         # tier 2 cannot work either — go straight to tier 3 and say so.
         card_skip = str(card.get("message") or "卡片发送失败")
