@@ -60,8 +60,12 @@ def _extend_tools(existing: object, extra: list[dict[str, str]]) -> list[dict[st
     base: list[dict[str, str]] = []
     if isinstance(existing, list):
         for item in existing:
-            if isinstance(item, dict) and isinstance(item.get("name"), str) and isinstance(item.get("arguments"), str):
-                base.append({"name": item["name"], "arguments": item["arguments"]})
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            arguments = item.get("arguments")
+            if isinstance(name, str) and isinstance(arguments, str):
+                base.append({"name": name, "arguments": arguments})
     base.extend(extra)
     return base
 
@@ -194,7 +198,7 @@ class HistoryManager:
                             pending_tools = _extend_tools(pending_tools, tools)
                 continue
 
-            row = {"role": role, "text": cleaned}
+            row: dict[str, object] = {"role": role, "text": cleaned}
             if kind != "chat":
                 row["kind"] = kind
             if sends:
