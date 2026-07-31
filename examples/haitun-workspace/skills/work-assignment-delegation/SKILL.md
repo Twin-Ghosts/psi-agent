@@ -10,7 +10,7 @@ category: productivity
 
 核心原则：
 
-- 先识别缺失信息，再问清楚。
+- 先自主检索和整理；只有确实需要安排者决策，或存在多个等价接收者/历史任务候选时才追问。
 - 不能把推测写成确定事实。
 - 不把场景限制在开发任务；不只限于开发任务，项目同步、交接、客户沟通、跨部门协作都适用。
 - 只在事实确认后写入 Memory。
@@ -19,12 +19,15 @@ category: productivity
 
 推荐流程：
 
-1. 识别安排者、接收者、任务目标、背景、期望结果、截止时间、原始资料链接。
-2. 找出缺口，向用户确认。
-3. 在用户确认后，调用 `assignment_upsert` 记录安排并显式写入 `state: "assigned"`；如果已有记录仍是 `draft`，先调用 `assignment_transition` 执行 `transition_type: "assign"`。
-4. 需要通过飞书交给接收者时，调用 `assignment_send_card`。该工具从 Memory 拉取权威详情，卡片把“安排者原始内容”“Agent 分析整理 (非安排者原话)”和“参考资料”分区展示，只保留“确认接收并创建飞书任务”动作。
-5. 如果接收者确认收到，调用 `assignment_accept`。它校验当前飞书操作者是接收者，确认 Memory 状态，并通过 Memory 的原子发布 claim 创建、记录至多一个对应的飞书任务。
-6. 如果接收者需要形成可评审方案，先帮助整理方案，再记录 transition。
+1. 从当前消息识别安排者、接收者、任务目标和明确约束。`original_request` 必须逐字保存安排者实际输入或语音转写；去掉系统注入的 `<feishu_context>` 包装，但不得润色、概括或加入 Agent 推导。语音把姓名转写错时，可以在身份字段中匹配正确成员，不能修改原始转写。
+2. 先调用 `assignment_list`，按接收者稳定 `user_id` 查看未结束安排和相近任务；再调用 `memory_search` 检索任务名称、项目名、客户名或仓库名相关背景。已有安排里的上下文、证据、风险和行动项必须实际用于本次整理，不能只用来猜工具 schema。
+3. 判断是否是同一逻辑任务：安排者和接收者的稳定 `user_id` 相同、核心目标相同且历史安排未结束时，复用已有记录及其 `idempotency_key`。不要为同一逻辑任务生成新的 `idempotency_key`。如果仍存在多个等价候选，再向安排者确认。
+4. 将检索结果分成已确认事实、Agent 分析和待确认缺口。写入前至少准备 `context`、`expected_outcome`、`evidence_refs`、`gaps`、`risks`、`action_items`；每项证据保留来源 URI，每个行动项写负责人，截止时间已知时写入行动项。没有截止时间时，必须在 `gaps` 中加入结构化缺口，不能只写进 `original_request`。
+5. 只有缺失内容会改变任务目标、接收者、交付边界或验收决策时才打扰安排者；可通过仓库、内部资料和历史任务查明的信息自行补齐并保留证据，无法查明但不阻塞理解的信息标为缺口。
+6. 在用户确认后，调用 `assignment_upsert` 记录安排并显式写入 `state: "assigned"`；如果已有记录仍是 `draft`，先调用 `assignment_transition` 执行 `transition_type: "assign"`。
+7. 需要通过飞书交给接收者时，调用 `assignment_send_card`。该工具从 Memory 拉取权威详情，卡片把“安排者原始内容”“Agent 分析整理 (非安排者原话)”和“参考资料”分区展示，只保留“确认接收并创建飞书任务”动作。
+8. 如果接收者确认收到，调用 `assignment_accept`。它校验当前飞书操作者是接收者，确认 Memory 状态，并通过 Memory 的原子发布 claim 创建、记录至多一个对应的飞书任务。
+9. 如果接收者需要形成可评审方案，先帮助整理方案，再记录 transition。
 
 接收者流程：
 
@@ -68,6 +71,7 @@ category: productivity
 
 常用工具：
 
+- `memory_search`
 - `assignment_upsert`
 - `assignment_get`
 - `assignment_list`

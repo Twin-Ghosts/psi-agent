@@ -55,6 +55,15 @@ async def assignment_send_card(
         open_id = _required_text(raw_open_id)
         if open_id is not None:
             recipient_open_ids.add(open_id)
+        raw_aliases = participant.get("feishu_open_ids")
+        if raw_aliases is not None and not isinstance(raw_aliases, list):
+            return invalid_argument("assignment recipient feishu_open_ids must be an array")
+        for raw_alias in raw_aliases or []:
+            if not isinstance(raw_alias, str):
+                return invalid_argument("assignment recipient feishu_open_ids items must be strings")
+            alias = _required_text(raw_alias)
+            if alias is not None:
+                recipient_open_ids.add(alias)
     if normalized_receive_id not in recipient_open_ids:
         return invalid_argument("receive_id must identify an assignment recipient")
 
