@@ -59,6 +59,15 @@ except ImportError:  # pragma: no cover — standalone import without editable i
         return ""
 
 
+try:
+    from psi_agent._private_space import enabled as _private_space_enabled
+except ImportError:  # pragma: no cover — standalone import without editable install
+    # Same shape as the fallback above: a same-signature no-op rather than a None
+    # module, so no call site needs a guard or a type suppression.
+    def _private_space_enabled() -> bool:
+        return False
+
+
 from prompt_sections import (
     BOOTSTRAP_PENDING_SECTION,
     CONTEXT_FILE_ORDER,
@@ -73,6 +82,7 @@ from prompt_sections import (
     IDENTITY_LINE,
     LANGUAGE_LOCALIZATION_SECTION,
     PLANNING_PROGRESS_SECTION,
+    PRIVATE_SPACE_SECTION,
     PSI_AGENT_HELP_GUIDANCE,
     FUSION_MEMORY_SECTION,
     SAFETY_SECTION,
@@ -1079,6 +1089,12 @@ Never write API keys into this workspace, generated `.flow.ts` files, or committ
             "",
             FUSION_MEMORY_SECTION,
         ]
+
+        # Only spend prompt budget on the isolation rules where isolation exists.
+        # 刻意为之: this is conduct guidance layered on top of the hard checks in
+        # ``psi_agent._private_space``; it is not what enforces the boundary.
+        if _private_space_enabled():
+            stable_parts += ["", PRIVATE_SPACE_SECTION]
 
         _session_tools = {
             "sessions_list",
