@@ -4,7 +4,7 @@
 
 本目录即事件表。Session **无**业务 event catalog。
 
-**改动分层**：同 `source` 下加事件 → **只改本目录**；新 `source` 首次出现 → 另加 Session `KNOWN_SOURCES`（见开发者指南）。勿每条事件都改 Session/Channel。
+**`source` vs `event`**：`source` = 管道品牌（`feishu` / `haitun`…，很少加）；`event` = 管道里的具体事（常加）。一个 source 下很多 event。加信号默认只加 event；只有全新一类生产者才开新 source（并改 Session `KNOWN_SOURCES`）。详见 workspace `AGENTS.md` § Channel events。
 
 ---
 

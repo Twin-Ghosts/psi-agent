@@ -289,10 +289,19 @@ AI 的 tool_calls 通过 SSE 流式传输——多个 chunk 中的 `delta.tool_c
 
 业务清单不在 Session；``KNOWN_SOURCES`` 只挡「信封从哪类生产者来」，不是 event 名枚举。
 
+**``source`` vs ``event``（后人必读）：**
+
+- ``source`` = **管道品牌**（谁生产：飞书平台 / agent 合成 / …）。很少新增；新品牌才改 ``KNOWN_SOURCES``。
+- ``event`` = **管道里的具体事**（入职、逾期、进群…）。常新增；只写 agent ``channel_events/``。
+- **一对多**：一个 ``source`` 挂很多 ``event``。加「又一种事」≠ 加新 ``source``。
+- **何时新 source**：现有品牌套不上的**新一类生产者**（例：首次引入 agent 合成 → ``haitun``）。不要为每个 SOP/skill 开 source。
+
 | 概念 | 说明 |
 |------|------|
 | **channel_events** | Agent 包内按 Channel 维护的事件定义（≈ 加 tool）；含官方 ``platform_map`` 与预留 ``synthetic`` |
-| **信封** | ``event`` + ``payload``；可选 ``raw_event`` / ``raw_payload`` |
+| **source** | 生产者类别；须 ∈ ``KNOWN_SOURCES`` |
+| **event** | 业务稳定名；Session **不**维护名单 |
+| **信封** | ``source`` + ``event`` + ``payload``；可选 ``raw_event`` / ``raw_payload`` |
 | **匹配（刻意为之）** | 先 ``event``+``filter``；未命中再 ``raw_event``+``raw_filter`` |
 | **落盘挂钩** | ``{Session.agent}/triggers/``；haitun ``trigger_manage`` |
 | **kind** | ``trigger.silent`` / ``trigger.display`` |

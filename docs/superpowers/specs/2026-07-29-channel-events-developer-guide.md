@@ -19,7 +19,7 @@
 
 **重启 Channel**（`--agent` / `PSI_AGENT` 指向该包）后生效。只有换 Channel 种类、扩框架接口、修 bug 才动 `src/psi_agent/channel`。
 
-**分层口诀（后人）：** 绝大多数注册事件 = **只动 agent 包**；只有「新 source / 改信封形状」才动 Session `event_protocol`。Session **没有**业务 event catalog，但会对未知 `source` 硬拒。
+**分层口诀（后人）：** `source` = 管道品牌（很少加）；`event` = 管道里的具体事（常加）。绝大多数注册 = **只动 agent 包加 event**；只有「新一类生产者 / 改信封形状」才动 Session `event_protocol`（新 source 进 `KNOWN_SOURCES`）。Session **没有**业务 event catalog，但会对未知 `source` 硬拒。
 
 ---
 

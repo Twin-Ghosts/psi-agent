@@ -89,16 +89,33 @@ service tools:
 
 **触发器信号源（交付对接）**：有「每次 xx 就…」类需求且 xx 可观测时，在 **`channel_events/<channel>/`** 按需注册（官方：`map.py`；自定义：`produce.py`），≈ 加 tool；目录 + `channel_events/README.md` 索引表即事件表，**不要**另建 Session catalog，也**不要**为每个事件改 Channel 源码（Feishu 已统一接线）。必读：`docs/superpowers/specs/2026-07-29-channel-events-developer-guide.md`。挂钩仍用 `triggers/` + `trigger_manage` / skill `feishu-event-remind`。产品用语：**触发器**（旧称「定事」已弃用），与**定时任务**成对。
 
-**注册事件改哪一层（刻意为之，后人勿每条都改 Session/Channel）：**
+### `source` 与 `event` 是什么关系（刻意为之）
+
+信封里两层正交字段，**不要混成一张表**：
+
+| 字段 | 一句话 | 例子 |
+|------|--------|------|
+| **`source`** | **谁家的管道**——信号从哪一类生产者进来（粗粒度，很少变） | `feishu`（飞书平台推送）、`haitun`（本 agent 合成）、`telegram`、`gateway`、`test` |
+| **`event`** | **发生了什么事**——业务稳定名（细粒度，常加） | `feishu.hr.user_created`、`haitun.task.overdue` |
+
+关系：**一个 `source` 下可以有很多 `event`**。Session 只硬校验 `source ∈ KNOWN_SOURCES`；**不**枚举 `event` 名（event 清单在本目录）。
+
+**什么时候才要引入新 `source`？**
+
+- **要**：出现一种**全新的生产者类别**——现有标签套不上。例：以前只有飞书平台推送（`feishu`），后来要加「agent 自己巡检/合成」→ 开 `haitun`；将来若接钉钉原生推送 → 才开 `dingtalk` 之类。
+- **不要**：只是多一种业务事（又一种入职/逾期/报销）。同管道下**加新 `event` 即可**，继续用已有 `feishu` 或 `haitun`。
+- **不要**：为每个 skill / 每个 SOP / 每个部门各开一个 `source`。
+
+口诀：**source = 管道品牌；event = 管道里的具体信号。加信号默认只加 event；换品牌才加 source（并改 `KNOWN_SOURCES`）。**
+
+**注册事件改哪一层：**
 
 | 情况 | 最小改动 | 不要动 |
 |------|----------|--------|
-| 在已有 `source`（`feishu` / `haitun` / …）下加新 `event` | **仅本 agent 包** `channel_events/`（+ README 索引；重启 Channel） | Session / Channel 框架 |
-| **首次**引入新的信封 `source` 字符串 | agent `channel_events/` **+** Session `event_protocol.py` 的 `KNOWN_SOURCES` | Channel 业务清单 |
-| 改信封字段 / `POST /events` 形状 | Session `event_protocol`（及调用方） | 不要用改协议冒充「加一条业务事件」 |
-| 用户要「每次 xx 就提醒」且 xx 已接通 | 只写 `triggers/`（`trigger_manage`） | 不必再注册 event |
-
-合成事件用 `source: haitun` 时，Session 会对未知 `source` **硬拒**（`EventProtocolError`）——故第一次加 `haitun` 才动了 protocol；之后同 source 的新事件**不必**再改 Session。
+| 已有 `source` 下加新 `event` | **仅本 agent 包** `channel_events/`（+ README；重启 Channel） | Session / Channel 框架 |
+| **首次**新 `source` 字符串 | agent `channel_events/` **+** Session `KNOWN_SOURCES` | Channel 业务清单；不要为每条 event 改 Session |
+| 改信封字段 / `POST /events` 形状 | Session `event_protocol` | 不要用改协议冒充「加一条业务事件」 |
+| 事件已接通，只要「每次就提醒」 | 只写 `triggers/` | 不必再注册 event |
 
 ## Tools (`tools/`)
 
