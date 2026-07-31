@@ -1313,6 +1313,822 @@ async def recall_message_impl(message_id: str, user_key: str = "") -> dict[str, 
     return {"ok": True, "message_id": mid, "recalled": True}
 
 
+# ── Edit a message that was already sent ──────────────────────────────────────
+#
+# PUT /open-apis/im/v1/messages/:message_id replaces a sent message's content in
+# place: the bubble keeps its id, its position in the chat and its thread, and
+# Feishu just marks it 已编辑. That is the difference from recall+resend, which
+# loses the id (breaking replies/threads that point at it) and shows everyone a
+# "撤回了一条消息" notice.
+#
+# Only text and post messages can be edited this way. An interactive card is
+# updated through PATCH on the same path (``edit_card_impl`` below); image / file /
+# audio / media messages cannot be edited at all (230054) and do have to be
+# recalled and re-sent.
+#
+# Three limits are invisible in the raw error text and are the ones editing
+# actually trips over: only the *sender* may edit (230071), a message can be
+# edited at most 20 times (230072), and the tenant admin configures how long a
+# message stays editable (230075).
+
+_EDIT_ERROR_HINTS = {
+    230001: "请求参数不合法; 编辑只支持文本(text)和富文本(post)消息, 卡片要用 feishu_message_edit_card。",
+    230002: "机器人不在该群里, 先把机器人加入群再编辑。",
+    230006: "应用未启用机器人能力, 到开发者后台开启后再试。",
+    230011: "该消息已被撤回, 无法再编辑。",
+    230013: "机器人对该用户不可用 (不在应用可用范围, 或该用户已离职)。",
+    230018: "该群的设置不允许这次操作 (如全员禁言)。",
+    230025: "内容超长 (文本上限约 150KB, 富文本约 30KB), 缩短后再编辑。",
+    230027: "缺少编辑所需权限 (im:message / im:message:send_as_bot / im:message:update)。",
+    230054: "该消息类型不支持编辑; 图片/文件/音频/视频消息只能撤回重发, 卡片用 feishu_message_edit_card。",
+    230071: "只有消息的发送者能编辑它: 这条不是当前身份发的。机器人只能改自己发的消息; "
+    "要改某人自己发的消息, 传该用户的 user_key 并让其完成授权。",
+    230072: "该消息已达到 20 次编辑上限, 无法继续编辑。",
+    230073: "密聊消息不支持编辑。",
+    230074: "第三方加密群的消息不支持编辑。",
+    230075: "已超出可编辑时限 (受企业管理员配置约束), 只能撤回重发。",
+    230110: "该消息已被删除, 无法编辑。",
+    232009: "群组已解散, 无法编辑。",
+}
+
+
+def _build_edit_message_request(message_id: str, msg_type: str, content: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.PUT
+    req.uri = "/open-apis/im/v1/messages/:message_id"
+    req.paths["message_id"] = message_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    req.body = {"msg_type": msg_type, "content": content}
+    return req
+
+
+def _require_message_id(message_id: str, what: str) -> tuple[str, dict[str, Any] | None]:
+    """Normalize an ``om_...`` message id, or explain why the given value can't be one."""
+    mid = message_id.strip()
+    if not mid:
+        return "", _error(f"message_id is required (the om_... id of the message to {what}).")
+    if not mid.startswith("om_"):
+        return "", _error(
+            f"message_id must be a message id starting with 'om_', got {mid!r}. "
+            "chat_id (oc_...) / open_id (ou_...) 不是消息 id; "
+            "消息 id 来自 feishu_message_send 的返回、<feishu_context>, 或 feishu_message_list。",
+        )
+    return mid, None
+
+
+def _with_hint(res: dict[str, Any], hints: dict[int, str]) -> dict[str, Any]:
+    """Attach the human-readable cause for a known Feishu error code, if we have one."""
+    hint = hints.get(res.get("code"))  # type: ignore[arg-type]
+    return {**res, "hint": hint} if hint else res
+
+
+async def edit_message_impl(message_id: str, text: str, user_key: str = "") -> dict[str, Any]:
+    """Replace the content of an already-sent text/post message, keeping its message_id.
+
+    ``<at>`` tags in *text* are turned into a real ``post`` mention exactly as in
+    ``send_message_impl`` — a plain-text ``<at>`` renders as a raw tag — so editing a
+    message to add or fix a mention works.
+
+    Tenant-first with a UAT fallback: the bot edits its own messages with its own
+    token, and passing the sender's ``user_key`` is what makes editing *that person's*
+    own message possible (Feishu only lets the sender edit).
+    """
+    mid, bad = _require_message_id(message_id, "edit")
+    if bad is not None:
+        return bad
+    if not text.strip():
+        return _error(
+            "text is required: editing replaces the whole message content, and Feishu has no empty message. "
+            "要让消息消失请用 feishu_message_recall。"
+        )
+    stripped, at_open_ids = _extract_and_strip_at_tags(text)
+    if at_open_ids:
+        # Mentions only render in a post message; a plain-text <at> shows the raw tag.
+        msg_type = "post"
+        content = _build_post_at_content(stripped, at_open_ids, at_all=False)
+    else:
+        msg_type = "text"
+        content = json.dumps({"text": text}, ensure_ascii=False)
+    res = await _invoke(_build_edit_message_request(mid, msg_type, content), user_key=user_key, prefer="tenant")
+    if not res["ok"]:
+        return _with_hint(res, _EDIT_ERROR_HINTS)
+    return {"ok": True, "message_id": mid, "edited": True, "msg_type": msg_type}
+
+
+# A card is not edited by the text/post PUT above — it has its own PATCH on the same
+# path, taking only ``content`` (the whole new card). Two extra rules apply:
+# the card must declare ``config.update_multi`` (both the old and the new card;
+# without it Feishu refuses or updates the card for only one viewer), and a card is
+# only updatable for 14 days after it was sent.
+_CARD_EDIT_ERROR_HINTS = {
+    230001: "请求参数不合法; 这个接口只能更新**交互卡片**消息, 文本/富文本消息用 feishu_message_edit。",
+    230011: "该卡片消息已被撤回, 无法再更新。",
+    230025: "卡片超长 (上限约 30KB), 精简后再更新。",
+    230027: "缺少更新所需权限 (im:message / im:message:send_as_bot / im:message:update)。",
+    230054: "该消息不是交互卡片, 不支持卡片更新; 文本/富文本用 feishu_message_edit。",
+    230071: "只有卡片的发送者能更新它: 这条不是当前身份发的。",
+    230075: "已超出可更新时限 (卡片发送 14 天内可更新)。",
+    230110: "该消息已被删除, 无法更新。",
+    232009: "群组已解散, 无法更新。",
+}
+
+
+def _build_edit_card_request(message_id: str, content: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.PATCH
+    req.uri = "/open-apis/im/v1/messages/:message_id"
+    req.paths["message_id"] = message_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    req.body = {"content": content}
+    return req
+
+
+def _ensure_update_multi(card: dict[str, Any]) -> dict[str, Any]:
+    """Make a legacy card updatable-for-everyone, which Feishu requires opt-in for.
+
+    A legacy card without ``config.update_multi = true`` either refuses the update or
+    applies it for a single viewer only — a silently half-broken result. Card 2.0
+    (``{"schema": "2.0", ...}``) has no such flag and is left alone.
+    """
+    if str(card.get("schema", "")).startswith("2"):
+        return card
+    config = card.get("config")
+    merged = dict(config) if isinstance(config, dict) else {}
+    merged["update_multi"] = True
+    return {**card, "config": merged}
+
+
+async def edit_card_impl(message_id: str, card_json: str, user_key: str = "") -> dict[str, Any]:
+    """Replace a sent interactive card's content in place, keeping its message_id.
+
+    Its own endpoint (PATCH, not the text/post PUT) and its own payload: just the whole
+    new card. Used to reflect state on a card that is already in the chat — mark an
+    approval 已通过, disable buttons, refresh a dashboard — without the recipient losing
+    the original bubble.
+
+    The card's callback context is **not** re-registered: an already-sent card's
+    handlers were snapshotted at send time and consumed on first click, so an update
+    changes what the card *shows*, not what its buttons dispatch. Send a new card with
+    ``send_card_impl`` when the actions themselves must change.
+    """
+    mid, bad = _require_message_id(message_id, "update")
+    if bad is not None:
+        return bad
+    if not isinstance(card_json, str):
+        return _error("card_json must be a JSON string containing an object")
+    try:
+        card = json.loads(card_json)
+    except ValueError as exc:
+        return _error(f"card_json is not valid JSON: {exc}")
+    if not isinstance(card, dict):
+        return _error(
+            "card_json must be a JSON object — the full replacement card, e.g. "
+            '{"schema":"2.0","body":{"elements":[...]}} or {"config":...,"elements":[...]}.'
+        )
+    content = json.dumps(_ensure_update_multi(card), ensure_ascii=False)
+    res = await _invoke(_build_edit_card_request(mid, content), user_key=user_key, prefer="tenant")
+    if not res["ok"]:
+        return _with_hint(res, _CARD_EDIT_ERROR_HINTS)
+    return {"ok": True, "message_id": mid, "edited": True, "msg_type": "interactive"}
+
+
+# ── Emoji reactions on a message ───────────────────────────────────────────────
+#
+# A reaction is the lightest possible acknowledgement: 收到 / 已处理 / 赞 without
+# adding a message to the chat. Three endpoints under
+# im/v1/messages/:message_id/reactions — POST to add (returns a reaction_id), DELETE
+# .../:reaction_id to remove, GET to list.
+#
+# Removal needs the reaction_id, and only the identity that added a reaction can
+# remove it. Rather than make the caller carry ids around, ``remove_reaction_impl``
+# accepts an ``emoji_type`` and resolves it through the list endpoint, keeping the
+# tool symmetric with add (same argument removes what it added).
+#
+# ``emoji_type`` values come from Feishu's emoji table and are **case-sensitive and
+# inconsistently cased** (``THUMBSUP``/``OK``/``DONE`` but ``Fire``/``OnIt``/``Get``),
+# so a wrong guess yields 231001. The common ones are aliased below.
+_REACTION_ERROR_HINTS = {
+    230110: "该消息已被删除, 无法操作表情回应。",
+    231001: "emoji_type 不是飞书支持的值 (大小写敏感, 如 THUMBSUP / OK / DONE / Fire); 换一个再试。",
+    231002: "当前身份不在该消息所在会话里, 先把机器人加入群 (或换成群内成员的 user_key)。",
+    231003: "找不到该消息 (id 有误或已撤回)。",
+    231004: "该会话不存在、已解散或已归档。",
+    231008: "当前身份无权访问该消息。",
+    231017: "该消息类型不支持表情回应 (如系统消息)。",
+    231018: "该消息对当前身份不可见。",
+    231021: "外部群里没有操作表情回应的权限。",
+    231022: "机器人对该用户不可用 (把该用户加入应用可用范围后重新发布)。",
+    232009: "群组已解散, 无法操作表情回应。",
+}
+
+# 中文/口语说法 → 飞书 emoji_type。飞书的枚举大小写混乱 (THUMBSUP 全大写, Fire 首字母大写),
+# 模型按字面猜十次错九次, 所以常用的这些一律先过一遍映射, 并且大小写不敏感地兜住。
+_EMOJI_ALIASES = {
+    "赞": "THUMBSUP",
+    "点赞": "THUMBSUP",
+    "👍": "THUMBSUP",
+    "好的": "OK",
+    "ok": "OK",
+    "👌": "OK",
+    "完成": "DONE",
+    "已完成": "DONE",
+    "收到": "OnIt",
+    "在办": "OnIt",
+    "处理中": "OnIt",
+    "感谢": "THANKS",
+    "谢谢": "THANKS",
+    "鼓掌": "APPLAUSE",
+    "👏": "APPLAUSE",
+    "笑": "SMILE",
+    "😄": "SMILE",
+    "心": "HEART",
+    "❤️": "HEART",
+    "爱心": "HEART",
+    "火": "Fire",
+    "🔥": "Fire",
+    "庆祝": "PARTY",
+    "🎉": "PARTY",
+    "加油": "JIAYI",
+    "对勾": "CheckMark",
+    "✅": "DONE",
+    "打勾": "CheckMark",
+    "叉": "CrossMark",
+    "❌": "CrossMark",
+}
+# The canonical spelling for values whose casing is the usual mistake, keyed lowercase.
+_EMOJI_CANONICAL = {
+    v.lower(): v
+    for v in (
+        "THUMBSUP",
+        "OK",
+        "DONE",
+        "SMILE",
+        "HEART",
+        "APPLAUSE",
+        "CLAP",
+        "PRAISE",
+        "THANKS",
+        "LGTM",
+        "Fire",
+        "PARTY",
+        "OnIt",
+        "JIAYI",
+        "Get",
+        "CheckMark",
+        "CrossMark",
+        "Hundred",
+        "Trophy",
+        "FIREWORKS",
+        "ROSE",
+        "MUSCLE",
+        "WAVE",
+        "LAUGH",
+        "CRY",
+        "THINKING",
+        "ThumbsDown",
+        "MinusOne",
+    )
+}
+
+
+def _normalize_emoji_type(emoji_type: str) -> str:
+    """Map a Chinese word / emoji character / mis-cased key onto a Feishu ``emoji_type``.
+
+    Unknown values pass through untouched: Feishu's table is ~130 entries and grows,
+    so an unrecognized value is sent as given (and answered with 231001) rather than
+    rejected here by a list that would go stale.
+    """
+    raw = emoji_type.strip()
+    if not raw:
+        return ""
+    alias = _EMOJI_ALIASES.get(raw) or _EMOJI_ALIASES.get(raw.lower())
+    if alias:
+        return alias
+    return _EMOJI_CANONICAL.get(raw.lower(), raw)
+
+
+def _build_add_reaction_request(message_id: str, emoji_type: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.POST
+    req.uri = "/open-apis/im/v1/messages/:message_id/reactions"
+    req.paths["message_id"] = message_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    req.body = {"reaction_type": {"emoji_type": emoji_type}}
+    return req
+
+
+def _build_remove_reaction_request(message_id: str, reaction_id: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.DELETE
+    req.uri = "/open-apis/im/v1/messages/:message_id/reactions/:reaction_id"
+    req.paths["message_id"] = message_id
+    req.paths["reaction_id"] = reaction_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    return req
+
+
+def _build_list_reactions_request(message_id: str, emoji_type: str, page_size: int, page_token: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.GET
+    req.uri = "/open-apis/im/v1/messages/:message_id/reactions"
+    req.paths["message_id"] = message_id
+    if emoji_type:
+        req.add_query("reaction_type", emoji_type)
+    req.add_query("page_size", max(1, min(page_size, 50)))
+    if page_token:
+        req.add_query("page_token", page_token)
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    return req
+
+
+def _reaction_record(item: Any) -> dict[str, Any]:
+    """One reaction as {reaction_id, emoji_type, operator_id, operator_type, action_time}."""
+    if not isinstance(item, dict):
+        return {}
+    reaction_type = item.get("reaction_type")
+    operator = item.get("operator")
+    return {
+        "reaction_id": item.get("reaction_id", ""),
+        "emoji_type": (reaction_type or {}).get("emoji_type", "") if isinstance(reaction_type, dict) else "",
+        "operator_id": (operator or {}).get("operator_id", "") if isinstance(operator, dict) else "",
+        "operator_type": (operator or {}).get("operator_type", "") if isinstance(operator, dict) else "",
+        "action_time": item.get("action_time", ""),
+    }
+
+
+async def add_reaction_impl(message_id: str, emoji_type: str, user_key: str = "") -> dict[str, Any]:
+    """React to a message with an emoji — an acknowledgement that adds no message.
+
+    ``emoji_type`` accepts a Feishu key (``THUMBSUP``), a Chinese word (``赞``,
+    ``收到``) or the emoji itself (``👍``); all three are normalized to the key
+    Feishu expects, whose casing is irregular enough that a literal guess usually
+    fails with 231001.
+
+    Returns the ``reaction_id``. Keep it if you want to remove exactly this reaction
+    later, though ``remove_reaction_impl`` can also find it from the emoji.
+    """
+    mid, bad = _require_message_id(message_id, "react to")
+    if bad is not None:
+        return bad
+    emoji = _normalize_emoji_type(emoji_type)
+    if not emoji:
+        return _error("emoji_type is required (e.g. THUMBSUP / OK / DONE / OnIt, or 赞 / 收到 / 完成).")
+    res = await _invoke(_build_add_reaction_request(mid, emoji), user_key=user_key, prefer="tenant")
+    if not res["ok"]:
+        return _with_hint(res, _REACTION_ERROR_HINTS)
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    return {"ok": True, "message_id": mid, **_reaction_record(data), "emoji_type": emoji}
+
+
+async def list_reactions_impl(
+    message_id: str, emoji_type: str = "", page_size: int = 50, page_token: str = "", user_key: str = ""
+) -> dict[str, Any]:
+    """List a message's reactions — who reacted with what, and each ``reaction_id``."""
+    mid, bad = _require_message_id(message_id, "list reactions of")
+    if bad is not None:
+        return bad
+    emoji = _normalize_emoji_type(emoji_type)
+    res = await _invoke(
+        _build_list_reactions_request(mid, emoji, page_size, page_token.strip()),
+        user_key=user_key,
+        prefer="tenant",
+    )
+    if not res["ok"]:
+        return _with_hint(res, _REACTION_ERROR_HINTS)
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    raw_items = data.get("items")
+    items: list[Any] = raw_items if isinstance(raw_items, list) else []
+    reactions = [r for r in (_reaction_record(i) for i in items) if r]
+    return {
+        "ok": True,
+        "message_id": mid,
+        "reactions": reactions,
+        "count": len(reactions),
+        "has_more": bool(data.get("has_more")),
+        "page_token": data.get("page_token", ""),
+    }
+
+
+async def remove_reaction_impl(
+    message_id: str, emoji_type: str = "", reaction_id: str = "", user_key: str = ""
+) -> dict[str, Any]:
+    """Remove a reaction, addressed either by ``reaction_id`` or by its emoji.
+
+    Feishu deletes by ``reaction_id`` and only lets the identity that added a reaction
+    remove it. Given an ``emoji_type`` instead, the message's reactions are listed and
+    the matching one is resolved — so "把刚才那个赞取消" works from the same argument
+    that added it, without the caller having stored an id.
+
+    Resolution stays deliberately strict: if several reactions share that emoji (added
+    by different people), the ids are returned and nothing is deleted rather than
+    guessing whose to take back.
+    """
+    mid, bad = _require_message_id(message_id, "remove a reaction from")
+    if bad is not None:
+        return bad
+    rid = reaction_id.strip()
+    emoji = _normalize_emoji_type(emoji_type)
+    if not rid:
+        if not emoji:
+            return _error("pass either reaction_id, or emoji_type (e.g. THUMBSUP / 赞) to look it up.")
+        listed = await list_reactions_impl(mid, emoji, page_size=50, user_key=user_key)
+        if not listed["ok"]:
+            return listed
+        matches = [r for r in listed["reactions"] if r["emoji_type"] == emoji and r["reaction_id"]]
+        if not matches:
+            return _error(
+                f"没有找到 emoji_type={emoji!r} 的表情回应 (可能本来没加, 或已被取消)。",
+                message_id=mid,
+                emoji_type=emoji,
+                code="reaction_not_found",
+            )
+        if len(matches) > 1:
+            return _error(
+                f"该消息上有 {len(matches)} 个 {emoji!r} 表情回应 (不同人加的), 无法确定要取消哪一个; "
+                "从 candidates 里挑一个 reaction_id 再调一次 (只能取消自己加的那个)。",
+                message_id=mid,
+                emoji_type=emoji,
+                candidates=matches,
+                code="reaction_ambiguous",
+            )
+        rid = matches[0]["reaction_id"]
+    res = await _invoke(_build_remove_reaction_request(mid, rid), user_key=user_key, prefer="tenant")
+    if not res["ok"]:
+        return _with_hint(res, _REACTION_ERROR_HINTS)
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    # The echoed record first, then the ids we know: Feishu's delete response omits
+    # fields for some message types, and an empty echo must not blank out the answer.
+    return {"ok": True, **_reaction_record(data), "message_id": mid, "reaction_id": rid, "removed": True}
+
+
+# ── Rich media messages — image / file / audio / video / rich text ──────────────
+#
+# Sending anything but text is always two calls: upload the bytes to get a key, then
+# send a message whose content references that key. Two *different* upload endpoints,
+# and picking the wrong one is the usual failure:
+#
+#   im/v1/images  → image_key (img_v3_...)  — pictures only, ≤10MB
+#   im/v1/files   → file_key  (file_v3_...) — documents, audio, video, ≤30MB
+#
+# These are IM-message uploads, unrelated to drive medias/upload_all (which puts a
+# file in the cloud drive / a doc block, see upload_media_impl). A drive file_token
+# cannot be sent as a message and vice versa.
+#
+# Both go out as multipart, which under this SDK means the binary must sit in the
+# request **body** as an io.IOBase carrying a .name — Client.arequest overwrites
+# req.files with Files.extract_files(req.body) right before sending, so a file put in
+# req.files is dropped and the request leaves as application/json ("boundary not
+# found"). Same reason _NamedBytes exists for drive uploads.
+_IMAGE_UPLOAD_MAX_BYTES = 10 * 1024 * 1024
+_FILE_UPLOAD_MAX_BYTES = 30 * 1024 * 1024
+
+# What Feishu accepts for im/v1/images. TIFF/HEIC are converted to JPG server-side.
+_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".ico", ".tif", ".tiff", ".heic"}
+# file_type for im/v1/files is an enum, not the extension: audio must be opus, video
+# mp4, documents their own four, and anything else falls back to "stream" (which is
+# what a .zip/.csv/.txt attachment is sent as).
+_FILE_TYPE_BY_SUFFIX = {
+    ".opus": "opus",
+    ".mp4": "mp4",
+    ".pdf": "pdf",
+    ".doc": "doc",
+    ".docx": "doc",
+    ".xls": "xls",
+    ".xlsx": "xls",
+    ".ppt": "ppt",
+    ".pptx": "ppt",
+}
+_FILE_TYPES = {"opus", "mp4", "pdf", "doc", "xls", "ppt", "stream"}
+# msg_type → which upload endpoint feeds it, so one send path serves all of them.
+_MEDIA_MSG_TYPES = {"image": "image", "file": "file", "audio": "file", "media": "file"}
+_UPLOAD_ERROR_HINTS = {
+    234001: "上传参数不合法 (image_type / file_type / file_name 有问题)。",
+    234002: "上传鉴权失败, 检查 PSI_FEISHU_APP_ID / PSI_FEISHU_APP_SECRET。",
+    234006: "文件超过大小上限 (图片 10MB, 文件 30MB)。",
+    234007: "应用未启用机器人能力, 到开发者后台开启后再试。",
+    234010: "文件是空的 (0 字节), 飞书拒收。",
+    234011: "无法识别的图片格式; 支持 JPG/JPEG/PNG/WEBP/GIF/BMP/ICO/TIFF/HEIC。",
+    234039: "图片分辨率超限 (GIF 2000x2000, 其它 12000x12000); 改用文件方式发送。",
+}
+_SEND_MEDIA_ERROR_HINTS = {
+    230001: "请求参数不合法; 常见原因是 image_key 与 file_key 用反了 (图片用 image_key, 音视频/文件用 file_key)。",
+    230002: "机器人不在该群里, 先把机器人加入群。",
+    230013: "机器人对该用户不可用 (不在应用可用范围, 或该用户已离职)。",
+    230055: "上传时的 file_type 与消息类型不一致 (音频要 opus, 视频要 mp4)。",
+}
+
+
+def _build_image_upload_request(image_type: str, file_name: str, data: bytes) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.POST
+    req.uri = "/open-apis/im/v1/images"
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    # Binary in the body (not req.files) — see the note above _IMAGE_UPLOAD_MAX_BYTES.
+    req.body = {"image_type": image_type, "image": _NamedBytes(data, file_name)}
+    return req
+
+
+def _build_file_upload_request(file_type: str, file_name: str, data: bytes, duration_ms: int) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.POST
+    req.uri = "/open-apis/im/v1/files"
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    body: dict[str, Any] = {"file_type": file_type, "file_name": file_name}
+    if duration_ms > 0:
+        body["duration"] = duration_ms
+    body["file"] = _NamedBytes(data, file_name)
+    req.body = body
+    return req
+
+
+async def _read_upload_bytes(file_path: str, limit: int, what: str) -> tuple[bytes, str, dict[str, Any] | None]:
+    """Read a local file for upload; returns (data, name, error) with error set on refusal."""
+    p = anyio.Path(file_path)
+    if not await p.is_file():
+        return b"", "", _error(f"file not found: {file_path}")
+    data = await p.read_bytes()
+    if not data:
+        return b"", "", _error(f"{file_path} is empty (0 bytes); Feishu rejects empty uploads.")
+    if len(data) > limit:
+        return (
+            b"",
+            "",
+            _error(
+                f"{what} is {len(data)} bytes, over the {limit // (1024 * 1024)}MB limit for this endpoint. "
+                "更大的文件先上传到云盘 (feishu_drive_upload) 再把链接发出去。",
+                size=len(data),
+            ),
+        )
+    return data, p.name, None
+
+
+async def upload_image_impl(image_path: str, user_key: str = "") -> dict[str, Any]:
+    """Upload a picture for use in messages; returns its ``image_key`` (``img_v3_...``).
+
+    Separate from ``upload_media_impl`` (cloud drive): only an IM ``image_key`` can be
+    sent as an image message or embedded in a post, and only a drive ``file_token``
+    can live in a document.
+    """
+    data, name, bad = await _read_upload_bytes(image_path, _IMAGE_UPLOAD_MAX_BYTES, "image")
+    if bad is not None:
+        return bad
+    suffix = pathlib.Path(name).suffix.lower()
+    if suffix and suffix not in _IMAGE_SUFFIXES:
+        return _error(
+            f"{name} is not an image Feishu accepts ({', '.join(sorted(_IMAGE_SUFFIXES))}). "
+            "非图片文件用 feishu_message_send_file 发送。",
+        )
+    # A factory: the SDK consumes the file entry on the first send, and this may be
+    # retried under a second identity.
+    res = await _invoke(
+        lambda: _build_image_upload_request("message", name, data),
+        user_key=user_key,
+        prefer="tenant",
+    )
+    if not res["ok"]:
+        return _with_hint(res, _UPLOAD_ERROR_HINTS)
+    rdata = res["data"] if isinstance(res["data"], dict) else {}
+    return {"ok": True, "image_key": rdata.get("image_key", ""), "file_name": name, "size": len(data)}
+
+
+async def upload_file_impl(
+    file_path: str, file_type: str = "", file_name: str = "", duration_ms: int = 0, user_key: str = ""
+) -> dict[str, Any]:
+    """Upload a document/audio/video for use in messages; returns its ``file_key``.
+
+    ``file_type`` is Feishu's enum, not the extension — it is derived from the suffix
+    (``.mp4``→mp4, ``.pdf``→pdf, ``.docx``→doc, …) and anything unmapped uploads as
+    ``stream``, which is how a .zip/.csv/.txt attachment is sent.
+
+    Audio must genuinely be OPUS: Feishu plays an ``audio`` message only for
+    ``file_type=opus``, and sending an .mp3 as audio is rejected with 230055. Convert
+    first (``ffmpeg -i in.mp3 -acodec libopus -ac 1 -ar 16000 out.opus``) or send the
+    .mp3 as a plain file instead.
+    """
+    data, name, bad = await _read_upload_bytes(file_path, _FILE_UPLOAD_MAX_BYTES, "file")
+    if bad is not None:
+        return bad
+    name = file_name.strip() or name
+    ftype = file_type.strip() or _FILE_TYPE_BY_SUFFIX.get(pathlib.Path(name).suffix.lower(), "stream")
+    if ftype not in _FILE_TYPES:
+        return _error(
+            f"file_type must be one of {', '.join(sorted(_FILE_TYPES))}, got {ftype!r} "
+            "(it is Feishu's enum, not the file extension; unlisted formats use 'stream').",
+        )
+    res = await _invoke(
+        lambda: _build_file_upload_request(ftype, name, data, max(0, duration_ms)),
+        user_key=user_key,
+        prefer="tenant",
+    )
+    if not res["ok"]:
+        return _with_hint(res, _UPLOAD_ERROR_HINTS)
+    rdata = res["data"] if isinstance(res["data"], dict) else {}
+    return {"ok": True, "file_key": rdata.get("file_key", ""), "file_name": name, "file_type": ftype, "size": len(data)}
+
+
+async def send_media_message_impl(
+    receive_id: str,
+    file_path: str,
+    msg_type: str,
+    receive_id_type: str = "chat_id",
+    cover_image_path: str = "",
+    file_name: str = "",
+    duration_ms: int = 0,
+    user_key: str = "",
+) -> dict[str, Any]:
+    """Upload a local file and send it as an image / file / audio / video message.
+
+    Both halves of the two-call dance in one place, because doing them separately is
+    where the keys get crossed: ``msg_type`` decides which upload endpoint runs
+    (``image`` → im/v1/images → ``image_key``; everything else → im/v1/files →
+    ``file_key``) and what the message content looks like.
+
+    ``media`` (video) may carry a cover: ``cover_image_path`` is uploaded as an image
+    and referenced as the thumbnail. Without one the video shows no preview frame.
+    """
+    kind = msg_type.strip().lower()
+    if kind not in _MEDIA_MSG_TYPES:
+        return _error(
+            f"msg_type must be one of {', '.join(sorted(_MEDIA_MSG_TYPES))}, got {msg_type!r}. "
+            "image=图片, file=文档/附件, audio=语音(opus), media=视频(mp4)。",
+        )
+    if kind == "image":
+        uploaded = await upload_image_impl(file_path, user_key=user_key)
+        if not uploaded["ok"]:
+            return uploaded
+        content: dict[str, Any] = {"image_key": uploaded["image_key"]}
+        detail = {"image_key": uploaded["image_key"]}
+    else:
+        forced = {"audio": "opus", "media": "mp4"}.get(kind, "")
+        uploaded = await upload_file_impl(
+            file_path, file_type=forced, file_name=file_name, duration_ms=duration_ms, user_key=user_key
+        )
+        if not uploaded["ok"]:
+            return uploaded
+        content = {"file_key": uploaded["file_key"]}
+        detail = {"file_key": uploaded["file_key"], "file_type": uploaded["file_type"]}
+        if kind == "media" and cover_image_path.strip():
+            cover = await upload_image_impl(cover_image_path.strip(), user_key=user_key)
+            if not cover["ok"]:
+                # The video is uploaded and sendable; a missing cover must not lose it.
+                logger.warning(f"video cover upload failed, sending without a cover — {cover.get('message', '')}")
+            else:
+                content["image_key"] = cover["image_key"]
+                detail["cover_image_key"] = cover["image_key"]
+    rid_type = _infer_receive_id_type(receive_id, receive_id_type)
+    req = _build_send_message_request(receive_id, rid_type, kind, json.dumps(content, ensure_ascii=False))
+    res = await _invoke(req, user_key=user_key, prefer="tenant")
+    if not res["ok"]:
+        return _with_hint({**res, **detail}, _SEND_MEDIA_ERROR_HINTS)
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    return {
+        "ok": True,
+        "message_id": data.get("message_id", ""),
+        "thread_id": data.get("thread_id", ""),
+        "chat_id": data.get("chat_id", ""),
+        "msg_type": kind,
+        "size": uploaded["size"],
+        **detail,
+    }
+
+
+# A post message is the only way to put text, pictures, links and mentions in **one**
+# bubble. Its content is a list of paragraphs, each a list of nodes — so the tool takes
+# a compact block list and expands it, uploading any local image on the way. Feishu
+# requires img and media nodes to occupy a paragraph of their own, which the builder
+# enforces rather than leaving to the caller.
+_POST_BLOCK_TAGS = {"text", "a", "at", "img", "code_block", "hr", "md"}
+
+
+def _post_node(block: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+    """One post node from a compact block dict; returns (node, error message)."""
+    tag = str(block.get("tag", "text")).strip() or "text"
+    if tag not in _POST_BLOCK_TAGS:
+        return None, f"unsupported tag {tag!r}; use one of {', '.join(sorted(_POST_BLOCK_TAGS))}"
+    if tag == "hr":
+        return {"tag": "hr"}, ""
+    if tag == "at":
+        user_id = str(block.get("user_id", "")).strip()
+        if not user_id:
+            return None, "an 'at' block needs user_id (an ou_... open_id, or \"all\")"
+        return {"tag": "at", "user_id": user_id}, ""
+    if tag == "a":
+        href = str(block.get("href", "")).strip()
+        if not href:
+            return None, "an 'a' block needs href"
+        return {"tag": "a", "text": str(block.get("text", "")) or href, "href": href}, ""
+    if tag == "img":
+        # image_path is resolved to an image_key by the caller before we get here.
+        image_key = str(block.get("image_key", "")).strip()
+        if not image_key:
+            return None, "an 'img' block needs image_key or image_path"
+        return {"tag": "img", "image_key": image_key}, ""
+    text = block.get("text")
+    if not isinstance(text, str) or not text:
+        return None, f"a {tag!r} block needs non-empty text"
+    if tag == "code_block":
+        node: dict[str, Any] = {"tag": "code_block", "text": text}
+        language = str(block.get("language", "")).strip()
+        if language:
+            node["language"] = language
+        return node, ""
+    if tag == "md":
+        return {"tag": "md", "text": text}, ""
+    node = {"tag": "text", "text": text}
+    style = block.get("style")
+    if isinstance(style, list) and style:
+        node["style"] = [str(s) for s in style]
+    return node, ""
+
+
+def _build_post_content(title: str, nodes: list[dict[str, Any]]) -> str:
+    """Group post nodes into paragraphs: img/hr/md stand alone, runs of text merge."""
+    paragraphs: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for node in nodes:
+        if node["tag"] in {"img", "hr", "md"}:
+            if current:
+                paragraphs.append(current)
+                current = []
+            paragraphs.append([node])
+            continue
+        current.append(node)
+    if current:
+        paragraphs.append(current)
+    return json.dumps({"zh_cn": {"title": title, "content": paragraphs}}, ensure_ascii=False)
+
+
+async def send_post_message_impl(
+    receive_id: str,
+    blocks_json: str,
+    title: str = "",
+    receive_id_type: str = "chat_id",
+    user_key: str = "",
+) -> dict[str, Any]:
+    """Send a **rich text** (post) message: styled text, links, mentions and images in one bubble.
+
+    ``blocks_json`` is a JSON array of compact blocks, in order, e.g.::
+
+        [{"tag": "text", "text": "本周周报", "style": ["bold"]},
+         {"tag": "at", "user_id": "ou_xxx"},
+         {"tag": "a", "text": "看板", "href": "https://..."},
+         {"tag": "img", "image_path": "C:/tmp/chart.png"},
+         {"tag": "md", "text": "1. 第一项\\n2. 第二项"}]
+
+    An ``img`` block may name a local ``image_path`` (uploaded here) or an existing
+    ``image_key``. Blocks are grouped into paragraphs the way Feishu requires — images,
+    separators and markdown each get their own line, adjacent text/link/mention nodes
+    share one — so the caller writes a flat list and gets a correct layout.
+    """
+    if not isinstance(blocks_json, str):
+        return _error("blocks_json must be a JSON string containing an array of blocks")
+    try:
+        blocks = json.loads(blocks_json)
+    except ValueError as exc:
+        return _error(f"blocks_json is not valid JSON: {exc}")
+    if not isinstance(blocks, list) or not blocks:
+        return _error(
+            'blocks_json must be a non-empty JSON array, e.g. [{"tag":"text","text":"hi"},'
+            '{"tag":"img","image_path":"C:/tmp/a.png"}]'
+        )
+    nodes: list[dict[str, Any]] = []
+    uploaded_keys: list[str] = []
+    for position, raw_block in enumerate(blocks):
+        if not isinstance(raw_block, dict):
+            return _error(f"block #{position} is not a JSON object", block_index=position)
+        block: dict[str, Any] = {str(k): v for k, v in raw_block.items()}
+        if str(block.get("tag", "")).strip() == "img" and not str(block.get("image_key", "")).strip():
+            path = str(block.get("image_path", "")).strip()
+            if not path:
+                return _error(f"block #{position}: an 'img' block needs image_path or image_key", block_index=position)
+            up = await upload_image_impl(path, user_key=user_key)
+            if not up["ok"]:
+                return {**up, "block_index": position}
+            block["image_key"] = up["image_key"]
+            uploaded_keys.append(up["image_key"])
+        node, err = _post_node(block)
+        if node is None:
+            return _error(f"block #{position}: {err}", block_index=position)
+        nodes.append(node)
+    rid_type = _infer_receive_id_type(receive_id, receive_id_type)
+    content = _build_post_content(title.strip(), nodes)
+    res = await _invoke(
+        _build_send_message_request(receive_id, rid_type, "post", content), user_key=user_key, prefer="tenant"
+    )
+    if not res["ok"]:
+        return _with_hint(res, _SEND_MEDIA_ERROR_HINTS)
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    return {
+        "ok": True,
+        "message_id": data.get("message_id", ""),
+        "thread_id": data.get("thread_id", ""),
+        "chat_id": data.get("chat_id", ""),
+        "msg_type": "post",
+        "blocks": len(nodes),
+        "uploaded_image_keys": uploaded_keys,
+    }
+
+
 def _build_list_messages_request(
     container_id: str, container_id_type: str, sort_type: str, page_size: int, page_token: str
 ) -> BaseRequest:

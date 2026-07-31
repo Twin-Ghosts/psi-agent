@@ -397,7 +397,7 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
     机器人**自己发的消息随时能撤**；撤**别人**的消息要求操作身份是该群群主/管理员，否则飞书报 230026，
     此时传群主的 `user_key` 并让其授权才行。撤回还有**时限**（企业管理员配置），超时报 230009。
     这两类失败工具都会在结果里带一句 `hint` 说明卡在哪，**如实转告用户**，别反复重试或谎称已撤回。
-    撤回不是编辑：内容写错就"撤回旧的 + 重发一条新的"。
+    撤回是"让这条消息不该存在"；只是**内容写错**就别撤回重发，用下面第 20 条的编辑。
 19. **改多维表格里已有的格子（改状态/改错的值/补空格，不是新增一行）**：用户说"把张三那行状态改成
     已完成""金额写错了改成 12000""把这几行都标记成已归档"时，**别用 `feishu_bitable_create_record`**
     （那会多出一行重复数据），按三步改：
@@ -421,3 +421,46 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
     公式/查找引用/创建时间/自动编号是**计算列，写不进去**，用户要改这些得改它依赖的列。
     两个工具默认 `validate_fields=True` 会先核列名、写完再比对飞书回显，发现没落值就在结果里给
     `dropped_fields` + `warning`——**看到这个别报"已改好"**，如实说哪几个值没写进去。
+20. **改已经发出去的消息（不撤回、不重发）**：用户说"把刚才那条改成…""数字写错了改一下"
+    "补一句"时，用 `feishu_message_edit(message_id=<om_...>, text=<改好的完整内容>, user_key=<sender_open_id>)`。
+    消息**保留原 message_id**、保留在会话/话题里的位置，飞书只标一个"已编辑"——比"撤回+重发"好：
+    重发会丢 message_id（引用它的回复和话题会断），还会给所有人推一条"撤回了一条消息"。
+    编辑是**整条替换**，所以要传改好的**全文**，不是差量；`<at user_id="ou_xxx"></at>` 照样能用
+    （会自动改用富文本发，@才渲染得出来）。
+    卡片消息用 `feishu_message_edit_card(message_id, card_json)`（不同接口）——审批卡片改成"已通过"、
+    按钮置灰、看板刷新都用它，别再发一张新卡片把旧的留在那儿还能点。注意卡片的**按钮回调不会重新注册**
+    （回调在发送时就快照好、首次点击即消耗），所以它改的是卡片**显示什么**，不是按钮**触发什么**；
+    可选动作本身要变就得用 `feishu_message_send_card` 发新卡片。
+    三条硬限制，答复用户前先知道：**只有发送者能编辑**（机器人只能改自己发的；要改某人自己发的消息，
+    传该用户的 `user_key` 并让其授权）、一条消息最多编辑 **20 次**、超过企业管理员配置的**可编辑时限**就只能撤回重发。
+    图片/文件/音频/视频消息**不能编辑**，只能撤回重发。失败时结果里带 `hint` 指明卡在哪，如实转告。
+21. **给消息加表情回应（收到/已处理，不占一条消息）**：用户说"收到就行""给这条点个赞"
+    "标记一下已处理"时，用 `feishu_message_react(message_id=<om_...>, emoji_type=<表情>)`——回应落在原气泡上，
+    **不往会话里加消息**，而回一句"好的"会。取消用
+    `feishu_message_unreact(message_id, emoji_type=<同一个表情>)`（也可传 `reaction_id`）；
+    看谁回应了什么用 `feishu_message_reactions(message_id)`（也是拿 `reaction_id` 的地方，可当轻量点名/投票读）。
+    `emoji_type` 传飞书键（`THUMBSUP`/`OK`/`DONE`/`OnIt`/`THANKS`/`Fire`/`PARTY`）、中文（`赞`/`收到`/`完成`/`感谢`）
+    或表情本身（`👍`/`✅`/`🎉`）都行，工具会归一化——**飞书这套枚举大小写不统一**（`THUMBSUP` 全大写但
+    `Fire`/`OnIt` 首字母大写），照字面猜十次错九次，报 231001。
+    只有**加回应的那个身份**能取消它，所以取消时传当初加回应用的同一个 `user_key`；
+    同一个表情被多人加过时工具**不猜**，返回 candidates 让你挑 `reaction_id`。
+22. **发图片/文件/语音/视频/富文本消息（不只是纯文本和卡片）**：
+    - `feishu_message_send_image(receive_id, image_path)`——把**本机图片**发成图片消息（图表、截图、照片）。
+      纯文本里放个 URL 只是个链接，云盘文件也不是聊天附件，只有这个能在会话里真的显示一张图。≤10MB。
+    - `feishu_message_send_file(receive_id, file_path, file_name="")`——发成可下载附件（PDF/Word/Excel/PPT/zip/任意）。
+      ≤30MB；要的是"放云盘、发链接、可协作编辑"就用 `feishu_drive_upload` 而不是这个。
+    - `feishu_message_send_audio(receive_id, audio_path, duration_ms=0)`——发成可播放语音。飞书只认
+      **OPUS**，.mp3 当语音发直接报 230055，先转（`ffmpeg -i in.mp3 -acodec libopus -ac 1 -ar 16000 out.opus`）
+      或者干脆用 `send_file` 当附件发。`text_to_speech` 产出的是 MP3，要发语音得先转。
+    - `feishu_message_send_video(receive_id, video_path, cover_image_path="")`——发成可播放视频，只支持 **mp4**、≤30MB；
+      不传封面就没有预览帧（封面上传失败不会连视频一起丢，会照发无封面版）。
+    - `feishu_message_send_post(receive_id, blocks_json, title="")`——**富文本**：加粗文字、链接、@、图片
+      装在**同一个气泡**里（带标题的周报、图表配解说、带链接和@的清单）。比卡片省事（不用拼卡片 JSON、
+      不用接回调），比发好几条消息干净。`blocks_json` 是块数组，`tag` 可为
+      `text`（可带 `style`: bold/italic/underline/lineThrough）/`a`(`href`)/`at`(`user_id`，`"all"` 是全员)/
+      `img`（本机图给 `image_path` 自动上传，或直接给已有 `image_key`）/`code_block`(可带 `language`)/`md`/`hr`，
+      分段规则（图片、分割线、markdown 各自独占一行，相邻文字/链接/@合并成一行）工具已经替你处理好。
+    这几个工具都是**上传 + 发送两步一起做**的，所以不会把 `image_key` 和 `file_key` 搞混
+    （图片走 `im/v1/images` 得 `image_key`，音视频文件走 `im/v1/files` 得 `file_key`，用反了报 230001）。
+    要给用户**发一个你刚生成的本地文件**、又不关心细节，最省事的仍是在回复里输出 `[SEND:<绝对路径>]`（第 14 条）；
+    这几个工具用在**指定发给谁、指定发成哪种消息类型**（比如把图表发到某个群、把视频带封面发给某人）的时候。
