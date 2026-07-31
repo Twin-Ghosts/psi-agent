@@ -85,8 +85,9 @@ _AUTH_PROMPT = (
     "1. tier=card —— 卡片授权, 用户点一下就好. **这一轮立刻收尾**, 别等待、也别再把链接"
     "当文本发一遍; 等飞书把点击回调给你 (一条 <feishu_card_action>, dispatch.handler 是 "
     "feishu_auth_wait), **那一轮**才调 feishu_auth_wait (用回调 value 里的 user_key).\n"
-    "2. tier=link_auto —— 网站授权但不用复制 code. 把 authorize_url 发给用户, 紧接着调 "
-    "feishu_auth_wait 等授权码自动回流.\n"
+    "2. tier=link_auto —— 网站授权但不用复制 code. 把 authorize_url 发给用户后**这一轮收尾**, "
+    "请他点完「同意授权」回你一句; 那一轮再调 feishu_auth_check 查一眼即可完成. 别在发链接这轮"
+    "调 feishu_auth_wait 干等 —— 阻塞占住 turn 锁, 用户这期间说什么都排队, 看着就是机器人卡死.\n"
     "3. tier=link_manual —— 网站授权且需要复制 code (兜底). 把 authorize_url 发给用户, "
     "再让他从浏览器**地址栏**复制 code= 后面那一串 (或整段网址) 交给 feishu_auth_complete. "
     "想帮用户彻底免掉复制 (把这个部署升到前两级), 调 feishu_auth_env_check 查出确切缺哪一项"
@@ -2480,10 +2481,12 @@ async def auth_start_impl(capabilities: str = "", user_key: str = "") -> dict[st
             "message": (
                 f"请把 authorize_url 发给用户 (本次申请的权限: {', '.join(union)}), "
                 "让其打开并点「同意授权」-- **不用复制任何 code**, 授权码会自动回流.\n"
-                "发完链接后立刻调 feishu_auth_wait (同一个 user_key) 等待用户点完, 它会自己完成授权.\n"
+                "发完链接**这一轮就收尾**, 顺带请用户点完后回你一句; 别在同一轮调 feishu_auth_wait 干等 "
+                "(阻塞占住 turn 锁, 用户这期间说什么都得排队). 用户回话那一轮调 "
+                "feishu_auth_check (同一个 user_key) 查一眼即可完成授权.\n"
                 "授权一次即缓存并自动续期; 只有当以后的任务需要**新的**权限时才会再请你授权一次."
             ),
-            "next_step": "feishu_auth_wait",
+            "next_step": "结束本轮; 用户回话后调 feishu_auth_check",
         }
         if private:
             result["callback_is_private"] = True
@@ -2711,6 +2714,10 @@ _TIER_LABEL = {
     TIER_MANUAL: "网站授权(需要复制 code)",
 }
 
+# ``auth_check_impl`` 的取件窗口: 只够跑完一次取件请求, 不做第二次轮询。取件箱 TTL 约
+# 10 分钟, 所以「看一眼就走」不会丢码 —— 这一点是它敢不阻塞的根据。
+_CHECK_TIMEOUT_SECONDS = 3.0
+
 
 async def auth_request_impl(
     user_key: str,
@@ -2730,7 +2737,8 @@ async def auth_request_impl(
     explicitly as ``tier``/``next_step``:
 
     - ``card`` — finish the turn now; wait only when the click callback arrives.
-    - ``link_auto`` — send ``authorize_url`` to the user, then ``feishu_auth_wait``.
+    - ``link_auto`` — send ``authorize_url``, finish the turn, then ``feishu_auth_check``
+      in the turn the user reports back. Never block in the sending turn.
     - ``link_manual`` — send ``authorize_url``, then ask for the code and pass it to
       ``feishu_auth_complete``.
     """
@@ -2777,7 +2785,7 @@ async def auth_request_impl(
         return started
     tier = TIER_LINK if started.get("auto_receive") else TIER_MANUAL
     next_step = (
-        "把 authorize_url 发给用户, 然后调 feishu_auth_wait 等授权码自动回流"
+        "把 authorize_url 发给用户后**结束本轮**, 请他点完回你一句; 那一轮再调 feishu_auth_check 查一眼"
         if tier == TIER_LINK
         else "把 authorize_url 发给用户, 再让他把地址栏里的 code 交给 feishu_auth_complete"
     )
@@ -2839,9 +2847,10 @@ async def auth_wait_impl(user_key: str = "", timeout_seconds: int = 480) -> dict
         # (实测过一次真实场景: 等待窗口比用户点击早关了 12 秒, 而回调随后就到了。)
         base = (
             f"等了 {int(timeout)} 秒还没收到授权回调 -- 这不代表失败: 用户可能还没点完. "
-            "授权码在 Gateway 取件箱里可留存约 10 分钟, 所以**先再调一次 feishu_auth_wait 继续等**, "
-            "拿到就照样能完成授权; 别急着让用户手抄 code, 也别告诉他失败了. "
-            "只有再等一轮仍然没有, 才去确认用户是否真的点了「同意授权」."
+            "授权码在 Gateway 取件箱里可留存约 10 分钟, 所以**这一轮就此收尾**, 告诉用户「点完同意后回我一句」; "
+            "下一轮再用 feishu_auth_check 查一眼即可完成授权, 别急着让用户手抄 code, 也别告诉他失败了. "
+            "**不要在本轮里再调一次 feishu_auth_wait 继续等** —— 阻塞占着 Session 的 turn 锁, "
+            "用户这期间说什么都得排队, 表现出来就是「机器人卡住不回话」."
         )
         # 回调地址只有内网可达时, 「一直重等」对外网用户是个死循环: 他的浏览器根本跳不到
         # 那个地址, 等到取件箱过期也不会有回调。所以这里必须给出另一条出路, 而不是让
@@ -2857,13 +2866,58 @@ async def auth_wait_impl(user_key: str = "", timeout_seconds: int = 480) -> dict
                 timed_out=True,
                 callback_is_private=True,
                 retry_hint=(
-                    "先再等一轮 feishu_auth_wait; 仍然没有就让用户把地址栏整条网址发回来, 交给 feishu_auth_complete"
+                    "本轮收尾; 下一轮用 feishu_auth_check 查一眼. "
+                    "仍然没有就让用户把地址栏整条网址发回来, 交给 feishu_auth_complete"
                 ),
             )
         return _error(
             base,
             timed_out=True,
-            retry_hint="再调一次 feishu_auth_wait (同一个 user_key) 即可继续等待",
+            retry_hint="本轮收尾, 下一轮用 feishu_auth_check (同一个 user_key) 查一眼, 别再阻塞等待",
+        )
+    if got.get("error"):
+        return _error(f"用户侧授权失败: {got['error']}")
+    return await auth_complete_impl(got.get("code", ""), user_key)
+
+
+async def auth_check_impl(user_key: str = "") -> dict[str, Any]:
+    """查一眼授权码到没到, 不阻塞 —— 到了就完成授权, 没到立刻返回。
+
+    与 ``auth_wait_impl`` 是同一条取件通道, 区别只在等待时长: 这里用一个极短的窗口
+    「看一眼就走」, 所以不会占住 Session 的 turn 锁。Gateway 取件箱 TTL 约 10 分钟,
+    用户晚点几分钟点完「同意授权」, 下一轮再查照样拿得到, 因此**推迟取码是安全的**,
+    不需要谁在原地干等。
+
+    ``pending=True`` 表示还没到 (不是失败): 收尾本轮, 等用户说「点好了」再查一次。
+    """
+    pending = await _read_pending(user_key)
+    state = str(pending.get("state") or "")
+    mode = str(pending.get("mode") or "manual")
+    if not state:
+        return _error("没有待完成的授权, 请先调 feishu_auth_request.")
+    if mode == "manual":
+        return _error(
+            "当前环境无法自动接收授权码, 请让用户从浏览器地址栏复制 code 后交给 feishu_auth_complete. "
+            "(想免掉复制: 调 feishu_auth_env_check 看确切缺哪一项配置, 它会给出修法.)",
+            manual_required=True,
+            next_step="feishu_auth_env_check",
+        )
+    if mode == "gateway":
+        got = await _oauth_rx.poll_gateway(state, _CHECK_TIMEOUT_SECONDS)
+    else:
+        port = _oauth_rx.loopback_port()
+        with contextlib.suppress(ValueError):
+            from urllib.parse import urlsplit  # noqa: PLC0415
+
+            port = urlsplit(str(pending.get("redirect_uri") or "")).port or port
+        got = await _oauth_rx.wait_loopback(port, state, _CHECK_TIMEOUT_SECONDS)
+    if not got:
+        return _error(
+            "授权码还没到 —— 这不是失败, 只说明用户还没在授权页点「同意授权」. "
+            "**本轮就此收尾**, 请用户点完后回你一句, 那一轮再调一次 feishu_auth_check. "
+            "授权码在取件箱里可留存约 10 分钟, 晚点查照样能完成.",
+            pending=True,
+            retry_hint="等用户说点好了, 再调 feishu_auth_check (同一个 user_key)",
         )
     if got.get("error"):
         return _error(f"用户侧授权失败: {got['error']}")

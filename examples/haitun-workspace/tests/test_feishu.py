@@ -1406,7 +1406,10 @@ async def test_auth_start_prefers_automatic_receive(monkeypatch: pytest.MonkeyPa
     result = await _impl.auth_start_impl("")
     assert result["auto_receive"] is True
     assert result["mode"] == "gateway"
-    assert result["next_step"] == "feishu_auth_wait"
+    # 自动通道下要把 agent 引到非阻塞的 check, 且明说本轮收尾 —— 发链接那轮阻塞等待会
+    # 占住 Session 的 turn 锁, 用户这期间说什么都排队。
+    assert "feishu_auth_check" in result["next_step"]
+    assert "feishu_auth_wait" not in result["next_step"]
     q = parse_qs(urlparse(result["authorize_url"]).query)
     assert q["redirect_uri"] == ["https://gw.example.com/oauth/callback"]
     # 自动路径的提示里不能再出现「从地址栏复制」的指令
@@ -1612,7 +1615,10 @@ async def test_auth_wait_timeout_is_retryable(monkeypatch: pytest.MonkeyPatch, t
     result = await _impl.auth_wait_impl("", 10)
     assert result["ok"] is False
     assert result["timed_out"] is True
-    assert "feishu_auth_wait" in result["message"]
+    # 超时必须把 agent 引到非阻塞的 check 上, 而不是「再等一轮」—— 后者会一直占着
+    # Session 的 turn 锁, 用户看到的就是机器人卡死不回话。
+    assert "feishu_auth_check" in result["message"]
+    assert "feishu_auth_check" in result["retry_hint"]
 
 
 @pytest.mark.asyncio
@@ -1626,6 +1632,84 @@ async def test_auth_wait_surfaces_user_denial(monkeypatch: pytest.MonkeyPatch, t
 
     monkeypatch.setattr(_impl._oauth_rx, "poll_gateway", _denied)
     result = await _impl.auth_wait_impl("", 10)
+    assert result["ok"] is False
+    assert "access_denied" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_auth_check_completes_when_code_already_arrived(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """取件箱里已经有码时, check 直接完成授权 —— 与 wait 走同一条通道。"""
+    pending = tmp_path / "pending.json"
+    pending.write_text(json.dumps({"state": "st", "mode": "gateway"}), encoding="utf-8")
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(pending))
+
+    async def _has_code(state: str, timeout_seconds: float, interval: float = 1.0) -> dict[str, str]:
+        return {"code": "ARRIVED"}
+
+    monkeypatch.setattr(_impl._oauth_rx, "poll_gateway", _has_code)
+    completed: dict[str, Any] = {}
+
+    async def _fake_complete(code: str, user_key: str = "") -> dict[str, Any]:
+        completed["code"] = code
+        return {"ok": True}
+
+    monkeypatch.setattr(_impl, "auth_complete_impl", _fake_complete)
+    result = await _impl.auth_check_impl("")
+    assert result["ok"] is True
+    assert completed["code"] == "ARRIVED"
+
+
+@pytest.mark.asyncio
+async def test_auth_check_does_not_block_when_code_absent(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """码还没到时 check 立刻返回 pending, 且只用极短窗口取件 —— 它不占 turn 锁的根据。"""
+    pending = tmp_path / "pending.json"
+    pending.write_text(json.dumps({"state": "st", "mode": "gateway"}), encoding="utf-8")
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(pending))
+    seen: dict[str, float] = {}
+
+    async def _no_code(state: str, timeout_seconds: float, interval: float = 1.0) -> dict[str, str]:
+        seen["timeout"] = timeout_seconds
+        return {}
+
+    monkeypatch.setattr(_impl._oauth_rx, "poll_gateway", _no_code)
+    result = await _impl.auth_check_impl("")
+    assert result["ok"] is False
+    assert result["pending"] is True
+    # 不是失败, 也不能把用户往「手抄 code」上引。
+    assert "feishu_auth_check" in result["retry_hint"]
+    assert seen["timeout"] <= _impl._CHECK_TIMEOUT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_auth_check_without_pending_asks_for_request(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(tmp_path / "missing.json"))
+    result = await _impl.auth_check_impl("")
+    assert result["ok"] is False
+    assert "feishu_auth_request" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_auth_check_manual_mode_says_so(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """manual 环境没有自动通道, check 也得如实说, 别让 agent 以为再查一次就有。"""
+    pending = tmp_path / "pending.json"
+    pending.write_text(json.dumps({"state": "st", "mode": "manual"}), encoding="utf-8")
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(pending))
+    result = await _impl.auth_check_impl("")
+    assert result["ok"] is False
+    assert result["manual_required"] is True
+
+
+@pytest.mark.asyncio
+async def test_auth_check_surfaces_user_denial(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    pending = tmp_path / "pending.json"
+    pending.write_text(json.dumps({"state": "st", "mode": "gateway"}), encoding="utf-8")
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(pending))
+
+    async def _denied(state: str, timeout_seconds: float, interval: float = 1.0) -> dict[str, str]:
+        return {"error": "access_denied"}
+
+    monkeypatch.setattr(_impl._oauth_rx, "poll_gateway", _denied)
+    result = await _impl.auth_check_impl("")
     assert result["ok"] is False
     assert "access_denied" in result["message"]
 
@@ -1940,7 +2024,9 @@ async def test_auth_request_falls_back_to_link_without_copy(monkeypatch: pytest.
     assert result["authorize_url"]
     assert result["downgraded_from"] == _impl.TIER_CARD
     assert "ou_" in result["downgrade_reason"]  # says why, so the agent can be honest
-    assert "feishu_auth_wait" in result["next_step"]
+    # 第 2 级同样不许在发链接那轮阻塞: 收尾 + 下一轮 check。
+    assert "feishu_auth_check" in result["next_step"]
+    assert "feishu_auth_wait" not in result["next_step"]
     assert captured == {}  # no card was sent
 
 

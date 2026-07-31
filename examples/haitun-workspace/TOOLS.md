@@ -114,7 +114,7 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
 | 优先级 | `tier` | 用户要做什么 | 你接下来做什么 |
 | --- | --- | --- | --- |
 | 1 | `card` | 点一下卡片按钮 | **这一轮立刻收尾**，等回调那轮再 `feishu_auth_wait` |
-| 2 | `link_auto` | 打开链接点「同意」，**不用复制 code** | 发 `authorize_url`，紧接着 `feishu_auth_wait` |
+| 2 | `link_auto` | 打开链接点「同意」，**不用复制 code** | 发 `authorize_url`，**这一轮收尾**，用户回话那轮再 `feishu_auth_check` |
 | 3 | `link_manual` | 打开链接点「同意」，**还要复制 code** | 发 `authorize_url`，再拿 code 调 `feishu_auth_complete` |
 
 降级原因写在返回的 `downgraded_from` / `downgrade_reason` 里：**如实告诉用户**为什么用了更麻烦的
@@ -141,9 +141,10 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
 
 **第 2、3 级的细节**：把返回的 `authorize_url` **原样发给用户**，让其打开并点「同意授权」，然后
 
-- `tier=link_auto`：**不要向用户索要任何 code**。直接调 `feishu_auth_wait(user_key=...)`
-  等待——用户点完「同意授权」后浏览器会看到「授权成功」页，授权码自动回流并完成授权。
-  返回 `timed_out=True` 时可以再调一次继续等；
+- `tier=link_auto`：**不要向用户索要任何 code**，也**别在发链接这一轮调 `feishu_auth_wait` 干等**。
+  发完链接就收尾，顺带请用户点完「同意授权」后回你一句（他会看到「授权成功」页）；用户回话那一轮调
+  `feishu_auth_check(user_key=...)` 查一眼即可完成授权。返回 `pending=True` 只是还没点完，不是失败，
+  再收尾一轮等他回话即可——授权码在取件箱里留存约 10 分钟，晚一轮取毫无损失；
 - `tier=link_manual`：才需要**明确告诉用户**看浏览器地址栏，地址形如
   `http://localhost/?code=xxxxxxxx&state=...`，把 `code=` 后面、`&` 之前那一串复制回来
   （整段网址也行），然后调 `feishu_auth_complete(code, user_key=...)`。
