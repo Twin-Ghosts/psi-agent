@@ -95,6 +95,29 @@ async def test_assignment_upsert_forwards_assignment_object(monkeypatch):
     ]
 
 
+async def test_assignment_upsert_documents_required_assignment_shape(monkeypatch):
+    module = _import_assignment_tool_with_fake_client("assignment_upsert", _FakeMemoryClient(), monkeypatch)
+    docstring = inspect.getdoc(module.assignment_upsert) or ""
+
+    for field in (
+        "title",
+        "state",
+        "assigner",
+        "recipients",
+        "original_request",
+        "context",
+        "expected_outcome",
+        "evidence_refs",
+        "gaps",
+        "risks",
+        "action_items",
+        "idempotency_key",
+    ):
+        assert field in docstring
+    assert "user_id" in docstring
+    assert "feishu_open_id" in docstring
+
+
 async def test_assignment_list_forwards_read_filter(monkeypatch):
     fake_client = _FakeMemoryClient()
     module = _import_assignment_tool_with_fake_client("assignment_list", fake_client, monkeypatch)
@@ -276,6 +299,28 @@ async def test_assignment_send_card_rejects_non_string_recipient_open_id(monkeyp
     assert fake_feishu.calls == []
 
 
+async def test_assignment_send_card_accepts_recipient_delivery_alias(monkeypatch):
+    assignment = {
+        **_assignment_record(),
+        "recipients": [
+            {
+                "user_id": "wangweibo",
+                "display_name": "王炜博",
+                "feishu_open_id": "ou_old",
+                "feishu_open_ids": ["ou_old", "ou_current"],
+            }
+        ],
+    }
+    fake_client = _QueueMemoryClient([{"ok": True, "result": assignment}])
+    fake_feishu = _FakeFeishuMessage()
+    module = _import_assignment_send_card_with_fakes(fake_client, fake_feishu, monkeypatch)
+
+    out = json.loads(await module.assignment_send_card("ou_current", "wa-123"))
+
+    assert out["ok"] is True
+    assert fake_feishu.calls[0]["receive_id"] == "ou_current"
+
+
 async def test_assignment_send_card_rejects_draft_assignment(monkeypatch):
     assignment = {**_assignment_record(), "state": "draft"}
     fake_client = _QueueMemoryClient([{"ok": True, "result": assignment}])
@@ -368,7 +413,7 @@ async def test_assignment_accept_confirms_publishes_and_records_delivery(monkeyp
     assert "工作安排编号: wa-123" in task_call["description"]
     assert task_call["due"] == "2026-08-01"
     assert task_call["assignees"] == "ou_receiver,ou_other"
-    assert task_call["followers"] == "ou_assigner"
+    assert task_call["followers"] == ""
     assert task_call["user_key"] == "ou_receiver"
     assert task_call["identity"] == "bot"
     first_transition = fake_client.calls[1]
@@ -419,6 +464,91 @@ async def test_assignment_accept_rejects_non_recipient(monkeypatch):
     assert out["error"]["code"] == "assignment_recipient_required"
     assert len(fake_client.calls) == 1
     assert fake_tasks.calls == []
+
+
+async def test_assignment_accept_preserves_memory_publication_error(monkeypatch):
+    assignment = {**_assignment_record(), "state": "received"}
+    fake_client = _QueueMemoryClient(
+        [
+            {"ok": True, "result": assignment},
+            {
+                "ok": False,
+                "error": {
+                    "code": "assignment_schema_migration_required",
+                    "message": "Apply Fusion Memory Postgres migration 008_assignment_publications.sql",
+                    "retryable": False,
+                },
+            },
+        ]
+    )
+    fake_tasks = _FakeFeishuTask()
+    module = _import_assignment_accept_with_fakes(
+        fake_client,
+        fake_tasks,
+        "feishu-ou_receiver",
+        monkeypatch,
+    )
+
+    out = json.loads(await module.assignment_accept("wa-123"))
+
+    assert out["ok"] is False
+    assert out["accepted"] is True
+    assert out["published"] is False
+    assert out["error"] == {
+        "code": "assignment_schema_migration_required",
+        "message": "Apply Fusion Memory Postgres migration 008_assignment_publications.sql",
+        "retryable": False,
+    }
+    assert fake_tasks.calls == []
+
+
+async def test_assignment_accept_uses_current_operator_alias_for_feishu_task(monkeypatch):
+    assignment = {
+        **_assignment_record(),
+        "state": "received",
+        "recipients": [
+            {
+                "user_id": "wangweibo",
+                "display_name": "王炜博",
+                "feishu_open_id": "ou_old",
+                "feishu_open_ids": ["ou_old", "ou_current"],
+            }
+        ],
+    }
+    fake_client = _QueueMemoryClient(
+        [
+            {"ok": True, "result": assignment},
+            {
+                "ok": True,
+                "result": {
+                    "acquired": True,
+                    "claim_token": "claim-1",
+                    "publication": {"status": "claimed", "channel": "feishu_task"},
+                },
+            },
+            {
+                "ok": True,
+                "result": {
+                    "status": "published",
+                    "channel": "feishu_task",
+                    "task_guid": "task-1",
+                },
+            },
+        ]
+    )
+    fake_tasks = _FakeFeishuTask()
+    module = _import_assignment_accept_with_fakes(
+        fake_client,
+        fake_tasks,
+        "feishu-ou_current",
+        monkeypatch,
+    )
+
+    out = json.loads(await module.assignment_accept("wa-123"))
+
+    assert out["ok"] is True
+    assert fake_tasks.calls[0]["assignees"] == "ou_current"
+    assert fake_client.calls[2][1]["publication"]["recipient_open_ids"] == ["ou_current"]
 
 
 async def test_assignment_accept_keeps_receipt_when_feishu_publish_fails(monkeypatch):
@@ -837,6 +967,13 @@ async def test_work_assignment_skill_documents_generic_assignment_flow():
     assert "assignment_transition" in source
     assert "不只限于开发任务" in source
     assert "不能把推测写成确定事实" in source
+    assert "先调用 `assignment_list`" in source
+    assert "再调用 `memory_search`" in source
+    assert "`original_request` 必须逐字保存" in source
+    assert "不要为同一逻辑任务生成新的 `idempotency_key`" in source
+    for field in ("context", "evidence_refs", "gaps", "risks", "action_items"):
+        assert f"`{field}`" in source
+    assert "没有截止时间" in source
 
 
 async def test_work_assignment_skill_documents_recipient_plan_flow():

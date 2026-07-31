@@ -44,8 +44,8 @@ async def assignment_accept(assignment_id: str) -> str:
     if assignment is None:
         return _error("assignment_invalid", "Fusion Memory returned an invalid assignment")
 
-    recipient_open_ids = _participant_open_ids(assignment.get("recipients"))
-    if operator_open_id not in recipient_open_ids:
+    recipients = assignment.get("recipients")
+    if not _participants_include_open_id(recipients, operator_open_id):
         return _error(
             "assignment_recipient_required",
             "Only a listed assignment recipient may accept this work",
@@ -88,12 +88,14 @@ async def assignment_accept(assignment_id: str) -> str:
                 "Assignment receipt was not confirmed",
             )
         assignment = accepted_assignment
-        recipient_open_ids = _participant_open_ids(assignment.get("recipients"))
-        if operator_open_id not in recipient_open_ids:
+        recipients = assignment.get("recipients")
+        if not _participants_include_open_id(recipients, operator_open_id):
             return _error(
                 "assignment_recipient_required",
                 "Only a listed assignment recipient may accept this work",
             )
+
+    recipient_open_ids = _recipient_task_open_ids(recipients, operator_open_id)
 
     claim = await CLIENT.call_tool(
         "assignment_publication",
@@ -105,10 +107,16 @@ async def assignment_accept(assignment_id: str) -> str:
         retryable=False,
     )
     if not claim.get("ok"):
+        error_code, error_message, retryable = _memory_error_fields(
+            claim,
+            fallback_code="assignment_publication_claim_failed",
+            fallback_message="Could not claim Feishu task publication",
+        )
         return _accepted_publication_error(
             normalized_assignment_id,
-            "assignment_publication_claim_failed",
-            _memory_error_message(claim, "Could not claim Feishu task publication"),
+            error_code,
+            error_message,
+            retryable=retryable,
         )
     claim_result = _result_object(claim)
     if claim_result is None:
@@ -164,7 +172,10 @@ async def assignment_accept(assignment_id: str) -> str:
             description=_task_description(assignment, normalized_assignment_id),
             due=_task_due(assignment),
             assignees=",".join(recipient_open_ids),
-            followers=",".join(_participant_open_ids([assignment.get("assigner")])),
+            # Feishu task create currently rejects follower members with 1470500
+            # in the bot-owned publish path; keep the assignees and embed the
+            # assigner context in the description instead of passing followers.
+            followers="",
             user_key=operator_open_id,
             identity="bot",
         )
@@ -288,21 +299,35 @@ def _is_invalid_request(result: dict[str, Any]) -> bool:
     return isinstance(error, dict) and error.get("code") == "invalid_request"
 
 
-def _memory_error_message(result: dict[str, Any], fallback: str) -> str:
+def _memory_error_fields(
+    result: dict[str, Any],
+    *,
+    fallback_code: str,
+    fallback_message: str,
+) -> tuple[str, str, bool]:
     error = result.get("error")
     if isinstance(error, dict):
-        return _text(error.get("message")) or fallback
-    return fallback
+        code = _text(error.get("code")) or fallback_code
+        message = _text(error.get("message")) or fallback_message
+        retryable = error.get("retryable") is True
+        return code, message, retryable
+    return fallback_code, fallback_message, False
 
 
-def _accepted_publication_error(assignment_id: str, code: str, message: str) -> str:
+def _accepted_publication_error(
+    assignment_id: str,
+    code: str,
+    message: str,
+    *,
+    retryable: bool = False,
+) -> str:
     return dumps_result(
         {
             "ok": False,
             "assignment_id": assignment_id,
             "accepted": True,
             "published": False,
-            "error": {"code": code, "message": message, "retryable": False},
+            "error": {"code": code, "message": message, "retryable": retryable},
         }
     )
 
@@ -317,6 +342,38 @@ def _participant_open_ids(value: Any) -> list[str]:
         open_id = _text(participant.get("feishu_open_id"))
         if open_id and _OPEN_ID_RE.fullmatch(open_id) and open_id not in open_ids:
             open_ids.append(open_id)
+    return open_ids
+
+
+def _participant_aliases(value: Any) -> list[str]:
+    if not isinstance(value, dict):
+        return []
+    aliases = _participant_open_ids([value])
+    raw_aliases = value.get("feishu_open_ids")
+    if not isinstance(raw_aliases, list):
+        return aliases
+    for raw_alias in raw_aliases:
+        alias = _text(raw_alias)
+        if alias and _OPEN_ID_RE.fullmatch(alias) and alias not in aliases:
+            aliases.append(alias)
+    return aliases
+
+
+def _participants_include_open_id(value: Any, open_id: str) -> bool:
+    if not isinstance(value, list):
+        return False
+    return any(open_id in _participant_aliases(participant) for participant in value)
+
+
+def _recipient_task_open_ids(value: Any, operator_open_id: str) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    open_ids: list[str] = []
+    for participant in value:
+        aliases = _participant_aliases(participant)
+        selected = operator_open_id if operator_open_id in aliases else (aliases[0] if aliases else None)
+        if selected is not None and selected not in open_ids:
+            open_ids.append(selected)
     return open_ids
 
 
