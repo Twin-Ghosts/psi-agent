@@ -6307,6 +6307,12 @@ def split_embedded_sheet_token(block_token: str) -> tuple[str, str]:
     return head, tail
 
 
+def _embedded_block_token(block: dict[str, Any], key: str) -> str:
+    """The ``token`` of an embedded block's payload (``"sheet"`` / ``"bitable"``), or ``""``."""
+    payload = block.get(key)
+    return str(payload.get("token", "")) if isinstance(payload, dict) else ""
+
+
 def _embedded_sheet_result(document_id: str, child: dict[str, Any], *, rows: int, columns: int) -> dict[str, Any]:
     """Shape a created sheet block into the tool result, including its write coordinates.
 
@@ -6314,7 +6320,7 @@ def _embedded_sheet_result(document_id: str, child: dict[str, Any], *, rows: int
     they are what ``feishu_sheet_write`` needs to fill the embedded grid, and an agent
     that only got the ``block_id`` back would have no way to write into it.
     """
-    token = ((child.get("sheet") or {}) if isinstance(child.get("sheet"), dict) else {}).get("token", "")
+    token = _embedded_block_token(child, "sheet")
     spreadsheet, sheet_id = split_embedded_sheet_token(token)
     return {
         "ok": True,
@@ -6419,12 +6425,16 @@ async def append_doc_sheet_impl(
     needs_growing = values is None and (want_rows > create_rows or want_columns > create_columns)
     if values is None and not needs_growing:
         return out
-    if not out["spreadsheet_token"] or not out["sheet_id"]:
+    # Split again into plain strings rather than reading them back out of ``out``, whose
+    # value type is the union of everything in the result dict.
+    block_token = _embedded_block_token(child, "sheet")
+    spreadsheet, sheet_id = split_embedded_sheet_token(block_token)
+    if not spreadsheet or not sheet_id:
         return {
             **out,
             "ok": False,
             "message": (
-                f"embedded sheet created but its token {out['block_token']!r} could not be split into "
+                f"embedded sheet created but its token {block_token!r} could not be split into "
                 "spreadsheet_token/sheet_id — write the values with feishu_sheet_write once you have them."
             ),
         }
@@ -6438,8 +6448,8 @@ async def append_doc_sheet_impl(
     # lost — so the end cell is always spelled out.
     end = f"{_column_letter(want_columns)}{want_rows}"
     wrote = await write_sheet_impl(
-        out["spreadsheet_token"],
-        f"{out['sheet_id']}!A1:{end}",
+        spreadsheet,
+        f"{sheet_id}!A1:{end}",
         json.dumps(payload, ensure_ascii=False),
         user_key,
         identity,
@@ -6459,8 +6469,8 @@ async def append_doc_sheet_impl(
         # Bold header, matching what feishu_doc_append_table's header row looks like. A
         # style failure is reported but doesn't fail the call: the data is already there.
         styled = await format_sheet_impl(
-            out["spreadsheet_token"],
-            f"{out['sheet_id']}!A1:{_column_letter(len(values[0]))}1",
+            spreadsheet,
+            f"{sheet_id}!A1:{_column_letter(len(values[0]))}1",
             json.dumps({"font": {"bold": True}}),
             user_key,
             identity,
@@ -6503,7 +6513,7 @@ async def append_doc_bitable_impl(
     child = _first_child(res, _BITABLE_BLOCK_TYPE)
     if child is None:
         return _error("Feishu created the block but returned no bitable block.")
-    token = ((child.get("bitable") or {}) if isinstance(child.get("bitable"), dict) else {}).get("token", "")
+    token = _embedded_block_token(child, "bitable")
     app_token, table_id = split_embedded_sheet_token(token)
     return {
         "ok": True,
@@ -7253,8 +7263,7 @@ def _embedded_block_coordinates(raw: dict[str, Any], block_type: int) -> dict[st
     block the ``app_token``/``table_id`` that ``feishu_bitable_*`` takes.
     """
     if block_type == _SHEET_BLOCK_TYPE:
-        payload = raw.get("sheet")
-        token = payload.get("token", "") if isinstance(payload, dict) else ""
+        token = _embedded_block_token(raw, "sheet")
         spreadsheet, sheet_id = split_embedded_sheet_token(token)
         return {
             "block_token": token,
@@ -7263,8 +7272,7 @@ def _embedded_block_coordinates(raw: dict[str, Any], block_type: int) -> dict[st
             "range": f"{sheet_id}!A1" if sheet_id else "",
         }
     if block_type == _BITABLE_BLOCK_TYPE:
-        payload = raw.get("bitable")
-        token = payload.get("token", "") if isinstance(payload, dict) else ""
+        token = _embedded_block_token(raw, "bitable")
         app_token, table_id = split_embedded_sheet_token(token)
         return {"block_token": token, "app_token": app_token, "table_id": table_id}
     return {}
