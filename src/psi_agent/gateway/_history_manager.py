@@ -29,17 +29,17 @@ def _merge_reasoning(existing: object, extra: str) -> str:
     return "\n".join(parts)
 
 
-def _tool_calls_as_markers(msg: dict[str, object]) -> str:
-    """Rebuild SSE-style ``[Tool Call:…]`` markers from JSONL ``tool_calls``.
+def _tool_calls_payload(msg: dict[str, object]) -> list[dict[str, str]]:
+    """Project JSONL ``tool_calls`` to ``[{name, arguments}, …]`` for SPA tool UI.
 
-    Session streams those markers live but does **not** persist them into
-    ``reasoning`` (only model thinking). SPA post-turn tool list parses markers,
-    so history projection synthesizes them from structured ``tool_calls``.
+    Session streams ``[Tool Call:…]`` only on the live SSE; JSONL keeps structured
+    ``tool_calls``. History exposes them as a separate ``tools`` field — never
+    stuffed into ``reasoning``.
     """
     raw = msg.get("tool_calls")
     if not isinstance(raw, list):
-        return ""
-    parts: list[str] = []
+        return []
+    out: list[dict[str, str]] = []
     for tc in raw:
         if not isinstance(tc, dict):
             continue
@@ -52,13 +52,34 @@ def _tool_calls_as_markers(msg: dict[str, object]) -> str:
         args = fn.get("arguments", "{}")
         if not isinstance(args, str):
             args = "{}"
-        parts.append(f"[Tool Call: {name}({args})]")
-    return "\n".join(parts)
+        out.append({"name": name.strip(), "arguments": args})
+    return out
 
 
-def _assistant_process_chunk(msg: dict[str, object], reasoning: str) -> str:
-    """Thinking prose + synthesized tool-call markers for one assistant JSONL row."""
-    return _merge_reasoning(reasoning, _tool_calls_as_markers(msg))
+def _extend_tools(existing: object, extra: list[dict[str, str]]) -> list[dict[str, str]]:
+    base: list[dict[str, str]] = []
+    if isinstance(existing, list):
+        for item in existing:
+            if (
+                isinstance(item, dict)
+                and isinstance(item.get("name"), str)
+                and isinstance(item.get("arguments"), str)
+            ):
+                base.append({"name": item["name"], "arguments": item["arguments"]})
+    base.extend(extra)
+    return base
+
+
+def _attach_process(
+    row: dict[str, object],
+    *,
+    reasoning: str,
+    tools: list[dict[str, str]],
+) -> None:
+    if reasoning:
+        row["reasoning"] = reasoning
+    if tools:
+        row["tools"] = tools
 
 
 class HistoryManager:
@@ -70,9 +91,9 @@ class HistoryManager:
             session_id=session_id,
         )
         messages: list[dict[str, object]] = []
-        # Reasoning (+ synthesized tool markers) from tool-call assistant rows
-        # held until the next displayable assistant — SPA tools/thinking survive refresh.
+        # Tool-round thinking / tools held until the next displayable assistant.
         pending_reasoning = ""
+        pending_tools: list[dict[str, str]] = []
         try:
             content = await path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -99,17 +120,22 @@ class HistoryManager:
                 if isinstance(reasoning_raw, str) and reasoning_raw.strip()
                 else ""
             )
+            tools = _tool_calls_payload(msg)
 
             if not is_displayable_chat_message(msg):
                 # Tool rounds: assistant + tool_calls (+ optional thinking), no chat content.
-                if role == "assistant" and kind == KIND_CHAT:
-                    chunk = _assistant_process_chunk(msg, reasoning)
-                    if chunk:
-                        if messages and messages[-1].get("role") == "assistant":
-                            prev = messages[-1]
-                            prev["reasoning"] = _merge_reasoning(prev.get("reasoning"), chunk)
-                        else:
-                            pending_reasoning = _merge_reasoning(pending_reasoning, chunk)
+                if role == "assistant" and kind == KIND_CHAT and (reasoning or tools):
+                    if messages and messages[-1].get("role") == "assistant":
+                        prev = messages[-1]
+                        if reasoning:
+                            prev["reasoning"] = _merge_reasoning(prev.get("reasoning"), reasoning)
+                        if tools:
+                            prev["tools"] = _extend_tools(prev.get("tools"), tools)
+                    else:
+                        if reasoning:
+                            pending_reasoning = _merge_reasoning(pending_reasoning, reasoning)
+                        if tools:
+                            pending_tools = _extend_tools(pending_tools, tools)
                 continue
 
             text = msg.get("content", "")
@@ -118,16 +144,18 @@ class HistoryManager:
             sends = extract_send_paths(text) if role == "assistant" else []
             cleaned = strip_transfer_markers(text)
 
-            if role == "user" and pending_reasoning:
-                # Orphan tool-round thinking before a new user turn: attach to last
-                # assistant if any, else drop (no bubble to hang on).
+            if role == "user" and (pending_reasoning or pending_tools):
                 if messages and messages[-1].get("role") == "assistant":
                     prev = messages[-1]
-                    prev["reasoning"] = _merge_reasoning(
-                        prev.get("reasoning"),
-                        pending_reasoning,
-                    )
+                    if pending_reasoning:
+                        prev["reasoning"] = _merge_reasoning(
+                            prev.get("reasoning"),
+                            pending_reasoning,
+                        )
+                    if pending_tools:
+                        prev["tools"] = _extend_tools(prev.get("tools"), pending_tools)
                 pending_reasoning = ""
+                pending_tools = []
 
             # SEND-only assistant turns: fold paths into the previous assistant
             # bubble so spa v1 does not render an empty message.
@@ -144,21 +172,34 @@ class HistoryManager:
                             _merge_reasoning(pending_reasoning, reasoning),
                         )
                         pending_reasoning = ""
+                    if tools or pending_tools:
+                        prev["tools"] = _extend_tools(
+                            prev.get("tools"),
+                            _extend_tools(pending_tools, tools),
+                        )
+                        pending_tools = []
                 else:
                     row: dict[str, object] = {"role": role, "text": "", "sends": sends}
                     merged = _merge_reasoning(pending_reasoning, reasoning)
+                    merged_tools = _extend_tools(pending_tools, tools)
                     pending_reasoning = ""
-                    if merged:
-                        row["reasoning"] = merged
+                    pending_tools = []
+                    _attach_process(row, reasoning=merged, tools=merged_tools)
                     messages.append(row)
                 continue
             if not cleaned:
-                if reasoning:
+                if reasoning or tools:
                     if messages and messages[-1].get("role") == "assistant":
                         prev = messages[-1]
-                        prev["reasoning"] = _merge_reasoning(prev.get("reasoning"), reasoning)
+                        if reasoning:
+                            prev["reasoning"] = _merge_reasoning(prev.get("reasoning"), reasoning)
+                        if tools:
+                            prev["tools"] = _extend_tools(prev.get("tools"), tools)
                     else:
-                        pending_reasoning = _merge_reasoning(pending_reasoning, reasoning)
+                        if reasoning:
+                            pending_reasoning = _merge_reasoning(pending_reasoning, reasoning)
+                        if tools:
+                            pending_tools = _extend_tools(pending_tools, tools)
                 continue
 
             row = {"role": role, "text": cleaned}
@@ -167,18 +208,19 @@ class HistoryManager:
             if sends:
                 row["sends"] = sends
             if role == "assistant":
-                merged = _merge_reasoning(
-                    pending_reasoning,
-                    _assistant_process_chunk(msg, reasoning),
-                )
+                merged = _merge_reasoning(pending_reasoning, reasoning)
+                merged_tools = _extend_tools(pending_tools, tools)
                 pending_reasoning = ""
-                if merged:
-                    row["reasoning"] = merged
+                pending_tools = []
+                _attach_process(row, reasoning=merged, tools=merged_tools)
             messages.append(row)
 
-        if pending_reasoning and messages and messages[-1].get("role") == "assistant":
+        if messages and messages[-1].get("role") == "assistant":
             prev = messages[-1]
-            prev["reasoning"] = _merge_reasoning(prev.get("reasoning"), pending_reasoning)
+            if pending_reasoning:
+                prev["reasoning"] = _merge_reasoning(prev.get("reasoning"), pending_reasoning)
+            if pending_tools:
+                prev["tools"] = _extend_tools(prev.get("tools"), pending_tools)
 
         logger.debug(f"History for session {session_id!r}: {len(messages)} displayable message(s)")
         return messages

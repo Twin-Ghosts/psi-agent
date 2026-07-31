@@ -72,11 +72,15 @@ export type ChatMessage = {
   text: string;
   files?: ChatFile[];
   /**
-   * Raw Session ``reasoning`` for this assistant turn (thinking + tool markers).
-   * Post-turn UI splits via ``parseReasoningSegments``: tool list + expandable「已思考」prose.
-   * From live SSE accumulate and/or `/history` projection; not in localStorage.
+   * Thinking prose for this assistant turn (may still contain live SSE tool markers;
+   * display strips them). History refresh uses prose-only ``reasoning`` plus ``tools``.
    */
   reasoning?: string;
+  /**
+   * Cursor-style tool activity one-liners for this turn (from live progress log
+   * and/or history ``tools`` projection). Rendered separately from「已思考」.
+   */
+  tools?: string[];
   /** Local-only: like / dislike on agent replies (spa v1 parity). */
   feedback?: MessageFeedback;
   /** User turn did not get a complete agent reply. */

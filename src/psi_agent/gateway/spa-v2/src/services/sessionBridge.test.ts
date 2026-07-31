@@ -136,6 +136,29 @@ describe('historyToChat', () => {
       },
     ])
   })
+
+  it('maps structured tools separately from reasoning', () => {
+    expect(
+      historyToChat([
+        {
+          role: 'assistant',
+          text: '完成了',
+          reasoning: '先列目录再读文件',
+          tools: [
+            { name: 'list_dir', arguments: '{"path": "."}' },
+            { name: 'read', arguments: '{"path": "a.md"}' },
+          ],
+        },
+      ]),
+    ).toEqual([
+      {
+        role: 'agent',
+        text: '完成了',
+        reasoning: '先列目录再读文件',
+        tools: ['浏览 `.`', '读取 `a.md`'],
+      },
+    ])
+  })
 })
 
 describe('historyToDeliverables', () => {

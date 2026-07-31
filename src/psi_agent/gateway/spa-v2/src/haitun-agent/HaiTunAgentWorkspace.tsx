@@ -193,6 +193,8 @@ export default function HaiTunAgentWorkspace({
   const streamEpochRef = useRef(0);
   /** Accumulate SSE reasoning (thinking + tool markers) for post-turn「已思考」expand. */
   const turnReasoningRef = useRef("");
+  /** Sealed tool one-liners for the current turn (mirrors progress log ``lines``). */
+  const turnToolsRef = useRef<string[]>([]);
   /** After Stop, block submit briefly — Stop↔Send swap under the same click would re-send the restored draft. */
   const suppressSubmitUntilRef = useRef(0);
   const historyLoadedRef = useRef<Set<string>>(new Set(["overview"]));
@@ -758,6 +760,7 @@ export default function HaiTunAgentWorkspace({
     setTypingCard(cardId);
     setTurnProgressLog(progressLogStart());
     turnReasoningRef.current = "";
+    turnToolsRef.current = [];
     setTodoSegmentSelection((current) => ({ ...current, [cardId]: "live" }));
     const userVisible = titleSource ?? (text.trim() || "附件");
     let turnOk = false;
@@ -812,9 +815,11 @@ export default function HaiTunAgentWorkspace({
           onReasoning: (delta, kind) => {
             if (!live()) return;
             if (delta) turnReasoningRef.current += delta;
-            setTurnProgressLog((prev) =>
-              applyProgressEvent(prev ?? progressLogStart(), kind, delta),
-            );
+            setTurnProgressLog((prev) => {
+              const next = applyProgressEvent(prev ?? progressLogStart(), kind, delta);
+              turnToolsRef.current = next.lines;
+              return next;
+            });
           },
         },
       );
@@ -903,13 +908,18 @@ export default function HaiTunAgentWorkspace({
     } finally {
       if (epoch === streamEpochRef.current) {
         const reasoningRaw = turnReasoningRef.current.trim();
-        // Keep thinking for「已思考」when the agent bubble still exists (not Stop).
-        if (reasoningRaw && !controller.signal.aborted) {
+        const tools = [...turnToolsRef.current];
+        // Keep thinking + tools when the agent bubble still exists (not Stop).
+        if ((reasoningRaw || tools.length) && !controller.signal.aborted) {
           setMessages((current) => {
             const list = [...(current[cardId] ?? [])];
             const last = list[list.length - 1];
             if (last?.role === "agent") {
-              list[list.length - 1] = { ...last, reasoning: reasoningRaw };
+              list[list.length - 1] = {
+                ...last,
+                ...(reasoningRaw ? { reasoning: reasoningRaw } : {}),
+                ...(tools.length ? { tools } : {}),
+              };
               return { ...current, [cardId]: list };
             }
             return current;

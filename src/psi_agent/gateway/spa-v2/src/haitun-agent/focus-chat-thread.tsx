@@ -9,10 +9,9 @@ import { downloadMatrixXlsx, matrixToTsv, tableToMatrix } from "../services/mdTa
 import { preferResultBelowRule } from "../services/assistantDisplay";
 import { TURN_PROGRESS, type ProgressLog } from "../services/turnProgress";
 import {
-  hasTurnProcess,
+  hasDisplayableReasoning,
   stripToolMarkersFromReasoning,
   thinkingHeaderLabel,
-  toolSummariesFromReasoning,
   toolsHeaderLabel,
 } from "../services/reasoningDisplay";
 import { FAILED_REASON_LABEL, isCompleteAgent } from "../services/messageTurn";
@@ -143,25 +142,28 @@ function CopyButton({ text, className }: { text: string; className?: string }) {
 }
 
 /**
- * Cursor-style post-turn process: tools (primary, default open) + thinking prose (collapsed).
- * Live streaming still uses the process log; after the turn, split packages from raw reasoning.
+ * Cursor-style post-turn process: tools (primary, from ``message.tools``) + thinking prose.
+ * Live streaming still uses the process log; after the turn, tools are a separate field
+ * (history ``tools`` / live progress lines) — not parsed out of ``reasoning``.
  */
 function TurnProcessDisclosure({
   reasoning,
+  tools = [],
   streaming = false,
 }: {
-  reasoning: string;
+  reasoning?: string;
+  tools?: string[];
   streaming?: boolean;
 }) {
-  const tools = toolSummariesFromReasoning(reasoning);
-  const thinking = stripToolMarkersFromReasoning(reasoning);
+  const toolLines = tools.filter((t) => !!t.trim());
+  const thinking = stripToolMarkersFromReasoning(reasoning ?? "");
   const [toolsOpen, setToolsOpen] = useState(true);
   const [thinkingOpen, setThinkingOpen] = useState(false);
-  if (!tools.length && !thinking) return null;
+  if (!toolLines.length && !thinking) return null;
 
   return (
     <div className="focus-chat-turn-process">
-      {tools.length > 0 ? (
+      {toolLines.length > 0 ? (
         <div className={`focus-chat-thinking focus-chat-tools${toolsOpen ? " is-open" : ""}`}>
           <button
             type="button"
@@ -170,7 +172,7 @@ function TurnProcessDisclosure({
             onClick={() => setToolsOpen((v) => !v)}
           >
             <ChevronRight size={14} className="focus-chat-thinking-chevron" aria-hidden />
-            <span>{toolsHeaderLabel(tools.length)}</span>
+            <span>{toolsHeaderLabel(toolLines.length)}</span>
           </button>
           {toolsOpen ? (
             <div
@@ -178,7 +180,7 @@ function TurnProcessDisclosure({
               role="list"
               aria-label="工具调用"
             >
-              {tools.map((line, i) => (
+              {toolLines.map((line, i) => (
                 <div className="focus-chat-progress-line" role="listitem" key={`${i}-${line}`}>
                   {line}
                 </div>
@@ -433,9 +435,15 @@ export function FocusChatThread({
             {isLiveAgent && writing ? thinkingBubble : null}
             {message.role === "agent"
               && !isLiveAgent
-              && hasTurnProcess(message.reasoning ?? "")
+              && (
+                (message.tools?.length ?? 0) > 0
+                || hasDisplayableReasoning(message.reasoning ?? "")
+              )
               ? (
-                <TurnProcessDisclosure reasoning={message.reasoning!} />
+                <TurnProcessDisclosure
+                  reasoning={message.reasoning}
+                  tools={message.tools}
+                />
               )
               : null}
             <div className="focus-chat-bubble-wrap">

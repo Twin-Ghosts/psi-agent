@@ -65,7 +65,7 @@ async def test_history_folds_tool_round_reasoning_into_next_assistant(
     tmp_path: Path,
     appdata: Path,
 ) -> None:
-    """Empty-content tool_calls rows are not bubbles; thinking + tools must survive refresh."""
+    """Empty-content tool_calls rows are not bubbles; thinking + tools survive as separate fields."""
     hm = HistoryManager()
     hist_dir = anyio.Path(str(appdata)) / "histories"
     await hist_dir.mkdir(parents=True)
@@ -90,11 +90,8 @@ async def test_history_folds_tool_round_reasoning_into_next_assistant(
         {
             "role": "assistant",
             "text": "\u5b8c\u6210",
-            "reasoning": (
-                "\u5148\u8bfb\u6587\u4ef6\n"
-                '[Tool Call: read({"path": "a.py"})]\n'
-                "\u518d\u603b\u7ed3"
-            ),
+            "reasoning": "\u5148\u8bfb\u6587\u4ef6\n\u518d\u603b\u7ed3",
+            "tools": [{"name": "read", "arguments": '{"path": "a.py"}'}],
         },
     ]
 
@@ -104,7 +101,7 @@ async def test_history_folds_tool_calls_without_reasoning(
     tmp_path: Path,
     appdata: Path,
 ) -> None:
-    """Structured tool_calls alone (no model thinking) still project as markers."""
+    """Structured tool_calls alone project onto ``tools`` (not into ``reasoning``)."""
     hm = HistoryManager()
     hist_dir = anyio.Path(str(appdata)) / "histories"
     await hist_dir.mkdir(parents=True)
@@ -129,7 +126,7 @@ async def test_history_folds_tool_calls_without_reasoning(
         {
             "role": "assistant",
             "text": "done",
-            "reasoning": '[Tool Call: bash({"command": "ls"})]',
+            "tools": [{"name": "bash", "arguments": '{"command": "ls"}'}],
         },
     ]
 
