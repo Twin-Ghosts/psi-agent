@@ -2464,7 +2464,11 @@ async def auth_start_impl(capabilities: str = "", user_key: str = "") -> dict[st
     )
     authorize_url = f"{_AUTHORIZE_URL}?{query}"
     if plan.automatic:
-        return {
+        # 回调地址是内网 IP 时, 自动回流只对在内网的用户成立; 外网用户点完同意,
+        # 浏览器跳不到这个地址, 回调永远不来。此时仍走自动通道 (内网用户照样免复制),
+        # 但必须把这个前提说出来并备好后路, 否则外网用户就一直卡在「等回调」上。
+        private = _oauth_rx.is_private_callback(plan.redirect_uri)
+        result = {
             "ok": True,
             "authorize_url": authorize_url,
             "auto_receive": True,
@@ -2481,6 +2485,15 @@ async def auth_start_impl(capabilities: str = "", user_key: str = "") -> dict[st
             ),
             "next_step": "feishu_auth_wait",
         }
+        if private:
+            result["callback_is_private"] = True
+            result["fallback_hint"] = (
+                f"注意: 回调地址 {plan.redirect_uri} 只有**内网**打得到. 用户若在外网, "
+                "点「同意授权」后页面会打不开 (一直转圈或提示无法访问), 自动回流也就不会发生 —— "
+                "这不是授权失败. 遇到这种情况, 让用户把浏览器**地址栏里那一整条网址**复制回来, "
+                "整条交给 feishu_auth_complete 即可 (工具会自己从里面取 code, 用户不用找 code 在哪)."
+            )
+        return result
     return {
         "ok": True,
         "authorize_url": authorize_url,
@@ -2751,17 +2764,23 @@ async def auth_request_impl(
     if not started.get("ok"):
         return started
     tier = TIER_LINK if started.get("auto_receive") else TIER_MANUAL
+    next_step = (
+        "把 authorize_url 发给用户, 然后调 feishu_auth_wait 等授权码自动回流"
+        if tier == TIER_LINK
+        else "把 authorize_url 发给用户, 再让他把地址栏里的 code 交给 feishu_auth_complete"
+    )
+    # 第 2 级承诺「不用复制」, 但内网回调地址只能对内网用户兑现这句话。这里不降级
+    # (内网用户仍是免复制的), 而是把 auth_start 带回来的后路一并交给调用方 —— 承诺
+    # 兑现不了时得说实话, 这条规则对「地址不可达」同样适用。
+    if tier == TIER_LINK and started.get("callback_is_private"):
+        next_step += "; 若用户在外网导致页面打不开, 改让他把地址栏整条网址发回来交给 feishu_auth_complete"
     return {
         **started,
         "tier": tier,
         "tier_label": _TIER_LABEL[tier],
         "downgraded_from": TIER_CARD,
         "downgrade_reason": card_skip,
-        "next_step": (
-            "把 authorize_url 发给用户, 然后调 feishu_auth_wait 等授权码自动回流"
-            if tier == TIER_LINK
-            else "把 authorize_url 发给用户, 再让他把地址栏里的 code 交给 feishu_auth_complete"
-        ),
+        "next_step": next_step,
     }
 
 
@@ -2806,11 +2825,31 @@ async def auth_wait_impl(user_key: str = "", timeout_seconds: int = 480) -> dict
     if not got:
         # 别把超时当失败报给用户: 取件箱 TTL 600 秒, 用户晚点几十秒点完, code 仍在里面等着取。
         # (实测过一次真实场景: 等待窗口比用户点击早关了 12 秒, 而回调随后就到了。)
-        return _error(
+        base = (
             f"等了 {int(timeout)} 秒还没收到授权回调 -- 这不代表失败: 用户可能还没点完. "
             "授权码在 Gateway 取件箱里可留存约 10 分钟, 所以**先再调一次 feishu_auth_wait 继续等**, "
             "拿到就照样能完成授权; 别急着让用户手抄 code, 也别告诉他失败了. "
-            "只有再等一轮仍然没有, 才去确认用户是否真的点了「同意授权」.",
+            "只有再等一轮仍然没有, 才去确认用户是否真的点了「同意授权」."
+        )
+        # 回调地址只有内网可达时, 「一直重等」对外网用户是个死循环: 他的浏览器根本跳不到
+        # 那个地址, 等到取件箱过期也不会有回调。所以这里必须给出另一条出路, 而不是让
+        # agent 反复安慰用户再等等。
+        redirect = str(pending.get("redirect_uri") or "")
+        if _oauth_rx.is_private_callback(redirect):
+            return _error(
+                base + "\n"
+                f"另外: 本次回调地址 {redirect} 只有内网打得到. 如果用户在外网, 他点完同意后页面会"
+                "打不开, 回调也就永远不会来 —— 再等无用. 这时问他一句「授权后那个打不开的页面, "
+                "地址栏里的网址是什么」, 把他发回来的**整条网址**交给 feishu_auth_complete 就能完成授权 "
+                "(不用让他自己找 code).",
+                timed_out=True,
+                callback_is_private=True,
+                retry_hint=(
+                    "先再等一轮 feishu_auth_wait; 仍然没有就让用户把地址栏整条网址发回来, 交给 feishu_auth_complete"
+                ),
+            )
+        return _error(
+            base,
             timed_out=True,
             retry_hint="再调一次 feishu_auth_wait (同一个 user_key) 即可继续等待",
         )

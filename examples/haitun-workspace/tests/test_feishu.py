@@ -1630,6 +1630,105 @@ async def test_auth_wait_surfaces_user_denial(monkeypatch: pytest.MonkeyPatch, t
     assert "access_denied" in result["message"]
 
 
+@pytest.mark.parametrize(
+    ("uri", "private"),
+    [
+        ("http://192.168.60.214:8090/oauth/callback", True),
+        ("http://10.0.0.5:8090/oauth/callback", True),
+        ("http://172.16.3.9/oauth/callback", True),
+        ("http://127.0.0.1:17860/oauth/callback", True),
+        ("http://localhost:17860/oauth/callback", True),
+        ("https://haitun.example.com/oauth/callback", False),
+        # 注意别拿 203.0.113.x (TEST-NET-3) 当公网样本: 文档保留段在 ipaddress 里
+        # 也算 is_private, 会把这个用例变成假失败。
+        ("https://8.8.8.8/oauth/callback", False),
+        ("", False),
+    ],
+)
+def test_is_private_callback_classifies_reachability(uri: str, private: bool) -> None:
+    """内网回调地址必须被认出来 —— 外网用户的浏览器跳不到那里, 自动回流不成立。"""
+    assert _impl._oauth_rx.is_private_callback(uri) is private
+
+
+@pytest.mark.asyncio
+async def test_auth_start_flags_private_callback(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """回调地址是内网 IP 时, 仍走自动通道, 但要交出「贴整条网址」这条后路。"""
+    monkeypatch.setenv("PSI_FEISHU_APP_ID", "cli_x")
+    monkeypatch.setenv("PSI_FEISHU_APP_SECRET", "sec")
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(tmp_path / "pending.json"))
+    monkeypatch.setattr(_impl, "_granted_scopes_path", lambda: str(tmp_path / "granted.json"))
+    monkeypatch.setattr(
+        _impl._oauth_rx,
+        "plan_receiver",
+        lambda explicit="": _impl._oauth_rx.ReceiverPlan(
+            mode="gateway", redirect_uri="http://192.168.60.214:8090/oauth/callback"
+        ),
+    )
+    result = await _impl.auth_start_impl("", "ou_a")
+    assert result["ok"] is True
+    # 自动通道不能因为地址是内网就被取消: 内网用户照样免复制。
+    assert result["auto_receive"] is True
+    assert result["callback_is_private"] is True
+    assert "feishu_auth_complete" in result["fallback_hint"]
+
+
+@pytest.mark.asyncio
+async def test_auth_start_public_callback_has_no_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """公网回调地址不该挂那段手工提示 —— 那是内网专属的补丁。"""
+    monkeypatch.setenv("PSI_FEISHU_APP_ID", "cli_x")
+    monkeypatch.setenv("PSI_FEISHU_APP_SECRET", "sec")
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(tmp_path / "pending.json"))
+    monkeypatch.setattr(_impl, "_granted_scopes_path", lambda: str(tmp_path / "granted.json"))
+    monkeypatch.setattr(
+        _impl._oauth_rx,
+        "plan_receiver",
+        lambda explicit="": _impl._oauth_rx.ReceiverPlan(
+            mode="gateway", redirect_uri="https://haitun.example.com/oauth/callback"
+        ),
+    )
+    result = await _impl.auth_start_impl("", "ou_a")
+    assert result["ok"] is True
+    assert "callback_is_private" not in result
+    assert "fallback_hint" not in result
+
+
+@pytest.mark.asyncio
+async def test_auth_wait_timeout_offers_url_paste_when_private(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """内网回调超时不能只叫「再等一轮」: 外网用户再等也不会有回调, 得给另一条出路。"""
+    pending = tmp_path / "pending.json"
+    pending.write_text(
+        json.dumps(
+            {
+                "state": "st",
+                "mode": "gateway",
+                "redirect_uri": "http://192.168.60.214:8090/oauth/callback",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(pending))
+
+    async def _no_code(state: str, timeout_seconds: float, interval: float = 1.0) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(_impl._oauth_rx, "poll_gateway", _no_code)
+    result = await _impl.auth_wait_impl("", 10)
+    assert result["ok"] is False
+    assert result["timed_out"] is True
+    assert result["callback_is_private"] is True
+    # 先再等一轮的建议要保留 (取件箱还有 TTL), 同时给出贴网址的出路。
+    assert "feishu_auth_wait" in result["message"]
+    assert "整条网址" in result["message"]
+    assert "feishu_auth_complete" in result["retry_hint"]
+
+
+@pytest.mark.asyncio
+async def test_auth_complete_accepts_full_callback_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """用户贴回来的是整条网址而不是 code —— 必须能直接用。"""
+    assert _impl._extract_code("http://192.168.60.214:8090/oauth/callback?code=abc123&state=st") == "abc123"
+    assert _impl._extract_code("  abc123  ") == "abc123"
+
+
 def _auth_card_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Any, mode: str = "gateway") -> dict[str, Any]:
     """Configure an app + a receiver channel, and capture what gets sent."""
     monkeypatch.setenv("PSI_FEISHU_APP_ID", "cli_x")
