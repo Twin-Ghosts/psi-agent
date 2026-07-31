@@ -6251,6 +6251,272 @@ async def append_doc_swimlane_impl(
     )
 
 
+# ── Embedded spreadsheets (block_type 30) and bitables (18) inside a doc ────────
+#
+# A native table block (31, above) is part of the document: it holds text, and nothing
+# more. What people mean by "在文档里放一个可编辑的飞书表格" is usually the other thing —
+# an embedded *spreadsheet*, with a formula bar, cell formats and filters, editable in
+# place and openable as its own sheet. That is block_type 30, and Feishu provisions the
+# backing spreadsheet itself: creating the block with a `row_size`/`column_size` returns
+# `sheet.token` of the form "<spreadsheetToken>_<sheetId>" (verified live — an empty
+# `sheet: {}` is rejected with 1770001 invalid param). Block 18 is the same story for a
+# 多维表格, whose token is "<appToken>_<tableId>" and which needs a `view_type`.
+#
+# The point of splitting that token is that no new write path is needed: the two halves
+# are exactly the (spreadsheet_token, sheet_id) pair the sheets/v2 values API already
+# takes, so the existing write/append/format helpers fill an in-document sheet as-is.
+# Writing past the declared size is fine — the worksheet grows to fit (measured: an 8-row
+# write into a 5-row block left the block reporting 8 rows).
+_SHEET_BLOCK_TYPE = 30
+_BITABLE_BLOCK_TYPE = 18
+
+# Largest row_size/column_size the *create block* call accepts. Measured against the live
+# API: 9 passes, 10 is refused with 99992402 "field validation failed" whatever the other
+# dimension is. Nothing in the docs mentions it, and the error names no field, so the
+# number is empirical — a bigger grid is reached by writing into the sheet afterwards,
+# which does grow it (30x4 written into a 9x4 block leaves the worksheet at 30x4).
+_SHEET_BLOCK_CREATE_MAX = 9
+
+# view_type 1 = grid (表格视图), the default a person sees when opening a new 多维表格.
+_BITABLE_DEFAULT_VIEW = 1
+
+
+def _column_letter(count: int) -> str:
+    """Spreadsheet column label for the ``count``-th column (1 → A, 27 → AA)."""
+    if count < 1:
+        return "A"
+    label = ""
+    while count:
+        count, rem = divmod(count - 1, 26)
+        label = chr(ord("A") + rem) + label
+    return label
+
+
+def split_embedded_sheet_token(block_token: str) -> tuple[str, str]:
+    """Split an embedded block's token into its ``(container_token, child_id)`` halves.
+
+    A sheet block's token is ``"<spreadsheetToken>_<sheetId>"`` and a bitable block's is
+    ``"<appToken>_<tableId>"``. Only the *first* underscore separates them: Feishu tokens
+    are alphanumeric, but splitting from the right would break the moment one contains an
+    underscore, so partition from the left. Returns ``("", "")`` when there is no
+    separator, letting callers report a clear error instead of writing to a half-token.
+    """
+    head, sep, tail = (block_token or "").strip().partition("_")
+    if not sep or not head or not tail:
+        return "", ""
+    return head, tail
+
+
+def _embedded_sheet_result(document_id: str, child: dict[str, Any], *, rows: int, columns: int) -> dict[str, Any]:
+    """Shape a created sheet block into the tool result, including its write coordinates.
+
+    ``spreadsheet_token`` + ``sheet_id`` are returned because they are the whole point:
+    they are what ``feishu_sheet_write`` needs to fill the embedded grid, and an agent
+    that only got the ``block_id`` back would have no way to write into it.
+    """
+    token = ((child.get("sheet") or {}) if isinstance(child.get("sheet"), dict) else {}).get("token", "")
+    spreadsheet, sheet_id = split_embedded_sheet_token(token)
+    return {
+        "ok": True,
+        "document_id": document_id,
+        "block_id": child.get("block_id", ""),
+        "block_token": token,
+        "spreadsheet_token": spreadsheet,
+        "sheet_id": sheet_id,
+        "range": f"{sheet_id}!A1" if sheet_id else "",
+        "rows": rows,
+        "columns": columns,
+        "url": f"{_DOC_BASE_URL}/sheets/{spreadsheet}" if spreadsheet else "",
+    }
+
+
+def _first_child(res: dict[str, Any], block_type: int) -> dict[str, Any] | None:
+    """Pick the created block of the wanted type out of a /children or /descendant reply."""
+    data = res.get("data") if isinstance(res.get("data"), dict) else {}
+    children = data.get("children") if isinstance(data, dict) else None
+    if not isinstance(children, list):
+        return None
+    for child in children:
+        if isinstance(child, dict) and child.get("block_type") == block_type:
+            return child
+    return None
+
+
+async def append_doc_sheet_impl(
+    document_id: str,
+    rows: int = 10,
+    columns: int = 5,
+    values_json: str = "",
+    header_row: bool = True,
+    user_key: str = "",
+    identity: str = "",
+    caption: str = "",
+    auto_number: bool = True,
+) -> dict[str, Any]:
+    """Append an embedded, editable Feishu spreadsheet (block_type 30) to a docx body.
+
+    When ``values_json`` is given, the grid is written into the new sheet, so one call
+    produces a filled in-document spreadsheet. The write goes through the ordinary
+    sheets/v2 path, which means ``=``-prefixed cells become live formulas — the reason to
+    embed a sheet rather than use a plain table block.
+
+    The block is created at most 9x9 (the API's undocumented creation cap) and grown to
+    the requested/data size by the write that follows, including for an empty sheet, whose
+    area is written as blank cells. So the size asked for is the size that appears.
+
+    A failed *write* still returns the block's coordinates with ``ok: False``: the sheet
+    exists in the document at that point, and silently dropping its token would leave an
+    empty embed nobody can fill.
+    """
+    if not document_id.strip():
+        return _error("document_id is required.")
+    doc = document_id.strip()
+
+    values: list[list[Any]] | None = None
+    if values_json.strip():
+        values, err = _parse_values_json(values_json)
+        if err or values is None:
+            return _error(err or "values_json produced no rows.")
+    if rows < 1 or columns < 1:
+        return _error("rows and columns must both be at least 1.")
+    if rows > _SHEET_MAX_ROWS or columns > _SHEET_MAX_COLS:
+        return _error(f"an embedded sheet is capped at {_SHEET_MAX_ROWS} rows x {_SHEET_MAX_COLS} columns.")
+
+    # The wanted final size, which is usually *larger* than the block can be created at.
+    # With data, the data decides: padding a 4-column table out to the default 5 would add
+    # a stray empty column the caller never asked for.
+    want_rows, want_columns = rows, columns
+    if values:
+        want_rows = len(values)
+        want_columns = max((len(r) for r in values), default=0)
+    # Creating the block is capped at 9x9 (measured: row_size or column_size of 10 is
+    # refused with 99992402 field validation failed, 9 is accepted). The cap only applies
+    # to *creation*: a subsequent ranged write grows the worksheet, so a big table starts
+    # from a clamped block and is expanded by its own write.
+    create_rows = min(want_rows, _SHEET_BLOCK_CREATE_MAX)
+    create_columns = min(want_columns, _SHEET_BLOCK_CREATE_MAX)
+    rows, columns = create_rows, create_columns
+
+    result_extra: dict[str, Any] = {}
+    if caption.strip():
+        # Same convention as the table tools: a 表 caption goes above what it labels, and
+        # it is written first so a failed caption never numbers a sheet that isn't there.
+        text, fields = await _resolve_table_caption(doc, caption, auto_number, user_key, identity)
+        result_extra.update(fields)
+        note = await append_doc_content_impl(doc, text, user_key, identity)
+        result_extra["caption_written"] = bool(note.get("ok"))
+        if not note.get("ok"):
+            result_extra["caption_error"] = note.get("message", "")
+
+    block = {"block_type": _SHEET_BLOCK_TYPE, "sheet": {"row_size": rows, "column_size": columns}}
+    res = await _invoke(_build_blocks_append_request(doc, [block]), user_key=user_key, prefer="user", identity=identity)
+    if not res["ok"]:
+        return res
+    child = _first_child(res, _SHEET_BLOCK_TYPE)
+    if child is None:
+        return _error("Feishu created the block but returned no sheet block to write into.")
+    out = {**_embedded_sheet_result(doc, child, rows=want_rows, columns=want_columns), **result_extra}
+    needs_growing = values is None and (want_rows > create_rows or want_columns > create_columns)
+    if values is None and not needs_growing:
+        return out
+    if not out["spreadsheet_token"] or not out["sheet_id"]:
+        return {
+            **out,
+            "ok": False,
+            "message": (
+                f"embedded sheet created but its token {out['block_token']!r} could not be split into "
+                "spreadsheet_token/sheet_id — write the values with feishu_sheet_write once you have them."
+            ),
+        }
+
+    # An empty sheet asked to be bigger than the creation cap is grown by writing blank
+    # cells over the wanted area — the same ranged write, just with nothing in it, so the
+    # person gets the 20 empty rows they asked to type into rather than a silent 9.
+    payload = values if values is not None else [[None] * want_columns for _ in range(want_rows)]
+    # The range must span the grid. A bare "<sheetId>!A1" is accepted by Feishu and comes
+    # back ok=True with an empty updatedRange having written *nothing* — data silently
+    # lost — so the end cell is always spelled out.
+    end = f"{_column_letter(want_columns)}{want_rows}"
+    wrote = await write_sheet_impl(
+        out["spreadsheet_token"],
+        f"{out['sheet_id']}!A1:{end}",
+        json.dumps(payload, ensure_ascii=False),
+        user_key,
+        identity,
+    )
+    if not wrote["ok"]:
+        return {
+            **out,
+            "ok": False,
+            "values_written": False,
+            "message": f"Embedded sheet created but writing its values failed: {wrote.get('message', '')}",
+            **({"need_auth": True} if wrote.get("need_auth") else {}),
+        }
+    if values is not None:
+        out["values_written"] = True
+    out["updated_cells"] = wrote.get("updated_cells")
+    if header_row and values:
+        # Bold header, matching what feishu_doc_append_table's header row looks like. A
+        # style failure is reported but doesn't fail the call: the data is already there.
+        styled = await format_sheet_impl(
+            out["spreadsheet_token"],
+            f"{out['sheet_id']}!A1:{_column_letter(len(values[0]))}1",
+            json.dumps({"font": {"bold": True}}),
+            user_key,
+            identity,
+        )
+        out["header_styled"] = bool(styled.get("ok"))
+    return out
+
+
+async def append_doc_bitable_impl(
+    document_id: str,
+    view_type: int = _BITABLE_DEFAULT_VIEW,
+    user_key: str = "",
+    identity: str = "",
+    caption: str = "",
+    auto_number: bool = True,
+) -> dict[str, Any]:
+    """Append an embedded 多维表格 (bitable, block_type 18) to a docx body.
+
+    Returns the new bitable's ``app_token`` and ``table_id`` — split out of the block's
+    ``"<appToken>_<tableId>"`` token — so the existing ``feishu_bitable_*`` tools can add
+    fields and records to it. Feishu creates the bitable itself; it starts with default
+    fields, which ``feishu_bitable_create_field`` can extend.
+    """
+    if not document_id.strip():
+        return _error("document_id is required.")
+    doc = document_id.strip()
+    result_extra: dict[str, Any] = {}
+    if caption.strip():
+        text, fields = await _resolve_table_caption(doc, caption, auto_number, user_key, identity)
+        result_extra.update(fields)
+        note = await append_doc_content_impl(doc, text, user_key, identity)
+        result_extra["caption_written"] = bool(note.get("ok"))
+        if not note.get("ok"):
+            result_extra["caption_error"] = note.get("message", "")
+
+    block = {"block_type": _BITABLE_BLOCK_TYPE, "bitable": {"view_type": int(view_type or _BITABLE_DEFAULT_VIEW)}}
+    res = await _invoke(_build_blocks_append_request(doc, [block]), user_key=user_key, prefer="user", identity=identity)
+    if not res["ok"]:
+        return res
+    child = _first_child(res, _BITABLE_BLOCK_TYPE)
+    if child is None:
+        return _error("Feishu created the block but returned no bitable block.")
+    token = ((child.get("bitable") or {}) if isinstance(child.get("bitable"), dict) else {}).get("token", "")
+    app_token, table_id = split_embedded_sheet_token(token)
+    return {
+        "ok": True,
+        "document_id": doc,
+        "block_id": child.get("block_id", ""),
+        "block_token": token,
+        "app_token": app_token,
+        "table_id": table_id,
+        "url": f"{_DOC_BASE_URL}/base/{app_token}" if app_token else "",
+        **result_extra,
+    }
+
+
 async def append_doc_content_impl(
     document_id: str,
     content: str,
@@ -6875,6 +7141,7 @@ _BLOCK_TYPE_NAMES = {
     14: "code",
     15: "quote",
     17: "todo",
+    18: "bitable",
     19: "callout",
     22: "divider",
     23: "file",
@@ -6978,6 +7245,31 @@ def _block_plain_text(block: dict[str, Any]) -> str:
 _BLOCKS_LIST_PAGE_MAX = 500
 
 
+def _embedded_block_coordinates(raw: dict[str, Any], block_type: int) -> dict[str, Any]:
+    """Write coordinates for an embedded sheet/bitable block, or ``{}`` for anything else.
+
+    Keyed by what the caller does next: a sheet block yields the
+    ``spreadsheet_token``/``sheet_id``/``range`` that ``feishu_sheet_*`` takes, a bitable
+    block the ``app_token``/``table_id`` that ``feishu_bitable_*`` takes.
+    """
+    if block_type == _SHEET_BLOCK_TYPE:
+        payload = raw.get("sheet")
+        token = payload.get("token", "") if isinstance(payload, dict) else ""
+        spreadsheet, sheet_id = split_embedded_sheet_token(token)
+        return {
+            "block_token": token,
+            "spreadsheet_token": spreadsheet,
+            "sheet_id": sheet_id,
+            "range": f"{sheet_id}!A1" if sheet_id else "",
+        }
+    if block_type == _BITABLE_BLOCK_TYPE:
+        payload = raw.get("bitable")
+        token = payload.get("token", "") if isinstance(payload, dict) else ""
+        app_token, table_id = split_embedded_sheet_token(token)
+        return {"block_token": token, "app_token": app_token, "table_id": table_id}
+    return {}
+
+
 async def list_doc_blocks_impl(
     document_id: str,
     max_blocks: int = 200,
@@ -7021,16 +7313,21 @@ async def list_doc_blocks_impl(
                 break
             block_type = raw.get("block_type") or 0
             text = _block_plain_text(raw)
-            items.append(
-                {
-                    "block_id": raw.get("block_id", ""),
-                    "block_type": block_type,
-                    "type_name": _BLOCK_TYPE_NAMES.get(block_type, str(block_type)),
-                    "parent_id": raw.get("parent_id", ""),
-                    "text": text if len(text) <= 200 else text[:200] + "…",
-                    "editable_text": block_type in _TEXTUAL_BLOCK_KEYS,
-                }
-            )
+            entry = {
+                "block_id": raw.get("block_id", ""),
+                "block_type": block_type,
+                "type_name": _BLOCK_TYPE_NAMES.get(block_type, str(block_type)),
+                "parent_id": raw.get("parent_id", ""),
+                "text": text if len(text) <= 200 else text[:200] + "…",
+                "editable_text": block_type in _TEXTUAL_BLOCK_KEYS,
+            }
+            # An embedded sheet/bitable holds no text, so the fields above say nothing
+            # about it: its content lives in a separate spreadsheet addressed by the
+            # block's token. Surfacing the split token here is what makes an *existing*
+            # in-document table editable — otherwise finding one and updating a cell
+            # would be impossible, since only the create call ever returned its token.
+            entry.update(_embedded_block_coordinates(raw, block_type))
+            items.append(entry)
         page_token = str(data.get("page_token") or "")
         if truncated or not page_token or len(items) >= limit:
             truncated = truncated or bool(page_token)

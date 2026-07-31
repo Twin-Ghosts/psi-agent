@@ -4683,6 +4683,309 @@ async def test_append_doc_swimlane_rejects_bad_json() -> None:
     assert result["ok"] is False
 
 
+# ── Embedded spreadsheets / bitables inside a doc (block_type 30 / 18) ─────────
+
+
+def test_split_embedded_sheet_token_takes_first_underscore() -> None:
+    assert _impl.split_embedded_sheet_token("LGCes_pY34sT") == ("LGCes", "pY34sT")
+    # Splitting from the right would mangle a container token containing an underscore.
+    assert _impl.split_embedded_sheet_token("has_under_child") == ("has", "under_child")
+
+
+def test_split_embedded_sheet_token_rejects_halfless_input() -> None:
+    for bad in ("", "  ", "nounderscore", "_tail", "head_"):
+        assert _impl.split_embedded_sheet_token(bad) == ("", ""), bad
+
+
+def test_column_letter_wraps_past_z() -> None:
+    assert (_impl._column_letter(1), _impl._column_letter(26)) == ("A", "Z")
+    assert (_impl._column_letter(27), _impl._column_letter(52)) == ("AA", "AZ")
+    assert _impl._column_letter(0) == "A"  # never emits an empty range
+
+
+@pytest.mark.asyncio
+async def test_append_doc_sheet_creates_block_and_returns_write_coordinates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cap = _CapturedInvoke(
+        {"children": [{"block_id": "doxcnSheet", "block_type": 30, "sheet": {"token": "shtTok_pY34sT"}}]}
+    )
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.append_doc_sheet_impl("doc1", rows=4, columns=3)
+    assert result["ok"] is True
+    req = cap.request
+    assert req.uri == "/open-apis/docx/v1/documents/:document_id/blocks/:block_id/children"
+    assert req.body["children"][0] == {"block_type": 30, "sheet": {"row_size": 4, "column_size": 3}}
+    # The split token is the whole point: these are what feishu_sheet_write takes.
+    assert result["spreadsheet_token"] == "shtTok"
+    assert result["sheet_id"] == "pY34sT"
+    assert result["range"] == "pY34sT!A1"
+    assert result["block_id"] == "doxcnSheet"
+
+
+@pytest.mark.asyncio
+async def test_append_doc_sheet_clamps_creation_and_grows_by_writing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Creation is capped at 9x9 by Feishu; the write is what delivers the asked-for size.
+
+    Sending row_size 12 would fail the whole call with 99992402, so the block is created
+    clamped and the ranged write (which does grow the worksheet) covers the real grid.
+    """
+    calls: list[Any] = []
+
+    async def fake_invoke(request: Any, **kwargs: Any) -> dict[str, Any]:
+        req = request() if callable(request) else request
+        calls.append(req)
+        return {
+            "ok": True,
+            "data": {"children": [{"block_id": "b1", "block_type": 30, "sheet": {"token": "shtTok_s1"}}]},
+        }
+
+    monkeypatch.setattr(_impl, "_invoke", fake_invoke)
+    rows = json.dumps([[f"r{i}", i, "x"] for i in range(12)])
+    result = await _impl.append_doc_sheet_impl("doc1", values_json=rows, header_row=False)
+    assert result["ok"] is True
+    assert result["values_written"] is True
+    created = calls[0].body["children"][0]["sheet"]
+    assert created == {"row_size": 9, "column_size": 3}
+    # The result reports the size the reader ends up seeing, not the clamped block.
+    assert (result["rows"], result["columns"]) == (12, 3)
+    # Second call is the values write, aimed at the embedded worksheet.
+    assert calls[1].uri == "/open-apis/sheets/v2/spreadsheets/:spreadsheet_token/values"
+    assert calls[1].paths["spreadsheet_token"] == "shtTok"
+    # A bare "s1!A1" is accepted by Feishu but writes nothing, so the range spans the grid.
+    assert calls[1].body["valueRange"]["range"] == "s1!A1:C12"
+
+
+@pytest.mark.asyncio
+async def test_append_doc_sheet_never_creates_a_block_over_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any requested size, data or not, must leave creation within 9x9."""
+    seen: list[dict[str, Any]] = []
+
+    async def fake_invoke(request: Any, **kwargs: Any) -> dict[str, Any]:
+        req = request() if callable(request) else request
+        if "docx" in req.uri:
+            seen.append(req.body["children"][0]["sheet"])
+        return {
+            "ok": True,
+            "data": {"children": [{"block_id": "b1", "block_type": 30, "sheet": {"token": "tok_s1"}}]},
+        }
+
+    monkeypatch.setattr(_impl, "_invoke", fake_invoke)
+    await _impl.append_doc_sheet_impl("doc1", rows=200, columns=40)
+    await _impl.append_doc_sheet_impl("doc1", rows=10, columns=5)
+    await _impl.append_doc_sheet_impl("doc1", values_json=json.dumps([[1] * 30] * 60))
+    assert seen == [
+        {"row_size": 9, "column_size": 9},
+        {"row_size": 9, "column_size": 5},
+        {"row_size": 9, "column_size": 9},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_append_doc_sheet_lets_the_data_decide_the_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 4-column table must not be padded out to the default 5 with a stray empty column."""
+    calls: list[Any] = []
+
+    async def fake_invoke(request: Any, **kwargs: Any) -> dict[str, Any]:
+        req = request() if callable(request) else request
+        calls.append(req)
+        return {
+            "ok": True,
+            "data": {"children": [{"block_id": "b1", "block_type": 30, "sheet": {"token": "tok_s1"}}]},
+        }
+
+    monkeypatch.setattr(_impl, "_invoke", fake_invoke)
+    grid = json.dumps([["a", "b", "c", "d"], [1, 2, 3, 4]])
+    result = await _impl.append_doc_sheet_impl("doc1", values_json=grid, header_row=False)
+    assert (result["rows"], result["columns"]) == (2, 4)
+    assert calls[1].body["valueRange"]["range"] == "s1!A1:D2"
+
+
+@pytest.mark.asyncio
+async def test_append_doc_sheet_grows_an_empty_sheet_with_blanks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Asking for 20 empty rows to type into must not silently yield 9."""
+    calls: list[Any] = []
+
+    async def fake_invoke(request: Any, **kwargs: Any) -> dict[str, Any]:
+        req = request() if callable(request) else request
+        calls.append(req)
+        return {
+            "ok": True,
+            "data": {"children": [{"block_id": "b1", "block_type": 30, "sheet": {"token": "tok_s1"}}]},
+        }
+
+    monkeypatch.setattr(_impl, "_invoke", fake_invoke)
+    result = await _impl.append_doc_sheet_impl("doc1", rows=20, columns=6)
+    assert result["ok"] is True
+    assert (result["rows"], result["columns"]) == (20, 6)
+    assert "values_written" not in result  # nothing was written *as data*
+    grow = calls[1]
+    assert grow.body["valueRange"]["range"] == "s1!A1:F20"
+    values = grow.body["valueRange"]["values"]
+    assert len(values) == 20
+    assert values[0] == [None] * 6  # blank cells, not placeholder text
+
+
+@pytest.mark.asyncio
+async def test_append_doc_sheet_within_the_cap_makes_one_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A small empty sheet needs no growing write — don't spend a request on it."""
+    calls: list[Any] = []
+
+    async def fake_invoke(request: Any, **kwargs: Any) -> dict[str, Any]:
+        req = request() if callable(request) else request
+        calls.append(req)
+        return {
+            "ok": True,
+            "data": {"children": [{"block_id": "b1", "block_type": 30, "sheet": {"token": "tok_s1"}}]},
+        }
+
+    monkeypatch.setattr(_impl, "_invoke", fake_invoke)
+    result = await _impl.append_doc_sheet_impl("doc1", rows=5, columns=4)
+    assert result["ok"] is True
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_append_doc_sheet_bolds_header_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[Any] = []
+
+    async def fake_invoke(request: Any, **kwargs: Any) -> dict[str, Any]:
+        req = request() if callable(request) else request
+        seen.append(req)
+        return {
+            "ok": True,
+            "data": {"children": [{"block_id": "b1", "block_type": 30, "sheet": {"token": "tok_s1"}}]},
+        }
+
+    monkeypatch.setattr(_impl, "_invoke", fake_invoke)
+    result = await _impl.append_doc_sheet_impl("doc1", values_json='[["姓名","评分"],["张三",95]]', header_row=True)
+    assert result["ok"] is True
+    assert result["header_styled"] is True
+    style_req = seen[-1]
+    assert style_req.uri == "/open-apis/sheets/v2/spreadsheets/:spreadsheet_token/style"
+    assert style_req.body["appendStyle"]["range"] == "s1!A1:B1"
+    assert style_req.body["appendStyle"]["style"]["font"]["bold"] is True
+
+
+@pytest.mark.asyncio
+async def test_append_doc_sheet_keeps_coordinates_when_the_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The embed exists once created — dropping its token would orphan an empty sheet."""
+
+    async def fake_invoke(request: Any, **kwargs: Any) -> dict[str, Any]:
+        req = request() if callable(request) else request
+        if "docx" in req.uri:
+            return {
+                "ok": True,
+                "data": {"children": [{"block_id": "b1", "block_type": 30, "sheet": {"token": "tok_s1"}}]},
+            }
+        return {"ok": False, "message": "no permission", "need_auth": True}
+
+    monkeypatch.setattr(_impl, "_invoke", fake_invoke)
+    result = await _impl.append_doc_sheet_impl("doc1", values_json='[["a"]]')
+    assert result["ok"] is False
+    assert result["values_written"] is False
+    assert result["need_auth"] is True
+    assert (result["spreadsheet_token"], result["sheet_id"]) == ("tok", "s1")
+
+
+@pytest.mark.asyncio
+async def test_append_doc_sheet_validates_input() -> None:
+    assert (await _impl.append_doc_sheet_impl(""))["ok"] is False
+    assert (await _impl.append_doc_sheet_impl("doc1", rows=0))["ok"] is False
+    assert (await _impl.append_doc_sheet_impl("doc1", rows=99999))["ok"] is False
+    bad_values = await _impl.append_doc_sheet_impl("doc1", values_json="not json")
+    assert bad_values["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_append_doc_sheet_reports_unsplittable_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"children": [{"block_id": "b1", "block_type": 30, "sheet": {"token": "nounderscore"}}]})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.append_doc_sheet_impl("doc1", values_json='[["a"]]')
+    assert result["ok"] is False
+    assert "could not be split" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_append_doc_bitable_returns_app_and_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke(
+        {"children": [{"block_id": "doxcnBt", "block_type": 18, "bitable": {"token": "appTok_tblXYZ"}}]}
+    )
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.append_doc_bitable_impl("doc1")
+    assert result["ok"] is True
+    # An empty bitable object is rejected by Feishu (1770001), so view_type is explicit.
+    assert cap.request.body["children"][0] == {"block_type": 18, "bitable": {"view_type": 1}}
+    assert result["app_token"] == "appTok"
+    assert result["table_id"] == "tblXYZ"
+
+
+@pytest.mark.asyncio
+async def test_append_doc_sheet_writes_caption_above(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_caption(
+        document_id: str, caption: str, auto_number: bool, user_key: str, identity: str
+    ) -> tuple[str, dict[str, Any]]:
+        return f"表 3：{caption}", {"caption_number": 3}  # noqa: RUF001
+
+    order: list[str] = []
+
+    async def fake_append_content(document_id: str, content: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        order.append(content)
+        return {"ok": True, "added": 1}
+
+    async def fake_invoke(request: Any, **kwargs: Any) -> dict[str, Any]:
+        order.append("sheet-block")
+        return {
+            "ok": True,
+            "data": {"children": [{"block_id": "b1", "block_type": 30, "sheet": {"token": "tok_s1"}}]},
+        }
+
+    monkeypatch.setattr(_impl, "_resolve_table_caption", fake_caption)
+    monkeypatch.setattr(_impl, "append_doc_content_impl", fake_append_content)
+    monkeypatch.setattr(_impl, "_invoke", fake_invoke)
+    # Within the 9x9 creation cap, so the only calls are the caption and the block itself.
+    result = await _impl.append_doc_sheet_impl("doc1", rows=5, columns=3, caption="客户明细")
+    assert result["ok"] is True
+    assert result["caption_number"] == 3
+    assert order == ["表 3：客户明细", "sheet-block"]  # noqa: RUF001 — caption first, above the sheet
+
+
+@pytest.mark.asyncio
+async def test_list_doc_blocks_surfaces_embedded_coordinates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Editing an *existing* embed is only possible if listing gives back its token."""
+    cap = _CapturedInvoke(
+        {
+            "items": [
+                {"block_id": "p1", "block_type": 2, "text": {"elements": [{"text_run": {"content": "hi"}}]}},
+                {"block_id": "s1", "block_type": 30, "sheet": {"token": "shtTok_wsA"}},
+                {"block_id": "b1", "block_type": 18, "bitable": {"token": "appTok_tbl1"}},
+            ],
+            "page_token": "",
+        }
+    )
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.list_doc_blocks_impl("doc1", 50)
+    assert result["ok"] is True
+    by_id = {b["block_id"]: b for b in result["blocks"]}
+    assert by_id["s1"]["type_name"] == "sheet"
+    assert by_id["s1"]["spreadsheet_token"] == "shtTok"
+    assert by_id["s1"]["range"] == "wsA!A1"
+    assert by_id["b1"]["type_name"] == "bitable"
+    assert (by_id["b1"]["app_token"], by_id["b1"]["table_id"]) == ("appTok", "tbl1")
+    # A plain paragraph gains no embed keys.
+    assert "spreadsheet_token" not in by_id["p1"]
+
+
+def test_embedded_sheet_tools_are_async_with_docstrings() -> None:
+    mod = importlib.import_module("feishu_doc")
+    for name in ("feishu_doc_append_sheet", "feishu_doc_append_bitable"):
+        fn = getattr(mod, name)
+        assert inspect.iscoroutinefunction(fn), name
+        assert (inspect.getdoc(fn) or "").strip(), f"{name} needs a docstring"
+
+
 def test_create_tools_are_async_with_docstrings() -> None:
     doc_mod = importlib.import_module("feishu_doc")
     wiki_mod = importlib.import_module("feishu_wiki")

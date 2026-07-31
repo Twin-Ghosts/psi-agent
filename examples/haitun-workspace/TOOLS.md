@@ -185,6 +185,19 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
   `document_id`，也就是 `feishu_doc_create` 返回的 id，或 wiki 节点的 `obj_token`；带 `user_key`）：
   - 表格：`feishu_doc_append_table(document_id, rows_json, header_row, column_width_json, user_key, caption)`——
     `rows_json` 是二维 JSON 数组，如 `[["姓名","部门"],["张三","研发"]]`，会生成飞书原生表格块。
+  - **可编辑的内嵌电子表格**：`feishu_doc_append_sheet(document_id, rows, columns, values_json, header_row, user_key, caption)`——
+    在文档里嵌一张**真正的飞书电子表格**（block_type 30，飞书自动新建后端表格），带公式栏、
+    单元格格式、筛选，能在文档里直接编辑，也能单独打开。返回 `spreadsheet_token` / `sheet_id` /
+    `range`，正是 `feishu_sheet_write` / `_append` / `_format` 要的参数，之后可反复写。
+    `values_json` 给了就一次建好并填数（`=` 开头的格子是活公式），尺寸按数据自己定；
+    不给就是一张空表，`rows`/`columns` 要多大就多大（飞书**建块**时限死 9x9，工具会自动
+    先建小再靠写入撑到你要的尺寸，所以要 30 行就真给 30 行）。
+    **和上面 `append_table` 怎么选**：内容是「数据」（要公式、会反复更新、要筛选排序、想当独立
+    表格用）→ 用 `append_sheet`；内容是「排成格子的文字」（一小段对照说明，读起来是正文的一部分）
+    → 用 `append_table`。`append_table` 的表格块只装文字，**没有公式也不能筛选**。
+  - **内嵌多维表格**：`feishu_doc_append_bitable(document_id, view_type, user_key, caption)`——
+    内容是「一条条记录」（台账、问题列表、报名表：要字段类型、多视图、逐行协作）时用它，
+    返回 `app_token` / `table_id`，接着用 `feishu_bitable_create_field` / `_create_record` 建字段填数据。
   - 流程图：`feishu_doc_append_flowchart(document_id, steps_json, title, user_key, caption)`——
     `steps_json` 是步骤数组 `["提交","审批","归档"]`。**飞书开放接口画不了真正的流程图块**
     （block_type 21 是空画布，API 填不进节点），所以用「单列表格 + ↓ 箭头」如实呈现，可编辑。
@@ -200,6 +213,10 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
     `{block_id, block_type, type_name, parent_id, text, editable_text}`。**这是拿到 `block_id`
     的唯一途径**，另两个工具都按 `block_id` 定位。`text` 是 200 字预览（要读全文仍用
     `feishu_doc_read`）；`editable_text=false` 表示该块（图片/表格/分割线）没有文字可改。
+    碰到**内嵌的电子表格块**（`type_name="sheet"`）还会多返回 `spreadsheet_token`/`sheet_id`/
+    `range`，内嵌多维表格块（`type_name="bitable"`）多返回 `app_token`/`table_id`——
+    **要改文档里已有的内嵌表格就靠这个**：先列块拿到这些坐标，再用 `feishu_sheet_write` 等写。
+    （这类块本身没有文字，`update_block` 改不了它，内容都在它背后那张表里。）
   - 改一段：`feishu_doc_update_block(document_id, block_id, text)`——只换文字，块的 id 和类型
     都保留（标题还是标题、项目符号还是项目符号）。注意 `text` 是**整段替换而非追加**，要传该块
     完整的新内容。文档根块（其 id 就等于 `document_id`）没有文字，工具会直接拒绝。
