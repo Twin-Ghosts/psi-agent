@@ -80,7 +80,13 @@ trigger_manage(
 )
 ```
 
+**新员工管理制度确认卡**（动态 `open_id`，不要写死 tool_args）：agent 包已有触发器
+`handbook-onboarding-welcome` + 工具 `handbook_onboarding_send_welcome`（Session 注入
+`event_payload_json`）。卡片提交走 skill `feishu-handbook-onboarding` →
+`handbook_onboarding_process_submit`。联调前改 `config/handbook_onboarding.yaml` 链接，并设
+`HAITUN_HANDBOOK_HR_NOTIFY_ID`（或 yaml 里 `hr_notify_id`）。
+
 ## Boundaries
 
 - 禁止手写 TRIGGER；禁止为未接通事件 invent 名
-- 飞书 IM 提醒必须 `fire=tool` + 真实 receive_id
+- 飞书 IM 提醒必须 `fire=tool` + 真实 receive_id（入职确认卡例外：用 `handbook_onboarding_*`，由事件 payload 解析收件人）

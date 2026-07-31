@@ -18,7 +18,7 @@
 |-----|------|--------|------|----------------|
 | 1 | 每人 HaiTun 对话入口 | **否** | 接入/路由基建 | — |
 | 2 | 飞书各处 @ 办简单事 | **部分** | @对话本身否；To-do 巡检逾期可触发 | `haitun.task.overdue`（已有 `haitun.task.completed`） |
-| 3 | HR 员工手册学习确认 | **是** | 入职/待确认/已确认 | `feishu.hr.user_created` → `haitun.hr.handbook_ack_required` / `handbook_confirmed` |
+| 3 | HR 员工手册学习确认 | **是** | 入职发卡 + 表单确认 + 校验/重发 | `feishu.hr.user_created` → tool `handbook_onboarding_*`（MVP 双侧 IM；`handbook_confirmed` 合成事件仍预留） |
 | 4 | 财务自动化 | **是**（问答部分否） | 假勤汇总、报销审核、报告推送 | `attendance_review_needed` / `expense_submitted` / `report_ready`；问答走对话 |
 | 5 | 私聊快捷办假勤报销 | **否** | 用户发起办理 | — |
 | 6 | 法律合同审查 | **部分** | 审查请求/交付可触发 | 复用 `haitun.review.requested` / `deliverable.ready` |

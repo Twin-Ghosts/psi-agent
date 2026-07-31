@@ -308,6 +308,11 @@ AI 的 tool_calls 通过 SSE 流式传输——多个 chunk 中的 `delta.tool_c
 
 无 TRIGGER 时事件仍可进门，matched/fired 为空（能力开、钩子关）。
 
+**``fire=tool`` 与动态 payload（刻意为之）**：TRIGGER.md 里 ``tool_args`` 是静态的。若 tool 形参声明了
+``event_payload_json`` / ``event_name`` / ``raw_event`` / ``event_source``，且 YAML 未给非空值，
+``TriggerRegistry._fire_tool`` 经 ``merge_event_tool_args`` 从信封注入——用于按 ``payload.open_id``
+给每位新员工发卡（见 haitun ``handbook_onboarding_send_welcome``）。
+
 ### History 展示白名单（``history_display.py``）
 
 | kind | 展示 |
