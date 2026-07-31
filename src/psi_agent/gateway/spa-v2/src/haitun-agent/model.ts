@@ -73,7 +73,7 @@ export type ChatMessage = {
   files?: ChatFile[];
   /**
    * Raw Session ``reasoning`` for this assistant turn (thinking + tool markers).
-   * Expandable「已思考」shows prose after ``stripToolMarkersFromReasoning``.
+   * Post-turn UI splits via ``parseReasoningSegments``: tool list + expandable「已思考」prose.
    * From live SSE accumulate and/or `/history` projection; not in localStorage.
    */
   reasoning?: string;

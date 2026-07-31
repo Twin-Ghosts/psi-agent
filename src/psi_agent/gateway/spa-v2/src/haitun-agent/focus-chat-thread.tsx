@@ -9,9 +9,11 @@ import { downloadMatrixXlsx, matrixToTsv, tableToMatrix } from "../services/mdTa
 import { preferResultBelowRule } from "../services/assistantDisplay";
 import { TURN_PROGRESS, type ProgressLog } from "../services/turnProgress";
 import {
-  hasDisplayableReasoning,
+  hasTurnProcess,
   stripToolMarkersFromReasoning,
   thinkingHeaderLabel,
+  toolSummariesFromReasoning,
+  toolsHeaderLabel,
 } from "../services/reasoningDisplay";
 import { FAILED_REASON_LABEL, isCompleteAgent } from "../services/messageTurn";
 import { ensureChatFileData, revealDeliverableInFolder } from "../utils/filePreviewUtils";
@@ -141,34 +143,66 @@ function CopyButton({ text, className }: { text: string; className?: string }) {
 }
 
 /**
- * Cursor-style post-turn thinking disclosure.
- * Live streaming still uses the process log; after the turn, expand「已思考」for prose.
+ * Cursor-style post-turn process: tools (primary, default open) + thinking prose (collapsed).
+ * Live streaming still uses the process log; after the turn, split packages from raw reasoning.
  */
-function ThinkingDisclosure({
+function TurnProcessDisclosure({
   reasoning,
   streaming = false,
 }: {
   reasoning: string;
   streaming?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
-  const body = stripToolMarkersFromReasoning(reasoning);
-  if (!body) return null;
-  const label = thinkingHeaderLabel({ streaming, hasBody: true });
+  const tools = toolSummariesFromReasoning(reasoning);
+  const thinking = stripToolMarkersFromReasoning(reasoning);
+  const [toolsOpen, setToolsOpen] = useState(true);
+  const [thinkingOpen, setThinkingOpen] = useState(false);
+  if (!tools.length && !thinking) return null;
+
   return (
-    <div className={`focus-chat-thinking${open ? " is-open" : ""}`}>
-      <button
-        type="button"
-        className="focus-chat-thinking-toggle"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-      >
-        <ChevronRight size={14} className="focus-chat-thinking-chevron" aria-hidden />
-        <span>{label}</span>
-      </button>
-      {open ? (
-        <div className="focus-chat-thinking-body" role="region" aria-label="思考过程">
-          {body}
+    <div className="focus-chat-turn-process">
+      {tools.length > 0 ? (
+        <div className={`focus-chat-thinking focus-chat-tools${toolsOpen ? " is-open" : ""}`}>
+          <button
+            type="button"
+            className="focus-chat-thinking-toggle"
+            aria-expanded={toolsOpen}
+            onClick={() => setToolsOpen((v) => !v)}
+          >
+            <ChevronRight size={14} className="focus-chat-thinking-chevron" aria-hidden />
+            <span>{toolsHeaderLabel(tools.length)}</span>
+          </button>
+          {toolsOpen ? (
+            <div
+              className="focus-chat-tools-body"
+              role="list"
+              aria-label="工具调用"
+            >
+              {tools.map((line, i) => (
+                <div className="focus-chat-progress-line" role="listitem" key={`${i}-${line}`}>
+                  {line}
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {thinking ? (
+        <div className={`focus-chat-thinking${thinkingOpen ? " is-open" : ""}`}>
+          <button
+            type="button"
+            className="focus-chat-thinking-toggle"
+            aria-expanded={thinkingOpen}
+            onClick={() => setThinkingOpen((v) => !v)}
+          >
+            <ChevronRight size={14} className="focus-chat-thinking-chevron" aria-hidden />
+            <span>{thinkingHeaderLabel({ streaming, hasBody: true })}</span>
+          </button>
+          {thinkingOpen ? (
+            <div className="focus-chat-thinking-body" role="region" aria-label="思考过程">
+              {thinking}
+            </div>
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -399,9 +433,9 @@ export function FocusChatThread({
             {isLiveAgent && writing ? thinkingBubble : null}
             {message.role === "agent"
               && !isLiveAgent
-              && hasDisplayableReasoning(message.reasoning ?? "")
+              && hasTurnProcess(message.reasoning ?? "")
               ? (
-                <ThinkingDisclosure reasoning={message.reasoning!} />
+                <TurnProcessDisclosure reasoning={message.reasoning!} />
               )
               : null}
             <div className="focus-chat-bubble-wrap">

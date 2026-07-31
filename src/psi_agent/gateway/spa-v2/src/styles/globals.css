@@ -4923,14 +4923,29 @@ button.metric-cell:disabled {
   letter-spacing: 0.01em;
 }
 
-/* Post-turn expandable thinking (Cursor-style「已思考」) */
-.focus-chat-thinking {
+/* Post-turn process: tools + thinking (Cursor-style split packages) */
+.focus-chat-turn-process {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 0.35rem;
   margin: 0 0 0.45rem;
   max-width: min(100%, 42rem);
+}
+.focus-chat-thinking {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.35rem;
+  margin: 0;
+  max-width: 100%;
+}
+.focus-chat-tools-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  width: 100%;
+  padding: 0.15rem 0 0.1rem 1.1rem;
 }
 .focus-chat-thinking-toggle {
   display: inline-flex;
