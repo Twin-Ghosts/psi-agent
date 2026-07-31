@@ -60,11 +60,7 @@ def _extend_tools(existing: object, extra: list[dict[str, str]]) -> list[dict[st
     base: list[dict[str, str]] = []
     if isinstance(existing, list):
         for item in existing:
-            if (
-                isinstance(item, dict)
-                and isinstance(item.get("name"), str)
-                and isinstance(item.get("arguments"), str)
-            ):
+            if isinstance(item, dict) and isinstance(item.get("name"), str) and isinstance(item.get("arguments"), str):
                 base.append({"name": item["name"], "arguments": item["arguments"]})
     base.extend(extra)
     return base
@@ -115,11 +111,7 @@ class HistoryManager:
             role = wire_role(msg.get("role"))
             kind = message_kind(msg)
             reasoning_raw = msg.get("reasoning")
-            reasoning = (
-                reasoning_raw.strip()
-                if isinstance(reasoning_raw, str) and reasoning_raw.strip()
-                else ""
-            )
+            reasoning = reasoning_raw.strip() if isinstance(reasoning_raw, str) and reasoning_raw.strip() else ""
             tools = _tool_calls_payload(msg)
 
             if not is_displayable_chat_message(msg):
