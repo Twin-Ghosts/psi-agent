@@ -12,11 +12,14 @@
 
 | 要加… | 改哪里 | 不改哪里 |
 |--------|--------|----------|
-| 官方推送事件 | agent `channel_events/feishu/<slug>/`（`EVENT.yaml` + `map.py`） | Session / Channel 源码 |
-| 自定义合成事件 | 同上（`EVENT.yaml` + `produce.py`） | Session / Channel 源码 |
+| 官方推送事件（`source: feishu`） | agent `channel_events/feishu/<slug>/`（`EVENT.yaml` + `map.py`） | Session / Channel 源码 |
+| 自定义合成事件（已有 `source`，如 `haitun`） | 同上（`EVENT.yaml` + `produce.py`） | Session / Channel 源码 |
+| **首次**新的信封 `source` 字符串 | agent `channel_events/` **+** Session `event_protocol.KNOWN_SOURCES` | Channel 业务清单；不要为每条 event 改 Session |
 | 进总线后的反应 | agent `triggers/`（`trigger_manage`） | Channel 源码 |
 
 **重启 Channel**（`--agent` / `PSI_AGENT` 指向该包）后生效。只有换 Channel 种类、扩框架接口、修 bug 才动 `src/psi_agent/channel`。
+
+**分层口诀（后人）：** 绝大多数注册事件 = **只动 agent 包**；只有「新 source / 改信封形状」才动 Session `event_protocol`。Session **没有**业务 event catalog，但会对未知 `source` 硬拒。
 
 ---
 

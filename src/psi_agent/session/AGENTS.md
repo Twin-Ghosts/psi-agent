@@ -274,10 +274,20 @@ AI 的 tool_calls 通过 SSE 流式传输——多个 chunk 中的 `delta.tool_c
 | 角色 | 位置 | 说明 |
 |------|------|------|
 | **统一接收** | ``session/server.py`` ``POST /events`` → ``SessionAgent.handle_event`` | 与 ``POST /chat/completions`` 并列；官方映射与合成事件**同一入口** |
-| **薄信封** | ``session/event_protocol.py`` | 校验形状（``source``/``event``/``payload``…），**无**业务事件 catalog 硬门槛 |
+| **薄信封** | ``session/event_protocol.py`` | 校验形状（``source``/``event``/``payload``…），**无**业务事件 catalog；``source`` 须在 ``KNOWN_SOURCES``（未知则 ``EventProtocolError``） |
 | **发放（挂钩）** | ``session/trigger_registry.py`` | 匹配 TRIGGER → ``fire`` |
 
 事件从哪来、叫什么业务名：见 agent 包 ``channel_events/`` + Channel 加载（``docs/superpowers/specs/2026-07-29-channel-events-in-agent-package.md``）。
+
+**后人注册事件时动哪一层（刻意为之）：**
+
+| 情况 | 改 | 不改 |
+|------|----|------|
+| 已有 ``source``（如 ``feishu`` / ``haitun``）下新业务 ``event`` | **仅** agent ``channel_events/`` | 本文件旁的业务代码、Channel 框架 |
+| **新** ``source`` 字符串首次出现 | ``event_protocol.KNOWN_SOURCES`` + agent ``channel_events/`` | 不要为每条 event 扩 Session |
+| 信封 / ``/events`` 协议形状 | ``event_protocol``（及相关校验） | 不要用改协议代替加事件 |
+
+业务清单不在 Session；``KNOWN_SOURCES`` 只挡「信封从哪类生产者来」，不是 event 名枚举。
 
 | 概念 | 说明 |
 |------|------|

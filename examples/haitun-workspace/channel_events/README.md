@@ -2,7 +2,9 @@
 
 > 交付准则：[`docs/superpowers/specs/2026-07-29-channel-events-developer-guide.md`](../../../docs/superpowers/specs/2026-07-29-channel-events-developer-guide.md)
 
-本目录即事件表。Session **无**业务 catalog。
+本目录即事件表。Session **无**业务 event catalog。
+
+**改动分层**：同 `source` 下加事件 → **只改本目录**；新 `source` 首次出现 → 另加 Session `KNOWN_SOURCES`（见开发者指南）。勿每条事件都改 Session/Channel。
 
 ---
 

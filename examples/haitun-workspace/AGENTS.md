@@ -89,6 +89,17 @@ service tools:
 
 **触发器信号源（交付对接）**：有「每次 xx 就…」类需求且 xx 可观测时，在 **`channel_events/<channel>/`** 按需注册（官方：`map.py`；自定义：`produce.py`），≈ 加 tool；目录 + `channel_events/README.md` 索引表即事件表，**不要**另建 Session catalog，也**不要**为每个事件改 Channel 源码（Feishu 已统一接线）。必读：`docs/superpowers/specs/2026-07-29-channel-events-developer-guide.md`。挂钩仍用 `triggers/` + `trigger_manage` / skill `feishu-event-remind`。产品用语：**触发器**（旧称「定事」已弃用），与**定时任务**成对。
 
+**注册事件改哪一层（刻意为之，后人勿每条都改 Session/Channel）：**
+
+| 情况 | 最小改动 | 不要动 |
+|------|----------|--------|
+| 在已有 `source`（`feishu` / `haitun` / …）下加新 `event` | **仅本 agent 包** `channel_events/`（+ README 索引；重启 Channel） | Session / Channel 框架 |
+| **首次**引入新的信封 `source` 字符串 | agent `channel_events/` **+** Session `event_protocol.py` 的 `KNOWN_SOURCES` | Channel 业务清单 |
+| 改信封字段 / `POST /events` 形状 | Session `event_protocol`（及调用方） | 不要用改协议冒充「加一条业务事件」 |
+| 用户要「每次 xx 就提醒」且 xx 已接通 | 只写 `triggers/`（`trigger_manage`） | 不必再注册 event |
+
+合成事件用 `source: haitun` 时，Session 会对未知 `source` **硬拒**（`EventProtocolError`）——故第一次加 `haitun` 才动了 protocol；之后同 source 的新事件**不必**再改 Session。
+
 ## Tools (`tools/`)
 
 ### Path roots（workspace / agent ContextVar + AppData）
