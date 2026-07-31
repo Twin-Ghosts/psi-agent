@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -95,7 +96,7 @@ async def handbook_onboarding_process_submit(card_action_json: str = "") -> str:
     if not envelope:
         return _fail("card_action_json must be a non-empty JSON object")
 
-    dispatch = envelope.get("dispatch") if isinstance(envelope.get("dispatch"), dict) else {}
+    dispatch = _as_dict(envelope.get("dispatch"))
     handler = str(dispatch.get("handler") or "").strip()
     matched = bool(dispatch.get("matched"))
     if handler and handler != _HANDLER:
@@ -103,26 +104,32 @@ async def handbook_onboarding_process_submit(card_action_json: str = "") -> str:
     if handler == _HANDLER and matched is False:
         return _fail("dispatch.matched is false; do not invent a handler")
 
-    action = envelope.get("action") if isinstance(envelope.get("action"), dict) else {}
-    form_value = action.get("form_value") if isinstance(action.get("form_value"), dict) else {}
-    value = action.get("value") if isinstance(action.get("value"), dict) else {}
+    action = _as_dict(envelope.get("action"))
+    form_value = _as_dict(action.get("form_value"))
+    value = _as_dict(action.get("value"))
     action_name = str(value.get("action") or action.get("action_id") or "").strip()
     if action_name and action_name != _ACTION_SUBMIT:
         return _fail(f"unexpected action {action_name!r}")
 
-    business = envelope.get("business_context") if isinstance(envelope.get("business_context"), dict) else {}
+    business = _as_dict(envelope.get("business_context"))
     open_id = str(business.get("open_id") or "").strip()
     name = str(business.get("name") or "").strip() or open_id
     attempt_raw = business.get("attempt", 1)
-    try:
-        attempt = max(1, int(attempt_raw))
-    except TypeError, ValueError:
+    attempt = 1
+    if isinstance(attempt_raw, bool):
         attempt = 1
+    elif isinstance(attempt_raw, int):
+        attempt = max(1, attempt_raw)
+    elif isinstance(attempt_raw, float):
+        attempt = max(1, int(attempt_raw))
+    elif isinstance(attempt_raw, str) and attempt_raw.strip():
+        with suppress(ValueError):
+            attempt = max(1, int(attempt_raw.strip()))
 
-    source = envelope.get("source") if isinstance(envelope.get("source"), dict) else {}
+    source = _as_dict(envelope.get("source"))
     operator = str(source.get("operator_open_id") or source.get("open_id") or "").strip()
     if not operator:
-        op = action.get("operator") if isinstance(action.get("operator"), dict) else {}
+        op = _as_dict(action.get("operator"))
         operator = str(op.get("open_id") or "").strip()
     if not open_id:
         open_id = operator
@@ -166,7 +173,8 @@ def _build_card(
     if attempt > 1:
         title = f"Retry: {title}"
     intro = str(cfg.get("welcome_intro") or "").strip()
-    links = cfg.get("handbook_links") if isinstance(cfg.get("handbook_links"), list) else []
+    links_raw = cfg.get("handbook_links")
+    links: list[Any] = links_raw if isinstance(links_raw, list) else []
     link_lines: list[str] = []
     for item in links:
         if not isinstance(item, dict):
@@ -318,6 +326,10 @@ async def _load_config() -> dict[str, Any]:
     except yaml.YAMLError:
         return {}
     return loaded if isinstance(loaded, dict) else {}
+
+
+def _as_dict(raw: Any) -> dict[str, Any]:
+    return raw if isinstance(raw, dict) else {}
 
 
 def _parse_json_object(raw: str | Any) -> dict[str, Any]:
