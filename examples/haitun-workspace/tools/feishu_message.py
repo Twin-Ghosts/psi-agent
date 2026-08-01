@@ -150,10 +150,13 @@ async def feishu_message_send_card(
 
     When handling the resulting ``<feishu_card_action>``, the updated original card already
     acknowledges the selected option. Do not narrate the click or announce a planned action before
-    calling the matched handler. After the handler succeeds, finish with zero assistant content:
-    do not emit ``NO_REPLY`` or a success confirmation. Reply only when the operator still needs a
-    warning, partial-failure detail, permission problem, or required next step. An unmatched or
-    failed handler must never be reported as successful.
+    calling the matched handler. After the handler succeeds, finish with zero assistant content
+    unless the matched handler explicitly provides a follow-up invitation to show. In particular,
+    if ``assignment_accept`` returns ``discussion_invitation.enabled=true``, reply with only that
+    invitation message and nothing else. Do not emit ``NO_REPLY`` or a success confirmation.
+    Reply only when the operator still needs a warning, partial-failure detail, permission
+    problem, required next step, or handler-provided invitation. An unmatched or failed handler
+    must never be reported as successful.
 
     Every actionable element's ``value`` must include an explicit action name and a stable
     business identifier such as ``request_id``; different buttons need different values.

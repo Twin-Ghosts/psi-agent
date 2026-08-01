@@ -88,6 +88,7 @@ from prompt_sections import (
     SUBAGENT_DELEGATION_SECTION,
     TOOL_CALL_STYLE_SECTION,
     WEB_SEARCH_RECENCY_SECTION,
+    WORK_ASSIGNMENT_ROUTING_SECTION,
     build_model_identity_line,
     build_runtime_line,
     build_skills_section,
@@ -1219,6 +1220,13 @@ this workspace, generated workflows, instruction files, or committed `.env` file
 
         if "skill_manage" in tools:
             stable_parts += ["", SKILL_AUTHORING_SECTION]
+
+        if {
+            "assignment_upsert",
+            "assignment_send_card",
+            "assignment_accept",
+        } & set(tools):
+            stable_parts += ["", WORK_ASSIGNMENT_ROUTING_SECTION]
 
         skills_section = build_skills_section(skills_xml)
         if skills_section:
