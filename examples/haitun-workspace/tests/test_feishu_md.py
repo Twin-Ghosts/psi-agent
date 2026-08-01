@@ -310,8 +310,10 @@ async def test_append_markdown_converts_then_writes(monkeypatch: pytest.MonkeyPa
 
 @pytest.mark.asyncio
 async def test_append_markdown_reports_partial_progress(monkeypatch: pytest.MonkeyPatch) -> None:
-    blocks = [{"block_id": f"p{i}", "block_type": 2, "parent_id": "", "text": {"elements": []}} for i in range(5)]
-    fake = _FakeFeishu(blocks, [b["block_id"] for b in blocks])
+    blocks: list[dict[str, Any]] = [
+        {"block_id": f"p{i}", "block_type": 2, "parent_id": "", "text": {"elements": []}} for i in range(5)
+    ]
+    fake = _FakeFeishu(blocks, [str(b["block_id"]) for b in blocks])
     monkeypatch.setattr(_impl, "_invoke", fake)
     monkeypatch.setattr(_md, "DESCENDANT_MAX_BLOCKS", 2)
 
