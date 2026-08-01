@@ -445,6 +445,16 @@ class ToolRegistry:
             logger.warning(f"Tools directory not found: {tools_dir!r}")
             return files
 
+        # Tool files are exec'd as synthetic modules with no package, so a helper import
+        # (``import _feishu_impl``) only resolves if *tools_dir* is on sys.path. Do it here
+        # rather than leaving each helper to insert its own path: when the insert lives in
+        # the helpers, whether a file loads depends on whether some *earlier* file in glob
+        # order happened to do the insert first, so a helper that omits it (as
+        # ``_assignment_tool_common`` did) breaks only its own tools and only sometimes.
+        tools_dir_str = str(await tools_anyio.resolve())
+        if tools_dir_str not in sys.path:
+            sys.path.insert(0, tools_dir_str)
+
         try:
             async for py_file in tools_anyio.glob("*.py"):
                 if py_file.name.startswith("_"):

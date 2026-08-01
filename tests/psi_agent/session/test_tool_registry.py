@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import textwrap
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -476,6 +477,42 @@ async def test_load_skips_underscore_files(tmp_path: Path) -> None:
     )
     tr = await ToolRegistry.load(tools_dir)
     assert tr.tools == {}
+
+
+@pytest.mark.anyio
+async def test_load_resolves_helper_import_regardless_of_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tool importing a private helper loads even if it comes first in glob order.
+
+    Tool files are exec'd as synthetic modules with no package, so ``import _helper``
+    needs *tools_dir* on sys.path. That used to be left to the helpers themselves, which
+    made loading order-dependent: ``aaa_tool.py`` failed while ``zzz_tool.py`` worked,
+    because only the latter ran after something had done the insert.
+    """
+    tools_dir = tmp_path / "tools"
+    await anyio.Path(tools_dir).mkdir()
+    await anyio.Path(tools_dir / "_helper.py").write_text("VALUE = 'from-helper'\n", encoding="utf-8")
+    # 'aaa' sorts before the helper's own name and inserts nothing itself.
+    await anyio.Path(tools_dir / "aaa_tool.py").write_text(
+        textwrap.dedent("""\
+        from _helper import VALUE
+
+        async def aaa_tool() -> str:
+            return VALUE
+    """),
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path / "unrelated"))
+    before = list(sys.path)
+
+    tr = await ToolRegistry.load(tools_dir)
+
+    assert "aaa_tool" in tr.tools, "helper import failed — tools_dir was not on sys.path"
+    func = tr.get("aaa_tool")
+    assert func is not None
+    assert await func() == "from-helper"
+    # The insert is the fix's mechanism, so assert it happened rather than that nothing changed.
+    assert str(tools_dir.resolve()) in sys.path
+    assert before == [p for p in sys.path if p != str(tools_dir.resolve())]
 
 
 @pytest.mark.anyio
