@@ -7042,6 +7042,70 @@ def _build_descendant_request(
     return req
 
 
+# Public aliases for the sibling helper modules (``_feishu_md``, ``_chart_*``): they need
+# the same request plumbing, and re-deriving it there would let the two copies drift on
+# things like which token types a docx write accepts.
+build_descendant_request = _build_descendant_request
+
+
+async def invoke_request(
+    request: Any,
+    user_key: str | None = None,
+    prefer: str = "tenant",
+    identity: str = "",
+    capabilities: list[str] | None = None,
+) -> dict[str, Any]:
+    """Public ``_invoke`` for sibling helper modules.
+
+    A delegating function rather than an alias so that replacing ``_invoke`` (tests, or
+    any future wrapper) is seen through this door too — an alias would capture the
+    original at import time and quietly bypass it.
+    """
+    return await _invoke(request, user_key=user_key, prefer=prefer, identity=identity, capabilities=capabilities)
+
+
+def real_block_id(response: dict[str, Any], temporary_id: str) -> str:
+    """The permanent ``block_id`` Feishu assigned to a temporary id we sent.
+
+    ``/descendant`` answers with ``block_id_relations`` mapping each ``temporary_block_id``
+    to the real one. Any follow-up edit (growing a table, filling a cell) has to address
+    the real id: the temporary one is ours, meaningful only inside that one request.
+    """
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    for rel in (data or {}).get("block_id_relations") or []:
+        if isinstance(rel, dict) and str(rel.get("temporary_block_id", "")) == temporary_id:
+            return str(rel.get("block_id", ""))
+    return ""
+
+
+async def list_all_blocks(document_id: str, user_key: str = "", identity: str = "") -> dict[str, Any]:
+    """Every block of a docx, raw and unpaged — for code that needs the block *graph*.
+
+    ``list_doc_blocks_impl`` is the agent-facing reader: it trims text to a preview and
+    caps the count, both wrong here, where a table's cells have to be matched to the
+    paragraphs inside them. Raw payloads, all pages, no cap.
+    """
+    doc = document_id.strip()
+    if not doc:
+        return _error("document_id is required.")
+    items: list[dict[str, Any]] = []
+    page_token = ""
+    while True:
+        res = await _invoke(
+            _build_document_blocks_list_request(doc, _BLOCKS_LIST_PAGE_MAX, page_token),
+            user_key=user_key,
+            prefer="tenant",
+            identity=identity,
+        )
+        if not res["ok"]:
+            return res
+        data = res["data"] if isinstance(res["data"], dict) else {}
+        items.extend(b for b in (data.get("items") or []) if isinstance(b, dict))
+        page_token = str(data.get("page_token") or "")
+        if not page_token:
+            return {"ok": True, "document_id": doc, "blocks": items}
+
+
 def _parse_rows(rows_json: str) -> list[list[str]] | dict[str, Any]:
     """Parse a JSON 2-D array of cell values into list[list[str]] (or an error dict).
 
@@ -7547,11 +7611,24 @@ async def append_doc_content_impl(
 ) -> dict[str, Any]:
     """Append text/heading blocks (from plain text or light Markdown) to a docx body.
 
+    Content that uses Markdown beyond headings — a ``|``-delimited table, a ``- `` list,
+    ``**bold**``, a fenced code block — is routed through Feishu's own Markdown converter
+    so it lands as *native blocks*: a real table you can drag, sort and edit, not the
+    literal pipes and dashes this tool used to write. Plain prose keeps the local
+    heading/paragraph mapping, which needs no round-trip.
+
     Pass ``user_key`` to write as that user (e.g. into a doc inside a user-owned wiki);
     empty uses the bot's tenant token.
     """
     if not document_id.strip():
         return _error("document_id is required.")
+    if not (content or "").strip():
+        return _error("content is empty — nothing to write.")
+    # Imported lazily: _feishu_md imports this module, so a module-scope import would cycle.
+    import _feishu_md as _md  # noqa: PLC0415
+
+    if _md.has_rich_markdown(content):
+        return await _md.append_markdown(document_id.strip(), content, user_key, identity)
     blocks = _content_to_blocks(content or "")
     if not blocks:
         return _error("content is empty — nothing to write.")

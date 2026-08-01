@@ -185,11 +185,18 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
   一次完成「建节点 + 写正文」，避免分两步（`feishu_wiki_create_doc` 再 `feishu_doc_append_content`）
   时留下**空文档**。若正文写入失败，它会连 `node_token`/`obj_token` 一并回报，可用相同 `user_key`
   调 `feishu_doc_append_content` 补写。
-- **在文档里放表格 / 流程图 / 泳道图**：`feishu_doc_append_content` 只能写标题和段落，
-  **写不出真正的表格**，更画不了图。要真正的表格/图，用下面三个专门工具（都吃 docx 的
-  `document_id`，也就是 `feishu_doc_create` 返回的 id，或 wiki 节点的 `obj_token`；带 `user_key`）：
-  - 表格：`feishu_doc_append_table(document_id, rows_json, header_row, column_width_json, user_key, caption)`——
-    `rows_json` 是二维 JSON 数组，如 `[["姓名","部门"],["张三","研发"]]`，会生成飞书原生表格块。
+- **在文档里放表格 / 流程图 / 泳道图**：`feishu_doc_append_content` 直接吃 Markdown，
+  **表格、列表、待办、引用、代码块、分割线、行内粗体/斜体/删除线/行内码/链接都会被飞书
+  转成原生块**——`| 姓名 | 部门 |` 写进去就是一张真正的飞书表格（能拖列宽、能排序、能编辑），
+  不再是一堆竖线和横线。所以**普通「文档里带个表格」直接写 Markdown 就行**，不用另外调工具。
+  下面几个专门工具解决 Markdown 表达不了的事（都吃 docx 的 `document_id`，也就是
+  `feishu_doc_create` 返回的 id，或 wiki 节点的 `obj_token`；带 `user_key`）：
+  - 表格（要给**表题自动编号**、或要指定**列宽**、或数据本来就是二维数组不想拼 Markdown 时用）：
+    `feishu_doc_append_table(document_id, rows_json, header_row, column_width_json, user_key, caption)`——
+    `rows_json` 是二维 JSON 数组，如 `[["姓名","部门"],["张三","研发"]]`，生成飞书原生表格块。
+    **和直接写 Markdown 表格怎么选**：只是正文里要一张表 → 直接 Markdown；要自动编号的表题
+    或指定列宽 → 用这个。
+
   - **可编辑的内嵌电子表格**：`feishu_doc_append_sheet(document_id, rows, columns, values_json, header_row, user_key, caption)`——
     在文档里嵌一张**真正的飞书电子表格**（block_type 30，飞书自动新建后端表格），带公式栏、
     单元格格式、筛选，能在文档里直接编辑，也能单独打开。返回 `spreadsheet_token` / `sheet_id` /
@@ -199,7 +206,8 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
     先建小再靠写入撑到你要的尺寸，所以要 30 行就真给 30 行）。
     **和上面 `append_table` 怎么选**：内容是「数据」（要公式、会反复更新、要筛选排序、想当独立
     表格用）→ 用 `append_sheet`；内容是「排成格子的文字」（一小段对照说明，读起来是正文的一部分）
-    → 用 `append_table`。`append_table` 的表格块只装文字，**没有公式也不能筛选**。
+    → 直接写 Markdown 表格或用 `append_table`。这两种表格块只装文字，**没有公式也不能筛选**。
+
   - **内嵌多维表格**：`feishu_doc_append_bitable(document_id, view_type, user_key, caption)`——
     内容是「一条条记录」（台账、问题列表、报名表：要字段类型、多视图、逐行协作）时用它，
     返回 `app_token` / `table_id`，接着用 `feishu_bitable_create_field` / `_create_record` 建字段填数据。
@@ -209,9 +217,10 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
   - 泳道图：`feishu_doc_append_swimlane(document_id, lanes_json, stages_json, user_key, caption)`——
     `lanes_json` 可传对象 `{"客户":["下单","付款"],"仓库":["发货"]}`（列=泳道，自动排格），
     或传泳道名数组 `["客户","客服","仓库"]` 再用 `stages_json` 给二维正文行。同样用表格如实呈现。
-  三个都收 `caption`（表题）：**只写内容不写「表N：」**，工具读文档已有的「表 N」自动续号，
+  这几个都收 `caption`（表题）：**只写内容不写「表N：」**，工具读文档已有的「表 N」自动续号，
   按学术体例写在**表格上方**（图注在下、表题在上），且「表」和「图」是两条互不干扰的序列。
-  一句话：用户要「表格/流程图/泳道图」时别再往正文里塞纯文本，改用这三个工具。
+  一句话：正文里的表格直接写 Markdown；要编号表题、要能算数筛选、要逐行协作，才换上面的工具。
+
 - **改文档里已有的内容（不是追加）**：上面的 `append_*` 只会往末尾加，写错一段不必重开一篇——
   用这三个「块级编辑」工具改稿（都吃 docx 的 `document_id` 或 wiki 节点的 `obj_token`）：
   - 先列块拿 id：`feishu_doc_list_blocks(document_id, max_blocks, user_key)` 返回
