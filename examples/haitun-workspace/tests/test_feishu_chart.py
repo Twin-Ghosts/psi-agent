@@ -1323,6 +1323,20 @@ async def test_caption_numbers_continue_the_document(monkeypatch: pytest.MonkeyP
     second = json.loads(await _chart._render_bar('["华东","华北"]', "[3,1]", document_id="doc1", caption="区域排名"))
     assert (first["caption_number"], second["caption_number"]) == (2, 3)
     assert fake.written == ["图 2：人力分布", "图 3：区域排名"]  # noqa: RUF001
+    # The caller numbers nothing itself, so the returned caption is its only way to know
+    # which line the chart landed under. It must be the text actually written.
+    assert [first["caption"], second["caption"]] == fake.written
+
+
+@pytest.mark.asyncio
+async def test_no_caption_given_reports_no_caption_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty ``caption`` field would read as if a blank caption had been written."""
+    fake = _FakeDoc("")
+    monkeypatch.setattr(_impl, "_invoke", fake)
+    result = json.loads(await _chart._render_pie('["研发","市场"]', "[3,1]", document_id="doc1"))
+    assert result["ok"] is True
+    assert "caption" not in result
+    assert fake.written == []
 
 
 @pytest.mark.asyncio
