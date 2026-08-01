@@ -300,8 +300,13 @@ service tools:
 - **Serper search**: install psi-agent with the `mcp` extra and have `uvx` available.
 - **Browser tools**: Node.js / `npx` (first run downloads `@playwright/mcp`) and a system
   browser (Edge by default). Optional env: `BROWSER_CHANNEL` (`msedge`/`chrome`),
-  `BROWSER_HEADLESS` (`1`/`0`), `BROWSER_CAPS` (default `vision,devtools`). If Node is
-  missing the `browser_*` tools are skipped at load time (logged), not fatal.
+  `BROWSER_HEADLESS` (`1`/`0`), `BROWSER_CAPS` (default `vision,devtools`),
+  `BROWSER_MCP_PACKAGE`, `BROWSER_STARTUP_TIMEOUT`, `BROWSER_PROFILE_DIR` (browser profile
+  location; defaults to a stable per-user cache dir so cookies/logins survive restarts),
+  `BROWSER_HEALTH_TIMEOUT` (seconds to wait for the server health probe, default `5`). If Node is
+  missing the `browser_*` tools are skipped at load time (logged), not fatal. A server that died or
+  went half-dead is detected and replaced on the next call, so the tools self-heal without a
+  Gateway restart.
 - **`browser_cdp` (raw CDP)**: a Chromium-family browser (Edge/Chrome) installed, **or**
   `CDP_ENDPOINT` pointing at a browser started with `--remote-debugging-port` (e.g.
   `http://localhost:9222`). No Node needed — it launches the browser directly and speaks
