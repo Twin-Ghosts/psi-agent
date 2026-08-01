@@ -89,8 +89,8 @@ _AUTH_PROMPT = (
     "它把等待放到后台, 那一轮同样立刻收尾, 码到了后台自己换 token 并私聊告知用户.\n"
     "2. tier=link_auto —— 网站授权但不用复制 code. 把 authorize_url 发给用户后**这一轮收尾**, "
     "请他点完「同意授权」回你一句; 那一轮再调 feishu_auth_check 查一眼即可完成. 想让码自己回来"
-    "不用用户再回话, 就在发完链接那一轮调 feishu_auth_collect (不阻塞). 任何一轮都别调 "
-    "feishu_auth_wait 干等 —— 它阻塞占住 turn 锁, 用户这期间说什么都排队, 看着就是机器人卡死.\n"
+    "不用用户再回话, 就在发完链接那一轮调 feishu_auth_collect (不阻塞). 无论哪条路都别在工具里"
+    "干等 —— 等待会占住 turn 锁, 用户这期间说什么都排队, 看着就是机器人卡死.\n"
     "3. tier=link_manual —— 网站授权且需要复制 code (兜底). 把 authorize_url 发给用户, "
     "再让他从浏览器**地址栏**复制 code= 后面那一串 (或整段网址) 交给 feishu_auth_complete. "
     "想帮用户彻底免掉复制 (把这个部署升到前两级), 调 feishu_auth_env_check 查出确切缺哪一项"
@@ -3237,8 +3237,8 @@ async def auth_start_impl(capabilities: str = "", user_key: str = "") -> dict[st
 
     授权码流程真正折磨人的是「同意之后还要自己从地址栏复制 code」。这里按环境选一条
     自动接收通道 (Gateway 回调 → 本机回环 → 都不行才手工), 把 ``state`` / PKCE
-    verifier / 通道信息一并写进 pending 文件, 供 ``auth_wait_impl`` 与
-    ``auth_complete_impl`` 取用。
+    verifier / 通道信息一并写进 pending 文件, 供后台 watcher (``auth_collect_impl``)、
+    ``auth_check_impl`` 与 ``auth_complete_impl`` 取用。
 
     The requested scope is the UNION of what this user already granted and what
     ``capabilities`` asks for: Feishu issues a token carrying exactly the scopes of
@@ -3306,7 +3306,7 @@ async def auth_start_impl(capabilities: str = "", user_key: str = "") -> dict[st
             "message": (
                 f"请把 authorize_url 发给用户 (本次申请的权限: {', '.join(union)}), "
                 "让其打开并点「同意授权」-- **不用复制任何 code**, 授权码会自动回流.\n"
-                "发完链接**这一轮就收尾**, 顺带请用户点完后回你一句; 别在同一轮调 feishu_auth_wait 干等 "
+                "发完链接**这一轮就收尾**, 顺带请用户点完后回你一句; 别在同一轮干等 "
                 "(阻塞占住 turn 锁, 用户这期间说什么都得排队). 用户回话那一轮调 "
                 "feishu_auth_check (同一个 user_key) 查一眼即可完成授权; 想让码自己回来、不指望用户"
                 "再回话, 就在发完链接这一轮调 feishu_auth_collect —— 它把等待放到后台, 本轮照样立刻收尾.\n"
@@ -3435,7 +3435,7 @@ async def auth_card_impl(
     ``receive_id`` defaults to ``user_key`` (a DM). Deliberately: the pending
     ``state``/PKCE verifier is written under the *sending* workspace, while a card
     clicked in a group is routed to the clicker's own private session — a different
-    workspace, where ``auth_wait`` would find no pending authorization.
+    workspace, where the code collector would find no pending authorization.
     """
     key = (user_key or "").strip()
     if not key:
@@ -3649,7 +3649,7 @@ async def _read_pending(user_key: str) -> dict[str, Any]:
 async def _receive_code(pending: dict[str, Any], window_seconds: float) -> dict[str, str]:
     """按 pending 记下的通道取一次码; 窗口内没等到返回空 dict。
 
-    ``auth_wait_impl`` / ``auth_check_impl`` / 后台 watcher 共用这一步, 区别只在给多长
+    ``auth_check_impl`` 与后台 watcher 共用这一步, 区别只在给多长
     的窗口 —— 通道选择的逻辑只该有一份, 否则改了一处漏一处 (回环端口的取法就曾这样重复)。
 
     ``window_seconds`` 不是本函数自己的超时, 而是**交给接收通道**的等待窗口 (poll_gateway /
@@ -3666,69 +3666,10 @@ async def _receive_code(pending: dict[str, Any], window_seconds: float) -> dict[
     return await _oauth_rx.wait_loopback(port, str(pending.get("state") or ""), window_seconds)
 
 
-async def auth_wait_impl(user_key: str = "", timeout_seconds: int = 480) -> dict[str, Any]:
-    """等浏览器把授权码送回来, 然后直接完成授权 -- 用户无需复制任何东西。
-
-    **阻塞**: 整段等待都发生在本次工具调用里, 也就是在 SessionAgent 的 turn 锁内。除了
-    「用户此刻正盯着授权页、且这一轮不打算再理他」这种极窄的情形, 都该用
-    ``auth_collect_impl`` 把等待放到后台 —— 卡片回调那一轮用的就是 collect。
-    """
-    pending = await _read_pending(user_key)
-    state = str(pending.get("state") or "")
-    mode = str(pending.get("mode") or "manual")
-    if not state:
-        return _error("没有待完成的授权, 请先调 feishu_auth_start.")
-    if mode == "manual":
-        return _error(
-            "当前环境无法自动接收授权码, 请让用户从浏览器地址栏复制 code 后交给 feishu_auth_complete. "
-            "(想免掉复制: 调 feishu_auth_env_check 看确切缺哪一项配置, 它会给出修法.)",
-            manual_required=True,
-            next_step="feishu_auth_env_check",
-        )
-    timeout = float(max(10, min(timeout_seconds, 600)))
-    got = await _receive_code(pending, timeout)
-    if not got:
-        # 别把超时当失败报给用户: 取件箱 TTL 600 秒, 用户晚点几十秒点完, code 仍在里面等着取。
-        # (实测过一次真实场景: 等待窗口比用户点击早关了 12 秒, 而回调随后就到了。)
-        base = (
-            f"等了 {int(timeout)} 秒还没收到授权回调 -- 这不代表失败: 用户可能还没点完. "
-            "授权码在 Gateway 取件箱里可留存约 10 分钟, 所以**这一轮就此收尾**, 告诉用户「点完同意后回我一句」; "
-            "下一轮再用 feishu_auth_check 查一眼即可完成授权, 别急着让用户手抄 code, 也别告诉他失败了. "
-            "**不要在本轮里再调一次 feishu_auth_wait 继续等** —— 阻塞占着 Session 的 turn 锁, "
-            "用户这期间说什么都得排队, 表现出来就是「机器人卡住不回话」."
-        )
-        # 回调地址只有内网可达时, 「一直重等」对外网用户是个死循环: 他的浏览器根本跳不到
-        # 那个地址, 等到取件箱过期也不会有回调。所以这里必须给出另一条出路, 而不是让
-        # agent 反复安慰用户再等等。
-        redirect = str(pending.get("redirect_uri") or "")
-        if _oauth_rx.is_private_callback(redirect):
-            return _error(
-                base + "\n"
-                f"另外: 本次回调地址 {redirect} 只有内网打得到. 如果用户在外网, 他点完同意后页面会"
-                "打不开, 回调也就永远不会来 —— 再等无用. 这时问他一句「授权后那个打不开的页面, "
-                "地址栏里的网址是什么」, 把他发回来的**整条网址**交给 feishu_auth_complete 就能完成授权 "
-                "(不用让他自己找 code).",
-                timed_out=True,
-                callback_is_private=True,
-                retry_hint=(
-                    "本轮收尾; 下一轮用 feishu_auth_check 查一眼. "
-                    "仍然没有就让用户把地址栏整条网址发回来, 交给 feishu_auth_complete"
-                ),
-            )
-        return _error(
-            base,
-            timed_out=True,
-            retry_hint="本轮收尾, 下一轮用 feishu_auth_check (同一个 user_key) 查一眼, 别再阻塞等待",
-        )
-    if got.get("error"):
-        return _error(f"用户侧授权失败: {got['error']}")
-    return await auth_complete_impl(got.get("code", ""), user_key)
-
-
 async def auth_check_impl(user_key: str = "") -> dict[str, Any]:
     """查一眼授权码到没到, 不阻塞 —— 到了就完成授权, 没到立刻返回。
 
-    与 ``auth_wait_impl`` 是同一条取件通道, 区别只在等待时长: 这里用一个极短的窗口
+    与后台 watcher (``auth_collect_impl``) 是同一条取件通道, 区别只在等待时长: 这里用一个极短的窗口
     「看一眼就走」, 所以不会占住 Session 的 turn 锁。Gateway 取件箱 TTL 约 10 分钟,
     用户晚点几分钟点完「同意授权」, 下一轮再查照样拿得到, 因此**推迟取码是安全的**,
     不需要谁在原地干等。
@@ -3808,7 +3749,7 @@ async def _notify_auth_outcome(user_key: str, state: _auth_watch.WatchState) -> 
 async def auth_collect_impl(user_key: str = "", timeout_seconds: int = 600) -> dict[str, Any]:
     """把「等授权码」交给后台任务, **本轮立刻返回** —— 卡片回调那一轮用这个。
 
-    与 ``auth_wait_impl`` 的区别只在谁来等: 那边在工具调用里等, 而工具调用发生在
+    等待绝不能放在工具调用里: 工具调用发生在
     SessionAgent 的 turn 内, turn 持锁, 于是用户在这几分钟里说的话全排队 (表现就是
     「机器人卡死」); 这边起一个脱离本轮的任务去等, 工具立刻返回, 码回来时后台私聊回告。
 
@@ -3841,6 +3782,18 @@ async def auth_collect_impl(user_key: str = "", timeout_seconds: int = 600) -> d
         parked = await _read_pending(watched_key)
         got = await _receive_code(parked, window_seconds)
         if not got:
+            # 回调地址只有内网可达时, 「再等等」对外网用户是死循环: 他的浏览器根本跳不到那个
+            # 地址, 等到取件箱过期也不会有回调。这时唯一的出路是让他把地址栏整条网址贴回来。
+            redirect = str(parked.get("redirect_uri") or "")
+            if _oauth_rx.is_private_callback(redirect):
+                return _error(
+                    f"等不到授权回调: 本次回调地址 {redirect} 只有内网打得到. 用户若在外网, "
+                    "点完「同意授权」后页面会打不开, 回调也就永远不会来 —— 再等无用. "
+                    "问他一句「授权后那个打不开的页面, 地址栏里的网址是什么」, 把他发回来的"
+                    "**整条网址**交给 feishu_auth_complete 即可完成授权 (不用让他自己找 code).",
+                    timed_out=True,
+                    callback_is_private=True,
+                )
             return _error("等待授权回调超时", timed_out=True)
         if got.get("error"):
             return _error(f"用户侧授权失败: {got['error']}")

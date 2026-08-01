@@ -144,7 +144,7 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
 
 **第 2、3 级的细节**：把返回的 `authorize_url` **原样发给用户**，让其打开并点「同意授权」，然后
 
-- `tier=link_auto`：**不要向用户索要任何 code**，也**任何一轮都别调 `feishu_auth_wait` 干等**。
+- `tier=link_auto`：**不要向用户索要任何 code**，也**任何一轮都别在工具里干等**。
   发完链接就收尾，然后二选一：调 `feishu_auth_collect(user_key=...)` 让码自己回来（推荐，
   用户不必再回话；后台收到后私聊告知他可以继续），或者请用户点完「同意授权」后回你一句
   （他会看到「授权成功」页），那一轮调 `feishu_auth_check(user_key=...)` 查一眼。返回
