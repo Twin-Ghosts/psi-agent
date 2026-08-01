@@ -626,10 +626,32 @@ async def auth_check_impl(user_key: str = "") -> dict[str, Any]:
         )
     got = await _receive_code(pending, _CHECK_TIMEOUT_SECONDS)
     if not got:
-        return _core._error(
+        base = (
             "授权码还没到 —— 这不是失败, 只说明用户还没在授权页点「同意授权」. "
             "**本轮就此收尾**, 请用户点完后回你一句, 那一轮再调一次 feishu_auth_check. "
-            "授权码在取件箱里可留存约 10 分钟, 晚点查照样能完成.",
+            "授权码在取件箱里可留存约 10 分钟, 晚点查照样能完成."
+        )
+        # 回调地址只有内网/本机可达时, 「再查一次」对远端用户是死循环: 他的浏览器跳不到
+        # 那个地址 (loopback 通道的 localhost 更是指他自己的电脑, 不是本容器), 回调永远
+        # 不来, 取件箱到期也还是空的。auth_collect 已经给过这条后路, 但推荐流程是「本轮收尾,
+        # 下一轮用 auth_check 查」—— 后续每一轮都走这里, 所以这里也必须给, 否则 agent 会
+        # 一直复读「他还没点」, 把已经点过同意的用户一直挂着。
+        redirect = str(pending.get("redirect_uri") or "")
+        if _oauth_rx.is_private_callback(redirect):
+            return _core._error(
+                base + "\n"
+                f"另外: 本次回调地址 {redirect} 只有内网/本机打得到. 如果用户不在内网, 他点完同意后"
+                "页面会打不开, 回调也就永远不会来 —— 再查无用. 这时问他一句「授权后那个打不开的"
+                "页面, 地址栏里的网址是什么」, 把他发回来的**整条网址**交给 feishu_auth_complete "
+                "就能完成授权 (不用让他自己找 code).",
+                pending=True,
+                callback_is_private=True,
+                retry_hint=(
+                    "等用户说点好了再查一次; 仍然没有就让用户把地址栏整条网址发回来, 交给 feishu_auth_complete"
+                ),
+            )
+        return _core._error(
+            base,
             pending=True,
             retry_hint="等用户说点好了, 再调 feishu_auth_check (同一个 user_key)",
         )

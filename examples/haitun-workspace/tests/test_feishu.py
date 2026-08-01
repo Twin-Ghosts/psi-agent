@@ -1603,7 +1603,13 @@ async def test_auth_check_completes_when_code_already_arrived(monkeypatch: pytes
 async def test_auth_check_does_not_block_when_code_absent(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     """码还没到时 check 立刻返回 pending, 且只用极短窗口取件 —— 它不占 turn 锁的根据。"""
     pending = tmp_path / "pending.json"
-    pending.write_text(json.dumps({"state": "st", "mode": "gateway"}), encoding="utf-8")
+    # 显式给一个公网回调地址: 否则 is_private_callback("") 会回落去读
+    # PSI_OAUTH_CALLBACK_BASE, 跑测试的机器上配了内网地址就会走 private 分支,
+    # 让这条断言随环境飘。这里要验的是「普通 pending」那条路。
+    pending.write_text(
+        json.dumps({"state": "st", "mode": "gateway", "redirect_uri": "https://haitun.example.com/oauth/callback"}),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(pending))
     seen: dict[str, float] = {}
 
@@ -2046,10 +2052,72 @@ async def test_collect_timeout_offers_url_paste_when_private(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
+async def test_auth_check_timeout_offers_url_paste_when_private(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """auth_check 也要给这条后路: 推荐流程是「本轮收尾, 下一轮 check」, 后续每轮都走它。
+
+    只有 auth_wait 给提示是不够的 —— 那只覆盖第一轮。回调永远不来时, 之后每次 check
+    都复读「他还没点同意」, 就会把已经点过的用户一直挂着。
+    """
+    pending = tmp_path / "pending.json"
+    pending.write_text(
+        json.dumps(
+            {
+                "state": "st",
+                "mode": "loopback",
+                "redirect_uri": "http://localhost:17860/oauth/callback",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(pending))
+
+    async def _no_code(port: int, expected_state: str, timeout_seconds: float) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(_impl._oauth_rx, "wait_loopback", _no_code)
+    result = await _impl.auth_check_impl("")
+    assert result["ok"] is False
+    # 仍然是 pending 而不是失败 (码可能真的还没到), 但必须同时交出贴网址那条路。
+    assert result["pending"] is True
+    assert result["callback_is_private"] is True
+    assert "整条网址" in result["message"]
+    assert "feishu_auth_complete" in result["retry_hint"]
+
+
+@pytest.mark.asyncio
+async def test_auth_check_public_callback_keeps_plain_pending(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """公网回调地址不挂那段提示: 回调迟到是常态, 别每轮都劝用户去贴网址。"""
+    pending = tmp_path / "pending.json"
+    pending.write_text(
+        json.dumps(
+            {
+                "state": "st",
+                "mode": "gateway",
+                "redirect_uri": "https://haitun.example.com/oauth/callback",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(pending))
+
+    async def _no_code(state: str, timeout_seconds: float, interval: float = 1.0) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(_impl._oauth_rx, "poll_gateway", _no_code)
+    result = await _impl.auth_check_impl("")
+    assert result["ok"] is False
+    assert result["pending"] is True
+    assert "callback_is_private" not in result
+    assert "整条网址" not in result["message"]
+
+
+@pytest.mark.asyncio
 async def test_auth_complete_accepts_full_callback_url(monkeypatch: pytest.MonkeyPatch) -> None:
     """用户贴回来的是整条网址而不是 code —— 必须能直接用。"""
     assert _impl._extract_code("http://192.168.60.214:8090/oauth/callback?code=abc123&state=st") == "abc123"
     assert _impl._extract_code("  abc123  ") == "abc123"
+    # 她那条 loopback 地址同样要认 (localhost, 端口不同)。
+    assert _impl._extract_code("http://localhost:17860/oauth/callback?code=xyz789&state=st") == "xyz789"
 
 
 def _auth_card_env(
