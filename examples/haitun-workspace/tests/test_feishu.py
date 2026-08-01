@@ -7020,3 +7020,354 @@ async def test_media_tools_return_json(monkeypatch: pytest.MonkeyPatch, tmp_path
     ):
         monkeypatch.setattr(_impl, "_invoke", _MediaInvoke())
         assert json.loads(await call)["message_id"] == "om_new"
+
+
+# ── Read status (已读 / 未读) ───────────────────────────────────────────────────
+
+
+class _SequencedInvoke:
+    """Replace _invoke; answer each call from a queue, recording every request.
+
+    Read-status makes several *different* calls (read_users pages, then the message,
+    then the roster), so a single canned reply can't drive it.
+    """
+
+    def __init__(self, replies: list[dict[str, Any]]) -> None:
+        self.replies = list(replies)
+        self.requests: list[Any] = []
+        self.user_keys: list[Any] = []
+
+    async def __call__(
+        self,
+        request: Any,
+        user_key: str | None = None,
+        prefer: str = "tenant",
+        identity: str = "",
+        capabilities: list[str] | None = None,
+    ) -> dict[str, Any]:
+        self.requests.append(request() if callable(request) else request)
+        self.user_keys.append(user_key)
+        reply = self.replies.pop(0) if self.replies else {"ok": True, "code": 0, "msg": "", "data": {}}
+        return {"ok": True, "code": 0, "msg": "", **reply} if "ok" not in reply else reply
+
+
+def _ok(data: dict[str, Any]) -> dict[str, Any]:
+    return {"ok": True, "code": 0, "msg": "", "data": data}
+
+
+@pytest.mark.asyncio
+async def test_read_status_builds_get_request_and_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+    seq = _SequencedInvoke(
+        [
+            _ok({"items": [{"user_id": "ou_a", "timestamp": "1699"}], "has_more": True, "page_token": "pt2"}),
+            _ok({"items": [{"user_id": "ou_b", "timestamp": "1700"}], "has_more": False}),
+        ]
+    )
+    monkeypatch.setattr(_impl, "_invoke", seq)
+    result = await _impl.read_status_impl("om_abc", include_unread=False, user_key="ou_me")
+    req = seq.requests[0]
+    assert req.http_method.name == "GET"
+    assert req.uri == "/open-apis/im/v1/messages/:message_id/read_users"
+    assert req.paths["message_id"] == "om_abc"
+    q = _qdict(req)
+    assert q.get("user_id_type") == "open_id"
+    assert q.get("page_size") == "100"
+    # the second page must carry the token from the first
+    assert _qdict(seq.requests[1]).get("page_token") == "pt2"
+    assert seq.user_keys[0] == "ou_me"
+    assert result["read_count"] == 2
+    assert result["read_users"] == [
+        {"open_id": "ou_a", "read_time": "1699"},
+        {"open_id": "ou_b", "read_time": "1700"},
+    ]
+    # include_unread=False must not spend calls on the message + roster
+    assert len(seq.requests) == 2
+    assert "unread_users" not in result
+
+
+@pytest.mark.asyncio
+async def test_read_status_computes_unread_from_roster(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Feishu has no unread endpoint: unread = roster - readers - sender.
+    seq = _SequencedInvoke(
+        [
+            _ok({"items": [{"user_id": "ou_a", "timestamp": "1699"}], "has_more": False}),
+            _ok({"items": [{"chat_id": "oc_1", "sender": {"id": "ou_bot"}}]}),
+            _ok(
+                {
+                    "items": [
+                        {"member_id": "ou_a", "name": "读了的"},
+                        {"member_id": "ou_c", "name": "没读的"},
+                        {"member_id": "ou_bot", "name": "机器人"},
+                    ],
+                    "has_more": False,
+                }
+            ),
+        ]
+    )
+    monkeypatch.setattr(_impl, "_invoke", seq)
+    result = await _impl.read_status_impl("om_abc")
+    assert result["read_count"] == 1
+    assert result["chat_id"] == "oc_1"
+    # the sender is excluded from unread, and so is the reader
+    assert result["unread_users"] == [{"open_id": "ou_c", "name": "没读的"}]
+    assert result["unread_count"] == 1
+    assert result["member_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_read_status_keeps_read_list_when_roster_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The unread half is best-effort: losing it must not lose the read list.
+    seq = _SequencedInvoke(
+        [
+            _ok({"items": [{"user_id": "ou_a", "timestamp": "1"}], "has_more": False}),
+            {"ok": False, "code": 230110, "msg": "deleted", "message": "err"},
+        ]
+    )
+    monkeypatch.setattr(_impl, "_invoke", seq)
+    result = await _impl.read_status_impl("om_abc")
+    assert result["ok"] is True
+    assert result["read_count"] == 1
+    assert "unread_users" not in result
+    assert "未读名单" in result["note"]
+
+
+@pytest.mark.asyncio
+async def test_read_status_hints_own_message_and_seven_day_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    for code, expect in ((230012, "自己发出的消息"), (230033, "7 天")):
+
+        async def _fail(*a: Any, code: int = code, **k: Any) -> dict[str, Any]:
+            return {"ok": False, "code": code, "msg": "nope", "message": "err"}
+
+        monkeypatch.setattr(_impl, "_invoke", _fail)
+        result = await _impl.read_status_impl("om_abc")
+        assert result["ok"] is False
+        assert expect in result["hint"], code
+
+
+@pytest.mark.asyncio
+async def test_read_status_rejects_non_message_id() -> None:
+    for bad in ("", "  ", "oc_1", "ou_2"):
+        result = await _impl.read_status_impl(bad)
+        assert result["ok"] is False
+        assert "message_id" in result["message"]
+
+
+# ── Pin / unpin (置顶) ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_pin_message_builds_post_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"pin": {"message_id": "om_abc", "chat_id": "oc_1", "operator_id": "ou_x"}})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.pin_message_impl("om_abc", user_key="ou_admin")
+    req = cap.request
+    assert req.http_method.name == "POST"
+    assert req.uri == "/open-apis/im/v1/pins"
+    assert req.body == {"message_id": "om_abc"}
+    assert cap.prefer == "tenant"
+    assert cap.user_key == "ou_admin"
+    assert result["pinned"] is True
+    assert result["chat_id"] == "oc_1"
+    assert result["operator_id"] == "ou_x"
+
+
+@pytest.mark.asyncio
+async def test_unpin_message_builds_delete_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.unpin_message_impl("om_abc")
+    req = cap.request
+    assert req.http_method.name == "DELETE"
+    assert req.uri == "/open-apis/im/v1/pins/:message_id"
+    assert req.paths["message_id"] == "om_abc"
+    assert result == {"ok": True, "message_id": "om_abc", "pinned": False}
+
+
+@pytest.mark.asyncio
+async def test_pin_hints_owner_admin_only_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 230046 is the usual blocker: the group restricts 置顶 to owner/admin.
+    async def _fail(*a: Any, **k: Any) -> dict[str, Any]:
+        return {"ok": False, "code": 230046, "msg": "No Permission to Pin", "message": "err"}
+
+    monkeypatch.setattr(_impl, "_invoke", _fail)
+    for result in (await _impl.pin_message_impl("om_a"), await _impl.unpin_message_impl("om_a")):
+        assert result["ok"] is False
+        assert "群主/管理员" in result["hint"]
+
+
+@pytest.mark.asyncio
+async def test_pin_rejects_non_message_id() -> None:
+    for bad in ("", "oc_1"):
+        assert (await _impl.pin_message_impl(bad))["ok"] is False
+        assert (await _impl.unpin_message_impl(bad))["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_list_pins_builds_get_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke(
+        {
+            "items": [{"message_id": "om_1", "chat_id": "oc_1", "operator_id": "ou_x", "create_time": "170"}],
+            "has_more": True,
+            "page_token": "pt2",
+        }
+    )
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.list_pins_impl("oc_1", start_time="100", end_time="200", page_size=90)
+    req = cap.request
+    assert req.http_method.name == "GET"
+    assert req.uri == "/open-apis/im/v1/pins"
+    q = _qdict(req)
+    assert q.get("chat_id") == "oc_1"
+    assert q.get("start_time") == "100"
+    assert q.get("end_time") == "200"
+    assert q.get("page_size") == "50"  # clamped to the API max
+    assert result["count"] == 1
+    assert result["pins"][0]["message_id"] == "om_1"
+    assert result["has_more"] is True
+    assert result["page_token"] == "pt2"
+
+
+@pytest.mark.asyncio
+async def test_list_pins_omits_empty_time_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"items": []})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    await _impl.list_pins_impl("oc_1")
+    q = _qdict(cap.request)
+    assert "start_time" not in q
+    assert "end_time" not in q
+
+
+@pytest.mark.asyncio
+async def test_list_pins_requires_group_chat_id() -> None:
+    for bad in ("", "om_1", "ou_2"):
+        result = await _impl.list_pins_impl(bad)
+        assert result["ok"] is False
+        assert "chat_id" in result["message"]
+
+
+# ── Forward / merge-forward (转发) ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_forward_builds_post_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"message_id": "om_new", "chat_id": "oc_2", "thread_id": "omt_9"})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.forward_message_impl("om_abc", "oc_2", user_key="ou_me")
+    req = cap.request
+    assert req.http_method.name == "POST"
+    assert req.uri == "/open-apis/im/v1/messages/:message_id/forward"
+    assert req.paths["message_id"] == "om_abc"
+    assert req.body == {"receive_id": "oc_2"}
+    assert _qdict(req).get("receive_id_type") == "chat_id"
+    assert cap.user_key == "ou_me"
+    assert result["forwarded"] is True
+    assert result["source_message_id"] == "om_abc"
+    assert result["message_id"] == "om_new"
+
+
+@pytest.mark.asyncio
+async def test_forward_infers_target_type_from_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A DM, a thread and an email each need a different receive_id_type; the default
+    # chat_id would earn 230034, so the prefix decides (omt_ is forward-only).
+    for rid, expected in (
+        ("ou_a", "open_id"),
+        ("on_b", "union_id"),
+        ("omt_c", "thread_id"),
+        ("a@b.com", "email"),
+        ("oc_d", "chat_id"),
+    ):
+        cap = _CapturedInvoke({"message_id": "om_new"})
+        monkeypatch.setattr(_impl, "_invoke", cap)
+        result = await _impl.forward_message_impl("om_abc", rid)
+        assert _qdict(cap.request).get("receive_id_type") == expected, rid
+        assert result["receive_id_type"] == expected
+
+
+@pytest.mark.asyncio
+async def test_forward_keeps_explicit_type_for_bare_user_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"message_id": "om_new"})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    await _impl.forward_message_impl("om_abc", "employee_7", receive_id_type="user_id")
+    assert _qdict(cap.request).get("receive_id_type") == "user_id"
+
+
+@pytest.mark.asyncio
+async def test_forward_rejects_message_id_as_target() -> None:
+    result = await _impl.forward_message_impl("om_abc", "om_target")
+    assert result["ok"] is False
+    assert "receive_id" in result["message"]
+    for bad in ("", "  "):
+        assert (await _impl.forward_message_impl("om_abc", bad))["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_forward_hints_unforwardable_message_types(monkeypatch: pytest.MonkeyPatch) -> None:
+    for code, expect in ((230061, "不支持转发"), (230065, "已被撤回"), (230069, "同一个会话")):
+
+        async def _fail(*a: Any, code: int = code, **k: Any) -> dict[str, Any]:
+            return {"ok": False, "code": code, "msg": "nope", "message": "err"}
+
+        monkeypatch.setattr(_impl, "_invoke", _fail)
+        result = await _impl.forward_message_impl("om_abc", "oc_2")
+        assert expect in result["hint"], code
+
+
+@pytest.mark.asyncio
+async def test_merge_forward_builds_post_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke(
+        {"message": {"message_id": "om_bundle", "chat_id": "oc_2"}, "invalid_message_id_list": ["om_bad"]}
+    )
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    result = await _impl.merge_forward_messages_impl('["om_a", "om_b"]', "oc_2")
+    req = cap.request
+    assert req.http_method.name == "POST"
+    assert req.uri == "/open-apis/im/v1/messages/merge_forward"
+    assert req.body == {"receive_id": "oc_2", "message_id_list": ["om_a", "om_b"]}
+    assert _qdict(req).get("receive_id_type") == "chat_id"
+    assert result["forwarded_count"] == 2
+    assert result["message_id"] == "om_bundle"
+    # ids Feishu refused are surfaced, not silently dropped
+    assert result["invalid_message_ids"] == ["om_bad"]
+
+
+@pytest.mark.asyncio
+async def test_merge_forward_accepts_comma_separated_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke({"message": {"message_id": "om_bundle"}})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    await _impl.merge_forward_messages_impl("om_a, om_b", "oc_2")
+    assert cap.request.body["message_id_list"] == ["om_a", "om_b"]
+
+
+@pytest.mark.asyncio
+async def test_merge_forward_validates_ids() -> None:
+    empty = await _impl.merge_forward_messages_impl("", "oc_2")
+    assert empty["ok"] is False
+    not_ids = await _impl.merge_forward_messages_impl('["oc_1"]', "oc_2")
+    assert not_ids["ok"] is False
+    assert "om_" in not_ids["message"]
+    too_many = await _impl.merge_forward_messages_impl(json.dumps([f"om_{i}" for i in range(101)]), "oc_2")
+    assert too_many["ok"] is False
+    assert "100" in too_many["message"]
+
+
+@pytest.mark.asyncio
+async def test_read_pin_forward_tools_return_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = importlib.import_module("feishu_message")
+    monkeypatch.setattr(_impl, "read_status_impl", lambda *a, **k: _async({"ok": True, "read_count": 3}))
+    monkeypatch.setattr(_impl, "pin_message_impl", lambda *a, **k: _async({"ok": True, "pinned": True}))
+    monkeypatch.setattr(_impl, "unpin_message_impl", lambda *a, **k: _async({"ok": True, "pinned": False}))
+    monkeypatch.setattr(_impl, "list_pins_impl", lambda *a, **k: _async({"ok": True, "count": 1}))
+    monkeypatch.setattr(_impl, "forward_message_impl", lambda *a, **k: _async({"ok": True, "forwarded": True}))
+    monkeypatch.setattr(
+        _impl, "merge_forward_messages_impl", lambda *a, **k: _async({"ok": True, "forwarded_count": 2})
+    )
+    assert json.loads(await mod.feishu_message_read_status("om_1"))["read_count"] == 3
+    assert json.loads(await mod.feishu_message_pin("om_1"))["pinned"] is True
+    assert json.loads(await mod.feishu_message_unpin("om_1"))["pinned"] is False
+    assert json.loads(await mod.feishu_message_pins("oc_1"))["count"] == 1
+    assert json.loads(await mod.feishu_message_forward("om_1", "oc_2"))["forwarded"] is True
+    assert json.loads(await mod.feishu_message_merge_forward('["om_1"]', "oc_2"))["forwarded_count"] == 2
+
+
+async def _async(value: dict[str, Any]) -> dict[str, Any]:
+    return value

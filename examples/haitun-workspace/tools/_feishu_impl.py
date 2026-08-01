@@ -8376,3 +8376,501 @@ async def delete_doc_blocks_impl(
         "deleted_count": len(deleted),
         "not_found": not_found,
     }
+
+
+# ── Read status: who has read a message (已读 / 未读) ──────────────────────────
+#
+# GET /open-apis/im/v1/messages/:message_id/read_users answers only half the
+# question: it returns the users who HAVE read the message and there is no
+# "unread users" endpoint at all. So 未读 is computed here — pull the chat's
+# roster and subtract the readers — because the alternative is every caller
+# reporting "3 人已读" and staying silent about the 12 who haven't.
+#
+# That diff needs the message's chat_id, which the caller rarely has at hand, so
+# it is resolved from the message itself (GET on the message) instead of being
+# demanded as an argument. The sender is excluded from 未读: the bot obviously
+# read its own message and Feishu never lists it as a reader.
+#
+# Two limits are invisible in the raw error text and are exactly what this API
+# trips over: only the bot's OWN messages can be queried (230012), and only
+# within 7 days of sending (230033).
+
+_READ_STATUS_ERROR_HINTS = {
+    230001: "请求参数不合法 (message_id 必须是 om_... 开头的消息 id)。",
+    230002: "机器人不在该会话里, 先把机器人加入群再查询已读情况。",
+    230006: "应用未启用机器人能力, 到开发者后台开启后再试。",
+    230012: "只能查询机器人自己发出的消息的已读情况; 别人发的消息查不了 (飞书不开放)。",
+    230013: "机器人对该用户不可用 (不在应用可用范围, 或该用户已离职)。",
+    230027: "缺少查询已读所需权限 (im:message / im:message:readonly / im:message:basic); 外部群不支持。",
+    230033: "超出 7 天查询窗口: 只能查询发送后 7 天以内的消息。",
+    230110: "该消息已被撤回或删除, 无法查询已读情况。",
+}
+
+
+def _build_read_users_request(message_id: str, user_id_type: str, page_size: int, page_token: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.GET
+    req.uri = "/open-apis/im/v1/messages/:message_id/read_users"
+    req.paths["message_id"] = message_id
+    req.add_query("user_id_type", user_id_type)
+    req.add_query("page_size", max(1, min(page_size, 100)))
+    if page_token:
+        req.add_query("page_token", page_token)
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    return req
+
+
+def _build_get_message_request(message_id: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.GET
+    req.uri = "/open-apis/im/v1/messages/:message_id"
+    req.paths["message_id"] = message_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    return req
+
+
+async def _message_chat_and_sender(message_id: str, user_key: str = "") -> tuple[str, str]:
+    """The ``(chat_id, sender_id)`` of a message, or ``("", "")`` if it can't be read.
+
+    Used to locate the roster for an unread diff without making the caller pass a
+    chat_id they'd have to dig up. Failure is not fatal to the caller: the read
+    list is still worth returning without the unread half.
+    """
+    res = await _invoke(_build_get_message_request(message_id), user_key=user_key, prefer="tenant")
+    if not res["ok"]:
+        return "", ""
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    items = data.get("items")
+    item = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else data
+    sender = item.get("sender")
+    sender_id = sender.get("id", "") if isinstance(sender, dict) else ""
+    return item.get("chat_id", "") or "", sender_id or ""
+
+
+async def read_status_impl(
+    message_id: str,
+    include_unread: bool = True,
+    page_size: int = 100,
+    user_key: str = "",
+) -> dict[str, Any]:
+    """Who has read a message the bot sent — and, by diff, who hasn't.
+
+    Pages through the readers in full (the caller wants a roll-call, not page 1)
+    and, when ``include_unread``, subtracts them from the chat's roster to get the
+    people who still haven't. The sender is left out of both lists.
+
+    Only the bot's own messages, sent within 7 days, can be queried at all — both
+    limits come back as a ``hint`` rather than a bare ``2300xx``.
+    """
+    mid, bad = _require_message_id(message_id, "check the read status of")
+    if bad is not None:
+        return bad
+
+    readers: list[dict[str, str]] = []
+    page_token = ""
+    while True:
+        res = await _invoke(
+            _build_read_users_request(mid, "open_id", page_size, page_token), user_key=user_key, prefer="tenant"
+        )
+        if not res["ok"]:
+            return _with_hint(res, _READ_STATUS_ERROR_HINTS)
+        data = res["data"] if isinstance(res["data"], dict) else {}
+        items = data.get("items") if isinstance(data.get("items"), list) else []
+        for it in items:
+            if isinstance(it, dict):
+                readers.append({"open_id": it.get("user_id", ""), "read_time": it.get("timestamp", "")})
+        page_token = data.get("page_token", "") or ""
+        if not data.get("has_more") or not page_token:
+            break
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "message_id": mid,
+        "read_users": readers,
+        "read_count": len(readers),
+    }
+    if not include_unread:
+        return result
+    return {**result, **await _unread_from_roster(mid, readers, user_key)}
+
+
+async def _unread_from_roster(message_id: str, readers: list[dict[str, str]], user_key: str) -> dict[str, Any]:
+    """The unread half of a read-status answer: chat roster minus readers minus sender.
+
+    Kept separate because it is best-effort — a p2p chat, a roster the bot may not
+    list, or an unreadable message each cost the unread list but not the read one,
+    so every failure returns a ``note`` instead of an error.
+    """
+    chat_id, sender_id = await _message_chat_and_sender(message_id, user_key)
+    if not chat_id:
+        return {"note": "未读名单需要消息所在会话的成员列表, 但这条消息读不到 (可能已撤回或机器人不可见)。"}
+    roster = await list_chat_members_impl(chat_id)
+    if not roster.get("ok"):
+        return {
+            "chat_id": chat_id,
+            "note": f"已读名单已取到, 但群成员列表拉取失败, 无法算未读: {roster.get('message', '')}".strip(),
+        }
+    read_ids = {r["open_id"] for r in readers if r.get("open_id")}
+    unread = [
+        {"open_id": m["id"], "name": m.get("name", "")}
+        for m in roster.get("members", [])
+        if m.get("id") and m["id"] not in read_ids and m["id"] != sender_id
+    ]
+    return {
+        "chat_id": chat_id,
+        "unread_users": unread,
+        "unread_count": len(unread),
+        "member_count": roster.get("count", 0),
+    }
+
+
+# ── Pin / unpin a message (置顶) ───────────────────────────────────────────────
+#
+# POST /open-apis/im/v1/pins pins, DELETE /open-apis/im/v1/pins/:message_id
+# unpins, GET /open-apis/im/v1/pins lists a group's pins (newest first).
+#
+# Two behaviours are worth not fighting: pinning an already-pinned message
+# returns the existing pin rather than an error, and unpinning a message that was
+# never pinned succeeds. Both are reported honestly as ok rather than dressed up.
+#
+# 230046 is the one that actually bites: many groups restrict 置顶 to the owner or
+# admins, and the bot is usually neither. That needs a *person's* identity
+# (``user_key`` + authorization), which the hint says outright instead of leaving
+# a bare "no permission".
+
+_PIN_ERROR_HINTS = {
+    230001: "请求参数不合法 (message_id 必须是 om_... 开头的消息 id)。",
+    230002: "机器人不在该群里, 先把机器人加入群再置顶。",
+    230006: "应用未启用机器人能力, 到开发者后台开启后再试。",
+    230011: "该消息已被撤回, 无法置顶。",
+    230013: "机器人对该用户不可用 (不在应用可用范围, 或该用户已离职)。",
+    230027: "缺少 Pin 所需权限 (im:message / im:message.pins:write_only / im:message:send_as_bot); "
+    "外部群还需开启对外共享。",
+    230045: "会话不存在 (群可能已解散)。",
+    230046: "该群限制只有群主/管理员能置顶: 用管理员本人身份操作 (传其 user_key 并完成授权), 或让群主放开权限。",
+    230047: "同一条消息的置顶/取消置顶操作过于频繁 (上限 5 QPS), 稍后再试。",
+    230048: "获取群 Pin 列表过于频繁, 稍后再试。",
+    230050: "该消息对当前操作身份不可见, 无法置顶。",
+    230054: "该消息类型不支持置顶。",
+    230111: "该消息即将自动销毁, 不支持此操作。",
+    232009: "群组已解散, 无法操作。",
+}
+
+
+def _build_pin_request(message_id: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.POST
+    req.uri = "/open-apis/im/v1/pins"
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    req.body = {"message_id": message_id}
+    return req
+
+
+def _build_unpin_request(message_id: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.DELETE
+    req.uri = "/open-apis/im/v1/pins/:message_id"
+    req.paths["message_id"] = message_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    return req
+
+
+def _build_list_pins_request(
+    chat_id: str, start_time: str, end_time: str, page_size: int, page_token: str
+) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.GET
+    req.uri = "/open-apis/im/v1/pins"
+    req.add_query("chat_id", chat_id)
+    if start_time:
+        req.add_query("start_time", start_time)
+    if end_time:
+        req.add_query("end_time", end_time)
+    req.add_query("page_size", max(1, min(page_size, 50)))
+    if page_token:
+        req.add_query("page_token", page_token)
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    return req
+
+
+def _pin_record(item: Any) -> dict[str, Any]:
+    """One pin as {message_id, chat_id, operator_id, operator_id_type, create_time}."""
+    if not isinstance(item, dict):
+        return {}
+    return {
+        "message_id": item.get("message_id", ""),
+        "chat_id": item.get("chat_id", ""),
+        "operator_id": item.get("operator_id", ""),
+        "operator_id_type": item.get("operator_id_type", ""),
+        "create_time": item.get("create_time", ""),
+    }
+
+
+async def pin_message_impl(message_id: str, user_key: str = "") -> dict[str, Any]:
+    """Pin a message to the top of its chat.
+
+    Idempotent by Feishu's own design: pinning an already-pinned message returns
+    that existing pin, so a repeat call is reported as ok rather than as an error.
+    """
+    mid, bad = _require_message_id(message_id, "pin")
+    if bad is not None:
+        return bad
+    res = await _invoke(_build_pin_request(mid), user_key=user_key, prefer="tenant")
+    if not res["ok"]:
+        return _with_hint(res, _PIN_ERROR_HINTS)
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    pin = data.get("pin") if isinstance(data.get("pin"), dict) else {}
+    return {"ok": True, "pinned": True, **{**_pin_record(pin), "message_id": mid}}
+
+
+async def unpin_message_impl(message_id: str, user_key: str = "") -> dict[str, Any]:
+    """Remove a message's pin (取消置顶).
+
+    Feishu also returns success when the message was never pinned, so this cannot
+    confirm that a pin actually existed — only that none does now.
+    """
+    mid, bad = _require_message_id(message_id, "unpin")
+    if bad is not None:
+        return bad
+    res = await _invoke(_build_unpin_request(mid), user_key=user_key, prefer="tenant")
+    if not res["ok"]:
+        return _with_hint(res, _PIN_ERROR_HINTS)
+    return {"ok": True, "message_id": mid, "pinned": False}
+
+
+async def list_pins_impl(
+    chat_id: str,
+    start_time: str = "",
+    end_time: str = "",
+    page_size: int = 50,
+    page_token: str = "",
+    user_key: str = "",
+) -> dict[str, Any]:
+    """List a group's pinned messages, newest pin first.
+
+    Only the pin records are returned (message_id + who pinned it + when); the
+    pinned messages' own content is not included, so read it with
+    ``feishu_message_list`` or the message id if the text is needed.
+    """
+    cid = chat_id.strip()
+    if not cid:
+        return _error("chat_id is required (the oc_... id of the group whose pins you want).")
+    if not cid.startswith("oc_"):
+        return _error(
+            f"chat_id must be a group id starting with 'oc_', got {cid!r}. "
+            "群 id 来自 feishu_chat_find 或 <feishu_context>; Pin 列表只支持按群查询。",
+        )
+    res = await _invoke(
+        _build_list_pins_request(cid, start_time.strip(), end_time.strip(), page_size, page_token),
+        user_key=user_key,
+        prefer="tenant",
+    )
+    if not res["ok"]:
+        return _with_hint(res, _PIN_ERROR_HINTS)
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    items = data.get("items") if isinstance(data.get("items"), list) else []
+    pins = [_pin_record(it) for it in items]
+    return {
+        "ok": True,
+        "chat_id": cid,
+        "pins": pins,
+        "count": len(pins),
+        "has_more": bool(data.get("has_more")),
+        "page_token": data.get("page_token", "") or "",
+    }
+
+
+# ── Forward a message to another chat (转发 / 合并转发) ────────────────────────
+#
+# POST /open-apis/im/v1/messages/:message_id/forward moves one message to another
+# target; POST /open-apis/im/v1/messages/merge_forward bundles 1-100 messages from
+# the SAME conversation into a single 合并转发 card.
+#
+# Forwarding preserves the original's attribution and content, which is the point:
+# re-sending the text with feishu_message_send loses who said it and silently
+# drops any attachment. The trade is that the content cannot be altered — to add
+# a remark, forward and then send a comment separately.
+#
+# Both endpoints accept a thread_id (``omt_...``) as the target, which the shared
+# id inference doesn't know (feishu_message_send cannot send to a thread), so
+# forwarding resolves the type itself.
+
+_FORWARD_ERROR_HINTS = {
+    230001: "请求参数不合法 (message_id 必须是 om_..., receive_id 与其类型要匹配)。",
+    230002: "机器人不在目标群里, 先把机器人加入目标群再转发。",
+    230006: "应用未启用机器人能力, 到开发者后台开启后再试。",
+    230013: "机器人对该用户不可用 (不在应用可用范围, 或该用户已离职)。",
+    230018: "目标群当前设置不允许该操作 (如全员禁言)。",
+    230019: "目标话题 (thread) 不存在。",
+    230020: "转发过于频繁, 触发限流 (单个目标 5 QPS), 稍后再试。",
+    230027: "缺少转发所需权限 (im:message / im:message:send_as_bot); 外部群还需开启对外共享。",
+    230029: "目标用户已离职。",
+    230034: "receive_id 不合法, 或与 receive_id_type 不匹配。",
+    230035: "没有向目标会话发消息的权限 (可能被禁言, 或机器人被屏蔽)。",
+    230038: "跨租户单聊不允许该操作。",
+    230049: "原消息还在发送中, 稍等再转发。",
+    230050: "原消息对当前身份不可见, 无法转发。",
+    230053: "该用户已停止接收机器人消息。",
+    230061: "该消息类型不支持转发 (红包/投票/语音/日程转让/系统消息等不可转发)。",
+    230062: "没有权限转发到第三方加密群。",
+    230063: "目标群 chat_id 不合法。",
+    230064: "要转发的消息不合法 (合并转发的子消息不能再次转发)。",
+    230065: "要转发的消息已被撤回。",
+    230066: "密聊消息不支持转发。",
+    230067: "合并转发的消息来源不合规 (不能跨多个话题, 也不能混合普通消息和话题回复)。",
+    230069: "合并转发的消息必须来自同一个会话, 当前这批跨了不同群。",
+    230070: "限制模式下不允许转发。",
+    230074: "目标话题对当前身份不可见。",
+    230110: "原消息已被删除, 无法转发。",
+    232009: "群组已解散, 无法转发。",
+}
+
+
+def _infer_forward_target_type(receive_id: str, given: str) -> str:
+    """Like ``_infer_receive_id_type``, but a ``omt_`` target is a thread.
+
+    Forwarding is the only path that accepts ``thread_id``, and the prefix is
+    unambiguous — inferring it here means "转发到这个话题里" works without the
+    caller also spelling out the type.
+    """
+    rid = receive_id.strip()
+    if rid.startswith("omt_"):
+        return "thread_id"
+    return _infer_receive_id_type(rid, given)
+
+
+def _build_forward_request(message_id: str, receive_id: str, receive_id_type: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.POST
+    req.uri = "/open-apis/im/v1/messages/:message_id/forward"
+    req.paths["message_id"] = message_id
+    req.add_query("receive_id_type", receive_id_type)
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    req.body = {"receive_id": receive_id}
+    return req
+
+
+def _build_merge_forward_request(message_ids: list[str], receive_id: str, receive_id_type: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.POST
+    req.uri = "/open-apis/im/v1/messages/merge_forward"
+    req.add_query("receive_id_type", receive_id_type)
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    req.body = {"receive_id": receive_id, "message_id_list": message_ids}
+    return req
+
+
+def _require_receive_id(receive_id: str) -> tuple[str, dict[str, Any] | None]:
+    """Normalize a forward target id, or say why it can't be one."""
+    rid = receive_id.strip()
+    if not rid:
+        return "", _error(
+            "receive_id is required — the target chat_id (oc_...), open_id (ou_...), "
+            "union_id (on_...), email, or thread_id (omt_...) to forward to."
+        )
+    if rid.startswith("om_"):
+        return "", _error(
+            f"receive_id must be a *target* (chat/user/thread), got a message id {rid!r}. "
+            "转发的目标是会话或人: 群用 chat_id (oc_...), 私聊用 open_id (ou_...), 话题用 thread_id (omt_...)。",
+        )
+    return rid, None
+
+
+def _parse_message_ids(message_ids_json: str) -> tuple[list[str] | None, str | None]:
+    """Parse a JSON array (or comma-separated list) of ``om_...`` ids; return (ids, error)."""
+    raw = message_ids_json.strip()
+    if not raw:
+        return None, 'message_ids_json is required — a JSON array of om_... message ids, e.g. ["om_a", "om_b"].'
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        # A bare comma-separated list is the likely hand-written form; accept it
+        # rather than failing on the quoting.
+        parsed = [part.strip() for part in raw.split(",") if part.strip()]
+    if isinstance(parsed, str):
+        parsed = [parsed]
+    if not isinstance(parsed, list) or not parsed:
+        return None, 'message_ids_json must be a non-empty JSON array of message ids, e.g. ["om_a", "om_b"].'
+    ids = [str(x).strip() for x in parsed]
+    bad = [x for x in ids if not x.startswith("om_")]
+    if bad:
+        return None, (
+            f"these are not message ids: {bad}. 合并转发只接受 om_... 开头的消息 id "
+            "(来自 feishu_message_list / feishu_message_send 的返回)。"
+        )
+    if len(ids) > 100:
+        return None, f"合并转发一次最多 100 条消息, 收到 {len(ids)} 条。"
+    return ids, None
+
+
+async def forward_message_impl(
+    message_id: str,
+    receive_id: str,
+    receive_id_type: str = "chat_id",
+    user_key: str = "",
+) -> dict[str, Any]:
+    """Forward one message to another chat, user or thread, keeping its attribution.
+
+    The target's type is inferred from its prefix (``oc_``/``ou_``/``on_``/``omt_``/
+    an email), so the default ``receive_id_type`` does not have to be corrected for
+    a DM or a thread — only a bare user_id needs it stated.
+    """
+    mid, bad = _require_message_id(message_id, "forward")
+    if bad is not None:
+        return bad
+    rid, bad_target = _require_receive_id(receive_id)
+    if bad_target is not None:
+        return bad_target
+    rid_type = _infer_forward_target_type(rid, receive_id_type)
+    res = await _invoke(_build_forward_request(mid, rid, rid_type), user_key=user_key, prefer="tenant")
+    if not res["ok"]:
+        return _with_hint(res, _FORWARD_ERROR_HINTS)
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    return {
+        "ok": True,
+        "forwarded": True,
+        "source_message_id": mid,
+        "message_id": data.get("message_id", ""),
+        "chat_id": data.get("chat_id", ""),
+        "thread_id": data.get("thread_id", ""),
+        "receive_id": rid,
+        "receive_id_type": rid_type,
+    }
+
+
+async def merge_forward_messages_impl(
+    message_ids_json: str,
+    receive_id: str,
+    receive_id_type: str = "chat_id",
+    user_key: str = "",
+) -> dict[str, Any]:
+    """Forward several messages as one 合并转发 bundle.
+
+    All the ids must come from the *same* conversation (Feishu answers 230069
+    otherwise). Ids it refuses individually come back in ``invalid_message_ids``
+    instead of being lost, so a partial bundle can be explained.
+    """
+    ids, err = _parse_message_ids(message_ids_json)
+    if err is not None:
+        return _error(err)
+    rid, bad_target = _require_receive_id(receive_id)
+    if bad_target is not None:
+        return bad_target
+    rid_type = _infer_forward_target_type(rid, receive_id_type)
+    res = await _invoke(_build_merge_forward_request(ids or [], rid, rid_type), user_key=user_key, prefer="tenant")
+    if not res["ok"]:
+        return _with_hint(res, _FORWARD_ERROR_HINTS)
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    message = data.get("message") if isinstance(data.get("message"), dict) else data
+    invalid = data.get("invalid_message_id_list")
+    return {
+        "ok": True,
+        "forwarded": True,
+        "source_message_ids": ids,
+        "forwarded_count": len(ids or []),
+        "message_id": message.get("message_id", ""),
+        "chat_id": message.get("chat_id", ""),
+        "receive_id": rid,
+        "receive_id_type": rid_type,
+        "invalid_message_ids": invalid if isinstance(invalid, list) else [],
+    }
