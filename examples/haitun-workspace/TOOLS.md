@@ -113,8 +113,8 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
 
 | 优先级 | `tier` | 用户要做什么 | 你接下来做什么 |
 | --- | --- | --- | --- |
-| 1 | `card` | 点一下卡片按钮 | **这一轮立刻收尾**，等回调那轮再 `feishu_auth_wait` |
-| 2 | `link_auto` | 打开链接点「同意」，**不用复制 code** | 发 `authorize_url`，**这一轮收尾**，用户回话那轮再 `feishu_auth_check` |
+| 1 | `card` | 点一下卡片按钮 | **这一轮立刻收尾**，回调那轮调 `feishu_auth_collect`（不阻塞，那轮也立刻收尾） |
+| 2 | `link_auto` | 打开链接点「同意」，**不用复制 code** | 发 `authorize_url`，**这一轮收尾**；调 `feishu_auth_collect` 让码自己回来，或等用户回话那轮 `feishu_auth_check` |
 | 3 | `link_manual` | 打开链接点「同意」，**还要复制 code** | 发 `authorize_url`，再拿 code 调 `feishu_auth_complete` |
 
 降级原因写在返回的 `downgraded_from` / `downgrade_reason` 里：**如实告诉用户**为什么用了更麻烦的
@@ -128,12 +128,15 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
 **第 1 级 `tier=card` 的细节**：卡上「点此授权」按钮同时做两件事——打开飞书授权页（`open_url`）
 + 把这次点击回调给你（`callback`）。
 
-- **发完卡这一轮就收尾**：别在同一轮里调 `feishu_auth_wait`，也别把链接再当文本发一遍。
-  同一轮等待会占住 Session 的 turn 锁，用户这期间说什么都得排队几分钟；
+- **发完卡这一轮就收尾**：别在同一轮里等待，也别把链接再当文本发一遍。
+  在轮次里等待会占住 Session 的 turn 锁，用户这期间说什么都得排队几分钟；
 - 用户点按钮后，你会收到一条 `<feishu_card_action>`，其 `dispatch.handler` 是
-  `feishu_auth_wait`、`action.value.user_key` 是该用户。**那一轮**才调
-  `feishu_auth_wait(user_key=...)` 等授权码自动回流（此时用户正对着授权页，等待是应该的），
-  拿到 token 后接着做原来被卡住的那件事；
+  `feishu_auth_collect`、`action.value.user_key` 是该用户。**那一轮**调
+  `feishu_auth_collect(user_key=...)`：它把「等授权码」交给一个脱离本轮的后台任务，
+  **本轮同样立刻收尾**。收到点击时用户才刚要在浏览器上点「同意」，在这一轮原地等就又把
+  会话占住了；码回流后后台自己换好 token 并私聊告诉用户可以继续；
+- 想主动确认进度，再调一次 `feishu_auth_collect` 即可（它返回 `status`：`watching` /
+  `granted` / `failed` / `timeout`，且不会起第二个收码任务）；
 - **卡片是一次性的**：用户点了按钮但没在授权页点「同意」时，这张卡已作废（原卡被改写成
   「已选择」），重新调 `feishu_auth_request` 发一张新的，别让用户再点旧卡；
 - 授权卡只能**私聊**发给本人（`receive_id` 默认就是 `user_key`）。待完成的授权记录存在发卡方
@@ -141,10 +144,11 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
 
 **第 2、3 级的细节**：把返回的 `authorize_url` **原样发给用户**，让其打开并点「同意授权」，然后
 
-- `tier=link_auto`：**不要向用户索要任何 code**，也**别在发链接这一轮调 `feishu_auth_wait` 干等**。
-  发完链接就收尾，顺带请用户点完「同意授权」后回你一句（他会看到「授权成功」页）；用户回话那一轮调
-  `feishu_auth_check(user_key=...)` 查一眼即可完成授权。返回 `pending=True` 只是还没点完，不是失败，
-  再收尾一轮等他回话即可——授权码在取件箱里留存约 10 分钟，晚一轮取毫无损失；
+- `tier=link_auto`：**不要向用户索要任何 code**，也**任何一轮都别调 `feishu_auth_wait` 干等**。
+  发完链接就收尾，然后二选一：调 `feishu_auth_collect(user_key=...)` 让码自己回来（推荐，
+  用户不必再回话；后台收到后私聊告知他可以继续），或者请用户点完「同意授权」后回你一句
+  （他会看到「授权成功」页），那一轮调 `feishu_auth_check(user_key=...)` 查一眼。返回
+  `pending=True` 只是还没点完，不是失败——授权码在取件箱里留存约 10 分钟，晚一轮取毫无损失；
 - `tier=link_manual`：才需要**明确告诉用户**看浏览器地址栏，地址形如
   `http://localhost/?code=xxxxxxxx&state=...`，把 `code=` 后面、`&` 之前那一串复制回来
   （整段网址也行），然后调 `feishu_auth_complete(code, user_key=...)`。

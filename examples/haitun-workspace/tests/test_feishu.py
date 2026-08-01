@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import inspect
 import io
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+import anyio
 import pytest
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +19,34 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 _impl: Any = importlib.import_module("_feishu_impl")
+_watch: Any = importlib.import_module("_feishu_auth_watch")
+
+
+async def _instant(value: Any) -> Any:
+    """把一个现成的值包成 awaitable (给 monkeypatch 当替身用)。"""
+    return value
+
+
+def _record_dm(sink: list[tuple[str, str]]) -> Any:
+    """替掉 send_message_impl, 把后台回告的私聊记下来。"""
+
+    async def _send(receive_id: str, text: str, receive_id_type: str, on_behalf_of: str = "") -> dict[str, Any]:
+        sink.append((receive_id, text))
+        return {"ok": True, "message_id": "om_x"}
+
+    return _send
+
+
+async def _settle(impl: Any, user_key: str, *, seconds: float = 2.0) -> None:
+    """等后台 watcher 跑完 —— 它是脱离本轮的任务, 不等就会在断言时还没写结果。
+
+    直接 await 它自己的 task (而不是轮询状态位): 任务结束时 ``_run`` 已经把结果和回告都写
+    完了, 所以这是「跑完」唯一准确的信号。
+    """
+    state = _watch.status(impl._norm_user_key(user_key))
+    assert state is not None and state.task is not None
+    with anyio.fail_after(seconds):
+        await asyncio.shield(state.task)
 
 
 @pytest.fixture(autouse=True)
@@ -2040,6 +2070,236 @@ async def test_auth_check_surfaces_user_denial(monkeypatch: pytest.MonkeyPatch, 
     assert "access_denied" in result["message"]
 
 
+def _pending_gateway(tmp_path: Any, monkeypatch: pytest.MonkeyPatch, state: str = "st") -> None:
+    """写一份 gateway 模式的 pending 记录 (后台收码的前提)。"""
+    pending = tmp_path / "pending.json"
+    pending.write_text(json.dumps({"state": state, "mode": "gateway"}), encoding="utf-8")
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(pending))
+
+
+@pytest.fixture(autouse=True)
+def _clean_auth_watchers() -> Any:
+    """watcher 表是模块级的; 不清会让上一个用例的结果被下一个当成自己的。"""
+    _watch.reset_all()
+    yield
+    _watch.reset_all()
+
+
+@pytest.mark.asyncio
+async def test_auth_collect_returns_before_the_code_arrives(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """这条链路的全部意义: 收码要多久, 这次工具调用都不能等 —— 等待占的是 Session 的 turn 锁。"""
+    _pending_gateway(tmp_path, monkeypatch)
+    released = anyio.Event()
+
+    async def _slow_poll(state: str, timeout_seconds: float, interval: float = 1.0) -> dict[str, str]:
+        await released.wait()  # 模拟用户半天没点「同意」
+        return {"code": "LATE"}
+
+    monkeypatch.setattr(_impl._oauth_rx, "poll_gateway", _slow_poll)
+
+    completed: dict[str, Any] = {}
+
+    async def _fake_complete(code: str, user_key: str = "") -> dict[str, Any]:
+        completed["code"] = code
+        return {"ok": True, "message": "授权成功"}
+
+    monkeypatch.setattr(_impl, "auth_complete_impl", _fake_complete)
+    monkeypatch.setattr(_impl, "send_message_impl", _record_dm(dms := []))
+
+    # 码还没到就已经返回 —— 且返回的是「在后台等着」而不是超时/失败。
+    with anyio.fail_after(2):
+        result = await _impl.auth_collect_impl("ou_a")
+    assert result["ok"] is True
+    assert result["background"] is True
+    assert result["status"] == _watch.STATUS_WATCHING
+    assert completed == {}
+
+    released.set()
+    await _settle(_impl, "ou_a")
+    assert completed["code"] == "LATE"
+    assert _watch.status("ou_a").status == _watch.STATUS_GRANTED
+    # 后台任务不在任何轮次里, 不私聊回告用户就等于悄悄成功了。
+    assert dms and dms[0][0] == "ou_a"
+    assert "授权成功" in dms[0][1]
+
+
+@pytest.mark.asyncio
+async def test_auth_collect_does_not_start_a_second_watcher(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """取件箱取走即删: 两个 watcher 会抢同一个码, 抢输的白等到超时。"""
+    _pending_gateway(tmp_path, monkeypatch)
+    polls = 0
+    polling = anyio.Event()
+    released = anyio.Event()
+
+    async def _counting_poll(state: str, timeout_seconds: float, interval: float = 1.0) -> dict[str, str]:
+        nonlocal polls
+        polls += 1
+        polling.set()
+        await released.wait()
+        return {}
+
+    monkeypatch.setattr(_impl._oauth_rx, "poll_gateway", _counting_poll)
+    first = await _impl.auth_collect_impl("ou_a")
+    # 先确认后台任务真跑到了取件那一步, 否则「没起第二个」会因为一个都没跑而假成立。
+    with anyio.fail_after(2):
+        await polling.wait()
+    second = await _impl.auth_collect_impl("ou_a")
+    assert first["already_watching"] is False
+    assert second["already_watching"] is True
+    assert polls == 1
+    released.set()
+
+
+@pytest.mark.asyncio
+async def test_auth_collect_refuses_manual_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """没有自动回流通道时后台也无从收码, 得说实话而不是假装在等。"""
+    pending = tmp_path / "pending.json"
+    pending.write_text(json.dumps({"state": "st", "mode": "manual"}), encoding="utf-8")
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(pending))
+    result = await _impl.auth_collect_impl("ou_a")
+    assert result["ok"] is False
+    assert result["manual_required"] is True
+
+
+@pytest.mark.asyncio
+async def test_auth_collect_reports_a_finished_background_grant(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """后台收完后再调不该去等一个已被取走的码, 而是直接给结论。"""
+    _pending_gateway(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        _impl._oauth_rx, "poll_gateway", lambda state, timeout_seconds, interval=1.0: _instant({"code": "C"})
+    )
+    monkeypatch.setattr(_impl, "auth_complete_impl", lambda code, user_key="": _instant({"ok": True}))
+    monkeypatch.setattr(_impl, "send_message_impl", _record_dm([]))
+    await _impl.auth_collect_impl("ou_a")
+    await _settle(_impl, "ou_a")
+    again = await _impl.auth_collect_impl("ou_a")
+    assert again["ok"] is True
+    assert again["collected_in_background"] is True
+    assert again["status"] == _watch.STATUS_GRANTED
+
+
+@pytest.mark.asyncio
+async def test_auth_check_defers_to_a_running_collector(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """check 也不该和后台抢码: 抢走一个, 另一边就白等到窗口关闭。"""
+    _pending_gateway(tmp_path, monkeypatch)
+    polls = 0
+    polling = anyio.Event()
+    released = anyio.Event()
+
+    async def _counting_poll(state: str, timeout_seconds: float, interval: float = 1.0) -> dict[str, str]:
+        nonlocal polls
+        polls += 1
+        polling.set()
+        await released.wait()
+        return {}
+
+    monkeypatch.setattr(_impl._oauth_rx, "poll_gateway", _counting_poll)
+    await _impl.auth_collect_impl("ou_a")
+    with anyio.fail_after(2):
+        await polling.wait()
+    result = await _impl.auth_check_impl("ou_a")
+    assert result["ok"] is True
+    assert result["status"] == _watch.STATUS_WATCHING
+    assert polls == 1  # check 没有自己再取一次
+    released.set()
+
+
+@pytest.mark.asyncio
+async def test_auth_check_reports_background_grant_not_missing_pending(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """后台成功会删掉 pending 文件; 若不看 watcher, check 会把已成功说成「请重新发起」。"""
+    _pending_gateway(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        _impl._oauth_rx, "poll_gateway", lambda state, timeout_seconds, interval=1.0: _instant({"code": "C"})
+    )
+    monkeypatch.setattr(
+        _impl, "auth_complete_impl", lambda code, user_key="": _instant({"ok": True, "message": "授权成功"})
+    )
+    monkeypatch.setattr(_impl, "send_message_impl", _record_dm([]))
+    await _impl.auth_collect_impl("ou_a")
+    await _settle(_impl, "ou_a")
+    (tmp_path / "pending.json").unlink()  # auth_complete 成功后就是这个状态
+    result = await _impl.auth_check_impl("ou_a")
+    assert result["ok"] is True
+    assert result["collected_in_background"] is True
+    assert "feishu_auth_request" not in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_reauth_keeps_the_loopback_channel_after_a_watcher_held_the_port(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """撤 watcher 必须**等它真关掉监听**, 否则重新授权会被静默降级成手工贴码。
+
+    实测过的回归: 只 cancel 不等待时, plan_receiver 的端口探测撞上仍未关闭的回环监听,
+    mode 从 loopback 掉到 manual —— 用户白白多了一步手抄 code。
+    """
+    monkeypatch.setenv("PSI_FEISHU_APP_ID", "cli_x")
+    monkeypatch.setenv("PSI_FEISHU_APP_SECRET", "sec")
+    monkeypatch.delenv("PSI_OAUTH_CALLBACK_BASE", raising=False)
+    monkeypatch.delenv("PSI_FEISHU_REDIRECT_URI", raising=False)
+    monkeypatch.setattr(_impl, "_pending_auth_path", lambda user_key="": str(tmp_path / "pending.json"))
+    monkeypatch.setattr(_impl, "_granted_scopes_path", lambda: str(tmp_path / "granted.json"))
+
+    # 真的占住端口才测得到那个 bug, 所以这里包一层真实的 wait_loopback: 它绑上端口后
+    # 置位 bound, 我们等这个信号 (而不是轮询端口), 之后才让第二次授权去重新选通道。
+    bound = anyio.Event()
+    real_wait_loopback = _impl._oauth_rx.wait_loopback
+
+    async def _wait_loopback_signalling(port: int, expected_state: str, timeout_seconds: float) -> dict[str, str]:
+        async with anyio.create_task_group() as tg:
+
+            async def _flag() -> None:
+                # 让出调度, 让 real_wait_loopback 先跑到 create_tcp_listener 那一步
+                await anyio.sleep(0.05)
+                bound.set()
+
+            tg.start_soon(_flag)
+            return await real_wait_loopback(port, expected_state, timeout_seconds)
+
+    monkeypatch.setattr(_impl._oauth_rx, "wait_loopback", _wait_loopback_signalling)
+
+    first = await _impl.auth_start_impl("docx_write", "ou_a")
+    assert first["mode"] == "loopback"
+    await _impl.auth_collect_impl("ou_a", 600)
+    with anyio.fail_after(2):
+        await bound.wait()
+    assert not _impl._oauth_rx._port_is_free(_impl._oauth_rx.loopback_port()), "前提不成立: watcher 没占住端口"
+
+    monkeypatch.setattr(_impl._oauth_rx, "wait_loopback", real_wait_loopback)
+    second = await _impl.auth_start_impl("docx_write", "ou_a")
+    assert second["mode"] == "loopback", "重新授权被降级了 —— 旧 watcher 的监听还没关"
+    assert second["auto_receive"] is True
+    assert _watch.status("ou_a") is None
+
+
+@pytest.mark.asyncio
+async def test_auth_start_forgets_a_stale_watcher(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """新一轮授权作废旧 state; 留着旧 watcher 的结果会被当成本次的。"""
+    monkeypatch.setenv("PSI_FEISHU_APP_ID", "cli_x")
+    monkeypatch.setenv("PSI_FEISHU_APP_SECRET", "sec")
+    _pending_gateway(tmp_path, monkeypatch)
+    monkeypatch.setattr(_impl, "_granted_scopes_path", lambda: str(tmp_path / "granted.json"))
+    monkeypatch.setattr(
+        _impl._oauth_rx,
+        "plan_receiver",
+        lambda explicit="": _impl._oauth_rx.ReceiverPlan(mode="gateway", redirect_uri="https://gw/x"),
+    )
+    released = anyio.Event()
+
+    async def _slow_poll(state: str, timeout_seconds: float, interval: float = 1.0) -> dict[str, str]:
+        await released.wait()
+        return {}
+
+    monkeypatch.setattr(_impl._oauth_rx, "poll_gateway", _slow_poll)
+    await _impl.auth_collect_impl("ou_a")
+    assert _watch.is_watching("ou_a") is True
+    await _impl.auth_start_impl("docx_write", "ou_a")
+    assert _watch.status("ou_a") is None
+    released.set()
+
+
 @pytest.mark.parametrize(
     ("uri", "private"),
     [
@@ -2127,7 +2387,7 @@ async def test_auth_wait_timeout_offers_url_paste_when_private(monkeypatch: pyte
     assert result["timed_out"] is True
     assert result["callback_is_private"] is True
     # 先再等一轮的建议要保留 (取件箱还有 TTL), 同时给出贴网址的出路。
-    assert "feishu_auth_wait" in result["message"]
+    assert "feishu_auth_check" in result["message"]
     assert "整条网址" in result["message"]
     assert "feishu_auth_complete" in result["retry_hint"]
 
@@ -2232,7 +2492,9 @@ async def test_auth_card_button_both_opens_url_and_calls_back(monkeypatch: pytes
     assert "bitable:app" in parse_qs(urlparse(authorize_url).query)["scope"][0]
     # the callback carries the action name the handler map is keyed on, plus whose auth it is
     assert by_type["callback"]["value"] == {"action": _impl._AUTH_CARD_ACTION, "user_key": "ou_a"}
-    assert captured["action_handlers"] == {_impl._AUTH_CARD_ACTION: "feishu_auth_wait"}
+    # 点击那轮走非阻塞的 collect: 收到点击时用户才刚要点「同意」, 在那一轮原地等就又把
+    # 会话锁住几分钟 —— 那正是这条链路要消灭的症状。
+    assert captured["action_handlers"] == {_impl._AUTH_CARD_ACTION: "feishu_auth_collect"}
     assert captured["business_context"]["user_key"] == "ou_a"
     assert captured["business_context"]["capabilities"] == ["bitable_write"]
     assert "要把台账建在你名下" in json.dumps(captured["card"], ensure_ascii=False)
@@ -2274,10 +2536,12 @@ async def test_auth_card_tells_the_agent_to_end_its_turn(monkeypatch: pytest.Mon
     """Waiting in the sending turn would hold the Session turn lock for minutes."""
     _auth_card_env(monkeypatch, tmp_path)
     result = await _impl.auth_card_impl("ou_a")
-    assert result["action_handler"] == "feishu_auth_wait"
+    assert result["action_handler"] == "feishu_auth_collect"
     msg = result["message"]
     assert "这一轮到此为止" in msg
-    assert "feishu_auth_wait" in msg
+    assert "feishu_auth_collect" in msg
+    # 回调那轮也不许阻塞: 指的是后台收码, 不是「那一轮再等」。
+    assert "feishu_auth_wait" not in msg
     # single-use cards: the recovery path must be a fresh card, not another tap
     assert "feishu_auth_card" in msg
 
@@ -2445,7 +2709,9 @@ def test_auth_prompt_states_the_tier_order_and_keeps_the_manual_fallback() -> No
     assert "feishu_auth_request" in prompt
     # the three tiers, named and in descending order of how little the user must do
     assert prompt.index(_impl.TIER_CARD) < prompt.index(_impl.TIER_LINK) < prompt.index(_impl.TIER_MANUAL)
-    assert "feishu_auth_wait" in prompt
+    # 收码一律走非阻塞的 collect; 提到 wait 只为叫模型别用它。
+    assert "feishu_auth_collect" in prompt
+    assert "别调 feishu_auth_wait" in prompt
     assert "地址栏" in prompt
     assert "feishu_auth_complete" in prompt
 
