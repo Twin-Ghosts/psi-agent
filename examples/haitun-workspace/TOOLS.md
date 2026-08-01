@@ -491,3 +491,22 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
     被飞书单独拒掉的 id 会放在 `invalid_message_ids` 里返回，**报数前先看这个字段**。
     红包/投票/语音/日程转让/系统消息/加密消息，以及合并转发里的子消息，**都不能转发**（230061/230064），
     碰上就如实转告 `hint`，别改用重发假装转发成功。
+26. **在文档里画图表**：一个工具 `feishu_chart(chart_type, data_json, title, options_json, document_id, ...)`
+    覆盖 21 种图（饼图 `pie`、折线 `line`、柱状 `column`、散点 `scatter`、雷达 `radar`、甘特 `gantt`……）。
+    数据按字段名放进 `data_json`（`{"labels_json": [...], "values_json": [...]}`），该类型专属参数放
+    `options_json`（`unit` / `percent` / `highlight` 之类）；**放错键会被拒并列出接受的键**，不会悄悄忽略——
+    否则 `percent` 被丢掉就会画出一张没人要的图。**先读 `feishu-charts` 技能再选类型**：工具只管画，
+    「哪种图能回答这个问题」是技能里的判断表。多面板拼一张图（`(a)(b)(c)` 共用一个图注）用
+    `feishu_chart_figure`。`document_id` 留空就只出 PNG（返回 `image_path`），可拿去塞进 Word/PPT 或
+    `[SEND:]` 发给用户。图注**自动按文档里已有的序号续「图 N」**，别自己写编号。返回里带 `warning`
+    说明本机缺中文字体、中文会变方框，**要如实告诉用户**，别报成功了事。
+27. **飞书没有专用工具的接口**：用 `feishu_api(method, uri, body_json, query_json, paths_json, prefer, ...)`
+    直接打任意开放平台端点。它走的是和专用工具**同一条 `_invoke`**，所以鉴权、tenant→user 令牌降级、
+    429 重试、错误码 `hint` 全都照旧。**端点清单在 `feishu-api` 技能里**（通讯录 / 考勤 / 云文档搜索 /
+    审批查询 / 日历读取 / 任务 / 群 / 知识库 / 培训），先读技能再拼 `uri`。`uri` 里的 `:name` 占位符
+    **原样留着**、值放 `paths_json`（让 SDK 转义）——没填的占位符会在**发请求前**被拒（`missing_path_params`），
+    不会变成一个莫名的 404。只认 UAT 的端点（全组织搜人、全库搜文档）传 `prefer="user"`。
+    **动手前先想有没有专用工具**：传二进制的上传端点会被直接拒并告诉你该用哪个工具
+    （`use_dedicated_tool`，文件句柄塞不进 JSON 字符串）；sheet / bitable / authen 路径会带 `warning`
+    点名你正在绕过谁的护栏（裸 `!A1` 静默丢数据、列名对不上静默丢值都是这么来的）。
+    这里 `uri` 写错就是一次真实写入，**炸的范围比任何一个窄工具都大**。
