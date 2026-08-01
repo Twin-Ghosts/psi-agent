@@ -8475,7 +8475,8 @@ async def read_status_impl(
         if not res["ok"]:
             return _with_hint(res, _READ_STATUS_ERROR_HINTS)
         data = res["data"] if isinstance(res["data"], dict) else {}
-        items = data.get("items") if isinstance(data.get("items"), list) else []
+        raw_items = data.get("items")
+        items: list[Any] = raw_items if isinstance(raw_items, list) else []
         for it in items:
             if isinstance(it, dict):
                 readers.append({"open_id": it.get("user_id", ""), "read_time": it.get("timestamp", "")})
@@ -8668,7 +8669,8 @@ async def list_pins_impl(
     if not res["ok"]:
         return _with_hint(res, _PIN_ERROR_HINTS)
     data = res["data"] if isinstance(res["data"], dict) else {}
-    items = data.get("items") if isinstance(data.get("items"), list) else []
+    raw_items = data.get("items")
+    items: list[Any] = raw_items if isinstance(raw_items, list) else []
     pins = [_pin_record(it) for it in items]
     return {
         "ok": True,
@@ -8861,7 +8863,8 @@ async def merge_forward_messages_impl(
     if not res["ok"]:
         return _with_hint(res, _FORWARD_ERROR_HINTS)
     data = res["data"] if isinstance(res["data"], dict) else {}
-    message = data.get("message") if isinstance(data.get("message"), dict) else data
+    raw_message = data.get("message")
+    message: dict[str, Any] = raw_message if isinstance(raw_message, dict) else data
     invalid = data.get("invalid_message_id_list")
     return {
         "ok": True,
