@@ -78,7 +78,8 @@ service tools:
 | `HAITUN_MODEL` | Override the model name shown in the runtime line. |
 | `HAITUN_AGENT_ID` | Agent ID shown in the runtime line. |
 | `HAITUN_CHANNEL` | Channel name shown in the runtime line. |
-| `TZ` | Standard IANA time zone for the date/time section, e.g. `Asia/Shanghai` (when unset, follows the system's local time zone). |
+| `TZ` | Standard IANA time zone for the date/time section, e.g. `Asia/Shanghai` (when unset, follows the system's local time zone). Also the zone scheduled-task cron fields and `once_at` are interpreted in — a UTC base image serving Beijing users must set this, or reminders resolve against the wrong clock. |
+| `HAITUN_KNOWLEDGE_CUTOFF` | Knowledge-cutoff anchor stated in the date/time section, e.g. `2026-01`. When unset the section says `unknown` and tells the agent to verify anything recent online — it never invents a date. Set it so the agent knows where its memory stops. |
 | `XFYUN_STT_APP_ID`, `XFYUN_STT_API_KEY`, `XFYUN_STT_API_SECRET` | iFLYTEK streaming STT credentials. |
 | `XFYUN_TTS_APP_ID`, `XFYUN_TTS_API_KEY`, `XFYUN_TTS_API_SECRET` | iFLYTEK online TTS credentials. |
 | `XFYUN_APP_ID`, `XFYUN_API_KEY`, `XFYUN_API_SECRET` | Optional shared fallback when both services use one app. |
