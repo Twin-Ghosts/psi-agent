@@ -320,18 +320,35 @@ Gateway exposes the following REST endpoints (see [Gateway layer docs](src/psi_a
 | POST | `/ais` | Create AI instance |
 | DELETE | `/ais/{ai_id}` | Delete AI |
 | GET | `/ais` | List all AIs |
+| POST | `/routers` | Create and start a Router |
+| DELETE | `/routers/{router_id}` | Stop and delete a Router |
+| GET | `/routers` | List all Routers |
 | POST | `/sessions` | Create Session |
 | DELETE | `/sessions/{session_id}` | Delete Session |
 | GET | `/sessions` | List all Sessions |
 | POST | `/sessions/{session_id}/chat` | Web UI chat (SSE stream) |
 | GET | `/sessions/{session_id}/history` | Get conversation history |
+| GET | `/sessions/{session_id}/todos` | Get conversation Todo list |
+| GET | `/sessions/{session_id}/todo-segments` | Get conversation subtask segments list |
+| GET | `/sessions/{session_id}/todo-segments/{segment_id}` | Get specific subtask segment |
+| POST | `/sessions/{session_id}/todo-segments/{segment_id}` | Update specific subtask segment label |
 | POST | `/feishu/route` | Idempotently route a Feishu chat to a Session: group chats by chat_id (whole chat shares one), DMs by open_id (one per user); spawn on first use |
 | GET | `/feishu/routes` | List Feishu chat → Session routes |
+| GET | `/oauth/callback` | OAuth redirect callback landing page |
+| GET | `/oauth/code` | Retrieve OAuth code using state |
+| GET | `/defaults` | Get default configuration and AppData paths |
+| GET | `/workspace/places` | Get list of common places and drive letters |
+| GET | `/workspace/browse` | Browse directory (`?path=...`) |
+| GET | `/workspace/file` | Read file content (Base64 encoded) |
+| POST | `/workspace/reveal` | Reveal path in OS file manager |
+| GET | `/workspace/cwd` | Get working directory |
 | GET | `/titles` | Get all session titles |
 | POST | `/titles` | Set session title |
 | POST | `/titles/generate` | AI auto-generate title |
-| GET | `/workspace/browse` | Browse directory (`?path=...`) |
-| GET | `/workspace/cwd` | Get working directory |
+| GET | `/summaries` | Get all task summaries |
+| POST | `/summaries` | Set task summary |
+| POST | `/summaries/generate` | AI auto-generate task summary |
+| POST | `/ui/attention` | Ping to trigger tray/webview attention flashing |
 | GET | `/openapi.json` | OpenAPI schema |
 | GET | `/favicon.ico` | Favicon (available only with `--icon`; returns 404 otherwise) |
 
