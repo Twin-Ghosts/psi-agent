@@ -530,6 +530,74 @@ async def feishu_message_send_post(
     return _f.dumps_result(await _f.send_post_message_impl(receive_id, blocks_json, title, receive_id_type, user_key))
 
 
+async def feishu_message_upload_image(image_path: str, user_key: str = "") -> str:
+    """Upload a local image to Feishu **without sending it**, returning its ``image_key``.
+
+    ``feishu_message_send_image`` uploads and sends in one step and is what you want for
+    "把这张图发给他". Use *this* when the same picture is needed **more than once**, since
+    an ``image_key`` is reusable and re-uploading the same file wastes a call each time:
+
+    - sending one chart to several people or groups — upload once, then pass the
+      ``image_key`` in each ``feishu_message_send_post`` block (``{"tag": "img",
+      "image_key": "img_v3_..."}``);
+    - putting a picture inside an **interactive card** (``feishu_message_send_card``),
+      whose ``img`` element takes only an ``image_key`` and has no upload of its own.
+
+    The key is an IM key and is **not** interchangeable with a drive ``file_token`` from
+    ``feishu_drive_upload`` (a drive token can't be sent in a message, and an
+    ``image_key`` can't live in a document), nor with the ``file_key`` from
+    ``feishu_message_upload_file`` — swapping those two is Feishu error 230001.
+
+    Max 10MB; JPG/JPEG/PNG/WEBP/GIF/BMP/ICO/TIFF/HEIC. Larger or other formats go
+    through ``feishu_message_upload_file`` / ``feishu_drive_upload`` instead.
+
+    Args:
+        image_path: Local path to the picture.
+        user_key: The sender's open_id as a fallback identity (optional).
+    """
+    return _f.dumps_result(await _f.upload_image_impl(image_path, user_key))
+
+
+async def feishu_message_upload_file(
+    file_path: str,
+    file_type: str = "",
+    file_name: str = "",
+    duration_ms: int = 0,
+    user_key: str = "",
+) -> str:
+    """Upload a local file/audio/video to Feishu **without sending it**, returning its ``file_key``.
+
+    ``feishu_message_send_file`` / ``_send_audio`` / ``_send_video`` upload and send in
+    one step — use those for a one-off delivery. Use *this* when the same attachment goes
+    to **several** conversations (upload once, reuse the ``file_key``) or when you want to
+    verify the upload succeeded before deciding where to send it.
+
+    ``file_type`` is Feishu's own enum, not the extension, and is derived from the suffix
+    when omitted (``.mp4``→mp4, ``.pdf``→pdf, ``.docx``→doc, ``.xlsx``→xls,
+    ``.pptx``→ppt, ``.opus``→opus; anything unmapped → ``stream``, which is how a
+    .zip/.csv/.txt is sent). A file uploaded as ``stream`` is sent as a ``file`` message;
+    ``opus`` is required for a playable voice message (an .mp3 sent as audio is rejected
+    with 230055 — convert first: ``ffmpeg -i in.mp3 -acodec libopus -ac 1 -ar 16000
+    out.opus``) and ``mp4`` for a video message.
+
+    The returned ``file_key`` is **not** an ``image_key`` (pictures go through
+    ``feishu_message_upload_image``; crossing the two is error 230001) and **not** a drive
+    ``file_token`` from ``feishu_drive_upload``.
+
+    Max 30MB — a bigger file belongs in the cloud drive (``feishu_drive_upload``) and gets
+    shared as a link.
+
+    Args:
+        file_path: Local path to the file.
+        file_type: Feishu's type enum — opus/mp4/pdf/doc/xls/ppt/stream. Leave empty to
+            derive it from the file's suffix.
+        file_name: Name to store/display it as (defaults to the file's own name).
+        duration_ms: Length in milliseconds, for audio/video.
+        user_key: The sender's open_id as a fallback identity (optional).
+    """
+    return _f.dumps_result(await _f.upload_file_impl(file_path, file_type, file_name, duration_ms, user_key))
+
+
 async def feishu_message_list(
     container_id: str,
     container_id_type: str = "chat",

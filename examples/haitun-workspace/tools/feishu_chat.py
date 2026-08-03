@@ -1,9 +1,12 @@
 """Feishu/Lark chat (group) tools — find a group the bot belongs to by name,
-resolve a member's open_id, and create a new group (拉人建群).
+resolve a member's open_id, create a new group (拉人建群), and run it afterwards
+(read its settings, add/remove members).
 
 Use ``feishu_chat_find`` to resolve a human-given group name (e.g. "主群") into a
 ``chat_id`` before sending messages (the bot must already be a member), or
-``feishu_chat_create`` to spin up a brand-new group and pull people into it.
+``feishu_chat_create`` to spin up a brand-new group and pull people into it. Once a
+group exists, ``feishu_chat_get`` reads who owns it and how it is configured, and
+``feishu_chat_add_members`` / ``feishu_chat_remove_members`` change its roster.
 Pair with ``feishu_message`` (send / reply-in-thread / list messages).
 """
 
@@ -107,3 +110,102 @@ async def feishu_chat_create(
         user_id_type: Id form used by user_ids/owner_id — open_id (default), union_id, or user_id.
     """
     return _f.dumps_result(await _f.create_chat_impl(name, user_ids, description, owner_id, user_id_type))
+
+
+async def feishu_chat_get(chat_id: str, user_id_type: str = "open_id", user_key: str = "") -> str:
+    """Read a Feishu/Lark group's **details** — owner, member counts, and settings.
+
+    The question this answers before you act on a group: **who owns it** (only the owner
+    or an admin may add/remove members or 置顶 in most groups — pass their ``user_key``
+    to those tools), **how many people are in it** (a 500-person group is not somewhere
+    to send a test message), and **what it allows** (whether the bot can add members
+    at all, whether @所有人 is permitted, whether 保密模式 blocks downloads).
+
+    ``settings`` comes back as readable Chinese pairs (e.g. ``{"谁可以加人": "仅群主和管理员"}``)
+    rather than Feishu's bare ``only_owner`` enums. ``owner_is_bot`` is true when the
+    group is owned by a bot, which is why no ``owner_id`` is returned — not an error.
+
+    Feishu answers a **non-member** caller with only the name, avatar, counts and status;
+    that comes back as ``partial=true``. Don't read a thin result as "这个群没有群主/没有
+    设置" — add the bot to the group (or pass a member's ``user_key``) and ask again.
+
+    Args:
+        chat_id: The group's chat_id (``oc_...``, from ``feishu_chat_find``).
+        user_id_type: Id form for owner/admin ids — open_id (default), union_id, or user_id.
+        user_key: A group member's open_id as a fallback identity, for a group the bot
+            isn't in (optional).
+    """
+    return _f.dumps_result(await _f.get_chat_impl(chat_id, user_id_type, user_key))
+
+
+async def feishu_chat_add_members(
+    chat_id: str,
+    user_ids: list[str] | None = None,
+    member_id_type: str = "open_id",
+    succeed_type: int = 1,
+    user_key: str = "",
+) -> str:
+    """Add people (or bots) to an **existing** Feishu/Lark group (拉人进群).
+
+    The counterpart to ``feishu_chat_create``, which can only pull people in at creation
+    time: use this to grow a group that already exists — onboarding a new teammate into
+    the project group, pulling a reviewer into a discussion.
+
+    Members are given as ids, not names: resolve them first with
+    ``feishu_chat_find_member`` (from another group), ``feishu_contact_search``, or
+    ``feishu_department_members``. To add a **bot**, pass its App ID with
+    ``member_id_type="app_id"``.
+
+    Partial results are the normal case and are reported separately, because the fix
+    differs: ``invalid_ids`` (outside the app's scope, or the person has left),
+    ``not_existed_ids`` (no such id), and ``pending_approval_ids`` — those people **will**
+    join once the owner approves, so don't re-add them.
+
+    Most groups restrict 加人 to the owner and admins, and the bot is neither unless it
+    created the group. That failure is Feishu 232017; pass the owner's/admin's
+    ``user_key`` to act as them, or ask them to change 「谁可以添加群成员」 to 所有群成员.
+    Check first with ``feishu_chat_get`` (``settings["谁可以加人"]``).
+
+    Args:
+        chat_id: Target group's chat_id (``oc_...``, from ``feishu_chat_find``).
+        user_ids: Ids to add — max 50 users (or 5 bots) per call; duplicates are dropped.
+        member_id_type: Id form of user_ids — open_id (default), union_id, user_id, or
+            app_id (for bots).
+        succeed_type: What to do about ids Feishu can't reach — 1 (default) adds everyone
+            reachable and reports the rest; 0 fails the whole call over one bad id;
+            2 fails strictly on any unusable id. Leave at 1 unless all-or-nothing matters.
+        user_key: The owner's/admin's open_id, to add members as that person when the bot
+            lacks the right (optional).
+    """
+    return _f.dumps_result(await _f.add_chat_members_impl(chat_id, user_ids, member_id_type, succeed_type, user_key))
+
+
+async def feishu_chat_remove_members(
+    chat_id: str,
+    user_ids: list[str] | None = None,
+    member_id_type: str = "open_id",
+    user_key: str = "",
+) -> str:
+    """Remove people (or bots) from a Feishu/Lark group (移出群成员).
+
+    Use it to clean up a group after someone changes teams or a temporary discussion
+    ends. Ids Feishu refused come back in ``invalid_ids`` rather than vanishing, so
+    compare ``removed`` against what you asked for before reporting success.
+
+    Two Feishu rules decide whether this works, and both surface as a ``hint``:
+    only the **owner**, an admin, or the bot that **created** the group may remove other
+    people (232017 — pass that person's ``user_key``; anyone may always remove
+    themselves), and the **owner cannot be removed** at all (232076 — transfer ownership
+    first). Removing someone is visible to the group and not undoable by this tool
+    (they must be re-added), so confirm the right people with
+    ``feishu_chat_list_members`` before calling.
+
+    Args:
+        chat_id: Target group's chat_id (``oc_...``, from ``feishu_chat_find``).
+        user_ids: Ids to remove — max 50 users (or 5 bots) per call.
+        member_id_type: Id form of user_ids — open_id (default), union_id, user_id, or
+            app_id (for bots).
+        user_key: The owner's/admin's open_id, to remove members as that person when the
+            bot lacks the right (optional).
+    """
+    return _f.dumps_result(await _f.remove_chat_members_impl(chat_id, user_ids, member_id_type, user_key))

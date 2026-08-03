@@ -2401,6 +2401,265 @@ async def create_chat_impl(
     }
 
 
+# ── Group administration — read a group's settings, add/remove members ───────
+#
+# ``create_chat_impl`` could only pull people in at creation time; running a group
+# afterwards needs the roster to be editable and its settings to be readable. Both
+# halves share Feishu's im/v1 chat errors, so the hint table is shared too. The
+# 232017 case is the one that actually bites: most groups restrict 加人 to
+# owner/admin, and the bot is neither unless it created the group — so the caller
+# must pass that person's ``user_key`` rather than expect the bot to manage.
+_CHAT_ADMIN_ERROR_HINTS = {
+    232006: "chat_id 无效; 用 feishu_chat_find 重新解析群名到 chat_id。",
+    232009: "群已解散, 无法操作。",
+    232010: "机器人与该群不在同一租户 (外部群), 内部接口管不了。",
+    232011: "机器人不在该群里, 先把机器人加入群。",
+    232013: "群成员数已达上限 (普通群/话题群 5000, 会议群 3000)。",
+    232014: "token 缺少所需权限 (im:chat 或 im:chat.members:write_only)。",
+    232017: "该群限定「仅群主和群管理员可添加成员」, 机器人不是群主/管理员; "
+    "传群主或管理员的 user_key 以本人身份操作, 或请他们把该设置改为「所有群成员」。",
+    232019: "同一个群被并发操作触发限流; 串行调用重试。",
+    232024: "机器人对该用户不可见, 或双方无协作权限; 检查应用可用范围。",
+    232025: "应用未启用机器人能力, 到开发者后台开启后再试。",
+    232027: "id_list 里没有有效成员。",
+    232028: "外部成员不能加入内部群。",
+    232033: "无操作外部群的权限。",
+    232034: "应用在该租户未安装或未启用。",
+    232043: "列表里含不可用的 ID; 核对后重试。",
+    232044: "达到企业管理员配置的成员上限, 需管理员放开。",
+    232076: "群主不能被移出群; 先转让群主再移出。",
+    232090: "群类型不支持该操作 (仅普通群 group / 话题群 topic)。",
+    99992351: "open_id 必须是 ou_ 前缀; 用 feishu_chat_find_member / feishu_contact_search 解析。",
+}
+# Feishu returns every group setting as a bare enum string. Naming them once here
+# keeps the tool's answer readable ("只有群主能加人") instead of making the model
+# guess what only_owner means in each of eight different fields.
+_CHAT_WHO = {
+    "only_owner": "仅群主和管理员",
+    "all_members": "所有群成员",
+    "not_anyone": "任何人都不可",
+    "moderator_list": "指定人员",
+    "allowed": "允许",
+    "not_allowed": "不允许",
+}
+_CHAT_SETTING_FIELDS = (
+    ("add_member_permission", "谁可以加人"),
+    ("share_card_permission", "是否可分享群名片"),
+    ("at_all_permission", "谁可以@所有人"),
+    ("edit_permission", "谁可以编辑群信息"),
+    ("membership_approval", "入群是否需审批"),
+    ("moderation_permission", "谁可以发言"),
+    ("join_message_visibility", "入群消息对谁可见"),
+    ("leave_message_visibility", "退群消息对谁可见"),
+    ("urgent_setting", "谁可以加急"),
+    ("video_conference_setting", "谁可以发起视频会议"),
+    ("hide_member_count_setting", "对谁隐藏成员数"),
+)
+
+
+def _build_get_chat_request(chat_id: str, user_id_type: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.GET
+    req.uri = "/open-apis/im/v1/chats/:chat_id"
+    req.paths["chat_id"] = chat_id
+    req.add_query("user_id_type", user_id_type)
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    return req
+
+
+def _chat_settings(data: dict[str, Any]) -> dict[str, str]:
+    """Group settings as {人话标签: 人话取值}, skipping fields Feishu didn't return."""
+    out: dict[str, str] = {}
+    for key, label in _CHAT_SETTING_FIELDS:
+        raw = data.get(key)
+        if not isinstance(raw, str) or not raw:
+            continue
+        if key == "membership_approval":
+            out[label] = "需审批" if raw == "approval_required" else "无需审批"
+            continue
+        out[label] = _CHAT_WHO.get(raw, raw)
+    restricted = data.get("restricted_mode_setting")
+    if isinstance(restricted, dict) and restricted.get("status"):
+        out["保密模式"] = "已开启"
+        for key, label in (
+            ("screenshot_has_permission_setting", "可截屏录屏"),
+            ("download_has_permission_setting", "可下载图片/视频/文件"),
+            ("message_has_permission_setting", "可复制转发"),
+        ):
+            raw = restricted.get(key)
+            if isinstance(raw, str) and raw:
+                out[label] = _CHAT_WHO.get(raw, raw)
+    return out
+
+
+async def get_chat_impl(chat_id: str, user_id_type: str = "open_id", user_key: str = "") -> dict[str, Any]:
+    """Read a group's owner, member counts, and settings.
+
+    Feishu deliberately answers a **non-member** caller with only name/avatar/counts
+    /status, so a thin result is not an error — ``partial`` says so rather than letting
+    the caller report "这个群没有群主". ``owner_id`` is also absent when the owner is a
+    bot, which is why the two cases are distinguished in the result.
+    """
+    cid = chat_id.strip()
+    if not cid:
+        return _error("chat_id is required (oc_...); resolve a group name with feishu_chat_find first.")
+    res = await _invoke(_build_get_chat_request(cid, user_id_type), user_key=user_key, prefer="tenant")
+    if not res["ok"]:
+        return _with_hint(res, _CHAT_ADMIN_ERROR_HINTS)
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    owner_id = data.get("owner_id", "") or ""
+    # user_count/bot_count come back as strings; a count is only useful as a number.
+    counts: dict[str, Any] = {}
+    for key in ("user_count", "bot_count"):
+        raw = data.get(key)
+        if isinstance(raw, str | int):
+            with contextlib.suppress(TypeError, ValueError):
+                counts[key] = int(raw)
+    return {
+        "ok": True,
+        "chat_id": cid,
+        "name": data.get("name", ""),
+        "description": data.get("description", ""),
+        "owner_id": owner_id,
+        "owner_id_type": data.get("owner_id_type", "") or (user_id_type if owner_id else ""),
+        "owner_is_bot": not owner_id and data.get("chat_mode") != "p2p",
+        **counts,
+        "user_manager_ids": data.get("user_manager_id_list") or [],
+        "bot_manager_app_ids": data.get("bot_manager_id_list") or [],
+        "chat_mode": data.get("chat_mode", ""),
+        "chat_type": data.get("chat_type", ""),
+        "chat_tag": data.get("chat_tag", ""),
+        "chat_status": data.get("chat_status", ""),
+        "external": bool(data.get("external")),
+        "settings": _chat_settings(data),
+        "avatar": data.get("avatar", ""),
+        # A caller outside the group gets a stub; say so instead of implying the group
+        # has no owner or no settings.
+        "partial": not owner_id and not data.get("chat_mode"),
+    }
+
+
+def _build_chat_members_change_request(
+    chat_id: str, id_list: list[str], member_id_type: str, add: bool, succeed_type: int
+) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.POST if add else HttpMethod.DELETE
+    req.uri = "/open-apis/im/v1/chats/:chat_id/members"
+    req.paths["chat_id"] = chat_id
+    req.add_query("member_id_type", member_id_type)
+    if add:
+        req.add_query("succeed_type", succeed_type)
+    req.body = {"id_list": id_list}
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    return req
+
+
+_CHAT_MEMBER_ID_TYPES = ("open_id", "union_id", "user_id", "app_id")
+
+
+def _clean_member_ids(user_ids: list[str] | None, member_id_type: str, verb: str) -> tuple[list[str], dict | None]:
+    """Validate a member id list for add/remove; returns (ids, error)."""
+    if member_id_type not in _CHAT_MEMBER_ID_TYPES:
+        return [], _error(f"member_id_type must be one of {', '.join(_CHAT_MEMBER_ID_TYPES)}, got {member_id_type!r}.")
+    ids = list(dict.fromkeys(u.strip() for u in (user_ids or []) if u and u.strip()))
+    if not ids:
+        return [], _error(f"user_ids is required — give at least one id to {verb}.")
+    if len(ids) > 50:
+        return [], _error(
+            f"Feishu takes at most 50 ids per call ({len(ids)} given); split the list and call again. "
+            "机器人一次最多 5 个。",
+        )
+    return ids, None
+
+
+async def add_chat_members_impl(
+    chat_id: str,
+    user_ids: list[str] | None = None,
+    member_id_type: str = "open_id",
+    succeed_type: int = 1,
+    user_key: str = "",
+) -> dict[str, Any]:
+    """Add people (or bots) to an existing group.
+
+    ``succeed_type=1`` is the default deliberately: Feishu's own default (0) fails the
+    **whole** call over one unreachable id, so adding nine reachable people would add
+    nobody. With 1 the reachable ones go in and the rest come back classified, which is
+    what a caller can actually act on.
+    """
+    cid = chat_id.strip()
+    if not cid:
+        return _error("chat_id is required (oc_...); resolve a group name with feishu_chat_find first.")
+    ids, bad = _clean_member_ids(user_ids, member_id_type, "add")
+    if bad is not None:
+        return bad
+    if succeed_type not in (0, 1, 2):
+        return _error("succeed_type must be 0 (all-or-nothing), 1 (add what's reachable), or 2 (strict).")
+    res = await _invoke(
+        _build_chat_members_change_request(cid, ids, member_id_type, True, succeed_type),
+        user_key=user_key,
+        prefer="tenant",
+    )
+    if not res["ok"]:
+        return _with_hint({**res, "chat_id": cid, "requested": ids}, _CHAT_ADMIN_ERROR_HINTS)
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    invalid = data.get("invalid_id_list") or []
+    missing = data.get("not_existed_id_list") or []
+    pending = data.get("pending_approval_id_list") or []
+    added = [i for i in ids if i not in {*invalid, *missing, *pending}]
+    return {
+        "ok": True,
+        "chat_id": cid,
+        "member_id_type": member_id_type,
+        "requested": ids,
+        "added": added,
+        "added_count": len(added),
+        # Kept apart because the fixes differ: unreachable (scope/离职) vs nonexistent
+        # id vs waiting on the owner's approval — the last one *will* join later.
+        "invalid_ids": invalid,
+        "not_existed_ids": missing,
+        "pending_approval_ids": pending,
+    }
+
+
+async def remove_chat_members_impl(
+    chat_id: str,
+    user_ids: list[str] | None = None,
+    member_id_type: str = "open_id",
+    user_key: str = "",
+) -> dict[str, Any]:
+    """Remove people (or bots) from a group.
+
+    Only the owner, an admin, or the bot that created the group may remove **others**
+    (232017), and the owner can never be removed (232076) — both surface as hints
+    rather than as a bare error code.
+    """
+    cid = chat_id.strip()
+    if not cid:
+        return _error("chat_id is required (oc_...); resolve a group name with feishu_chat_find first.")
+    ids, bad = _clean_member_ids(user_ids, member_id_type, "remove")
+    if bad is not None:
+        return bad
+    res = await _invoke(
+        _build_chat_members_change_request(cid, ids, member_id_type, False, 0),
+        user_key=user_key,
+        prefer="tenant",
+    )
+    if not res["ok"]:
+        return _with_hint({**res, "chat_id": cid, "requested": ids}, _CHAT_ADMIN_ERROR_HINTS)
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    invalid = data.get("invalid_id_list") or []
+    removed = [i for i in ids if i not in set(invalid)]
+    return {
+        "ok": True,
+        "chat_id": cid,
+        "member_id_type": member_id_type,
+        "requested": ids,
+        "removed": removed,
+        "removed_count": len(removed),
+        "invalid_ids": invalid,
+    }
+
+
 # ── Approval (审批) — list pending tasks, read instance, approve/reject ────────
 #
 # Lets the agent read an approval application's form content and decide whether
