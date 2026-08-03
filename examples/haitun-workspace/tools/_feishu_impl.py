@@ -2660,6 +2660,1314 @@ async def remove_chat_members_impl(
     }
 
 
+# ── 群公告 (chat announcement) — read and write the pinned notice board ──────────
+#
+# An announcement is not a message: it is a *document* hanging off the chat, so it is
+# read and written with the docx block APIs (docx/v1/chats/:chat_id/announcement/...)
+# rather than im/v1. That is the whole reason this needs a tool instead of one
+# feishu_api call — writing one requires three separate facts to line up:
+#
+# 1. There are TWO generations of announcement. The legacy one (im/v1 .../announcement,
+#    old-doc serialization) and the docx one. Feishu refuses cross-generation calls with
+#    232097, and every group created in recent years is docx. So only the docx endpoints
+#    are used here, and 232097 is translated rather than passed through as a bare code.
+# 2. Every write is optimistic-locked on ``revision_id``. Sending a stale one fails, so
+#    the revision is always read immediately before writing instead of being asked of
+#    the caller — an agent has no way to know it.
+# 3. The root block_id of an announcement is the ``chat_id`` itself (the same trick docx
+#    uses, where document_id doubles as the root block_id). Guessing anything else here
+#    produces a 404 that reads like "no announcement".
+_ANNOUNCEMENT_ERROR_HINTS = {
+    232001: "参数不合法; 检查 chat_id 是不是 oc_ 开头的群 (单聊 p2p 没有群公告)。",
+    232002: "该群限定「仅群主和管理员可编辑群信息」; 传群主/管理员的 user_key 以本人身份改, 或请他们放开该设置。",
+    232003: "群公告数据异常, 稍后重试。",
+    232010: "操作者与该群不在同一租户 (外部群), 内部接口管不了。",
+    232011: "调用者不在该群里; 先把机器人 (或本人) 加入群。",
+    232018: "更新失败, 请求结构有问题 (检查 content 是否为空)。",
+    232019: "同一个群被并发操作触发限流; 串行调用重试。",
+    232024: "群公告可见性或协作权限不足。",
+    232025: "应用未启用机器人能力, 到开发者后台开启后再试。",
+    232033: "外部群不支持该操作。",
+    232034: "应用在该租户未安装或未启用。",
+    232066: "缺少群公告文档的阅读权限; 让群主把公告共享给机器人, 或传本人 user_key。",
+    232097: "这是旧版 (非 docx) 群公告, 本工具的 docx 端点操作不了; "
+    "请群主在群里手动把公告重建一次 (新建的即为 docx 版), 或改用旧版接口。",
+}
+
+
+def _build_announcement_get_request(chat_id: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.GET
+    req.uri = "/open-apis/docx/v1/chats/:chat_id/announcement"
+    req.paths["chat_id"] = chat_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    return req
+
+
+def _build_announcement_blocks_request(chat_id: str, page_size: int, page_token: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.GET
+    req.uri = "/open-apis/docx/v1/chats/:chat_id/announcement/blocks"
+    req.paths["chat_id"] = chat_id
+    req.add_query("page_size", page_size)
+    if page_token:
+        req.add_query("page_token", page_token)
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    return req
+
+
+def _build_announcement_children_request(
+    chat_id: str, children: list[dict[str, Any]], revision_id: int, index: int
+) -> BaseRequest:
+    """Append blocks under the announcement root (whose block_id IS the chat_id)."""
+    req = BaseRequest()
+    req.http_method = HttpMethod.POST
+    req.uri = "/open-apis/docx/v1/chats/:chat_id/announcement/blocks/:block_id/children"
+    req.paths["chat_id"] = chat_id
+    req.paths["block_id"] = chat_id
+    req.add_query("revision_id", revision_id)
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    body: dict[str, Any] = {"children": children}
+    if index >= 0:
+        body["index"] = index
+    req.body = body
+    return req
+
+
+def _build_announcement_delete_request(chat_id: str, start: int, end: int, revision_id: int) -> BaseRequest:
+    """Delete children [start, end) of the announcement root — the range is half-open."""
+    req = BaseRequest()
+    req.http_method = HttpMethod.DELETE
+    req.uri = "/open-apis/docx/v1/chats/:chat_id/announcement/blocks/:block_id/children/batch_delete"
+    req.paths["chat_id"] = chat_id
+    req.paths["block_id"] = chat_id
+    req.add_query("revision_id", revision_id)
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    req.body = {"start_index": start, "end_index": end}
+    return req
+
+
+async def _announcement_meta(chat_id: str, user_key: str) -> dict[str, Any]:
+    """``{revision_id, announcement_type, ...}`` for a chat's announcement.
+
+    Read before every write: ``revision_id`` is an optimistic lock the caller cannot
+    know, and ``announcement_type`` tells us up front whether the docx endpoints even
+    apply (a legacy announcement would otherwise fail mid-write with 232097).
+    """
+    res = await _invoke(_build_announcement_get_request(chat_id), user_key=user_key, prefer="tenant")
+    if not res["ok"]:
+        return _with_hint(res, _ANNOUNCEMENT_ERROR_HINTS)
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    revision = data.get("revision_id")
+    if not isinstance(revision, int):
+        with contextlib.suppress(TypeError, ValueError):
+            revision = int(str(revision))
+    return {
+        "ok": True,
+        "revision_id": revision if isinstance(revision, int) else 0,
+        "announcement_type": data.get("announcement_type", "") or "",
+        "owner_id": data.get("owner_id", "") or "",
+        "modifier_id": data.get("modifier_id", "") or "",
+        "create_time": data.get("create_time_v2") or data.get("create_time") or "",
+        "update_time": data.get("update_time_v2") or data.get("update_time") or "",
+    }
+
+
+async def read_chat_announcement_impl(chat_id: str, max_chars: int = 20000, user_key: str = "") -> dict[str, Any]:
+    """Read a group's 群公告 as plain text plus its block structure.
+
+    The announcement is a document, so this pages its blocks and joins their text the
+    same way ``list_doc_blocks_impl`` does — the caller wants to know what the notice
+    says, not to parse docx JSON. ``blocks`` is returned alongside so a follow-up edit
+    can address a specific paragraph.
+
+    An **empty** announcement is a legitimate answer (``text == ""``, ``block_count``
+    counting only the root), not an error: a group that never had a notice set still
+    has an announcement document.
+    """
+    cid = chat_id.strip()
+    if not cid:
+        return _error("chat_id is required (oc_...); resolve a group name with feishu_chat_find first.")
+    meta = await _announcement_meta(cid, user_key)
+    if not meta["ok"]:
+        return meta
+
+    limit = max(1, min(int(max_chars or 20000), 100000))
+    blocks: list[dict[str, Any]] = []
+    page_token = ""
+    while True:
+        res = await _invoke(
+            _build_announcement_blocks_request(cid, _BLOCKS_LIST_PAGE_MAX, page_token),
+            user_key=user_key,
+            prefer="tenant",
+        )
+        if not res["ok"]:
+            return _with_hint(res, _ANNOUNCEMENT_ERROR_HINTS)
+        data = res["data"] if isinstance(res["data"], dict) else {}
+        for raw in data.get("items") or []:
+            if not isinstance(raw, dict):
+                continue
+            block_type = raw.get("block_type") or 0
+            blocks.append(
+                {
+                    "block_id": raw.get("block_id", ""),
+                    "block_type": block_type,
+                    "type_name": _BLOCK_TYPE_NAMES.get(block_type, str(block_type)),
+                    "parent_id": raw.get("parent_id", ""),
+                    "text": _block_plain_text(raw),
+                }
+            )
+        page_token = str(data.get("page_token") or "")
+        if not data.get("has_more") or not page_token:
+            break
+
+    # The root block (its id is the chat_id) is scaffolding, not content.
+    body = [b for b in blocks if b["block_id"] != cid]
+    text = "\n".join(b["text"] for b in body if b["text"])
+    return {
+        "ok": True,
+        "chat_id": cid,
+        "revision_id": meta["revision_id"],
+        "announcement_type": meta["announcement_type"],
+        "owner_id": meta["owner_id"],
+        "modifier_id": meta["modifier_id"],
+        "update_time": meta["update_time"],
+        "text": text if len(text) <= limit else text[:limit] + "…",
+        "truncated": len(text) > limit,
+        "block_count": len(body),
+        "blocks": body,
+        "empty": not text.strip(),
+    }
+
+
+async def set_chat_announcement_impl(
+    chat_id: str,
+    content: str,
+    replace: bool = True,
+    user_key: str = "",
+) -> dict[str, Any]:
+    """Write a group's 群公告 from plain text / light Markdown headings.
+
+    ``replace=True`` (the default) rewrites the notice: the existing body blocks are
+    deleted first, then the new content is appended. That ordering is deliberate — the
+    delete bumps ``revision_id``, so the append must re-read it rather than reuse the
+    one it started with, or Feishu rejects the write on a stale lock.
+
+    ``replace=False`` appends to whatever is already there, for adding a line to a
+    standing notice without retyping it.
+
+    Blank ``content`` with ``replace=True`` is refused rather than treated as "clear
+    the announcement": wiping a group's notice is not something to do by accident. Use
+    ``clear_chat_announcement_impl`` to say that explicitly.
+    """
+    cid = chat_id.strip()
+    if not cid:
+        return _error("chat_id is required (oc_...); resolve a group name with feishu_chat_find first.")
+    if not (content or "").strip():
+        return _error(
+            "content is empty — nothing to write. 要清空群公告请用 feishu_chat_announcement_clear (显式操作)。"
+        )
+    blocks = _content_to_blocks(content)
+    if not blocks:
+        return _error("content produced no blocks — nothing to write.")
+
+    deleted = 0
+    if replace:
+        cleared = await clear_chat_announcement_impl(cid, user_key=user_key)
+        if not cleared["ok"]:
+            return cleared
+        deleted = cleared["deleted"]
+
+    # Re-read the revision: a delete above (or anyone else's edit) has moved it on.
+    meta = await _announcement_meta(cid, user_key)
+    if not meta["ok"]:
+        return meta
+    added = 0
+    for start in range(0, len(blocks), _BLOCKS_BATCH):
+        batch = blocks[start : start + _BLOCKS_BATCH]
+        revision = meta["revision_id"]
+        res = await _invoke(
+            _build_announcement_children_request(cid, batch, revision, -1),
+            user_key=user_key,
+            prefer="tenant",
+        )
+        if not res["ok"]:
+            return _with_hint({**res, "chat_id": cid, "added": added, "deleted": deleted}, _ANNOUNCEMENT_ERROR_HINTS)
+        added += len(batch)
+        # Each successful batch advances the document version; the next one must use it.
+        data = res["data"] if isinstance(res["data"], dict) else {}
+        next_revision = data.get("revision_id")
+        meta = {**meta, "revision_id": next_revision if isinstance(next_revision, int) else revision + 1}
+    return {
+        "ok": True,
+        "chat_id": cid,
+        "added": added,
+        "deleted": deleted,
+        "replaced": replace,
+        "revision_id": meta["revision_id"],
+    }
+
+
+async def clear_chat_announcement_impl(chat_id: str, user_key: str = "") -> dict[str, Any]:
+    """Delete every body block of a group's 群公告, leaving it empty.
+
+    Separate from ``set_chat_announcement_impl`` because emptying a group's notice is a
+    destructive act with no undo, so it has to be asked for by name. Deleting nothing
+    (an already-empty announcement) succeeds with ``deleted == 0`` rather than erroring.
+    """
+    cid = chat_id.strip()
+    if not cid:
+        return _error("chat_id is required (oc_...); resolve a group name with feishu_chat_find first.")
+    current = await read_chat_announcement_impl(cid, max_chars=1, user_key=user_key)
+    if not current["ok"]:
+        return current
+    count = int(current.get("block_count") or 0)
+    if count <= 0:
+        return {"ok": True, "chat_id": cid, "deleted": 0, "revision_id": current.get("revision_id", 0)}
+    res = await _invoke(
+        _build_announcement_delete_request(cid, 0, count, int(current.get("revision_id") or 0)),
+        user_key=user_key,
+        prefer="tenant",
+    )
+    if not res["ok"]:
+        return _with_hint({**res, "chat_id": cid}, _ANNOUNCEMENT_ERROR_HINTS)
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    revision = data.get("revision_id")
+    return {
+        "ok": True,
+        "chat_id": cid,
+        "deleted": count,
+        "revision_id": revision if isinstance(revision, int) else 0,
+    }
+
+
+# ── 群设置变更 / 解散群 / 转让群主 (chat update, delete, ownership) ───────────────
+#
+# All three ride the same two endpoints — PUT /open-apis/im/v1/chats/:chat_id for every
+# setting (including ``owner_id``, which is how ownership transfer works) and DELETE on
+# the same path to dismiss the group. They are separate tools because the *consequences*
+# differ by an order of magnitude, and because Feishu's raw body is easy to get wrong in
+# two specific ways that silently produce the opposite of what was asked:
+#
+# 1. **``add_member_permission`` and ``share_card_permission`` are coupled.** Feishu
+#    rejects ``only_owner`` + ``allowed``. Sending one alone is accepted but leaves the
+#    pair inconsistent, so the pair is completed here from whichever half was given.
+# 2. **禁言 is not a field on this endpoint.** "全员禁言" lives on a *different* endpoint
+#    (PUT .../moderation, ``moderation_setting``); an agent reaching for
+#    ``moderation_permission`` on the update body gets a silently ignored field. Hence
+#    ``update_chat_moderation_impl`` below, and the guard in ``update_chat_impl``.
+#
+# The human-facing vocabulary is deliberately Chinese-first: the agent is told "把群改名"
+# / "开全员禁言", and mapping that onto Feishu's enum strings is exactly the knowledge
+# that has to be *guaranteed* rather than remembered.
+_CHAT_UPDATE_ERROR_HINTS = {
+    232002: "该群限定「仅群主和管理员可编辑群信息」; 传群主/管理员的 user_key 以本人身份改。",
+    232012: "指定的新群主还不是群成员; 先用 feishu_chat_add_members 把他加进群再转让。",
+    232016: "普通成员只能改群头像/群名称/群描述/国际化名称; 其它设置要群主或管理员。",
+    232020: "群名称不合法 (公开群至少 2 个字符)。",
+    232021: "群头像 image_key 无效; 必须用 image_type='avatar' 上传 (feishu_chat_upload_avatar)。",
+}
+# Who-can-do-what enums, keyed by the words a user actually says.
+_CHAT_WHO_VALUES = {
+    "all_members": "all_members",
+    "only_owner": "only_owner",
+    "not_anyone": "not_anyone",
+    "所有群成员": "all_members",
+    "所有人": "all_members",
+    "仅群主和管理员": "only_owner",
+    "仅群主": "only_owner",
+    "群主和管理员": "only_owner",
+    "任何人都不可": "not_anyone",
+    "禁止": "not_anyone",
+}
+# The update body's own fields, split by the value vocabulary each one takes, so an
+# unknown value is refused with the accepted list instead of being sent off to Feishu.
+_CHAT_WHO_FIELDS = (
+    "add_member_permission",
+    "at_all_permission",
+    "edit_permission",
+    "join_message_visibility",
+    "leave_message_visibility",
+    "urgent_setting",
+    "video_conference_setting",
+    "hide_member_count_setting",
+)
+_CHAT_APPROVAL_VALUES = {
+    "approval_required": "approval_required",
+    "no_approval_required": "no_approval_required",
+    "需审批": "approval_required",
+    "需要审批": "approval_required",
+    "开": "approval_required",
+    "无需审批": "no_approval_required",
+    "不需要审批": "no_approval_required",
+    "关": "no_approval_required",
+}
+_CHAT_TYPE_VALUES = {"private": "private", "public": "public", "私有": "private", "公开": "public"}
+
+
+def _normalize_chat_who(field: str, value: str) -> tuple[str, str]:
+    """Map a who-can-do-this value onto Feishu's enum; returns (enum, error)."""
+    mapped = _CHAT_WHO_VALUES.get(value.strip())
+    if not mapped:
+        return "", (
+            f"{field} 的取值 {value!r} 无效; 只能是 all_members (所有群成员) / only_owner (仅群主和管理员)"
+            " / not_anyone (任何人都不可)。"
+        )
+    return mapped, ""
+
+
+def _build_update_chat_request(chat_id: str, body: dict[str, Any], user_id_type: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.PUT
+    req.uri = "/open-apis/im/v1/chats/:chat_id"
+    req.paths["chat_id"] = chat_id
+    req.add_query("user_id_type", user_id_type)
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    req.body = body
+    return req
+
+
+def _chat_update_body(
+    name: str,
+    description: str,
+    avatar: str,
+    add_member_permission: str,
+    at_all_permission: str,
+    edit_permission: str,
+    membership_approval: str,
+    chat_type: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """The PUT body for a settings change; returns (body, error).
+
+    Only fields the caller actually named are included — Feishu treats an omitted field
+    as "leave it alone", so building the body from non-empty arguments is what keeps a
+    rename from also resetting permissions.
+    """
+    body: dict[str, Any] = {}
+    if name.strip():
+        body["name"] = name.strip()
+    if description.strip():
+        body["description"] = description.strip()
+    if avatar.strip():
+        body["avatar"] = avatar.strip()
+    for field, raw in (
+        ("add_member_permission", add_member_permission),
+        ("at_all_permission", at_all_permission),
+        ("edit_permission", edit_permission),
+    ):
+        if not raw.strip():
+            continue
+        mapped, err = _normalize_chat_who(field, raw)
+        if err:
+            return {}, _error(err)
+        body[field] = mapped
+    if membership_approval.strip():
+        mapped_approval = _CHAT_APPROVAL_VALUES.get(membership_approval.strip())
+        if not mapped_approval:
+            return {}, _error(
+                f"membership_approval 的取值 {membership_approval!r} 无效; "
+                "只能是 approval_required (入群需审批) 或 no_approval_required (无需审批)。"
+            )
+        body["membership_approval"] = mapped_approval
+    if chat_type.strip():
+        mapped_type = _CHAT_TYPE_VALUES.get(chat_type.strip())
+        if not mapped_type:
+            return {}, _error(f"chat_type 的取值 {chat_type!r} 无效; 只能是 private (私有群) 或 public (公开群)。")
+        body["chat_type"] = mapped_type
+    # Feishu refuses only_owner + allowed, and accepting one half alone leaves the pair
+    # contradictory — so the partner field is derived rather than left to the caller.
+    if "add_member_permission" in body:
+        body["share_card_permission"] = "allowed" if body["add_member_permission"] == "all_members" else "not_allowed"
+    return body, None
+
+
+async def update_chat_impl(
+    chat_id: str,
+    name: str = "",
+    description: str = "",
+    avatar: str = "",
+    add_member_permission: str = "",
+    at_all_permission: str = "",
+    edit_permission: str = "",
+    membership_approval: str = "",
+    chat_type: str = "",
+    user_key: str = "",
+) -> dict[str, Any]:
+    """Change a group's name / avatar / description / permissions (群设置变更).
+
+    Every argument is optional and only the named ones are sent, so renaming a group
+    cannot accidentally reset who may add members. ``share_card_permission`` is derived
+    from ``add_member_permission`` because Feishu requires the pair to agree.
+
+    Not here on purpose: **全员禁言** (use ``update_chat_moderation_impl`` — a different
+    endpoint) and **转让群主** (use ``transfer_chat_owner_impl`` — same endpoint, but the
+    consequence warrants its own tool).
+    """
+    cid = chat_id.strip()
+    if not cid:
+        return _error("chat_id is required (oc_...); resolve a group name with feishu_chat_find first.")
+    body, bad = _chat_update_body(
+        name,
+        description,
+        avatar,
+        add_member_permission,
+        at_all_permission,
+        edit_permission,
+        membership_approval,
+        chat_type,
+    )
+    if bad is not None:
+        return bad
+    if not body:
+        return _error(
+            "没有要改的东西 — 至少给一个字段 (name / description / avatar / add_member_permission / "
+            "at_all_permission / edit_permission / membership_approval / chat_type)。"
+            "全员禁言用 feishu_chat_mute, 转让群主用 feishu_chat_transfer_owner。"
+        )
+    res = await _invoke(_build_update_chat_request(cid, body, "open_id"), user_key=user_key, prefer="tenant")
+    if not res["ok"]:
+        return _with_hint({**res, "chat_id": cid}, {**_CHAT_ADMIN_ERROR_HINTS, **_CHAT_UPDATE_ERROR_HINTS})
+    return {"ok": True, "chat_id": cid, "updated": body}
+
+
+async def transfer_chat_owner_impl(
+    chat_id: str,
+    new_owner_id: str,
+    user_id_type: str = "open_id",
+    user_key: str = "",
+) -> dict[str, Any]:
+    """Hand a group over to a new owner (转让群主).
+
+    Split out of ``update_chat_impl`` because it is the one settings change the *caller
+    loses control by*: after this the previous owner is an ordinary member (or admin),
+    so a tool that could do it as a side effect of a rename would be dangerous.
+
+    The new owner **must already be in the group** — Feishu answers 232012 otherwise,
+    which is translated to say "add them first" rather than left as a code. Only the
+    current owner can do this (232017), so ``user_key`` normally has to be theirs.
+    """
+    cid = chat_id.strip()
+    owner = new_owner_id.strip()
+    if not cid:
+        return _error("chat_id is required (oc_...); resolve a group name with feishu_chat_find first.")
+    if not owner:
+        return _error(
+            "new_owner_id is required — 新群主的 id (默认 open_id, ou_ 开头); "
+            "用 feishu_chat_list_members / feishu_contact_search 解析姓名。"
+        )
+    if user_id_type not in ("open_id", "union_id", "user_id"):
+        return _error(f"user_id_type must be open_id, union_id, or user_id, got {user_id_type!r}.")
+    res = await _invoke(
+        _build_update_chat_request(cid, {"owner_id": owner}, user_id_type),
+        user_key=user_key,
+        prefer="tenant",
+    )
+    if not res["ok"]:
+        return _with_hint(
+            {**res, "chat_id": cid, "new_owner_id": owner},
+            {**_CHAT_ADMIN_ERROR_HINTS, **_CHAT_UPDATE_ERROR_HINTS},
+        )
+    return {"ok": True, "chat_id": cid, "new_owner_id": owner, "user_id_type": user_id_type}
+
+
+def _build_delete_chat_request(chat_id: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.DELETE
+    req.uri = "/open-apis/im/v1/chats/:chat_id"
+    req.paths["chat_id"] = chat_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    return req
+
+
+_DISMISS_CONFIRM = "解散群"
+
+
+async def dismiss_chat_impl(chat_id: str, confirm: str = "", user_key: str = "") -> dict[str, Any]:
+    """Dismiss (解散) a group — irreversible, and its history is not kept.
+
+    This is the most destructive call in the Feishu tool set: Feishu does not preserve
+    the chat record, so nothing here or elsewhere can undo it. It therefore requires an
+    explicit ``confirm="解散群"``, which exists so that a mis-parsed instruction ("清一下
+    群") cannot dissolve a group — the agent has to have understood the request well
+    enough to name the act.
+
+    Only the owner (or the creating bot with ``im:chat:operate_as_owner``) may do this;
+    232017 says so, and 232009 means somebody already dissolved it.
+    """
+    cid = chat_id.strip()
+    if not cid:
+        return _error("chat_id is required (oc_...); resolve a group name with feishu_chat_find first.")
+    if confirm.strip() != _DISMISS_CONFIRM:
+        return _error(
+            f"解散群是不可逆的 (飞书不保留群记录, 消息/文件全部无法找回)。确认要解散请传 "
+            f"confirm='{_DISMISS_CONFIRM}'。先用 feishu_chat_get 核对这是不是要解散的那个群。",
+            need_confirmation=True,
+            chat_id=cid,
+        )
+    res = await _invoke(_build_delete_chat_request(cid), user_key=user_key, prefer="tenant")
+    if not res["ok"]:
+        return _with_hint({**res, "chat_id": cid}, _CHAT_ADMIN_ERROR_HINTS)
+    return {"ok": True, "chat_id": cid, "dismissed": True}
+
+
+# ── 全员禁言 (chat moderation) ───────────────────────────────────────────────────
+# A separate endpoint from every other group setting, which is the trap: the field named
+# ``moderation_permission`` that ``feishu_chat_get`` *reads* cannot be written through the
+# chat-update body. Writing it needs PUT .../moderation with ``moderation_setting``, plus
+# — for the "只让某几个人能说话" case — the added/removed lists, which Feishu requires to
+# be disjoint.
+_MODERATION_VALUES = {
+    "all_members": "all_members",
+    "only_owner": "only_owner",
+    "moderator_list": "moderator_list",
+    "所有群成员": "all_members",
+    "所有人可发言": "all_members",
+    "解除禁言": "all_members",
+    "取消禁言": "all_members",
+    "全员禁言": "only_owner",
+    "仅群主和管理员": "only_owner",
+    "仅群主": "only_owner",
+    "指定人员": "moderator_list",
+    "指定成员可发言": "moderator_list",
+}
+_MODERATION_ERROR_HINTS = {
+    232060: "该群已被封禁, 无法修改发言权限。",
+    232092: "群里正在开会, 此时改不了发言权限; 会议结束后重试。",
+}
+
+
+def _build_chat_moderation_request(
+    chat_id: str, setting: str, added: list[str], removed: list[str], user_id_type: str
+) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.PUT
+    req.uri = "/open-apis/im/v1/chats/:chat_id/moderation"
+    req.paths["chat_id"] = chat_id
+    req.add_query("user_id_type", user_id_type)
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    body: dict[str, Any] = {"moderation_setting": setting}
+    if added:
+        body["moderator_added_list"] = added
+    if removed:
+        body["moderator_removed_list"] = removed
+    req.body = body
+    return req
+
+
+async def update_chat_moderation_impl(
+    chat_id: str,
+    setting: str,
+    speaker_ids: list[str] | None = None,
+    revoke_ids: list[str] | None = None,
+    user_id_type: str = "open_id",
+    user_key: str = "",
+) -> dict[str, Any]:
+    """Set who may speak in a group — 全员禁言 / 解除禁言 / 指定人员可发言.
+
+    ``setting`` accepts Feishu's enums or the words a user says: ``"全员禁言"`` →
+    ``only_owner`` (only owner+admins can post), ``"解除禁言"`` → ``all_members``,
+    ``"指定人员"`` → ``moderator_list`` with ``speaker_ids`` naming who keeps the right.
+
+    The two lists must be disjoint (Feishu rejects an id in both), and ids that are not
+    in the group are dropped silently on Feishu's side — so ``requested`` is echoed back
+    for comparison. Only the owner or the creating bot may call this (232017).
+    """
+    cid = chat_id.strip()
+    if not cid:
+        return _error("chat_id is required (oc_...); resolve a group name with feishu_chat_find first.")
+    mapped = _MODERATION_VALUES.get((setting or "").strip())
+    if not mapped:
+        return _error(
+            f"setting 的取值 {setting!r} 无效; 只能是 all_members (所有人可发言/解除禁言) / "
+            "only_owner (全员禁言, 仅群主和管理员可发言) / moderator_list (仅指定人员可发言)。"
+        )
+    added = [i.strip() for i in (speaker_ids or []) if i and i.strip()]
+    removed = [i.strip() for i in (revoke_ids or []) if i and i.strip()]
+    both = sorted(set(added) & set(removed))
+    if both:
+        return _error(f"同一个 id 不能同时出现在 speaker_ids 和 revoke_ids 里: {', '.join(both)}。")
+    if mapped == "moderator_list" and not added and not removed:
+        return _error("setting='moderator_list' 时要用 speaker_ids 指明谁可以发言 (否则等于谁都不能说)。")
+    if user_id_type not in ("open_id", "union_id", "user_id"):
+        return _error(f"user_id_type must be open_id, union_id, or user_id, got {user_id_type!r}.")
+    res = await _invoke(
+        _build_chat_moderation_request(cid, mapped, added, removed, user_id_type),
+        user_key=user_key,
+        prefer="tenant",
+    )
+    if not res["ok"]:
+        return _with_hint({**res, "chat_id": cid}, {**_CHAT_ADMIN_ERROR_HINTS, **_MODERATION_ERROR_HINTS})
+    return {
+        "ok": True,
+        "chat_id": cid,
+        "moderation_setting": mapped,
+        "speakers_added": added,
+        "speakers_revoked": removed,
+        "user_id_type": user_id_type,
+    }
+
+
+# ── 群菜单 (chat menu) — the buttons along the bottom of a group ─────────────────
+#
+# Two shapes of the same thing, and the API makes them awkward in a way worth absorbing:
+# a first-level menu either *does* something (``action_type="REDIRECT_LINK"`` + a URL) or
+# *contains* children (``action_type="NONE"``, no icon allowed). Feishu enforces that,
+# but only after the request lands, so the combination is checked here.
+#
+# Create **appends** — it never replaces — and caps at 3 first-level menus with 5
+# children each. Children cannot be added to a first-level menu that already exists, so
+# a menu with sub-items has to be created in one call: the whole tree is built from a
+# compact ``[{name, url?, children?}]`` list rather than Feishu's nested wrapper objects,
+# which are three levels of single-key dicts an agent gets wrong more often than not.
+_MENU_ERROR_HINTS = {
+    232011: "机器人不在该群里, 先把机器人加入群。",
+    232025: "应用未启用机器人能力, 到开发者后台开启后再试。",
+    232055: "机器人没有管理群菜单的权限 (该群限定群主/管理员才能改)。",
+    232056: "菜单图标 image_key 不是本机器人上传的; 用 feishu_message_upload_image 重新上传。",
+    232090: "群类型不支持群菜单 (仅普通群 group)。",
+}
+_MENU_MAX_TOP = 3
+_MENU_MAX_CHILDREN = 5
+_MENU_NAME_MAX = 120
+
+
+def _menu_item(name: str, url: str, image_key: str) -> tuple[dict[str, Any], str]:
+    """One ``chat_menu_item``; returns (item, error).
+
+    A menu with no URL is a container (``action_type="NONE"``); with one it redirects.
+    ``common_url`` alone covers every platform, which is what a caller means by "点开
+    打开这个链接" — the per-platform overrides exist for apps that need them and are not
+    worth the schema here.
+    """
+    label = name.strip()
+    if not label:
+        return {}, "菜单名称不能为空。"
+    if len(label) > _MENU_NAME_MAX:
+        return {}, f"菜单名称 {label!r} 超过 {_MENU_NAME_MAX} 字。"
+    item: dict[str, Any] = {"name": label}
+    link = url.strip()
+    if link:
+        if not link.startswith(("http://", "https://")):
+            return {}, f"菜单 {label!r} 的 url 必须以 http:// 或 https:// 开头, 收到 {link!r}。"
+        item["action_type"] = "REDIRECT_LINK"
+        item["redirect_link"] = {"common_url": link}
+    else:
+        item["action_type"] = "NONE"
+    if image_key.strip():
+        item["image_key"] = image_key.strip()
+    return item, ""
+
+
+def _menu_tree_body(menus: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Feishu's nested ``menu_tree`` from a flat ``[{name, url, image_key, children}]``."""
+    if not menus:
+        return {}, _error("menus is required — 至少给一个菜单, 形如 [{'name': '帮助', 'url': 'https://...'}]。")
+    if len(menus) > _MENU_MAX_TOP:
+        return {}, _error(f"一个群最多 {_MENU_MAX_TOP} 个一级菜单, 收到 {len(menus)} 个。")
+    top_levels: list[dict[str, Any]] = []
+    for position, raw in enumerate(menus):
+        if not isinstance(raw, dict):
+            return {}, _error(f"menus[{position}] 不是对象; 形如 {{'name': '帮助', 'url': 'https://...'}}。")
+        children_raw = raw.get("children") or []
+        if not isinstance(children_raw, list):
+            return {}, _error(f"menus[{position}].children 必须是列表。")
+        if len(children_raw) > _MENU_MAX_CHILDREN:
+            return {}, _error(f"menus[{position}] 最多 {_MENU_MAX_CHILDREN} 个二级菜单, 收到 {len(children_raw)} 个。")
+        # A parent with children may not redirect or carry an icon — Feishu's rule.
+        if children_raw and (str(raw.get("url", "")).strip() or str(raw.get("image_key", "")).strip()):
+            return {}, _error(
+                f"menus[{position}] 带了 children, 这种一级菜单只能是分组: 不能再给 url 或 image_key "
+                "(点它只会展开子菜单)。"
+            )
+        item, err = _menu_item(str(raw.get("name", "")), str(raw.get("url", "")), str(raw.get("image_key", "")))
+        if err:
+            return {}, _error(f"menus[{position}]: {err}")
+        children: list[dict[str, Any]] = []
+        for child_position, child_raw in enumerate(children_raw):
+            if not isinstance(child_raw, dict):
+                return {}, _error(f"menus[{position}].children[{child_position}] 不是对象。")
+            child_item, child_err = _menu_item(
+                str(child_raw.get("name", "")), str(child_raw.get("url", "")), str(child_raw.get("image_key", ""))
+            )
+            if child_err:
+                return {}, _error(f"menus[{position}].children[{child_position}]: {child_err}")
+            children.append({"chat_menu_item": child_item})
+        entry: dict[str, Any] = {"chat_menu_item": item}
+        if children:
+            entry["children"] = children
+        top_levels.append(entry)
+    return {"menu_tree": {"chat_menu_top_levels": top_levels}}, None
+
+
+def _build_chat_menu_request(chat_id: str, method: HttpMethod, suffix: str, body: dict[str, Any]) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = method
+    req.uri = f"/open-apis/im/v1/chats/:chat_id/menu_tree{suffix}"
+    req.paths["chat_id"] = chat_id
+    req.token_types = {AccessTokenType.TENANT}
+    if body:
+        req.body = body
+    return req
+
+
+def _menu_summary(data: Any) -> list[dict[str, Any]]:
+    """Flatten Feishu's ``menu_tree`` reply into ``[{id, name, url, children}]``.
+
+    The ids matter: deleting or reordering menus keys off ``chat_menu_top_level_id``,
+    and it is only ever returned here.
+    """
+    tree = data.get("menu_tree") if isinstance(data, dict) else None
+    top_levels = tree.get("chat_menu_top_levels") if isinstance(tree, dict) else None
+    out: list[dict[str, Any]] = []
+    for raw in top_levels or []:
+        if not isinstance(raw, dict):
+            continue
+        item = raw.get("chat_menu_item") if isinstance(raw.get("chat_menu_item"), dict) else {}
+        link = item.get("redirect_link") if isinstance(item.get("redirect_link"), dict) else {}
+        children: list[dict[str, Any]] = []
+        for child in raw.get("children") or []:
+            if not isinstance(child, dict):
+                continue
+            child_item = child.get("chat_menu_item") if isinstance(child.get("chat_menu_item"), dict) else {}
+            child_link = child_item.get("redirect_link") if isinstance(child_item.get("redirect_link"), dict) else {}
+            children.append(
+                {
+                    "id": child.get("chat_menu_second_level_id", ""),
+                    "name": child_item.get("name", ""),
+                    "url": child_link.get("common_url", "") if isinstance(child_link, dict) else "",
+                }
+            )
+        entry: dict[str, Any] = {
+            "id": raw.get("chat_menu_top_level_id", ""),
+            "name": item.get("name", ""),
+            "url": link.get("common_url", "") if isinstance(link, dict) else "",
+        }
+        if children:
+            entry["children"] = children
+        out.append(entry)
+    return out
+
+
+async def get_chat_menu_impl(chat_id: str, user_key: str = "") -> dict[str, Any]:
+    """Read a group's 群菜单 as ``[{id, name, url, children}]``.
+
+    The prerequisite for changing one: ``chat_menu_top_level_id`` is needed to delete or
+    reorder a menu, and creating appends rather than replaces — so knowing what is there
+    is how you avoid ending up with two 「帮助」 buttons.
+    """
+    cid = chat_id.strip()
+    if not cid:
+        return _error("chat_id is required (oc_...); resolve a group name with feishu_chat_find first.")
+    res = await _invoke(_build_chat_menu_request(cid, HttpMethod.GET, "", {}), user_key=user_key, prefer="tenant")
+    if not res["ok"]:
+        return _with_hint({**res, "chat_id": cid}, {**_CHAT_ADMIN_ERROR_HINTS, **_MENU_ERROR_HINTS})
+    menus = _menu_summary(res["data"])
+    return {"ok": True, "chat_id": cid, "menus": menus, "count": len(menus)}
+
+
+async def add_chat_menu_impl(chat_id: str, menus: list[dict[str, Any]] | None = None, user_key: str = "") -> dict:
+    """Append first-level menus (each optionally with sub-items) to a group's 群菜单.
+
+    ``menus`` is a flat list — ``[{"name": "帮助", "url": "https://…"}]``, or with
+    ``"children": [{"name": …, "url": …}]`` for a dropdown. A menu with children is a
+    *group heading*: it may not itself have a url or icon (Feishu's rule), and children
+    cannot be added to a first-level menu later, so the whole dropdown goes in one call.
+
+    This **appends**: existing menus survive. Read ``get_chat_menu_impl`` first if the
+    intent was to replace them, then delete the old ones.
+    """
+    cid = chat_id.strip()
+    if not cid:
+        return _error("chat_id is required (oc_...); resolve a group name with feishu_chat_find first.")
+    body, bad = _menu_tree_body(menus or [])
+    if bad is not None:
+        return bad
+    res = await _invoke(_build_chat_menu_request(cid, HttpMethod.POST, "", body), user_key=user_key, prefer="tenant")
+    if not res["ok"]:
+        return _with_hint({**res, "chat_id": cid}, {**_CHAT_ADMIN_ERROR_HINTS, **_MENU_ERROR_HINTS})
+    created = _menu_summary(res["data"])
+    return {"ok": True, "chat_id": cid, "menus": created, "count": len(created)}
+
+
+async def delete_chat_menu_impl(chat_id: str, menu_ids: list[str] | None = None, user_key: str = "") -> dict[str, Any]:
+    """Remove first-level menus (and their sub-items) from a group's 群菜单.
+
+    Takes ``chat_menu_top_level_id`` values from ``get_chat_menu_impl`` — ids, not names,
+    because two menus may share a name and deleting the wrong button is visible to
+    everyone in the group.
+    """
+    cid = chat_id.strip()
+    if not cid:
+        return _error("chat_id is required (oc_...); resolve a group name with feishu_chat_find first.")
+    ids = [str(i).strip() for i in (menu_ids or []) if str(i).strip()]
+    if not ids:
+        return _error("menu_ids is required — 一级菜单 id 列表, 用 feishu_chat_menu_get 取 (不是菜单名)。")
+    body = {"chat_menu_top_level_ids": ids}
+    res = await _invoke(_build_chat_menu_request(cid, HttpMethod.DELETE, "", body), user_key=user_key, prefer="tenant")
+    if not res["ok"]:
+        return _with_hint({**res, "chat_id": cid, "requested": ids}, {**_CHAT_ADMIN_ERROR_HINTS, **_MENU_ERROR_HINTS})
+    remaining = _menu_summary(res["data"])
+    return {"ok": True, "chat_id": cid, "deleted": ids, "menus": remaining, "count": len(remaining)}
+
+
+# ── 群标签页 (chat tabs) — the pinned tabs across the top of a group ─────────────
+#
+# Feishu lists eleven ``tab_type`` values but only two can be *created*: ``doc`` and
+# ``url``. The rest (pin / 会议纪要 / 任务 / 图片视频 …) are built-in tabs the API can only
+# read. Trying to create one fails with an unhelpful parameter error, so unsupported
+# types are refused here by name, with the two that work spelled out.
+_TAB_ERROR_HINTS = {
+    232046: "群标签页数量已达上限 (每个会话最多 20 个自定义标签页)。",
+    232047: "标签页名称过长 (最多 60 字)。",
+    232048: "tab_content 不合法; doc 类型要文档链接, url 类型要 http(s) 链接。",
+    232050: "该会话类型不支持群标签页 (仅群组 group 和单聊 p2p)。",
+    232051: "缺少该文档的权限; 先把文档共享给机器人 (或传本人 user_key)。",
+    232055: "机器人没有管理群标签页的权限 (该群限定群主/管理员才能改)。",
+}
+_TAB_CREATABLE_TYPES = ("doc", "url")
+_TAB_NAME_MAX = 60
+
+
+def _build_chat_tabs_request(chat_id: str, method: HttpMethod, suffix: str, body: dict[str, Any]) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = method
+    req.uri = f"/open-apis/im/v1/chats/:chat_id/chat_tabs{suffix}"
+    req.paths["chat_id"] = chat_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    if body:
+        req.body = body
+    return req
+
+
+def _tab_summary(data: Any) -> list[dict[str, Any]]:
+    """Feishu's ``chat_tabs`` reply as ``[{tab_id, name, type, content}]``."""
+    tabs = data.get("chat_tabs") if isinstance(data, dict) else None
+    out: list[dict[str, Any]] = []
+    for raw in tabs or []:
+        if not isinstance(raw, dict):
+            continue
+        content = raw.get("tab_content") if isinstance(raw.get("tab_content"), dict) else {}
+        out.append(
+            {
+                "tab_id": raw.get("tab_id", ""),
+                "name": raw.get("tab_name", ""),
+                "type": raw.get("tab_type", ""),
+                "content": content.get("url") or content.get("doc") or "",
+            }
+        )
+    return out
+
+
+async def list_chat_tabs_impl(chat_id: str, user_key: str = "") -> dict[str, Any]:
+    """List a group's 群标签页 as ``[{tab_id, name, type, content}]``.
+
+    Includes the built-in tabs (pin / 会议纪要 / 任务 …) that cannot be created or removed
+    through the API, so a ``tab_id`` from here is not necessarily deletable — only the
+    ``doc`` and ``url`` ones this tool created are.
+    """
+    cid = chat_id.strip()
+    if not cid:
+        return _error("chat_id is required (oc_...); resolve a group name with feishu_chat_find first.")
+    res = await _invoke(
+        _build_chat_tabs_request(cid, HttpMethod.GET, "/list_tabs", {}), user_key=user_key, prefer="tenant"
+    )
+    if not res["ok"]:
+        return _with_hint({**res, "chat_id": cid}, {**_CHAT_ADMIN_ERROR_HINTS, **_TAB_ERROR_HINTS})
+    tabs = _tab_summary(res["data"])
+    return {"ok": True, "chat_id": cid, "tabs": tabs, "count": len(tabs)}
+
+
+async def add_chat_tab_impl(
+    chat_id: str,
+    tab_name: str,
+    tab_type: str = "url",
+    content: str = "",
+    user_key: str = "",
+) -> dict[str, Any]:
+    """Pin a document or a web page as a 群标签页 at the top of a group.
+
+    Only ``doc`` (a Feishu doc/sheet/bitable link) and ``url`` (any web page) can be
+    created — the other tab types Feishu documents are built-in and read-only, so asking
+    for one is refused up front rather than failing as a parameter error.
+    """
+    cid = chat_id.strip()
+    if not cid:
+        return _error("chat_id is required (oc_...); resolve a group name with feishu_chat_find first.")
+    name = tab_name.strip()
+    if not name:
+        return _error("tab_name is required — 标签页显示的名字。")
+    if len(name) > _TAB_NAME_MAX:
+        return _error(f"tab_name 最多 {_TAB_NAME_MAX} 字, 收到 {len(name)} 字。")
+    kind = (tab_type or "").strip().lower()
+    if kind not in _TAB_CREATABLE_TYPES:
+        return _error(
+            f"tab_type 只能是 {' 或 '.join(_TAB_CREATABLE_TYPES)}, 收到 {tab_type!r}。"
+            "其它标签页类型 (pin / 会议纪要 / 任务 / 图片视频 等) 是飞书内置的, API 只能读不能建。"
+        )
+    link = content.strip()
+    if not link:
+        return _error("content is required — doc 类型给飞书文档链接, url 类型给网页链接。")
+    if not link.startswith(("http://", "https://")):
+        return _error(f"content 必须以 http:// 或 https:// 开头, 收到 {link!r}。")
+    body = {"chat_tabs": [{"tab_name": name, "tab_type": kind, "tab_content": {kind: link}}]}
+    res = await _invoke(_build_chat_tabs_request(cid, HttpMethod.POST, "", body), user_key=user_key, prefer="tenant")
+    if not res["ok"]:
+        return _with_hint({**res, "chat_id": cid}, {**_CHAT_ADMIN_ERROR_HINTS, **_TAB_ERROR_HINTS})
+    tabs = _tab_summary(res["data"])
+    return {"ok": True, "chat_id": cid, "tabs": tabs, "count": len(tabs)}
+
+
+async def delete_chat_tabs_impl(chat_id: str, tab_ids: list[str] | None = None, user_key: str = "") -> dict[str, Any]:
+    """Remove 群标签页 by ``tab_id`` (from ``list_chat_tabs_impl``).
+
+    Built-in tabs cannot be removed this way; Feishu refuses them, which is reported as
+    the error rather than silently counted as removed.
+    """
+    cid = chat_id.strip()
+    if not cid:
+        return _error("chat_id is required (oc_...); resolve a group name with feishu_chat_find first.")
+    ids = [str(i).strip() for i in (tab_ids or []) if str(i).strip()]
+    if not ids:
+        return _error("tab_ids is required — 标签页 id 列表, 用 feishu_chat_tabs 取 (不是标签页名字)。")
+    body = {"tab_ids": ids}
+    res = await _invoke(
+        _build_chat_tabs_request(cid, HttpMethod.DELETE, "/delete_tabs", body), user_key=user_key, prefer="tenant"
+    )
+    if not res["ok"]:
+        return _with_hint({**res, "chat_id": cid, "requested": ids}, {**_CHAT_ADMIN_ERROR_HINTS, **_TAB_ERROR_HINTS})
+    tabs = _tab_summary(res["data"])
+    return {"ok": True, "chat_id": cid, "deleted": ids, "tabs": tabs, "count": len(tabs)}
+
+
+async def upload_chat_avatar_impl(image_path: str, user_key: str = "") -> dict[str, Any]:
+    """Upload a picture as a **group avatar** and return its ``image_key``.
+
+    Separate from ``upload_image_impl`` for one reason that costs a debugging session to
+    find: ``im/v1/images`` takes an ``image_type``, and a group avatar must be uploaded
+    as ``"avatar"``. A ``message``-type key is accepted by the upload and then rejected
+    by the chat-update call (232021), which reads as "bad avatar" rather than "wrong
+    upload type".
+    """
+    data, name, bad = await _read_upload_bytes(image_path, _IMAGE_UPLOAD_MAX_BYTES, "avatar image")
+    if bad is not None:
+        return bad
+    suffix = pathlib.Path(name).suffix.lower()
+    if suffix and suffix not in _IMAGE_SUFFIXES:
+        return _error(f"{name} is not an image Feishu accepts ({', '.join(sorted(_IMAGE_SUFFIXES))}).")
+    res = await _invoke(
+        lambda: _build_image_upload_request("avatar", name, data),
+        user_key=user_key,
+        prefer="tenant",
+    )
+    if not res["ok"]:
+        return _with_hint(res, _UPLOAD_ERROR_HINTS)
+    rdata = res["data"] if isinstance(res["data"], dict) else {}
+    return {"ok": True, "image_key": rdata.get("image_key", ""), "file_name": name, "size": len(data)}
+
+
+# ── 会话列表 (chat list) — every group the caller is in ──────────────────────────
+#
+# The complement to ``find_chat_impl``: search answers "which group is called 产品评审",
+# this answers "what groups are there at all" — needed when the user says 「我在哪些群」or
+# when a sweep has to cover every group without a name to search by.
+#
+# Two things separate it from a bare feishu_api call. ``sort_type="ByActiveTimeDesc"`` is
+# the one a person means by 「最近活跃的群」, but Feishu warns that paging through it can
+# *skip groups*, since activity order shifts underfoot; so paging is only done under the
+# stable creation-time order, and the active-time ordering is applied locally to a single
+# page. And ``prefer`` decides *whose* list this is: the bot's groups (tenant) or the
+# caller's own (user token) — the same endpoint, two entirely different answers, which is
+# the mistake worth making impossible.
+_CHAT_STATUS_LABELS = {"normal": "正常", "dissolved": "已解散", "dissolved_save": "已解散(保留记录)"}
+_CHAT_LIST_PAGE_MAX = 100
+
+
+def _build_chat_list_request(user_id_type: str, sort_type: str, page_size: int, page_token: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.GET
+    req.uri = "/open-apis/im/v1/chats"
+    req.add_query("user_id_type", user_id_type)
+    req.add_query("sort_type", sort_type)
+    req.add_query("page_size", page_size)
+    if page_token:
+        req.add_query("page_token", page_token)
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    return req
+
+
+async def list_chats_impl(
+    whose: str = "bot",
+    limit: int = 100,
+    user_key: str = "",
+) -> dict[str, Any]:
+    """List the groups the bot (``whose="bot"``) or the caller (``whose="me"``) is in.
+
+    ``whose`` is the argument that matters: the endpoint is the same either way, but the
+    *token* decides whose membership is listed, and "我在哪些群" answered with the bot's
+    groups is a wrong answer that looks right. ``whose="me"`` needs the caller to have
+    authorized (``user_key`` is then required).
+
+    Pages through in creation order up to ``limit`` — deliberately not in activity order,
+    because Feishu documents that paging an activity-ordered list can skip groups as the
+    order shifts. Single-chat (p2p) conversations are never included; Feishu's chat list
+    is groups only.
+    """
+    kind = (whose or "bot").strip().lower()
+    if kind not in ("bot", "me"):
+        return _error("whose must be 'bot' (机器人所在的群) or 'me' (调用者本人所在的群).")
+    if kind == "me" and not user_key.strip():
+        return _error("whose='me' 要知道你是谁 — 传 <feishu_context> 里的 sender_open_id 作 user_key。")
+    cap = max(1, min(int(limit or 100), 1000))
+    prefer = "user" if kind == "me" else "tenant"
+
+    chats: list[dict[str, Any]] = []
+    page_token = ""
+    truncated = False
+    while True:
+        page_size = min(_CHAT_LIST_PAGE_MAX, cap - len(chats))
+        res = await _invoke(
+            _build_chat_list_request("open_id", "ByCreateTimeAsc", page_size, page_token),
+            user_key=user_key,
+            # identity is irrelevant to a read, but prefer="user" would otherwise ask.
+            identity="user" if kind == "me" else "",
+            prefer=prefer,
+        )
+        if not res["ok"]:
+            return _with_hint(res, _CHAT_ADMIN_ERROR_HINTS)
+        data = res["data"] if isinstance(res["data"], dict) else {}
+        for raw in data.get("items") or []:
+            if not isinstance(raw, dict):
+                continue
+            status = raw.get("chat_status", "") or ""
+            chats.append(
+                {
+                    "chat_id": raw.get("chat_id", ""),
+                    "name": raw.get("name", ""),
+                    "description": raw.get("description", ""),
+                    "owner_id": raw.get("owner_id", "") or "",
+                    # No owner_id on a bot-owned group — say which case this is rather
+                    # than leaving a blank the caller reads as "没有群主".
+                    "owner_is_bot": not raw.get("owner_id"),
+                    "external": bool(raw.get("external")),
+                    "chat_status": status,
+                    "status_label": _CHAT_STATUS_LABELS.get(status, status),
+                }
+            )
+        page_token = str(data.get("page_token") or "")
+        if not data.get("has_more") or not page_token or len(chats) >= cap:
+            truncated = bool(data.get("has_more") and page_token and len(chats) >= cap)
+            break
+    return {
+        "ok": True,
+        "whose": kind,
+        "chats": chats,
+        "count": len(chats),
+        "truncated": truncated,
+        "active": len([c for c in chats if c["chat_status"] == "normal"]),
+    }
+
+
+# ── 消息搜索 (message search) — find messages by keyword across chats ────────────
+#
+# Feishu's only keyword search over message *content*, and it is user-token-only: it
+# searches what **that person** can see, so there is no bot-wide variant to fall back on
+# (the tenant token is refused outright). Same auth path as docs search / global user
+# search: the caller must have authorized once.
+#
+# The response is the sharp edge. Feishu returns **message_ids only** — no text, no
+# sender, no chat. A search result the agent can't read is useless, so each hit is
+# hydrated through ``im/v1/messages/:message_id`` and the text extracted with the same
+# ``_message_plain_text`` the history tools use. Hydration is capped and failures are
+# kept as bare ids rather than dropped, so a partial result stays honest about what it
+# could not read (a message in a chat the *bot* is not in, typically).
+_MESSAGE_SEARCH_HINTS = {
+    99991663: "缺少用户授权; 消息搜索只能以本人身份进行 (tenant token 不被接受)。",
+    99991400: "搜索参数不合法; 检查 start_time/end_time 是否为秒级时间戳。",
+}
+_MESSAGE_SEARCH_HYDRATE_MAX = 50
+_MESSAGE_SEARCH_TYPES = ("file", "image", "media")
+_MESSAGE_SEARCH_FROM_TYPES = ("bot", "user")
+_MESSAGE_SEARCH_CHAT_TYPES = ("group_chat", "p2p_chat")
+
+
+def _build_message_search_request(body: dict[str, Any], page_size: int, page_token: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.POST
+    req.uri = "/open-apis/search/v2/message"
+    req.add_query("page_size", page_size)
+    if page_token:
+        req.add_query("page_token", page_token)
+    # User token only: this searches what the authorizing person can see.
+    req.token_types = {AccessTokenType.USER}
+    req.body = body
+    return req
+
+
+def _message_search_body(
+    query: str,
+    chat_ids: list[str],
+    from_ids: list[str],
+    message_type: str,
+    from_type: str,
+    chat_type: str,
+    start_time: str,
+    end_time: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """The search body; returns (body, error). Only named filters are included."""
+    body: dict[str, Any] = {"query": query}
+    if chat_ids:
+        body["chat_ids"] = chat_ids
+    if from_ids:
+        body["from_ids"] = from_ids
+    if message_type.strip():
+        kind = message_type.strip().lower()
+        if kind not in _MESSAGE_SEARCH_TYPES:
+            return {}, _error(
+                f"message_type 只能是 {', '.join(_MESSAGE_SEARCH_TYPES)} (按附件类型筛), 收到 {message_type!r}。"
+                "搜纯文本消息不要传这个参数。"
+            )
+        body["message_type"] = kind
+    if from_type.strip():
+        sender = from_type.strip().lower()
+        if sender not in _MESSAGE_SEARCH_FROM_TYPES:
+            return {}, _error(f"from_type 只能是 {' 或 '.join(_MESSAGE_SEARCH_FROM_TYPES)}, 收到 {from_type!r}。")
+        body["from_type"] = sender
+    if chat_type.strip():
+        where = chat_type.strip().lower()
+        if where not in _MESSAGE_SEARCH_CHAT_TYPES:
+            return {}, _error(f"chat_type 只能是 group_chat (群聊) 或 p2p_chat (单聊), 收到 {chat_type!r}。")
+        body["chat_type"] = where
+    # Feishu wants second-level timestamps as strings here (not the ms other endpoints
+    # take), and a wrong unit silently matches nothing instead of erroring.
+    for field, raw in (("start_time", start_time), ("end_time", end_time)):
+        if not raw.strip():
+            continue
+        digits = raw.strip()
+        if not digits.isdigit():
+            return {}, _error(f"{field} 必须是秒级 Unix 时间戳 (如 '1609296809'), 收到 {raw!r}。")
+        if len(digits) >= 13:
+            return {}, _error(
+                f"{field}={raw!r} 看起来是毫秒时间戳; 这个接口要**秒级** (10 位), 传毫秒会搜不到任何东西。"
+            )
+        body[field] = digits
+    return body, None
+
+
+async def _hydrate_message(message_id: str, user_key: str) -> dict[str, Any]:
+    """One search hit turned into ``{message_id, chat_id, sender, text, create_time}``.
+
+    Failure is reported per-hit (``readable: False``) instead of aborting the search: a
+    hit in a chat the bot cannot read is a normal outcome, and the id alone still tells
+    the caller the message exists.
+    """
+    res = await _invoke(_build_get_message_request(message_id), user_key=user_key, prefer="tenant")
+    if not res["ok"]:
+        return {"message_id": message_id, "readable": False, "reason": res.get("message", "")}
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    items = data.get("items")
+    item = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else data
+    sender = item.get("sender") if isinstance(item.get("sender"), dict) else {}
+    body = item.get("body") if isinstance(item.get("body"), dict) else {}
+    return {
+        "message_id": message_id,
+        "readable": True,
+        "chat_id": item.get("chat_id", "") or "",
+        "sender_id": sender.get("id", "") if isinstance(sender, dict) else "",
+        "sender_type": sender.get("sender_type", "") if isinstance(sender, dict) else "",
+        "msg_type": body.get("message_type") or item.get("msg_type", "") or "",
+        "create_time": item.get("create_time", "") or "",
+        "text": _message_plain_text(item),
+    }
+
+
+async def search_messages_impl(
+    query: str,
+    chat_ids: list[str] | None = None,
+    from_ids: list[str] | None = None,
+    message_type: str = "",
+    from_type: str = "",
+    chat_type: str = "",
+    start_time: str = "",
+    end_time: str = "",
+    limit: int = 20,
+    user_key: str = "",
+) -> dict[str, Any]:
+    """Search message content by keyword across the caller's chats (全局消息搜索).
+
+    Searches as **the caller**, so it finds what that person can see and needs their
+    authorization — Feishu accepts no tenant token here, which is why there is no
+    bot-wide variant. ``user_key`` is therefore required, not optional.
+
+    Feishu returns message ids only; each hit is read back so the result carries the
+    actual ``text``, ``chat_id`` and sender. Hits the bot cannot read come back with
+    ``readable: false`` and their id, rather than being dropped — usually a chat the bot
+    isn't in, which the caller may want to know about.
+
+    Filters narrow rather than widen: ``chat_ids`` to particular groups, ``from_ids`` to
+    particular senders, ``start_time``/``end_time`` as **second**-level timestamps.
+    """
+    keyword = (query or "").strip()
+    if not keyword:
+        return _error("query is required — 要搜的关键词。")
+    key = user_key.strip()
+    if not key:
+        return _error(
+            "user_key is required — 消息搜索只能以本人身份进行 (飞书不接受机器人 token), "
+            "传 <feishu_context> 里的 sender_open_id。"
+        )
+    body, bad = _message_search_body(
+        keyword,
+        [c.strip() for c in (chat_ids or []) if c and c.strip()],
+        [f.strip() for f in (from_ids or []) if f and f.strip()],
+        message_type,
+        from_type,
+        chat_type,
+        start_time,
+        end_time,
+    )
+    if bad is not None:
+        return bad
+    cap = max(1, min(int(limit or 20), _MESSAGE_SEARCH_HYDRATE_MAX))
+
+    ids: list[str] = []
+    page_token = ""
+    has_more = False
+    while True:
+        res = await _invoke(
+            _build_message_search_request(body, min(cap - len(ids), _MESSAGE_SEARCH_HYDRATE_MAX), page_token),
+            user_key=key,
+            prefer="user",
+            identity="user",
+            capabilities=[],
+        )
+        if not res["ok"]:
+            return _with_hint(res, _MESSAGE_SEARCH_HINTS)
+        data = res["data"] if isinstance(res["data"], dict) else {}
+        for raw in data.get("items") or []:
+            # Feishu documents items as a list of message_id strings; tolerate an object
+            # form too rather than returning nothing if that ever changes.
+            if isinstance(raw, str) and raw:
+                ids.append(raw)
+            elif isinstance(raw, dict) and raw.get("message_id"):
+                ids.append(str(raw["message_id"]))
+        page_token = str(data.get("page_token") or "")
+        has_more = bool(data.get("has_more"))
+        if not has_more or not page_token or len(ids) >= cap:
+            break
+
+    ids = ids[:cap]
+    messages = [await _hydrate_message(mid, key) for mid in ids]
+    return {
+        "ok": True,
+        "query": keyword,
+        "filters": {k: v for k, v in body.items() if k != "query"},
+        "messages": messages,
+        "count": len(messages),
+        "unreadable": len([m for m in messages if not m.get("readable")]),
+        "has_more": has_more and len(ids) >= cap,
+    }
+
+
 # ── Approval (审批) — list pending tasks, read instance, approve/reject ────────
 #
 # Lets the agent read an approval application's form content and decide whether

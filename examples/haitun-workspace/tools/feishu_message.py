@@ -622,6 +622,64 @@ async def feishu_message_list(
     )
 
 
+async def feishu_message_search(
+    query: str,
+    chat_ids: list[str] | None = None,
+    from_ids: list[str] | None = None,
+    message_type: str = "",
+    from_type: str = "",
+    chat_type: str = "",
+    start_time: str = "",
+    end_time: str = "",
+    limit: int = 20,
+    user_key: str = "",
+) -> str:
+    """Search Feishu/Lark **message content** by keyword across chats (全局消息搜索).
+
+    The one way to answer 「上周谁说过发布时间」/「搜一下关于报销的消息」 without knowing which
+    group it was in: ``feishu_message_list`` can only walk one chat you already have the
+    id for, this searches by words.
+
+    Searches **as the asking person**, so it finds what they can see — Feishu accepts no
+    bot token here, which is why ``user_key`` is required rather than optional, and why
+    there is no bot-wide variant to fall back on. The person must have authorized once
+    (``feishu_auth_card`` / ``feishu_auth_start``).
+
+    Feishu returns message ids only, so each hit is read back: results carry the actual
+    ``text``, ``chat_id``, sender and time. Hits the bot cannot read come back with
+    ``readable: false`` and just their id — normally a chat the bot isn't in — rather than
+    being silently dropped, so a partial answer is visible as partial.
+
+    Args:
+        query: The keyword(s) to search for.
+        chat_ids: Restrict to these chats (``oc_...``); empty searches all the person's chats.
+        from_ids: Restrict to messages sent by these people (ids, not names).
+        message_type: Restrict to messages **carrying an attachment** — ``file`` / ``image``
+            / ``media``. Leave empty to search ordinary text messages.
+        from_type: ``user`` or ``bot`` — who sent it.
+        chat_type: ``group_chat`` (群聊) or ``p2p_chat`` (单聊).
+        start_time: Earliest send time as a **second**-level Unix timestamp string (e.g.
+            ``"1609296809"``). Milliseconds are refused — they would match nothing.
+        end_time: Latest send time, same format.
+        limit: Max hits to return and read back (default 20, cap 50).
+        user_key: The caller's open_id from ``<feishu_context>``. **Required.**
+    """
+    return _f.dumps_result(
+        await _f.search_messages_impl(
+            query,
+            chat_ids,
+            from_ids,
+            message_type,
+            from_type,
+            chat_type,
+            start_time,
+            end_time,
+            limit,
+            user_key,
+        )
+    )
+
+
 async def feishu_thread_read(thread_id: str, page_size: int = 50) -> str:
     """Read a topic thread as clean, per-message records — sender + plain text.
 

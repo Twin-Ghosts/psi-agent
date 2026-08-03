@@ -26,6 +26,11 @@ category: integration
 | 移除表情回应 | `feishu_message_unreact` | 要先按 emoji 解析出 reaction_id，多个命中必须拒绝 |
 | OAuth 授权 | `feishu_auth_*` | 管着 UAT 存储与回调接收 |
 | 发/编辑消息、卡片 | `feishu_message_send` / `_edit` / `_edit_card` | `<at>` 升级 post、卡片 update_multi 等组包细节 |
+| 读/写群公告 | `feishu_chat_announcement` / `_set` / `_clear` | 公告是 **docx 文档**（不是 im/v1），根 block_id 就是 chat_id，每次写都要按 `revision_id` 乐观锁重读 |
+| 改群设置 / 禁言 | `feishu_chat_update` / `feishu_chat_mute` | 加人权限与群名片权限**必须成对**；禁言根本不在群设置那个 body 里（写了会被静默忽略） |
+| 解散群 / 转让群主 | `feishu_chat_dismiss` / `feishu_chat_transfer_owner` | 解散**不可逆且不保留群记录**，工具要求显式 `confirm="解散群"` |
+| 群菜单 / 群标签页 | `feishu_chat_menu_*` / `feishu_chat_tab*` | 菜单是三层嵌套包装对象、带子菜单的一级菜单不能有链接；标签页 11 种类型只有 2 种能建 |
+| 搜索消息 | `feishu_message_search` | 只吃 user token，且**只返回 message_id**，必须回查才有正文 |
 
 判断方法：先用 `tool_search` 找一下有没有 `feishu_` 开头的对应工具；有就用它。
 
@@ -132,6 +137,14 @@ feishu_api(
 
 wiki 节点的 `obj_token` 才是文档 id，读内容要用它而不是 `node_token`。
 建群拉人用 `feishu_chat_create`；建 wiki 文档用 `feishu_wiki_create_doc*`。
+
+**群的运营几乎都有专用工具了，别手搓**：群列表 `feishu_chat_list`、群公告
+`feishu_chat_announcement`/`_set`/`_clear`、群设置 `feishu_chat_update`、禁言
+`feishu_chat_mute`、转让群主 `feishu_chat_transfer_owner`、解散群
+`feishu_chat_dismiss`、群菜单 `feishu_chat_menu_*`、群标签页 `feishu_chat_tab*`。
+这些端点各自都有一个「照着文档写也会错」的地方（公告是 docx 文档且按 revision 乐观锁、
+禁言不在群设置那个 body 里、加人权限和群名片权限必须成对、解散不可逆），
+所以护栏在工具里，不在这张表里。
 
 ### 培训
 
