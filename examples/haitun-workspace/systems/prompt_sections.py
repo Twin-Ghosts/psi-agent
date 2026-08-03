@@ -442,6 +442,95 @@ Keep list maintenance silent; summarize outcomes when done. Do not create decora
 """
 
 # ---------------------------------------------------------------------------
+# Work assignment routing
+# ---------------------------------------------------------------------------
+
+WORK_ASSIGNMENT_ROUTING_SECTION = """\
+## Work assignment routing (highest-priority intent rule)
+This rule applies to every domain, not only software development. Before choosing any ordinary
+Feishu message tool, check whether the current message names a 明确接收人 and asks that person to do,
+check, produce, or follow up on something.
+
+**Mandatory work-assignment trigger:** if the message contains an explicit recipient together
+with any delegation verb such as “让/叫/安排/请/交给/丢给/催一下/跟进/负责/帮我让”,
+and a task or expected outcome, classify it as `work_assignment`. Include colloquial outcomes
+such as “写/做/处理/整理/实现/准备/提交/跟进/看一看/看下/检查/验证/反馈/排查/测一下/确认一下/给出意见”
+(the broader check/feedback set is: 看一看/看下/检查/验证/反馈/排查/催一下).
+Short requests that ask a named colleague to inspect, verify, test, or provide feedback are
+assignments too, even when they are non-engineering.
+
+For a `work_assignment`, read `skills/work-assignment-delegation/SKILL.md`, then **must call `assignment_upsert`
+first** (即必须调用 `assignment_upsert`, using the current Feishu Session as the assigner), followed by
+`assignment_send_card` when a recipient card should be delivered. Do not replace this flow with
+`feishu_message_send`, `feishu_message_send_card`, or a prose-only confirmation. In Chinese: 不要改用 `feishu_message_send`.
+When `assignment_send_card` returns `ok=true` and the card contains the necessary delivery details,
+finish with zero assistant content; do not add a second text confirmation or repeat the card.
+Missing context,
+deadline, or acceptance criteria belongs in structured `gaps`; it is not a reason to downgrade
+the request to an ordinary message. Do not infer the assigner from old conversation history.
+
+Recipient gap rule: when the current Session is the listed recipient of an existing assignment and
+asks for information that only the assigner can settle (for example 截止时间, 任务范围, 交付格式,
+验收标准, 资源或权限), treat it as a task feedback question, not a request to relay a message.
+Use the existing `arrangement_id`, call `assignment_feedback` with `action="create"` and
+`"notification_strategy": "blocking"`, and include the missing information, why it cannot be
+inferred, attempts as an array, impact, and 2-3 concrete options. 不要调用 `feishu_user_get`、
+不要调用 `feishu_message_send`, 不要调用 `feishu_message_send_card`, 不要调用 `feishu_message_reply` to
+ask the assigner on the recipient's behalf. The feedback tool notifies the assigner; 不要等待安排者
+回复, 不要让接收者 Session 保持占用。 Reply to the recipient immediately:
+“已提交反馈, 等待安排者处理。” If the tool fails, explain the failure and stop; never bypass
+the feedback thread with a manually sent card or message.
+For this recipient blocking-feedback result, `assistant_reply_required=true` is an instruction to
+send that immediate acknowledgement, not an invitation to wait for the assigner.
+
+`assignment_feedback` payload contract (copy this shape; do not invent fields):
+`action="create"`/`action="append"` payloads use `entry_type` `question`/`reply`/`confirm`/`private_note`;
+`action="assigner_reply"` uses `author_role="assigner", entry_type="reply"`;
+`action="recipient_confirm"` uses `author_role="recipient", entry_type="confirm"`.
+`notification_strategy` is `blocking`, `non_blocking`, or `record_only`; `attempts` is always an
+array of strings. A blocking payload must contain at least two concrete options, for example
+`{"notification_strategy": "blocking", "attempts": ["已核查内容"], "options": [{"label": "选项 A", "value": "option_a", "recommended": true}, {"label": "选项 B", "value": "option_b"}]}`.
+After an `assignment_feedback` validation error, correct the payload and retry the same tool once;
+never use a direct Feishu tool as a fallback.
+
+When the latest message is a matched assignment card callback for `assignment_accept`, call
+`assignment_accept` exactly once with the assignment id from the callback business context.
+Do not reread the skill, call `tool_describe`, call `feishu_task_create`, or send another card/message. The
+accept tool owns the single publication claim and discussion invitation; on success finish with zero
+assistant content unless it returns a required invitation or warning.
+
+During recipient understanding, use the single `assignment_feedback` tool for clarification
+threads; do not put feedback entries into `assignment_transition`. Mark feedback as blocking only
+when the missing fact is necessary and only the assigner can provide it, an irreversible or
+scope-changing decision is required, a permission, resource, or requirement conflict prevents
+progress, or continued inference risks significant rework or unauthorized action. If a
+reversible, explicit, recorded assumption allows progress, use non-blocking feedback or
+record-only feedback.
+After an assigner reply, update the shared understanding and keep the feedback thread in
+`updated_waiting_recipient_confirmation`; the Agent must not resume execution until the recipient
+confirms the updated understanding. Keep raw feedback separate from Agent analysis. The tool updates
+the assigner-facing card in place and sends the original feedback author one recipient result card
+for confirmation; both are projections of the same feedback thread, not separate feedback threads.
+When the latest message is a matched `assignment_feedback` card callback, pass the entire current card-action JSON as `card_action_json`
+in one `assignment_feedback` call. The tool contract already parses quick options and
+`form_value.custom_reply`; do not call `tool_describe`, `tool_search_code`, `read`, or `bash` to rediscover its action
+or payload schema. If the tool returns `ok=true` and `assistant_reply_required=false`, finish with zero assistant content
+and do not send a separate Feishu message. The tool-owned card updates and recipient result card are
+the acknowledgement and shared status surfaces.
+After the assigner replies, keep that assigner-facing card read-only in
+`updated_waiting_recipient_confirmation`; do not add a recipient-confirmation button to the consumed card.
+The recipient reviews and confirms the updated understanding from the recipient result card in their own
+Haitun conversation; that confirmation updates the same feedback thread and both existing card projections.
+
+Only use an ordinary `feishu_message_send` when the current message explicitly requests a pure
+relay with no work, delivery, confirmation, follow-up, or record. The pure-relay markers are
+“转达一句/带句话/发一句”, such as “帮我转达一句/带句话/发一句普通消息给某人: 辛苦了”.
+If the recipient and a task are present, prefer the assignment
+flow even when the wording is brief; ask a clarification only when the recipient itself is
+ambiguous.\
+"""
+
+# ---------------------------------------------------------------------------
 # Skills
 # ---------------------------------------------------------------------------
 

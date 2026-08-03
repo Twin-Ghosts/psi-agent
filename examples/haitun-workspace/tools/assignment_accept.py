@@ -4,6 +4,9 @@ import json
 import re
 from typing import Any
 
+import _feishu_impl
+from _assignment_delivery import advance_delivery as _advance_delivery
+from _assignment_delivery import sync_progress_card as _sync_progress_card
 from _assignment_tool_common import CLIENT, dumps_result, invalid_argument
 from feishu_task import _feishu_task_create_once
 
@@ -43,6 +46,7 @@ async def assignment_accept(assignment_id: str) -> str:
     assignment = _result_object(fetched)
     if assignment is None:
         return _error("assignment_invalid", "Fusion Memory returned an invalid assignment")
+    title = _text(assignment.get("title")) or "工作安排"
 
     recipients = assignment.get("recipients")
     if not _participants_include_open_id(recipients, operator_open_id):
@@ -96,6 +100,17 @@ async def assignment_accept(assignment_id: str) -> str:
             )
 
     recipient_open_ids = _recipient_task_open_ids(recipients, operator_open_id)
+    accepted_delivery = await _advance_delivery(
+        CLIENT,
+        assignment_id=normalized_assignment_id,
+        event="accepted",
+        recipient_open_id=operator_open_id,
+    )
+    progress_card_update = await _project_progress_card(
+        normalized_assignment_id,
+        title,
+        accepted_delivery,
+    )
 
     claim = await CLIENT.call_tool(
         "assignment_publication",
@@ -142,17 +157,29 @@ async def assignment_accept(assignment_id: str) -> str:
                     "Fusion Memory returned an invalid published record",
                 )
             task_url = _text(publication.get("url")) or ""
-            return dumps_result(
-                {
-                    "ok": True,
-                    "assignment_id": normalized_assignment_id,
-                    "accepted": True,
-                    "published": True,
-                    "already_published": True,
-                    "task_guid": task_guid,
-                    "url": task_url,
-                }
+            published_delivery = await _advance_delivery(
+                CLIENT,
+                assignment_id=normalized_assignment_id,
+                event="task_published",
             )
+            progress_card_update = await _project_progress_card(
+                normalized_assignment_id,
+                title,
+                published_delivery,
+            )
+            result = {
+                "ok": True,
+                "assignment_id": normalized_assignment_id,
+                "accepted": True,
+                "published": True,
+                "already_published": True,
+                "task_guid": task_guid,
+                "url": task_url,
+                "discussion_invitation": _discussion_invitation(enabled=False, sent=False),
+            }
+            if progress_card_update is not None:
+                result["progress_card_update"] = progress_card_update
+            return dumps_result(result)
         return _accepted_publication_error(
             normalized_assignment_id,
             "assignment_publication_reconciliation_required",
@@ -168,7 +195,7 @@ async def assignment_accept(assignment_id: str) -> str:
 
     task_result = _parse_tool_result(
         await _feishu_task_create_once(
-            summary=_text(assignment.get("title")) or "工作安排",
+            summary=title,
             description=_task_description(assignment, normalized_assignment_id),
             due=_task_due(assignment),
             assignees=",".join(recipient_open_ids),
@@ -250,16 +277,55 @@ async def assignment_accept(assignment_id: str) -> str:
                 },
             }
         )
-    return dumps_result(
-        {
-            "ok": True,
-            "assignment_id": normalized_assignment_id,
-            "accepted": True,
-            "published": True,
-            "task_guid": task_guid,
-            "url": task_url,
-        }
+    invitation = await _send_discussion_invitation(operator_open_id)
+    published_delivery = await _advance_delivery(
+        CLIENT,
+        assignment_id=normalized_assignment_id,
+        event="task_published",
     )
+    progress_card_update = await _project_progress_card(
+        normalized_assignment_id,
+        title,
+        published_delivery,
+    )
+    result = {
+        "ok": True,
+        "assignment_id": normalized_assignment_id,
+        "accepted": True,
+        "published": True,
+        "task_guid": task_guid,
+        "url": task_url,
+        "discussion_invitation": invitation,
+    }
+    if progress_card_update is not None:
+        result["progress_card_update"] = progress_card_update
+    return dumps_result(result)
+
+
+async def _project_progress_card(
+    assignment_id: str,
+    title: str,
+    advanced: dict[str, Any],
+) -> dict[str, Any] | None:
+    if _result_object(advanced) is None:
+        return None
+    updated = await _sync_progress_card(
+        CLIENT,
+        assignment_id=assignment_id,
+        title=title,
+    )
+    if updated.get("ok") is True:
+        return None
+    return {
+        "updated": False,
+        "deferred": True,
+        "error": updated.get("error")
+        or {
+            "code": "progress_card_update_failed",
+            "message": "Progress card update was deferred",
+            "retryable": True,
+        },
+    }
 
 
 async def _finalize_publication(
@@ -330,6 +396,27 @@ def _accepted_publication_error(
             "error": {"code": code, "message": message, "retryable": retryable},
         }
     )
+
+
+def _discussion_invitation(*, enabled: bool = True, sent: bool = False) -> dict[str, Any]:
+    return {
+        "enabled": enabled,
+        "message": "任务已发布。要不要和我一起讨论一版可评审的实施方案",
+        "sent": sent,
+    }
+
+
+async def _send_discussion_invitation(operator_open_id: str) -> dict[str, Any]:
+    invitation = _discussion_invitation()
+    try:
+        await _feishu_impl.send_message_impl(
+            operator_open_id,
+            _text(invitation.get("message")) or "",
+            "open_id",
+        )
+    except Exception:
+        return invitation
+    return _discussion_invitation(enabled=False, sent=True)
 
 
 def _participant_open_ids(value: Any) -> list[str]:

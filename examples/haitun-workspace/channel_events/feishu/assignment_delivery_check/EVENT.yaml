@@ -1,0 +1,5 @@
+name: haitun.assignment.delivery_check
+source: haitun
+kind: synthetic
+description: >
+  定期唤醒每个已注册飞书用户的任务投递刷新工具。事件本身不读取任务内容或调用飞书 API。

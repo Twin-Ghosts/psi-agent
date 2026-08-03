@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -94,3 +95,113 @@ def test_format_trigger_roundtrip_yaml() -> None:
     assert header["raw_event"] == "im.chat.member.user.added_v1"
     assert yaml.safe_load(json.dumps(header["filter"])) == {"chat_id": "oc_1"}
     assert "note" in body
+
+
+def test_assignment_delivery_trigger_uses_silent_tool_fire() -> None:
+    trigger_path = WORKSPACE_ROOT / "triggers" / "assignment-delivery-refresh" / "TRIGGER.md"
+    raw = trigger_path.read_text(encoding="utf-8")
+    header, _body = tm._parse_header(raw)
+
+    assert header["event"] == "haitun.assignment.delivery_check"
+    assert header["source"] == "haitun"
+    assert header["fire"] == "tool"
+    assert header["tool"] == "assignment_delivery_refresh"
+    assert header["visibility"] == "silent"
+
+
+@pytest.mark.anyio
+async def test_assignment_delivery_event_routes_each_registered_feishu_user(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    token_map = tmp_path / "tokens.json"
+    token_map.write_text(
+        json.dumps(
+            {
+                "ou_b": {"token": "token-b"},
+                "ou_a": {"token": "token-a"},
+                "invalid": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FUSION_MEMORY_TOKEN_MAP_FILE", str(token_map))
+    producer_path = WORKSPACE_ROOT / "channel_events" / "feishu" / "assignment_delivery_check" / "produce.py"
+    spec = importlib.util.spec_from_file_location("assignment_delivery_check_producer", producer_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert await module._registered_open_ids() == ["ou_a", "ou_b"]
+
+
+@pytest.mark.anyio
+async def test_assignment_delivery_event_isolates_one_user_emit_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    token_map = tmp_path / "tokens.json"
+    token_map.write_text(
+        json.dumps(
+            {
+                "ou_a": {"token": "token-a"},
+                "ou_b": {"token": "token-b"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FUSION_MEMORY_TOKEN_MAP_FILE", str(token_map))
+    producer_path = WORKSPACE_ROOT / "channel_events" / "feishu" / "assignment_delivery_check" / "produce.py"
+    spec = importlib.util.spec_from_file_location("assignment_delivery_check_isolation", producer_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    emitted: list[str] = []
+
+    class StopProducer(BaseException):
+        pass
+
+    class FakeContext:
+        async def emit(self, envelope: dict[str, object]) -> None:
+            open_id = envelope["routing"]["open_id"]
+            assert isinstance(open_id, str)
+            emitted.append(open_id)
+            if open_id == "ou_a":
+                raise RuntimeError("one Session is unavailable")
+
+    async def stop_after_one_iteration(_seconds: float) -> None:
+        raise StopProducer
+
+    monkeypatch.setattr(module.anyio, "sleep", stop_after_one_iteration)
+
+    with pytest.raises(StopProducer):
+        await module.produce(FakeContext())
+
+    assert emitted == ["ou_a", "ou_b"]
+
+
+@pytest.mark.anyio
+async def test_assignment_delivery_event_survives_token_map_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    producer_path = WORKSPACE_ROOT / "channel_events" / "feishu" / "assignment_delivery_check" / "produce.py"
+    spec = importlib.util.spec_from_file_location("assignment_delivery_check_read_failure", producer_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class StopProducer(BaseException):
+        pass
+
+    async def broken_registered_open_ids() -> list[str]:
+        raise UnicodeError("token map changed during read")
+
+    async def stop_after_recovery(_seconds: float) -> None:
+        raise StopProducer
+
+    monkeypatch.setattr(module, "_registered_open_ids", broken_registered_open_ids)
+    monkeypatch.setattr(module.anyio, "sleep", stop_after_recovery)
+
+    with pytest.raises(StopProducer):
+        await module.produce(object())

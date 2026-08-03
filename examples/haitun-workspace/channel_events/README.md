@@ -36,6 +36,7 @@
 |--------------|------|----------|------|
 | `haitun.task.completed` | `task_completed` | 通用 / 2 | 接口；produce 空转 |
 | `haitun.task.overdue` | `task_overdue` | 2 | 同上 |
+| `haitun.assignment.delivery_check` | `assignment_delivery_check` | 通用任务安排 | 每分钟按已注册飞书用户路由，刷新七天内投递进度 |
 | `haitun.goal.progress` | `goal_progress` | 通用 | 同上 |
 | `haitun.handoff.needed` | `handoff_needed` | 7–8 | 同上 |
 | `haitun.handoff.activated` | `handoff_activated` | 8 | 同上 |

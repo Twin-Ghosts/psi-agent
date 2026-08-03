@@ -66,3 +66,87 @@ def test_tools_md_delivery_item_is_channel_neutral() -> None:
     assert "上传发送到用户当前所在的聊天窗口" in text
     assert "上传发送到用户当前的飞书聊天窗口" not in text
     assert "绝不要拿 `feishu_*` 工具当交付手段" in text
+
+
+def test_work_assignment_routing_covers_colloquial_delivery_requests() -> None:
+    guidance = sections.WORK_ASSIGNMENT_ROUTING_SECTION
+
+    assert "work-assignment-delegation" in guidance
+    assert "让/叫/安排/请" in guidance
+    assert "写/做/处理/整理/实现/准备/提交/跟进" in guidance
+    assert "Short requests that ask a named colleague" in guidance
+    assert "帮我转达" in guidance
+    assert "看一看/看下/检查/验证/反馈/排查/催一下" in guidance
+    assert "明确接收人" in guidance
+    assert "必须调用 `assignment_upsert`" in guidance
+    assert "不要改用 `feishu_message_send`" in guidance
+    assert "转达一句/带句话/发一句" in guidance
+
+
+def test_assignment_accept_callback_does_not_reread_skills_or_emit_duplicate_text() -> None:
+    guidance = sections.WORK_ASSIGNMENT_ROUTING_SECTION
+
+    assert "assignment_accept" in guidance
+    assert "do not reread the skill" in guidance.lower()
+    assert "assignment_send_card" in guidance
+    assert "zero assistant content" in guidance
+
+
+def test_work_assignment_feedback_requires_recipient_confirmation_after_reply() -> None:
+    guidance = sections.WORK_ASSIGNMENT_ROUTING_SECTION
+
+    assert "assignment_feedback" in guidance
+    assert "updated_waiting_recipient_confirmation" in guidance
+    assert "must not resume execution" in guidance
+    assert "recipient result card" in guidance
+    assert "same feedback thread" in guidance
+    assert "assignment_transition" in guidance
+
+
+def test_work_assignment_feedback_card_callback_uses_direct_tool_contract() -> None:
+    guidance = sections.WORK_ASSIGNMENT_ROUTING_SECTION
+
+    assert "pass the entire current card-action JSON as `card_action_json`" in guidance
+    assert "do not call `tool_describe`, `tool_search_code`, `read`, or `bash`" in guidance
+    assert "finish with zero assistant content" in guidance
+    assert "do not send a separate Feishu message" in guidance
+
+
+def test_work_assignment_feedback_limits_blocking_to_irreducible_gaps() -> None:
+    guidance = sections.WORK_ASSIGNMENT_ROUTING_SECTION
+
+    assert "only the assigner can provide" in guidance
+    assert "irreversible" in guidance
+    assert "permission, resource, or requirement conflict" in guidance
+    assert "significant rework or unauthorized action" in guidance
+    assert "reversible, explicit, recorded assumption" in guidance
+
+
+def test_recipient_task_questions_use_feedback_instead_of_relay() -> None:
+    guidance = sections.WORK_ASSIGNMENT_ROUTING_SECTION
+
+    assert "截止时间" in guidance
+    assert "任务范围" in guidance
+    assert "验收标准" in guidance
+    assert "assignment_feedback" in guidance
+    assert "不要调用 `feishu_user_get`" in guidance
+    assert "不要调用 `feishu_message_send`" in guidance
+    assert "不要等待安排者" in guidance
+    assert "已提交反馈" in guidance
+    assert '"notification_strategy": "blocking"' in guidance
+
+
+def test_assignment_feedback_tool_contract_documents_actions_and_payload() -> None:
+    source = (
+        sections.WORK_ASSIGNMENT_ROUTING_SECTION
+        + "\n"
+        + (Path(__file__).resolve().parents[1] / "tools" / "assignment_feedback.py").read_text(encoding="utf-8")
+    )
+
+    assert 'action="create"' in source
+    assert 'action="append"' in source
+    assert 'action="assigner_reply"' in source
+    assert 'action="recipient_confirm"' in source
+    assert '"notification_strategy": "blocking"' in source
+    assert '"attempts": ["已核查内容"]' in source
+    assert '"options": [{"label": "选项 A", "value": "option_a", "recommended": true}]' in source
