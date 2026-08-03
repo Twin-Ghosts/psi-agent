@@ -10748,7 +10748,7 @@ async def find_users_by_contact_impl(
         return _with_hint(res, _CONTACT_ADMIN_ERROR_HINTS)
 
     data = res["data"] if isinstance(res["data"], dict) else {}
-    raw_list = data.get("user_list") if isinstance(data.get("user_list"), list) else []
+    raw_list = data.get("user_list", []) if isinstance(data.get("user_list"), list) else []
     found: list[dict[str, Any]] = []
     seen_ids: list[str] = []
     matched_values: set[str] = set()
@@ -10765,7 +10765,7 @@ async def find_users_by_contact_impl(
         # 把它记成已命中会让 not_found 永远是空的。
         if value:
             matched_values.add(value)
-        status = it.get("status") if isinstance(it.get("status"), dict) else {}
+        status = it.get("status", {}) if isinstance(it.get("status"), dict) else {}
         found.append(
             {
                 "user_id": uid,
@@ -10828,10 +10828,10 @@ _DEPT_PAGE_SIZE = 50
 
 def _department_record(it: dict[str, Any], department_id_type: str) -> dict[str, Any]:
     """把飞书的部门对象收成稳定形状 (含主/副负责人拆分)。"""
-    leaders = it.get("leaders") if isinstance(it.get("leaders"), list) else []
+    leaders = it.get("leaders", []) if isinstance(it.get("leaders"), list) else []
     primary = [lead.get("leaderID", "") for lead in leaders if isinstance(lead, dict) and lead.get("leaderType") == 1]
     deputy = [lead.get("leaderID", "") for lead in leaders if isinstance(lead, dict) and lead.get("leaderType") == 2]
-    status = it.get("status") if isinstance(it.get("status"), dict) else {}
+    status = it.get("status", {}) if isinstance(it.get("status"), dict) else {}
     did = it.get("department_id", "") if department_id_type == "department_id" else it.get("open_department_id", "")
     return {
         "department_id": did,
@@ -11100,7 +11100,7 @@ def _build_user_delete_request(user_id: str, body: dict[str, Any], user_id_type:
 def _user_summary(raw: Any) -> dict[str, Any]:
     """建/改用户后飞书回的 user 对象, 收成和 feishu_user_get 一致的形状。"""
     it = raw if isinstance(raw, dict) else {}
-    status = it.get("status") if isinstance(it.get("status"), dict) else {}
+    status = it.get("status", {}) if isinstance(it.get("status"), dict) else {}
     return {
         "open_id": it.get("open_id", ""),
         "user_id": it.get("user_id", ""),
@@ -11667,7 +11667,7 @@ async def user_group_manage_impl(
         if not res["ok"]:
             return _with_hint(res, _CONTACT_ADMIN_ERROR_HINTS)
         data = res["data"] if isinstance(res["data"], dict) else {}
-        raw_list = data.get("grouplist") if isinstance(data.get("grouplist"), list) else []
+        raw_list = data.get("grouplist", []) if isinstance(data.get("grouplist"), list) else []
         groups = [_group_record(g) for g in raw_list]
         return {
             "ok": True,
@@ -11755,7 +11755,7 @@ async def user_group_members_impl(
         if not res["ok"]:
             return _with_hint({**res, "group_id": gid}, _CONTACT_ADMIN_ERROR_HINTS)
         data = res["data"] if isinstance(res["data"], dict) else {}
-        raw_list = data.get("memberlist") if isinstance(data.get("memberlist"), list) else []
+        raw_list = data.get("memberlist", []) if isinstance(data.get("memberlist"), list) else []
         members = [
             {"member_id": m.get("member_id", ""), "member_type": m.get("member_type", "")}
             for m in raw_list
