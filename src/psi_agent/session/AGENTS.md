@@ -193,6 +193,22 @@ Session 层使用两个对称的协议适配器，将 `SessionAgent.run()` 包�
 - 用 `inspect.getdoc()` 提取描述（支持 Google-style 的 `Args:` 格式）
 - 跨文件同名 tool 以后加载者覆盖（`tools` property 展平时 `dict.update` 自然行为）
 
+### 私有 helper 与 `sys.path`（刻意为之）
+
+`_` 开头的文件**不**被当作 tool 加载，但仍可被 tool 文件以裸名 `import _feishu_impl` 导入——
+因为 tool 文件是以**无 package 的合成模块**（`psi_tool_{stem}_{session_id}_{file_hash}`）exec 的，
+裸导入只能靠 `sys.path` 解析。`_load_from_dir` 在遍历 `*.py` **之前**统一
+`sys.path.insert(0, str(await tools_anyio.resolve()))`（已在 path 上则跳过），所以：
+
+| | 约定 |
+|--|------|
+| **helper 不必自己插 path** | 由 loader 保证。让 helper 自己插会让「某个 tool 能否加载」取决于 **glob 顺序里更早的文件是否恰好插过路径**——漏插的 helper（曾是 `_assignment_tool_common`）只坏自己的 importer、而且只是**有时**坏。详见根 `AGENTS.md` 坑 24 |
+| **tool 文件里的 `sys.path.insert` 不是死代码** | `examples/*/tests/test_*.py` 直接 `importlib.import_module("bash")` 导入 tool 文件，**不经过 loader**，那条 insert 是这条路径上唯一的保障。别当冗余删掉 |
+| **path 条目永不移除** | tool 可能在函数体里**延迟 import** helper（调用时才导），load 结束就摘掉会在调用时炸。代价是 `sys.path` 每见一个新 tools_dir 长一条、Session 死了也不回收（有 `not in sys.path` 去重，不会无界增长） |
+| **helper 不享受 per-session 隔离** | tool 文件用 `psi_tool_{stem}_{session_id}_{hash}` 注册，helper 却以**真名**落 `sys.modules`。一进程内两个不同 agent 包若有同名 helper（`examples/` 里 `_fusion_memory_config.py` 等 23 个 basename 就跨 workspace 重名），**先加载的那份被所有人共用**（已实测：B 的 tool 拿到 A 的 helper 值） |
+| **改 helper 要重启进程** | `refresh()` 只按 hash 重新 `compile` + `exec` tool 文件；helper 走正常 import、命中 `sys.modules` 缓存，改了不生效（已实测）。这是坑 13「`compile`+`exec` 避免陈旧 bytecode」**只覆盖 tool 文件、不覆盖 helper** 的直接后果 |
+| **tools_dir 在 `sys.path[0]`** | 意味着 tool / helper 文件可**进程级**遮蔽 stdlib 与 site-packages（实测 `tools/secrets.py` 会让 `import secrets` 拿到工具文件、`token_hex` 消失）。当前 `examples/` 无一例碰撞（可用脚本复核），但新增工具**别取 stdlib 同名** |
+
 ## 动态重载
 
 `ToolRegistry.refresh(session_id)` 在每次 agent turn 前自动调用，检测文件变更并增量更新：
@@ -208,6 +224,7 @@ Session 层使用两个对称的协议适配器，将 `SessionAgent.run()` 包�
   - 文件删除 → 其所有 tool 标记 `removed`
   - 文件内 tool 增删 → 分别标记 `added` / `removed`
 - `fresh` 标志保证 skipped 文件不被误删
+- **只覆盖 tool 文件，不覆盖 `_` 开头的 helper**：helper 走正常 import、命中 `sys.modules` 缓存，改了要重启进程才生效（见上「私有 helper 与 `sys.path`」）
 - `ScheduleRegistry` 以 per-file `ScheduleEntry` 存储（含 hash），`refresh()` 支持 add/update/remove/skip。每个 schedule 有独立 `CancelScope`，update/remove 时取消旧 runner 并启动新 runner。`refresh()` 内部已 try/except，失败时 log warning 返回 `{}`，不修改内部状态，调用方可直接 await 无需自行容错
 - Schedule 刷新的两个时机：
   1. 每次 `run()` 入口（turn 开始），与 tool 一并刷新

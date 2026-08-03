@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import textwrap
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -9,6 +10,25 @@ import anyio
 import pytest
 
 from psi_agent.session.tool_registry import FileEntry, ToolFunction, ToolRegistry
+
+
+@pytest.fixture(autouse=True)
+def _restore_import_state() -> Iterator[None]:
+    """Undo the loader's process-global imports side effects after every test.
+
+    ``_load_from_dir`` prepends *tools_dir* to ``sys.path`` and never removes it (a tool may
+    import its helper lazily at call time), and private helpers land in ``sys.modules`` under
+    their real name. Without this fixture every ``ToolRegistry.load(tmp_path / "tools")`` in this
+    file leaves a now-deleted directory at the front of ``sys.path``, and a cached ``_helper``
+    from one test would satisfy a later test's different ``_helper`` — a false pass.
+    """
+    path_before = list(sys.path)
+    modules_before = set(sys.modules)
+    yield
+    sys.path[:] = path_before
+    for name in set(sys.modules) - modules_before:
+        del sys.modules[name]
+
 
 # ── FileEntry ─────────────────────────────────────────────────────────────────
 
@@ -513,6 +533,10 @@ async def test_load_resolves_helper_import_regardless_of_order(tmp_path: Path, m
     # The insert is the fix's mechanism, so assert it happened rather than that nothing changed.
     assert str(tools_dir.resolve()) in sys.path
     assert before == [p for p in sys.path if p != str(tools_dir.resolve())]
+    # 刻意为之: the helper is cached under its real name, not the tool files'
+    # psi_tool_{stem}_{session_id}_{hash} — so it is shared across agent packs and survives
+    # refresh. Documented as root AGENTS.md pitfall 24; asserted here so a change is deliberate.
+    assert "_helper" in sys.modules
 
 
 @pytest.mark.anyio

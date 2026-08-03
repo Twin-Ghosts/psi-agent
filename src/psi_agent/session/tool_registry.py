@@ -451,9 +451,15 @@ class ToolRegistry:
         # the helpers, whether a file loads depends on whether some *earlier* file in glob
         # order happened to do the insert first, so a helper that omits it (as
         # ``_assignment_tool_common`` did) breaks only its own tools and only sometimes.
+        # The entry is never removed: a tool may import its helper lazily inside the function
+        # body, long after loading. Consequences worth knowing (see root AGENTS.md pitfall 24):
+        # helpers land in sys.modules under their real name (no session_id/hash), so same-named
+        # helpers in two agent packs share whichever loaded first, editing a helper needs a
+        # process restart, and a tool file may shadow a stdlib/site-packages module process-wide.
         tools_dir_str = str(await tools_anyio.resolve())
         if tools_dir_str not in sys.path:
             sys.path.insert(0, tools_dir_str)
+            logger.debug(f"Added tools dir to sys.path: {tools_dir_str!r}")
 
         try:
             async for py_file in tools_anyio.glob("*.py"):
