@@ -123,7 +123,22 @@ jobs:
           cl /nologo /O2 ".github\inno-setup\haitun.c" ".github\inno-setup\haitun.res" /Fe:".github\inno-setup\haitun.exe" /link /SUBSYSTEM:WINDOWS user32.lib shell32.lib
       - shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl" -OutFile ".github\inno-setup\ChineseSimplified.isl"
+          # raw.githubusercontent.com 偶发把连接掐掉, 单次失败不该让整条流水线红掉, 所以重试。
+          # -MaximumRetryCount 只管 4xx/5xx, 传输层断连是抛异常, 得自己兜。
+          $uri = 'https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl'
+          $out = '.github\inno-setup\ChineseSimplified.isl'
+          foreach ($i in 1..5) {
+            try {
+              Invoke-WebRequest -Uri $uri -OutFile $out
+              # 断在半路会留下截断的文件, 让 ISCC 报一个毫不相关的错, 所以这里先验一眼。
+              if ((Get-Item $out).Length -lt 1024) { throw "downloaded file is truncated ($((Get-Item $out).Length) bytes)" }
+              break
+            } catch {
+              if ($i -eq 5) { throw }
+              Write-Host "attempt $i failed: $($_.Exception.Message) — retrying in $(2 * $i)s"
+              Start-Sleep -Seconds (2 * $i)
+            }
+          }
       - shell: pwsh
         run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Qp /O"installer-output" ".github\inno-setup\haitun.iss"'
       - uses: actions/upload-artifact@v7
