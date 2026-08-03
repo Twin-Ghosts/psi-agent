@@ -89,6 +89,76 @@ def test_raw_to_dict_exposes_event_fields_not_repr() -> None:
     assert "raw" not in raw
 
 
+# Every real lark P2 model shipped by the SDK, so the unwrapping is proven for
+# all event families — not just the member-added one that surfaced the bug.
+_P2_MODELS = [
+    (
+        "im.message.receive_v1",
+        "p2_im_message_receive_v1",
+        "P2ImMessageReceiveV1",
+        {
+            "sender": {"sender_id": {"open_id": "ou_s"}, "sender_type": "user"},
+            "message": {"message_id": "om_1", "chat_id": "oc_1", "message_type": "text"},
+        },
+        ("message", "message_id"),
+    ),
+    (
+        "im.message.recalled_v1",
+        "p2_im_message_recalled_v1",
+        "P2ImMessageRecalledV1",
+        {"message_id": "om_2", "chat_id": "oc_2", "recall_type": "message_owner"},
+        ("chat_id",),
+    ),
+    (
+        "im.message.reaction.created_v1",
+        "p2_im_message_reaction_created_v1",
+        "P2ImMessageReactionCreatedV1",
+        {"message_id": "om_3", "reaction_type": {"emoji_type": "SMILE"}, "operator_type": "user"},
+        ("message_id",),
+    ),
+    (
+        "im.chat.updated_v1",
+        "p2_im_chat_updated_v1",
+        "P2ImChatUpdatedV1",
+        {"chat_id": "oc_4", "operator_id": {"open_id": "ou_o"}, "after_change": {"name": "新群名"}},
+        ("chat_id",),
+    ),
+    (
+        "im.chat.disbanded_v1",
+        "p2_im_chat_disbanded_v1",
+        "P2ImChatDisbandedV1",
+        {"chat_id": "oc_5", "operator_id": {"open_id": "ou_o"}, "name": "某群"},
+        ("chat_id",),
+    ),
+    (
+        "im.chat.member.user.deleted_v1",
+        "p2_im_chat_member_user_deleted_v1",
+        "P2ImChatMemberUserDeletedV1",
+        {"chat_id": "oc_6", "users": [{"user_id": {"open_id": "ou_gone"}}]},
+        ("chat_id",),
+    ),
+]
+
+
+@pytest.mark.parametrize(("event_type", "module", "cls_name", "body", "path"), _P2_MODELS)
+def test_raw_to_dict_unwraps_every_p2_model(
+    event_type: str, module: str, cls_name: str, body: dict[str, Any], path: tuple[str, ...]
+) -> None:
+    """Any P2 event must reach map_event as plain data with its header intact."""
+    mod = pytest.importorskip(f"lark_channel.api.im.v1.model.{module}")
+    cls = getattr(mod, cls_name)
+    raw = _raw_to_dict(cls({"header": {"event_id": f"e-{event_type}", "event_type": event_type}, "event": body}))
+    event = raw["event"]
+    assert isinstance(event, dict), f"{event_type} degraded to {event!r}"
+    assert "raw" not in event, f"{event_type} fell back to repr()"
+    # Walk to a nested leaf to prove recursion, not just the top level.
+    node: Any = event
+    for key in path:
+        assert isinstance(node, dict) and key in node, f"{event_type}: missing {'.'.join(path)}"
+        node = node[key]
+    assert _delivery_id(raw) == f"e-{event_type}"
+
+
 def test_raw_to_dict_passes_dicts_through() -> None:
     raw = _raw_to_dict({"event": {"chat_id": "oc_y"}, "uuid": "u-9"})
     assert raw["event"]["chat_id"] == "oc_y"
