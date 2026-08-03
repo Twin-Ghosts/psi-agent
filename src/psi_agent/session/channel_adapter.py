@@ -6,7 +6,7 @@ agent/lock/``run()`` references.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import aclosing
 from typing import Any, Protocol
 
@@ -22,10 +22,14 @@ class _ChunkStream(Protocol):
     Structural on purpose: importing ``AgentRun`` here would make
     ``agent`` ↔ ``channel_adapter`` a cycle, and the adapter needs nothing from
     a run beyond iterating and closing it.
+
+    ``aclose`` is a plain def returning ``Awaitable[None]`` rather than an
+    ``async def``: the latter pins the return type to ``CoroutineType``, which a
+    bare ``AsyncGenerator`` (returning ``Coroutine``) then fails to satisfy.
     """
 
     def __aiter__(self) -> AsyncIterator[AgentChunk]: ...
-    async def aclose(self) -> None: ...
+    def aclose(self) -> Awaitable[None]: ...
 
 
 class ChannelAdapter:

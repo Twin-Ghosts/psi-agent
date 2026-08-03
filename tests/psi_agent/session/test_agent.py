@@ -1362,8 +1362,10 @@ async def test_agent_run_result_is_immutable() -> None:
         model_finish_reason="stop",
         model_turns=1,
     )
+    # Via setattr: a direct ``result.status = ...`` is a static type error on a
+    # frozen dataclass, but the point here is the *runtime* guarantee.
     with pytest.raises((AttributeError, TypeError)):
-        result.status = AgentRunStatus.INCOMPLETE  # type: ignore[misc]
+        setattr(result, "status", AgentRunStatus.INCOMPLETE)  # noqa: B010
 
 
 @pytest.mark.anyio
