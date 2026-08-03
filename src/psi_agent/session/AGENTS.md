@@ -159,6 +159,36 @@ Session 层使用两个对称的协议适配器，将 `SessionAgent.run()` 包�
 | `AiDelta` | AI→SessionAgent | SSE 解析后的内部流元素 |
 | `AgentChunk` | SessionAgent→Channel | 纯语义输出（`content` / `reasoning` + 可选 `kind` provenance） |
 | `AgentError` | SessionAgent→Channel | 不可恢复错误信号 |
+| `AgentRunResult` | SessionAgent→调用方 | 一次 run 的不可变终态（`status` / `stop_cause` / `model_finish_reason` / `model_turns`）；**不进 SSE** |
+
+### 运行终态（`AgentRunResult`，issue #585）
+
+`run_streamed()` 返回 `AgentRun`——照旧 `async for` 迭代，迭代耗尽后读 `run.result` 得知这一轮**是怎么结束的**：
+
+```python
+run = agent.run_streamed(user_message, extra_params)
+async for chunk in run:
+    consume(chunk)
+result = run.result   # 正常耗尽后非 None
+```
+
+`AgentRunResult` 与 `AgentError` **互斥**：前者表示 agent loop 正常返回（但答案可能不完整），后者表示 loop 无法正常返回。因此 `status` 没有 `FAILED`——失败根本不产出 result。提前 `break` / 被取消 / 客户端断开同样留 `result=None`：那一轮没到达任何终态，**猜一个终态比不报更糟**。
+
+| 场景 | `status` | `stop_cause` | `model_finish_reason` |
+|------|----------|--------------|-----------------------|
+| 模型正常 `stop` | `COMPLETED` | `MODEL_COMPLETED` | `"stop"` |
+| 模型因 `length` 等停止 | `INCOMPLETE` | `MODEL_STOPPED` | 原始值 |
+| 达到 `max_tool_rounds` | `INCOMPLETE` | `AGENT_TURN_LIMIT` | 通常 `"tool_calls"` |
+| 流里从未出现 finish reason | `INCOMPLETE` | `INVALID_MODEL_STREAM` | `None` |
+| 模型 / Session 执行错误 | 不产出 result | 不适用 | 抛 `AgentError` |
+
+几处刻意为之：
+
+- **`stop_cause` 与 `model_finish_reason` 分两列**，不合并：后者是模型的原始诊断串（照抄，含本代码还不认识的新 reason），前者是 **runtime 视角**的停止原因。多个 finish reason（以及「压根没有」）会collapse 成同一个 runtime cause，而 `AGENT_TURN_LIMIT` 在模型侧根本没有对应值。
+- **`None` finish reason 单独归 `INVALID_MODEL_STREAM`**，不跟 `MODEL_STOPPED` 混：排错时「模型提前停了」和「我们没听到它为什么停」是两回事。
+- **`AGENT_TURN_LIMIT` 而非 "tool limit"**：受限的是 agent/model loop 的**轮数**，一轮可能含多个工具调用。配置名 `max_tool_rounds` 暂留以兼容。
+- **`run()` 保留**为 `run_streamed()` 的丢弃 result 版本（纯 `AsyncGenerator`），schedule / trigger runner 等现有调用点一字不改。
+- **SSE 线上形状不变**：result 归调用方读，永不作为 chunk 进流。`handle_request` 只把它写进日志（不完整则 WARNING）。`ChannelAdapter.write()` 用结构化 `_ChunkStream` Protocol 同时接 `AgentRun` 和裸 generator——直接 import `AgentRun` 会让 `agent` ↔ `channel_adapter` 成环，而适配器除了迭代 + 关闭并不需要 run 的任何东西。
 
 ## SessionAgent 支持多种传输
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import aclosing
 from pathlib import Path
 from typing import Any
@@ -27,6 +27,9 @@ from psi_agent.session.protocol import (
     REASONING_KIND_TOOL_RESULT,
     AgentChunk,
     AgentError,
+    AgentRunResult,
+    AgentRunStatus,
+    AgentStopCause,
 )
 from psi_agent.session.runtime_context import runtime_scope
 from psi_agent.session.schedule_registry import ScheduleRegistry
@@ -42,6 +45,46 @@ fraction of the threshold — in that regime the signal re-fires every turn but
 compaction cannot shrink the system prompt, so each pass costs an LLM call and
 erodes older context without lowering ``prompt_tokens``.
 """
+
+
+class AgentRun:
+    """One in-flight agent run: an ``AgentChunk`` stream plus its terminal result.
+
+    Async-iterable, so callers keep the familiar ``async for chunk in run``
+    shape.  ``result`` is ``None`` until the stream is exhausted, then holds an
+    ``AgentRunResult``.  A run that fails raises ``AgentError`` out of the
+    iteration and leaves ``result`` at ``None`` — result and error are mutually
+    exclusive by construction.
+
+    Abandoning a run early (``break``, cancellation, client disconnect) also
+    leaves ``result`` at ``None``: the run never reached a terminal state, and
+    guessing one would be worse than saying nothing.
+    """
+
+    def __init__(self, start: Callable[[AgentRun], AsyncGenerator[AgentChunk]]) -> None:
+        # The loop needs to hand its result back to *this* object, so it is
+        # started with the run already in hand rather than wired up afterwards.
+        self._result: AgentRunResult | None = None
+        self._chunks = start(self)
+
+    @property
+    def result(self) -> AgentRunResult | None:
+        """Terminal result, or ``None`` if the run has not finished normally."""
+        return self._result
+
+    def _set_result(self, result: AgentRunResult) -> None:
+        """Called by the agent loop at each normal exit.  Internal."""
+        self._result = result
+
+    def __aiter__(self) -> AgentRun:
+        return self
+
+    async def __anext__(self) -> AgentChunk:
+        return await self._chunks.__anext__()
+
+    async def aclose(self) -> None:
+        """Close the underlying generator — lets ``aclosing(run)`` work."""
+        await self._chunks.aclose()
 
 
 class SessionAgent:
@@ -208,9 +251,21 @@ class SessionAgent:
                 return response
 
             logger.info("Acquired session lock, processing request")
-            await self._channel_adapter.write(response, self.run(user_message, extra_params))
+            run = self.run_streamed(user_message, extra_params)
+            await self._channel_adapter.write(response, run)
 
-        logger.info("Session request completed")
+        # SSE shape is unchanged (see ChannelAdapter.write); the result is
+        # diagnostics only — it tells the log whether the turn actually finished.
+        result = run.result
+        if result is None:
+            logger.info("Session request completed without a terminal result (failed or abandoned)")
+        elif result.is_complete:
+            logger.info(f"Session request completed ({result.stop_cause}, model_turns={result.model_turns})")
+        else:
+            logger.warning(
+                f"Session request incomplete: stop_cause={result.stop_cause}, "
+                f"model_finish_reason={result.model_finish_reason!r}, model_turns={result.model_turns}"
+            )
         return response
 
     async def handle_event(self, request: web.Request) -> web.Response:
@@ -241,6 +296,22 @@ class SessionAgent:
 
     # -- agent loop -----------------------------------------------------------
 
+    def run_streamed(
+        self,
+        user_message: dict[str, Any],
+        extra_params: dict[str, Any] | None = None,
+        *,
+        response_kind: str | None = None,
+    ) -> AgentRun:
+        """Run one turn and return an ``AgentRun`` — chunk stream + terminal result.
+
+        Preferred entry point over ``run()``: iterate it exactly the same way,
+        then read ``run.result`` afterwards to learn *how* the turn ended
+        (complete answer, stopped short, turn limit, no finish reason).
+        Execution failure still raises ``AgentError`` out of the iteration.
+        """
+        return AgentRun(lambda run: self._run(user_message, extra_params, response_kind=response_kind, run=run))
+
     async def run(
         self,
         user_message: dict[str, Any],
@@ -249,6 +320,10 @@ class SessionAgent:
         response_kind: str | None = None,
     ) -> AsyncGenerator[AgentChunk]:
         """Run one turn of the ReAct agent loop.  Yields ``AgentChunk``.
+
+        Backwards-compatible view of ``run_streamed()`` that drops the terminal
+        result.  Prefer ``run_streamed()`` when the caller cares whether the turn
+        actually finished.
 
         The conversation auto-snapshots on the first mutation; on
         failure the snapshot is restored so that memory and disk
@@ -260,6 +335,36 @@ class SessionAgent:
         When omitted, assistant/tool rows inherit the user message's ``kind``
         (Channel turns default to ``chat``).
         """
+        async with aclosing(self._run(user_message, extra_params, response_kind=response_kind, run=None)) as chunks:
+            async for chunk in chunks:
+                yield chunk
+
+    async def _run(
+        self,
+        user_message: dict[str, Any],
+        extra_params: dict[str, Any] | None = None,
+        *,
+        response_kind: str | None = None,
+        run: AgentRun | None = None,
+    ) -> AsyncGenerator[AgentChunk]:
+        """The agent loop proper.  *run* receives the terminal result, if given."""
+
+        def _finish(
+            status: AgentRunStatus,
+            stop_cause: AgentStopCause,
+            model_finish_reason: str | None,
+            model_turns: int,
+        ) -> None:
+            if run is not None:
+                run._set_result(
+                    AgentRunResult(
+                        status=status,
+                        stop_cause=stop_cause,
+                        model_finish_reason=model_finish_reason,
+                        model_turns=model_turns,
+                    )
+                )
+
         hook_message = dict(user_message)
         hook_message["session_id"] = self._conversation.session_id
         request_params = dict(extra_params or {})
@@ -308,8 +413,10 @@ class SessionAgent:
                 await self._conversation.commit()
                 logger.debug(f"History now has {len(self._conversation.messages)} messages")
 
+                model_turns = 0
                 for _round in range(self._max_tool_rounds):
                     logger.debug(f"Agent loop round {_round + 1}/{self._max_tool_rounds}")
+                    model_turns = _round + 1
 
                     tool_defs = [
                         {
@@ -492,6 +599,12 @@ class SessionAgent:
                         await self._schedule_registry.refresh()
                         if _compaction_needed:
                             await self._maybe_compact(_compaction_prompt_tokens, _compaction_threshold)
+                        _finish(
+                            AgentRunStatus.COMPLETED,
+                            AgentStopCause.MODEL_COMPLETED,
+                            finish_reason,
+                            model_turns,
+                        )
                         return
 
                     if finish_reason not in ("error", "stop", "tool_calls", "compaction_needed"):
@@ -507,6 +620,17 @@ class SessionAgent:
                                 assistant_msg["reasoning"] = accumulated_reasoning
                             self._conversation.add(with_kind(assistant_msg, turn_response_kind))
                         await self._conversation.commit()
+                        # No finish reason at all is a broken stream, not a model
+                        # decision — keep the two apart so triage can tell "the
+                        # model stopped early" from "we never heard why".
+                        _finish(
+                            AgentRunStatus.INCOMPLETE,
+                            AgentStopCause.MODEL_STOPPED
+                            if finish_reason is not None
+                            else AgentStopCause.INVALID_MODEL_STREAM,
+                            finish_reason,
+                            model_turns,
+                        )
                         return
 
                 else:
@@ -519,6 +643,14 @@ class SessionAgent:
                     )
                     await self._conversation.commit()
                     yield AgentChunk(content="[Max tool rounds reached]")
+                    # Loop ran out of rounds; the last model turn asked for yet
+                    # more tools, so its finish reason is typically "tool_calls".
+                    _finish(
+                        AgentRunStatus.INCOMPLETE,
+                        AgentStopCause.AGENT_TURN_LIMIT,
+                        finish_reason,
+                        model_turns,
+                    )
 
     async def _maybe_compact(self, prompt_tokens: int = 0, threshold: int = 0) -> None:
         """Invoke compact_history from system.py, insert compaction message
