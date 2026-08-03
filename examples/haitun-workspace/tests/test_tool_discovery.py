@@ -95,6 +95,44 @@ async def test_assignment_upsert_forwards_assignment_object(monkeypatch):
     ]
 
 
+async def test_assignment_upsert_binds_assigner_to_current_feishu_session(monkeypatch):
+    fake_client = _FakeMemoryClient()
+    runtime_context = importlib.import_module("psi_agent.session.runtime_context")
+    monkeypatch.setattr(runtime_context, "get_session_id", lambda: "feishu-ou_assigner")
+    module = _import_assignment_tool_with_fake_client("assignment_upsert", fake_client, monkeypatch)
+
+    out = await module.assignment_upsert(
+        json.dumps(
+            {
+                "title": "处理权限限制",
+                "assigner": {
+                    "user_id": "ou_wrong",
+                    "display_name": "高博",
+                    "feishu_open_id": "ou_wrong",
+                },
+                "recipients": [{"user_id": "user-b"}],
+                "gaps": ["截止时间未明确"],
+                "risks": ["不能破坏现有飞书任务发布"],
+                "action_items": ["提交可评审方案"],
+                "evidence_refs": ["https://example.com/source"],
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    assert json.loads(out)["ok"] is True
+    forwarded = fake_client.calls[0][1]["assignment"]
+    assert forwarded["assigner"] == {
+        "user_id": "ou_assigner",
+        "display_name": "ou_assigner",
+        "feishu_open_id": "ou_assigner",
+    }
+    assert forwarded["gaps"] == [{"description": "截止时间未明确"}]
+    assert forwarded["risks"] == [{"description": "不能破坏现有飞书任务发布"}]
+    assert forwarded["action_items"] == [{"description": "提交可评审方案"}]
+    assert forwarded["evidence_refs"] == [{"uri": "https://example.com/source"}]
+
+
 async def test_assignment_upsert_documents_required_assignment_shape(monkeypatch):
     module = _import_assignment_tool_with_fake_client("assignment_upsert", _FakeMemoryClient(), monkeypatch)
     docstring = inspect.getdoc(module.assignment_upsert) or ""
