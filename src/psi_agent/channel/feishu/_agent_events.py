@@ -8,6 +8,7 @@ After this wiring, new Feishu events are added only under the agent package.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -203,6 +204,50 @@ async def _watch_channel_events(
             logger.error(f"channel_events/feishu reload failed — {e!r}")
 
 
+# Marks a processor this module installed, so a reload neither re-wraps its own
+# fan-out nor stacks a second one on top of a processor it already owns.
+_OURS_ATTR = "_psi_agent_channel_event"
+
+
+class _AgentEventFanout:
+    """Run a built-in dispatcher processor, then fan the delivery out to mappers.
+
+    Some platform events already have an owner in ``_processorMap``: the bot's own
+    reply path takes ``p2.im.message.receive_v1`` via ``channel.on("message")``.
+    Registering a mapper only on the free key (``p1.*``) puts it on a key the WS
+    transport never uses — the mapper loads, probes fine, and still never fires.
+    Wrapping keeps the built-in behaviour first and adds the fan-out after.
+
+    ``type()`` must delegate: the dispatcher calls it to pick the deserialization
+    target *before* ``do()``, so returning anything else would hand the built-in
+    handler an object of the wrong type.
+    """
+
+    __slots__ = ("_fanout", "_inner")
+
+    def __init__(self, inner: Any, fanout: Callable[[Any], None]) -> None:
+        self._inner = inner
+        self._fanout = fanout
+
+    def type(self) -> Any:
+        return self._inner.type()
+
+    def do(self, data: Any) -> Any:
+        # The built-in handler owns the user-visible behaviour: run it first, and
+        # never let a mapper problem turn into a missing reply.
+        result = self._inner.do(data)
+        try:
+            self._fanout(data)
+        except Exception as e:
+            logger.warning(f"agent event fan-out failed — {e!r}")
+        return result
+
+
+def _is_ours(processor: Any) -> bool:
+    """Whether *processor* was installed by this module (plain or fan-out)."""
+    return isinstance(processor, _AgentEventFanout) or getattr(processor, _OURS_ATTR, False) is True
+
+
 def _register_platform_map(
     live: _LiveEventDefs,
     channel: Any,
@@ -211,8 +256,9 @@ def _register_platform_map(
 ) -> int:
     """Install one dispatcher processor per platform event (idempotent).
 
-    Safe to call repeatedly: already-installed keys are skipped, and the
-    installed processor resolves its mapper from *live* on every delivery.
+    Safe to call repeatedly: keys already carrying a fan-out are skipped, keys with
+    a built-in owner get wrapped (see :class:`_AgentEventFanout`), and every
+    installed processor resolves its mapper from *live* on each delivery.
     """
     if _CustomizedEventProcessor is None:
         logger.warning("lark_channel CustomizedEventProcessor missing — agent events off")
@@ -233,8 +279,9 @@ def _register_platform_map(
     for platform_event in platform_events:
         for schema in ("p1", "p2"):
             key = f"{schema}.{platform_event}"
-            if key in proc_map:
-                logger.debug(f"processor already present for {key}; skipping")
+            existing = proc_map.get(key)
+            if _is_ours(existing):
+                logger.debug(f"channel event processor already installed for {key}; skipping")
                 continue
 
             def _on_event(raw: Any, _platform_event: str = platform_event) -> None:
@@ -250,9 +297,20 @@ def _register_platform_map(
                         logger.warning(f"schedule agent event {edef.name!r} failed — {e!r}")
 
             try:
-                proc_map[key] = _CustomizedEventProcessor(_on_event)
+                if existing is None:
+                    processor = _CustomizedEventProcessor(_on_event)
+                    with contextlib.suppress(AttributeError):
+                        setattr(processor, _OURS_ATTR, True)
+                    proc_map[key] = processor
+                    logger.info(f"Registered channel event processor → {key}")
+                else:
+                    # A built-in handler already owns this key (e.g. ``channel.on("message")``
+                    # takes ``p2.im.message.receive_v1``). Skipping would leave the mapper on
+                    # a key that never sees traffic, so wrap instead: the original still runs,
+                    # then the same delivery fans out to channel_events mappers.
+                    proc_map[key] = _AgentEventFanout(existing, _on_event)
+                    logger.info(f"Wrapped existing processor for fan-out → {key}")
                 registered += 1
-                logger.info(f"Registered channel event processor → {key}")
             except Exception as e:
                 logger.warning(f"register {key} failed — {e!r}")
     return registered

@@ -615,3 +615,117 @@ async def test_watcher_survives_a_broken_edit(tmp_path: Path, monkeypatch: pytes
                     break
                 await live.wait_for_reload()
         tg.cancel_scope.cancel()
+
+
+class _BuiltinProcessor:
+    """Stands in for the SDK processor that ``channel.on("message")`` installs."""
+
+    def __init__(self) -> None:
+        self.seen: list[Any] = []
+
+    def type(self) -> type:
+        return dict
+
+    def do(self, data: Any) -> str:
+        self.seen.append(data)
+        return "builtin-result"
+
+
+@pytest.mark.anyio
+async def test_existing_processor_is_wrapped_not_skipped(tmp_path: Path) -> None:
+    """The bot's own reply path owns ``p2.im.message.receive_v1``.
+
+    Skipping that key (the old behaviour) left the mapper on ``p1.*`` only, which
+    the WS transport never delivers to — the event loaded and never fired.
+    """
+    _write_event_dir(
+        tmp_path,
+        "message_received",
+        "feishu.message.received",
+        "def map_event(raw):\n    return [{'payload': {}}]\n",
+    )
+    channel = _FakeChannel()
+    builtin = _BuiltinProcessor()
+    channel.dispatcher._processorMap["p2.im.message.receive_v1"] = builtin
+    live = _LiveEventDefs()
+    live.replace(await load_channel_event_defs(tmp_path, "feishu"))
+
+    async def _resolve(_open_id: str | None) -> Any:
+        raise AssertionError("not reached")
+
+    scheduled: list[Any] = []
+    installed = _register_platform_map(live, channel, _resolve, lambda *a, **k: scheduled.append(a))
+
+    assert installed == 2  # p1 registered fresh, p2 wrapped
+    wrapper = channel.dispatcher._processorMap["p2.im.message.receive_v1"]
+    assert isinstance(wrapper, agent_events._AgentEventFanout)
+    # Deserialization target must still come from the built-in processor.
+    assert wrapper.type() is dict
+
+    result = wrapper.do({"event": {}})
+    assert result == "builtin-result"  # built-in behaviour preserved
+    assert builtin.seen == [{"event": {}}]  # and it ran
+    assert scheduled  # the mapper was fanned out to as well
+
+
+@pytest.mark.anyio
+async def test_fanout_failure_does_not_break_the_builtin_handler(tmp_path: Path) -> None:
+    """A broken mapper must never cost the user their reply."""
+    _write_event_dir(
+        tmp_path,
+        "message_received",
+        "feishu.message.received",
+        "def map_event(raw):\n    return [{'payload': {}}]\n",
+    )
+    channel = _FakeChannel()
+    builtin = _BuiltinProcessor()
+    channel.dispatcher._processorMap["p2.im.message.receive_v1"] = builtin
+    live = _LiveEventDefs()
+    live.replace(await load_channel_event_defs(tmp_path, "feishu"))
+
+    async def _resolve(_open_id: str | None) -> Any:
+        raise AssertionError("not reached")
+
+    def _explode(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("portal closed")
+
+    _register_platform_map(live, channel, _resolve, _explode)
+    wrapper = channel.dispatcher._processorMap["p2.im.message.receive_v1"]
+
+    assert wrapper.do({"event": {}}) == "builtin-result"
+    assert builtin.seen == [{"event": {}}]
+
+
+@pytest.mark.anyio
+async def test_reload_does_not_stack_fanouts(tmp_path: Path) -> None:
+    """Re-registration is idempotent: no wrapper-around-wrapper on every reload."""
+    _write_event_dir(
+        tmp_path,
+        "message_received",
+        "feishu.message.received",
+        "def map_event(raw):\n    return [{'payload': {}}]\n",
+    )
+    channel = _FakeChannel()
+    builtin = _BuiltinProcessor()
+    channel.dispatcher._processorMap["p2.im.message.receive_v1"] = builtin
+    live = _LiveEventDefs()
+    live.replace(await load_channel_event_defs(tmp_path, "feishu"))
+
+    async def _resolve(_open_id: str | None) -> Any:
+        raise AssertionError("not reached")
+
+    scheduled: list[Any] = []
+
+    def _record(*a: Any, **_k: Any) -> None:
+        scheduled.append(a)
+
+    _register_platform_map(live, channel, _resolve, _record)
+    wrapper = channel.dispatcher._processorMap["p2.im.message.receive_v1"]
+    # Second pass (what the hot-reload watcher does) must install nothing new.
+    assert _register_platform_map(live, channel, _resolve, _record) == 0
+    assert channel.dispatcher._processorMap["p2.im.message.receive_v1"] is wrapper
+
+    wrapper.do({"event": {}})
+    # One delivery fans out exactly once, not once per reload.
+    assert len(scheduled) == 1
+    assert builtin.seen == [{"event": {}}]
