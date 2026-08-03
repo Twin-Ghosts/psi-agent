@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 from pathlib import Path
 from typing import Any
 
@@ -623,7 +624,9 @@ class _BuiltinProcessor:
     def __init__(self) -> None:
         self.seen: list[Any] = []
 
-    def type(self) -> type:
+    # Named ``type`` to match the SDK's IEventProcessor protocol; that shadows the
+    # builtin inside this class body, so the return type is spelled via ``builtins``.
+    def type(self) -> builtins.type:
         return dict
 
     def do(self, data: Any) -> str:
