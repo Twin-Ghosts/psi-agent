@@ -13,14 +13,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import anyio
 from loguru import logger
 
 from psi_agent.channel._core import ChannelCore
-from psi_agent.channel._event_defs import ChannelEventDef, load_channel_event_defs
+from psi_agent.channel._event_defs import (
+    ChannelEventDef,
+    channel_events_fingerprint,
+    load_channel_event_defs,
+)
+from psi_agent.channel._event_shapes import describe_shape, non_null_paths, plainify
 from psi_agent.channel._synthetic import start_synthetic_producers
 
-# Guard against cycles / pathological nesting while unwrapping SDK models.
-_PLAINIFY_MAX_DEPTH = 12
+# How often to re-scan channel_events/ for new or edited definitions.
+_RELOAD_INTERVAL_SECONDS = 5.0
 
 _CustomizedEventProcessor: Any = None
 try:
@@ -46,19 +52,11 @@ def _plainify(value: Any, _depth: int = 0) -> Any:
     hand-rolled classes with no ``dict()``/``model_dump()``/``to_dict()`` — their
     fields live in ``__dict__``. Without unwrapping them, every P2 payload
     reaches ``map_event`` as ``repr()`` text and no mapper can read a field.
+
+    Shared with the ``channel_event_check`` self-check tool so a probed mapper
+    sees byte-for-byte what the live path hands it.
     """
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    if _depth >= _PLAINIFY_MAX_DEPTH:
-        return repr(value)
-    if isinstance(value, dict):
-        return {str(k): _plainify(v, _depth + 1) for k, v in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_plainify(v, _depth + 1) for v in value]
-    inner = getattr(value, "__dict__", None)
-    if isinstance(inner, dict):
-        return {k: _plainify(v, _depth + 1) for k, v in inner.items() if not k.startswith("_")}
-    return repr(value)
+    return plainify(value, _depth)
 
 
 def _raw_to_dict(raw: Any) -> dict[str, Any]:
@@ -91,6 +89,44 @@ def _raw_to_dict(raw: Any) -> dict[str, Any]:
     return {"raw": repr(raw)}
 
 
+class _LiveEventDefs:
+    """Current ``platform_map`` definitions, keyed by ``platform_event``.
+
+    The dispatcher processor for a platform event can only be installed once —
+    ``lark`` rebuilds ``_processorMap`` at ``start_background()`` and we skip
+    keys another subsystem already owns. So the installed processor never
+    closes over a ``ChannelEventDef``; it looks the current one up here at fire
+    time. Editing ``map.py`` then takes effect by swapping the entry, with no
+    container restart and no second registration.
+    """
+
+    def __init__(self) -> None:
+        self._by_platform: dict[str, list[ChannelEventDef]] = {}
+        self.reloads = 0
+        self._changed = anyio.Event()
+
+    def replace(self, defs: list[ChannelEventDef]) -> None:
+        grouped: dict[str, list[ChannelEventDef]] = {}
+        for edef in defs:
+            if edef.kind == "platform_map" and edef.map_fn and edef.platform_event:
+                grouped.setdefault(edef.platform_event, []).append(edef)
+        self._by_platform = grouped
+        self.reloads += 1
+        # Wake anyone waiting on a reload, then arm a fresh Event for the next.
+        changed, self._changed = self._changed, anyio.Event()
+        changed.set()
+
+    async def wait_for_reload(self) -> None:
+        """Block until the next ``replace()``. Used by tests and diagnostics."""
+        await self._changed.wait()
+
+    def platform_events(self) -> list[str]:
+        return sorted(self._by_platform)
+
+    def for_platform(self, platform_event: str) -> list[ChannelEventDef]:
+        return list(self._by_platform.get(platform_event, ()))
+
+
 async def register_feishu_agent_events(
     *,
     channel: Any,
@@ -102,13 +138,25 @@ async def register_feishu_agent_events(
     """Load ``channel_events/feishu``; register platform_map + start synthetics.
 
     Must run **after** ``start_background()`` (dispatcher rebuild). Pass an
-    open ``anyio`` TaskGroup so synthetic producers cancel with Channel.
+    open ``anyio`` TaskGroup so synthetic producers cancel with Channel — the
+    same TaskGroup also hosts the reload watcher that keeps edits to
+    ``channel_events/`` live without a restart.
     """
     defs = await load_channel_event_defs(agent_root, "feishu")
-    platform_n = _register_platform_map(defs, channel, resolve_core, portal_start)
+    live = _LiveEventDefs()
+    live.replace(defs)
+    platform_n = _register_platform_map(live, channel, resolve_core, portal_start)
     synthetic_n = 0
     if task_group is not None:
         synthetic_n = start_synthetic_producers(defs, resolve_core=resolve_core, task_group=task_group)
+        task_group.start_soon(
+            _watch_channel_events,
+            live,
+            agent_root,
+            channel,
+            resolve_core,
+            portal_start,
+        )
     elif any(d.kind == "synthetic" and d.produce_fn for d in defs):
         logger.warning("synthetic channel_events present but no task_group — producers not started")
     return FeishuAgentEventsStats(
@@ -117,18 +165,61 @@ async def register_feishu_agent_events(
     )
 
 
+async def _watch_channel_events(
+    live: _LiveEventDefs,
+    agent_root: Path,
+    channel: Any,
+    resolve_core: Callable[[str | None], Awaitable[ChannelCore]],
+    portal_start: Callable[..., Any],
+) -> None:
+    """Re-load ``channel_events/feishu`` whenever the tree changes.
+
+    Closes the "changed it, cannot verify it" gap: an agent that writes a new
+    event directory or fixes a field path in ``map.py`` sees the effect on the
+    next delivery instead of needing a restart it cannot perform itself.
+    Synthetic producers are **not** restarted here — a running producer task
+    cannot be swapped safely, so those still need a Channel restart.
+    """
+    previous = await channel_events_fingerprint(agent_root, "feishu")
+    while True:
+        await anyio.sleep(_RELOAD_INTERVAL_SECONDS)
+        try:
+            current = await channel_events_fingerprint(agent_root, "feishu")
+            if current == previous:
+                continue
+            previous = current
+            defs = await load_channel_event_defs(agent_root, "feishu")
+            before = set(live.platform_events())
+            live.replace(defs)
+            after = set(live.platform_events())
+            added = _register_platform_map(live, channel, resolve_core, portal_start)
+            names = ", ".join(sorted(d.name for d in defs if d.kind == "platform_map")) or "(none)"
+            logger.info(
+                f"channel_events/feishu reloaded — platform_map: {names}; "
+                f"newly registered processors={added}"
+                + (f"; dropped {', '.join(sorted(before - after))}" if before - after else "")
+            )
+        except Exception as e:
+            logger.error(f"channel_events/feishu reload failed — {e!r}")
+
+
 def _register_platform_map(
-    defs: list[ChannelEventDef],
+    live: _LiveEventDefs,
     channel: Any,
     resolve_core: Callable[[str | None], Awaitable[ChannelCore]],
     portal_start: Callable[..., Any],
 ) -> int:
+    """Install one dispatcher processor per platform event (idempotent).
+
+    Safe to call repeatedly: already-installed keys are skipped, and the
+    installed processor resolves its mapper from *live* on every delivery.
+    """
     if _CustomizedEventProcessor is None:
         logger.warning("lark_channel CustomizedEventProcessor missing — agent events off")
         return 0
 
-    platform_defs = [d for d in defs if d.kind == "platform_map" and d.map_fn and d.platform_event]
-    if not platform_defs:
+    platform_events = live.platform_events()
+    if not platform_events:
         logger.info("No feishu platform_map events under channel_events/feishu")
         return 0
 
@@ -139,23 +230,29 @@ def _register_platform_map(
         return 0
 
     registered = 0
-    for edef in platform_defs:
+    for platform_event in platform_events:
         for schema in ("p1", "p2"):
-            key = f"{schema}.{edef.platform_event}"
+            key = f"{schema}.{platform_event}"
             if key in proc_map:
                 logger.debug(f"processor already present for {key}; skipping")
                 continue
 
-            def _on_event(raw: Any, _edef: ChannelEventDef = edef) -> None:
-                try:
-                    portal_start(_forward_one, _edef, raw, resolve_core)
-                except Exception as e:
-                    logger.warning(f"schedule agent event {_edef.name!r} failed — {e!r}")
+            def _on_event(raw: Any, _platform_event: str = platform_event) -> None:
+                # Resolve now, not at registration — picks up hot-reloaded mappers.
+                edefs = live.for_platform(_platform_event)
+                if not edefs:
+                    logger.debug(f"no channel_event owns {_platform_event!r} anymore; ignoring")
+                    return
+                for edef in edefs:
+                    try:
+                        portal_start(_forward_one, edef, raw, resolve_core)
+                    except Exception as e:
+                        logger.warning(f"schedule agent event {edef.name!r} failed — {e!r}")
 
             try:
                 proc_map[key] = _CustomizedEventProcessor(_on_event)
                 registered += 1
-                logger.info(f"Registered channel event {edef.name!r} → {key}")
+                logger.info(f"Registered channel event processor → {key}")
             except Exception as e:
                 logger.warning(f"register {key} failed — {e!r}")
     return registered
@@ -174,6 +271,30 @@ def _delivery_id(raw_dict: dict[str, Any]) -> str:
     return ""
 
 
+def _event_body(raw_dict: dict[str, Any]) -> Any:
+    """The part of the payload a mapper reads fields from."""
+    body = raw_dict.get("event")
+    return body if isinstance(body, dict) else raw_dict
+
+
+def _log_empty_mapping(edef: ChannelEventDef, raw_dict: dict[str, Any]) -> None:
+    """Explain a mapper that returned no envelopes — otherwise it is silent.
+
+    ``matched=1 fired=[]`` looks identical whether the mapper dropped the event
+    or Session deduped it, so print the shape the mapper actually saw and the
+    paths that hold values. A wrong field path becomes obvious by comparison.
+    """
+    body = _event_body(raw_dict)
+    paths = non_null_paths(body)
+    shown = ", ".join(paths[:18]) or "(none)"
+    logger.warning(
+        f"{edef.name}: map_event returned no envelopes — event dropped, "
+        f"no trigger will fire. The mapper saw event{{{describe_shape(body)}}}. "
+        f"Readable paths: {shown}. Compare these against the field paths in "
+        f"{edef.path / 'map.py'}; the channel_event_check tool replays a sample event."
+    )
+
+
 async def _forward_one(
     edef: ChannelEventDef,
     raw: Any,
@@ -184,9 +305,19 @@ async def _forward_one(
         if edef.map_fn is None:
             return
         raw_dict = _raw_to_dict(raw)
-        envelopes = edef.map_fn(raw_dict)
+        try:
+            envelopes = edef.map_fn(raw_dict)
+        except Exception as e:
+            body = _event_body(raw_dict)
+            logger.error(
+                f"{edef.name}: map_event raised {e!r} — event dropped. It was given event{{{describe_shape(body)}}}."
+            )
+            return
         if not isinstance(envelopes, list):
             logger.error(f"{edef.name}: map_event must return list[dict], got {type(envelopes)!r}")
+            return
+        if not envelopes:
+            _log_empty_mapping(edef, raw_dict)
             return
         delivery_id = _delivery_id(raw_dict)
         for index, env in enumerate(envelopes):

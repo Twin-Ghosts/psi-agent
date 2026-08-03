@@ -5,10 +5,24 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
+from loguru import logger
 
-from psi_agent.channel._event_defs import ChannelEventDef, load_channel_event_defs
-from psi_agent.channel.feishu._agent_events import _delivery_id, _forward_one, _plainify, _raw_to_dict
+import psi_agent.channel.feishu._agent_events as agent_events
+from psi_agent.channel._event_defs import (
+    ChannelEventDef,
+    channel_events_fingerprint,
+    load_channel_event_defs,
+)
+from psi_agent.channel.feishu._agent_events import (
+    _delivery_id,
+    _forward_one,
+    _LiveEventDefs,
+    _plainify,
+    _raw_to_dict,
+    _register_platform_map,
+)
 
 HAITUN = Path(__file__).resolve().parents[4] / "examples" / "haitun-workspace"
 
@@ -243,3 +257,318 @@ async def test_framework_fills_key_when_mapper_omits_it() -> None:
     keys = [e["idempotency_key"] for e in first + second]
     assert len(set(keys)) == 4, keys
     assert all(k for k in keys)
+
+
+def _def_with(map_fn: Any, name: str = "feishu.test.probe") -> ChannelEventDef:
+    return ChannelEventDef(
+        dir_name="probe",
+        name=name,
+        source="feishu",
+        kind="platform_map",
+        platform_event="im.message.receive_v1",
+        description="",
+        map_fn=map_fn,
+        produce_fn=None,
+        path=HAITUN,
+    )
+
+
+@pytest.mark.anyio
+async def test_empty_mapping_is_logged_with_shape_and_paths(caplog: pytest.LogCaptureFixture) -> None:
+    """A mapper returning [] must not be silent — that is indistinguishable from dedup."""
+
+    def _map(raw: dict[str, Any]) -> list[dict[str, Any]]:
+        # The classic defect: chat_id lives at event.message.chat_id, not event.chat_id.
+        event = raw.get("event") or {}
+        return [] if not event.get("chat_id") else [{"payload": {}}]
+
+    messages: list[str] = []
+    handle = logger.add(lambda m: messages.append(m.record["message"]), level="WARNING")
+    try:
+        posted = await _forward(
+            _def_with(_map),
+            {"header": {"event_id": "evt-e1"}, "event": {"message": {"chat_id": "oc_1"}}},
+        )
+    finally:
+        logger.remove(handle)
+    assert posted == []
+    blob = "\n".join(messages)
+    assert "returned no envelopes" in blob
+    # The diagnostic must name the path the mapper should have used.
+    assert "message.chat_id" in blob
+
+
+@pytest.mark.anyio
+async def test_raising_mapper_is_logged_with_shape() -> None:
+    def _map(_raw: dict[str, Any]) -> list[dict[str, Any]]:
+        raise KeyError("chat_id")
+
+    messages: list[str] = []
+    handle = logger.add(lambda m: messages.append(m.record["message"]), level="ERROR")
+    try:
+        posted = await _forward(_def_with(_map), {"header": {"event_id": "evt-e2"}, "event": {"message": {}}})
+    finally:
+        logger.remove(handle)
+    assert posted == []
+    blob = "\n".join(messages)
+    assert "map_event raised" in blob
+    assert "KeyError" in blob
+
+
+def test_live_defs_group_by_platform_event() -> None:
+    live = _LiveEventDefs()
+    assert live.platform_events() == []
+    one = _def_with(lambda _raw: [], name="feishu.test.one")
+    live.replace([one])
+    assert live.platform_events() == ["im.message.receive_v1"]
+    assert [d.name for d in live.for_platform("im.message.receive_v1")] == ["feishu.test.one"]
+
+
+def test_live_defs_swap_takes_effect_without_reregistration() -> None:
+    """Hot reload works by swapping the entry the installed processor reads."""
+    live = _LiveEventDefs()
+    live.replace([_def_with(lambda _raw: [], name="feishu.test.before")])
+    live.replace([_def_with(lambda _raw: [], name="feishu.test.after")])
+    assert [d.name for d in live.for_platform("im.message.receive_v1")] == ["feishu.test.after"]
+
+
+def test_live_defs_ignore_incomplete_defs() -> None:
+    """Synthetic defs and mapper-less defs own no platform event."""
+    live = _LiveEventDefs()
+    synthetic = ChannelEventDef(
+        dir_name="s",
+        name="haitun.test.synthetic",
+        source="haitun",
+        kind="synthetic",
+        platform_event="",
+        description="",
+        map_fn=None,
+        produce_fn=None,
+        path=HAITUN,
+    )
+    live.replace([synthetic, _def_with(None, name="feishu.test.nomap")])
+    assert live.platform_events() == []
+
+
+def test_live_defs_keep_both_owners_of_one_platform_event() -> None:
+    """Two definitions may map the same Feishu event; both must still fire."""
+    live = _LiveEventDefs()
+    live.replace(
+        [
+            _def_with(lambda _raw: [], name="feishu.test.a"),
+            _def_with(lambda _raw: [], name="feishu.test.b"),
+        ]
+    )
+    assert sorted(d.name for d in live.for_platform("im.message.receive_v1")) == [
+        "feishu.test.a",
+        "feishu.test.b",
+    ]
+
+
+@pytest.mark.anyio
+async def test_fingerprint_changes_when_map_py_is_edited(tmp_path: Path) -> None:
+    """The watcher's change detector must notice an edited mapper."""
+    event_dir = tmp_path / "channel_events" / "feishu" / "probe"
+    event_dir.mkdir(parents=True)
+    (event_dir / "EVENT.yaml").write_text(
+        "name: feishu.test.probe\nsource: feishu\nkind: platform_map\nplatform_event: im.message.receive_v1\n",
+        encoding="utf-8",
+    )
+    map_py = event_dir / "map.py"
+    map_py.write_text("def map_event(raw):\n    return []\n", encoding="utf-8")
+
+    before = await channel_events_fingerprint(tmp_path, "feishu")
+    assert before
+    assert await channel_events_fingerprint(tmp_path, "feishu") == before
+
+    map_py.write_text("def map_event(raw):\n    return [{'payload': {}}]\n", encoding="utf-8")
+    after = await channel_events_fingerprint(tmp_path, "feishu")
+    assert after != before
+
+    # A brand-new event directory must also register as a change.
+    other = tmp_path / "channel_events" / "feishu" / "second"
+    other.mkdir()
+    (other / "EVENT.yaml").write_text("name: feishu.test.second\nkind: synthetic\n", encoding="utf-8")
+    assert await channel_events_fingerprint(tmp_path, "feishu") != after
+
+
+@pytest.mark.anyio
+async def test_fingerprint_empty_when_tree_absent(tmp_path: Path) -> None:
+    assert await channel_events_fingerprint(tmp_path, "feishu") == ""
+
+
+@pytest.mark.anyio
+async def test_reloaded_mapper_is_used_on_next_delivery(tmp_path: Path) -> None:
+    """End-to-end of gap 3: fix map.py, next event uses the fix — no restart."""
+    event_dir = tmp_path / "channel_events" / "feishu" / "probe"
+    event_dir.mkdir(parents=True)
+    (event_dir / "EVENT.yaml").write_text(
+        "name: feishu.test.probe\nsource: feishu\nkind: platform_map\nplatform_event: im.message.receive_v1\n",
+        encoding="utf-8",
+    )
+    map_py = event_dir / "map.py"
+    # Broken: reads chat_id from the wrong level, so it drops every event.
+    map_py.write_text(
+        "def map_event(raw):\n"
+        "    event = raw.get('event') or {}\n"
+        "    chat_id = event.get('chat_id')\n"
+        "    if not chat_id:\n"
+        "        return []\n"
+        "    return [{'payload': {'chat_id': chat_id}}]\n",
+        encoding="utf-8",
+    )
+    sample = {"header": {"event_id": "evt-r1"}, "event": {"message": {"chat_id": "oc_live"}}}
+
+    live = _LiveEventDefs()
+    live.replace(await load_channel_event_defs(tmp_path, "feishu"))
+    broken = live.for_platform("im.message.receive_v1")[0]
+    assert await _forward(broken, sample) == []
+
+    # The agent fixes the field path; the watcher re-loads the tree.
+    map_py.write_text(
+        "def map_event(raw):\n"
+        "    message = (raw.get('event') or {}).get('message') or {}\n"
+        "    chat_id = message.get('chat_id')\n"
+        "    if not chat_id:\n"
+        "        return []\n"
+        "    return [{'payload': {'chat_id': chat_id}}]\n",
+        encoding="utf-8",
+    )
+    live.replace(await load_channel_event_defs(tmp_path, "feishu"))
+    fixed = live.for_platform("im.message.receive_v1")[0]
+    posted = await _forward(fixed, sample)
+    assert [e["payload"]["chat_id"] for e in posted] == ["oc_live"]
+
+
+class _FakeDispatcher:
+    def __init__(self) -> None:
+        self._processorMap: dict[str, Any] = {}
+
+
+class _FakeChannel:
+    def __init__(self) -> None:
+        self.dispatcher = _FakeDispatcher()
+
+
+def _write_event_dir(root: Path, slug: str, event_name: str, map_source: str) -> Path:
+    event_dir = root / "channel_events" / "feishu" / slug
+    event_dir.mkdir(parents=True, exist_ok=True)
+    (event_dir / "EVENT.yaml").write_text(
+        f"name: {event_name}\nsource: feishu\nkind: platform_map\nplatform_event: im.message.receive_v1\n",
+        encoding="utf-8",
+    )
+    (event_dir / "map.py").write_text(map_source, encoding="utf-8")
+    return event_dir
+
+
+@pytest.mark.anyio
+async def test_watcher_picks_up_a_brand_new_event_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gap 3 end-to-end: a directory added after startup registers itself."""
+    monkeypatch.setattr(agent_events, "_RELOAD_INTERVAL_SECONDS", 0.01)
+    channel = _FakeChannel()
+    live = _LiveEventDefs()
+    live.replace(await load_channel_event_defs(tmp_path, "feishu"))
+    assert live.platform_events() == []
+
+    async def _resolve(_open_id: str | None) -> Any:
+        raise AssertionError("not reached")
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(agent_events._watch_channel_events, live, tmp_path, channel, _resolve, lambda *a, **k: None)
+        # The agent writes a new event while the Channel is already running.
+        await anyio.sleep(0.05)
+        _write_event_dir(
+            tmp_path,
+            "chat_message_received",
+            "feishu.chat.message_received",
+            "def map_event(raw):\n    return [{'payload': {}}]\n",
+        )
+        with anyio.fail_after(5):
+            while not live.platform_events():
+                await live.wait_for_reload()
+        tg.cancel_scope.cancel()
+
+    assert live.platform_events() == ["im.message.receive_v1"]
+    # A processor is installed for the new event without a restart.
+    assert "p2.im.message.receive_v1" in channel.dispatcher._processorMap
+
+
+@pytest.mark.anyio
+async def test_watcher_swaps_an_edited_mapper_without_reregistering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An edited map.py takes effect, and the processor is installed only once."""
+    monkeypatch.setattr(agent_events, "_RELOAD_INTERVAL_SECONDS", 0.01)
+    map_py = (
+        _write_event_dir(
+            tmp_path,
+            "chat_message_received",
+            "feishu.chat.message_received",
+            "def map_event(raw):\n    return []\n",
+        )
+        / "map.py"
+    )
+    channel = _FakeChannel()
+    live = _LiveEventDefs()
+    live.replace(await load_channel_event_defs(tmp_path, "feishu"))
+    first = live.for_platform("im.message.receive_v1")[0]
+    assert first.map_fn is not None
+    assert first.map_fn({"event": {}}) == []
+    installed = _register_platform_map(live, channel, lambda _o: None, lambda *a, **k: None)
+    assert installed == 2  # p1 + p2
+    processor = channel.dispatcher._processorMap["p2.im.message.receive_v1"]
+
+    async def _resolve(_open_id: str | None) -> Any:
+        raise AssertionError("not reached")
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(agent_events._watch_channel_events, live, tmp_path, channel, _resolve, lambda *a, **k: None)
+        await anyio.sleep(0.05)
+        map_py.write_text("def map_event(raw):\n    return [{'payload': {'ok': 1}}]\n", encoding="utf-8")
+        with anyio.fail_after(5):
+            while live.for_platform("im.message.receive_v1")[0].map_fn is first.map_fn:
+                await live.wait_for_reload()
+        tg.cancel_scope.cancel()
+
+    reloaded = live.for_platform("im.message.receive_v1")[0]
+    assert reloaded.map_fn is not None
+    assert reloaded.map_fn({"event": {}}) == [{"payload": {"ok": 1}}]
+    # Same processor object: the swap happens behind it, not by re-registering.
+    assert channel.dispatcher._processorMap["p2.im.message.receive_v1"] is processor
+
+
+@pytest.mark.anyio
+async def test_watcher_survives_a_broken_edit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A map.py with a syntax error must not kill the watcher or the old mapper."""
+    monkeypatch.setattr(agent_events, "_RELOAD_INTERVAL_SECONDS", 0.01)
+    map_py = (
+        _write_event_dir(
+            tmp_path,
+            "chat_message_received",
+            "feishu.chat.message_received",
+            "def map_event(raw):\n    return [{'payload': {'v': 1}}]\n",
+        )
+        / "map.py"
+    )
+    channel = _FakeChannel()
+    live = _LiveEventDefs()
+    live.replace(await load_channel_event_defs(tmp_path, "feishu"))
+
+    async def _resolve(_open_id: str | None) -> Any:
+        raise AssertionError("not reached")
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(agent_events._watch_channel_events, live, tmp_path, channel, _resolve, lambda *a, **k: None)
+        await anyio.sleep(0.05)
+        map_py.write_text("def map_event(raw:\n", encoding="utf-8")  # syntax error
+        await anyio.sleep(0.1)
+        # Broken file loads nothing, so the event now has no owner — but the
+        # watcher is still alive and recovers when the file is fixed.
+        map_py.write_text("def map_event(raw):\n    return [{'payload': {'v': 2}}]\n", encoding="utf-8")
+        with anyio.fail_after(5):
+            while True:
+                owners = live.for_platform("im.message.receive_v1")
+                if owners and owners[0].map_fn and owners[0].map_fn({"event": {}}) == [{"payload": {"v": 2}}]:
+                    break
+                await live.wait_for_reload()
+        tg.cancel_scope.cancel()

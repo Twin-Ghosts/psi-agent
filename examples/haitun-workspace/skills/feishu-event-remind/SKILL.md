@@ -16,6 +16,7 @@ category: knowledge-base
 | **`event`** | `channel_events` 公布的稳定名（如 `feishu.chat.member_added`） | 不是散文条件 |
 | **`raw_event`** | 平台原生类型（回退匹配） | 不是登记新能力 |
 | **`fire=tool`** | 命中后 Session 直调工具 | 到事时 LLM 不参与 |
+| **`channel_event_check`** | 自查工具：看事件字段结构、试跑自己的 `map.py` | 只读；不发消息、不投真事件 |
 
 ## When to use
 
@@ -45,6 +46,24 @@ category: knowledge-base
 | 需要交接 / 阻塞找人 / 交付物 / 审查 | `handoff.needed` / `blocker.raised` / `deliverable.ready` / `review.requested` | — |
 
 完整表与 SOP 判定见 `channel_events/README.md`。
+
+## 自查：写完先验（触发器不响时第一步做这个）
+
+触发器不响有两类原因，**日志上长得一样**（都只有 `matched=1 fired=[]`），必须用工具分辨：
+
+```text
+channel_event_check(action="list")                              # ① event 名对不对
+channel_event_check(action="probe", event="feishu.chat.member_added")   # ② mapper 出不出信封
+```
+
+- `probe` 显示 `OK — N envelope(s)`：mapper 没问题，把 `TRIGGER.md` 的 `filter` 逐键对照信封里的 `payload`。
+- `probe` 显示 `EMPTY`：mapper 字段路径写错了，输出里会直接列出**实际可读的路径**，照着改。
+- 需要事先知道字段在哪一层：`channel_event_check(action="shape", platform_event="im.message.receive_v1")`。
+  样例由真实 lark SDK 模型生成，例如 `chat_id` 在 `event['message']['chat_id']`，**不在** `event['chat_id']`；
+  发消息人的 open_id 在 `event['sender']['sender_id']['open_id']`。
+
+新写或改完 `channel_events/feishu/<slug>/map.py` 后，Channel 会在数秒内自动重载（不必重启容器），
+但**必须先 `probe` 通过再让用户去试**。
 
 ## Procedure
 
@@ -90,3 +109,4 @@ trigger_manage(
 
 - 禁止手写 TRIGGER；禁止为未接通事件 invent 名
 - 飞书 IM 提醒必须 `fire=tool` + 真实 receive_id（入职确认卡例外：用 `handbook_onboarding_*`，由事件 payload 解析收件人）
+- 自己写过 `map.py` 就必须 `channel_event_check(action="probe", …)` 验一遍；不要凭字段名猜结构，也不要用「让用户再试一次」代替自查

@@ -69,4 +69,18 @@
 channel_events/feishu/<slug>/{EVENT.yaml, map.py|produce.py}
 ```
 
-加事件 = 加目录 + **更新本表** + 重启 Channel。挂钩用 `trigger_manage` / skill `feishu-event-remind`。禁止 invent 表外名。
+加事件 = 加目录 + **更新本表**。`platform_map` 目录新增或 `map.py` 改动由 Channel 自动重载（数秒内生效，无需重启）；`produce.py` 的合成事件生产者仍需重启 Channel。挂钩用 `trigger_manage` / skill `feishu-event-remind`。禁止 invent 表外名。
+
+## 自查（写完先验，别靠上线试）
+
+`map.py` 返回 `[]` 时日志与「去重跳过」长得一模一样，所以**写完必须自查**：
+
+```text
+channel_event_check(action="list")                                    # 加载了哪些事件
+channel_event_check(action="shape", platform_event="im.message.receive_v1")   # 字段到底在哪一层
+channel_event_check(action="probe", event="feishu.chat.member_added")         # 拿样例事件试跑自己的 map.py
+```
+
+`shape` 用真实 `lark_channel` SDK 模型造样例，所以它给的路径就是线上路径 —— 例如
+`im.message.receive_v1` 的 `chat_id` 在 `event['message']['chat_id']`，**不在** `event['chat_id']`。
+`probe` 返回空时会把 mapper 实际拿到的结构和可读路径一并打出来，照着改字段路径即可。
