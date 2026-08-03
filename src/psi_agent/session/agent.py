@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from collections.abc import AsyncGenerator, Callable
 from contextlib import aclosing
@@ -309,8 +310,37 @@ class SessionAgent:
         then read ``run.result`` afterwards to learn *how* the turn ended
         (complete answer, stopped short, turn limit, no finish reason).
         Execution failure still raises ``AgentError`` out of the iteration.
+
+        Layered *on top of* ``run()`` rather than beside it: ``run()`` stays the
+        single implementation, so a subclass that overrides it — or a test that
+        replaces it outright — keeps taking effect here.  An override that does
+        not accept the sink still streams normally and just leaves ``result`` at
+        ``None``, which is what "never reported a terminal state" already means.
         """
-        return AgentRun(lambda run: self._run(user_message, extra_params, response_kind=response_kind, run=run))
+        return AgentRun(lambda sink: self._run_with_sink(user_message, extra_params, response_kind, sink))
+
+    def _run_with_sink(
+        self,
+        user_message: dict[str, Any],
+        extra_params: dict[str, Any] | None,
+        response_kind: str | None,
+        sink: AgentRun,
+    ) -> AsyncGenerator[AgentChunk]:
+        """Call ``run()``, passing only the keyword arguments it accepts.
+
+        ``run()`` gets replaced by test doubles with a narrower
+        ``(user_message, extra_params)`` signature, so the extra keywords are
+        offered rather than assumed — otherwise handing a stub an argument it
+        never declared is a ``TypeError`` at request time.  Real overrides keep
+        the full signature and get the sink.
+        """
+        params = inspect.signature(self.run).parameters
+        kwargs: dict[str, Any] = {}
+        if "response_kind" in params:
+            kwargs["response_kind"] = response_kind
+        if "_result_sink" in params:
+            kwargs["_result_sink"] = sink
+        return self.run(user_message, extra_params, **kwargs)
 
     async def run(
         self,
@@ -318,12 +348,9 @@ class SessionAgent:
         extra_params: dict[str, Any] | None = None,
         *,
         response_kind: str | None = None,
+        _result_sink: AgentRun | None = None,
     ) -> AsyncGenerator[AgentChunk]:
         """Run one turn of the ReAct agent loop.  Yields ``AgentChunk``.
-
-        Backwards-compatible view of ``run_streamed()`` that drops the terminal
-        result.  Prefer ``run_streamed()`` when the caller cares whether the turn
-        actually finished.
 
         The conversation auto-snapshots on the first mutation; on
         failure the snapshot is restored so that memory and disk
@@ -334,20 +361,10 @@ class SessionAgent:
         (schedule runners pass ``schedule.display`` / ``schedule.silent``).
         When omitted, assistant/tool rows inherit the user message's ``kind``
         (Channel turns default to ``chat``).
-        """
-        async with aclosing(self._run(user_message, extra_params, response_kind=response_kind, run=None)) as chunks:
-            async for chunk in chunks:
-                yield chunk
 
-    async def _run(
-        self,
-        user_message: dict[str, Any],
-        extra_params: dict[str, Any] | None = None,
-        *,
-        response_kind: str | None = None,
-        run: AgentRun | None = None,
-    ) -> AsyncGenerator[AgentChunk]:
-        """The agent loop proper.  *run* receives the terminal result, if given."""
+        ``_result_sink`` is filled in by ``run_streamed()``; direct callers of
+        ``run()`` ignore it and just get the chunk stream as before.
+        """
 
         def _finish(
             status: AgentRunStatus,
@@ -355,8 +372,8 @@ class SessionAgent:
             model_finish_reason: str | None,
             model_turns: int,
         ) -> None:
-            if run is not None:
-                run._set_result(
+            if _result_sink is not None:
+                _result_sink._set_result(
                     AgentRunResult(
                         status=status,
                         stop_cause=stop_cause,
