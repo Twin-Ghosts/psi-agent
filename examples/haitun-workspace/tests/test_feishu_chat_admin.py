@@ -839,6 +839,33 @@ async def test_search_messages_hints_missing_authorization(monkeypatch: pytest.M
     assert "本人身份" in hint
 
 
+def test_message_search_capability_grants_the_scope_it_needs() -> None:
+    """The authorize page must actually ask for ``search:message``.
+
+    Found against the live app: ``search/v2`` sits under no prefix in
+    ``_URI_CAPABILITIES``, so inferred capabilities are empty and the consent screen
+    would omit this scope — the user authorizes, and searching still fails with the
+    same permission error. Naming the capability at the call site is what closes that,
+    so both halves are pinned here.
+    """
+    assert "message_search" in _impl.scope_catalog_keys()
+    assert "search:message" in _impl._scope_string(["message_search"])
+
+
+@pytest.mark.asyncio
+async def test_search_messages_asks_for_message_search_capability(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def _no_token(request: Any, **kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"ok": False, "code": 99991663, "message": "no token", "need_auth": True}
+
+    monkeypatch.setattr(_impl, "_invoke", _no_token)
+    await _impl.search_messages_impl("x", user_key="ou_me")
+    assert captured["capabilities"] == ["message_search"]
+    assert captured["prefer"] == "user"
+
+
 # ── Tool layer: every new tool is async, documented, and returns JSON ────────────
 
 

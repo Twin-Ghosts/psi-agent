@@ -3940,7 +3940,10 @@ async def search_messages_impl(
             user_key=key,
             prefer="user",
             identity="user",
-            capabilities=[],
+            # Named explicitly: search/v2 is not under any prefix in _URI_CAPABILITIES,
+            # so inference would yield none and the authorize page would omit
+            # search:message — the user would authorize and still not be able to search.
+            capabilities=["message_search"],
         )
         if not res["ok"]:
             return _with_hint(res, _MESSAGE_SEARCH_HINTS)
@@ -4524,6 +4527,10 @@ _SCOPE_CATALOG: dict[str, tuple[str, ...]] = {
     "task_write": ("task:task:write",),
     "calendar_write": ("calendar:calendar",),
     "contact_read": ("contact:contact.base:readonly",),
+    # Searching message *content* is user-only (no tenant equivalent), and the scope is
+    # not implied by any im:* permission the bot already holds — so a caller who
+    # authorizes without naming it gets a token that still cannot search.
+    "message_search": ("search:message",),
     # Phone/email are separately gated: without these the contact tools still
     # succeed but return those fields empty, so ask for them only when needed.
     "contact_phone_email_read": (
