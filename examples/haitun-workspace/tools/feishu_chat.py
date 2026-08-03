@@ -23,6 +23,7 @@ from __future__ import annotations
 # ruff: noqa: E402
 import sys
 from pathlib import Path
+from typing import Any
 
 TOOLS_DIR = Path(__file__).resolve().parent
 if str(TOOLS_DIR) not in sys.path:
@@ -479,7 +480,7 @@ async def feishu_chat_menu_get(chat_id: str, user_key: str = "") -> str:
     return _f.dumps_result(await _f.get_chat_menu_impl(chat_id, user_key))
 
 
-async def feishu_chat_menu_add(chat_id: str, menus: list[dict] | None = None, user_key: str = "") -> str:
+async def feishu_chat_menu_add(chat_id: str, menus: list[dict[str, Any]] | None = None, user_key: str = "") -> str:
     """Add buttons to a Feishu/Lark group's **群菜单** (群底部的快捷入口).
 
     ``menus`` is a flat list: ``[{"name": "值班表", "url": "https://…"}]``, or with
