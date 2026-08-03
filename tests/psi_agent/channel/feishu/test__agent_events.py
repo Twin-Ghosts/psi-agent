@@ -514,12 +514,13 @@ async def test_watcher_swaps_an_edited_mapper_without_reregistering(
     first = live.for_platform("im.message.receive_v1")[0]
     assert first.map_fn is not None
     assert first.map_fn({"event": {}}) == []
-    installed = _register_platform_map(live, channel, lambda _o: None, lambda *a, **k: None)
-    assert installed == 2  # p1 + p2
-    processor = channel.dispatcher._processorMap["p2.im.message.receive_v1"]
 
     async def _resolve(_open_id: str | None) -> Any:
         raise AssertionError("not reached")
+
+    installed = _register_platform_map(live, channel, _resolve, lambda *a, **k: None)
+    assert installed == 2  # p1 + p2
+    processor = channel.dispatcher._processorMap["p2.im.message.receive_v1"]
 
     async with anyio.create_task_group() as tg:
         tg.start_soon(agent_events._watch_channel_events, live, tmp_path, channel, _resolve, lambda *a, **k: None)
