@@ -57,12 +57,12 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 ## Agent Loop 逻辑
 
 1. 收到 channel 请求 → `ChannelAdapter.handle()` 解析请求，提取 user_message + extra_params
-2. `SessionAgent.run()` 入口：
+2. `SessionAgent.run()` 入口（`handle_request` 经 `run_streamed()` 进入，见「运行终态」）：
    - add() / replace_system() 在首次变更时自动建立快照（implicit snapshot）
    - 惰性构建或重建 system prompt（首次 run 或 rebuild checker 返回 True 时）；随后把本回合的易变块挂到 user 消息上（见「每回合易变上下文」）
    - 检查暂存的 schedule 响应 → peek + yield → yield 全部成功后 `clear_pending()`
    - User message 追加到 history 后立即 ``commit()`` 落盘
-3. 获取 `anyio.Lock`（忙则 FIFO 排队等待）—— `handle_request()` 在调用 `run()` 前持有
+3. 获取 `anyio.Lock`（忙则 FIFO 排队等待）—— `handle_request()` 在调用 `run_streamed()` 前持有
 4. 通过 `AiClient.stream()` 发送 `history + tools + extra_params` 到 AI backend（streaming）
 5. 消费 `AiDelta` 流（AiClient 已做好 SSE 解析、错误检测）：
    - content → `yield AgentChunk(content=...)` 给 ChannelAdapter
@@ -150,8 +150,8 @@ Session 层使用两个对称的协议适配器，将 `SessionAgent.run()` 包�
 ### ChannelAdapter（`channel_adapter.py`）
 - 纯无状态编解码——`parse_request()` 和 `write()` 两个入口
 - `parse_request(request) → (user_message, extra_params)` — HTTP JSON 解析
-- `write(response, chunks)` — 消费 `AgentChunk` 迭代器，写入 SSE 到 response
-- 不持有 agent / lock 引用，不调用 `agent.run()`
+- `write(response, chunks)` — 消费 `AgentChunk` 流（结构化 `_ChunkStream`：`AgentRun` 或裸 generator 都收），写入 SSE 到 response
+- 不持有 agent / lock 引用，不调用 `agent.run()` / `agent.run_streamed()`
 
 ### 核心类型
 | 类型 | 方向 | 职责 |
@@ -184,11 +184,12 @@ result = run.result   # 正常耗尽后非 None
 
 几处刻意为之：
 
-- **`stop_cause` 与 `model_finish_reason` 分两列**，不合并：后者是模型的原始诊断串（照抄，含本代码还不认识的新 reason），前者是 **runtime 视角**的停止原因。多个 finish reason（以及「压根没有」）会collapse 成同一个 runtime cause，而 `AGENT_TURN_LIMIT` 在模型侧根本没有对应值。
+- **`stop_cause` 与 `model_finish_reason` 分两列**，不合并：后者是模型的原始诊断串（照抄，含本代码还不认识的新 reason），前者是 **runtime 视角**的停止原因。多个 finish reason（以及「压根没有」）会 collapse 成同一个 runtime cause，而 `AGENT_TURN_LIMIT` 在模型侧根本没有对应值。
 - **`None` finish reason 单独归 `INVALID_MODEL_STREAM`**，不跟 `MODEL_STOPPED` 混：排错时「模型提前停了」和「我们没听到它为什么停」是两回事。
 - **`AGENT_TURN_LIMIT` 而非 "tool limit"**：受限的是 agent/model loop 的**轮数**，一轮可能含多个工具调用。配置名 `max_tool_rounds` 暂留以兼容。
 - **`run()` 保留**为 `run_streamed()` 的丢弃 result 版本（纯 `AsyncGenerator`），schedule / trigger runner 等现有调用点一字不改。
-- **SSE 线上形状不变**：result 归调用方读，永不作为 chunk 进流。`handle_request` 只把它写进日志（不完整则 WARNING）。`ChannelAdapter.write()` 用结构化 `_ChunkStream` Protocol 同时接 `AgentRun` 和裸 generator——直接 import `AgentRun` 会让 `agent` ↔ `channel_adapter` 成环，而适配器除了迭代 + 关闭并不需要 run 的任何东西。
+- **SSE 线上形状不变**：result 归调用方读，永不作为 chunk 进流。`handle_request` 只把它写进日志（不完整则 WARNING，与 loop 内 `Reached max tool rounds` / `Unexpected finish_reason` 同级）。`ChannelAdapter.write()` 用结构化 `_ChunkStream` Protocol 同时接 `AgentRun` 和裸 generator——直接 import `AgentRun` 会让 `agent` ↔ `channel_adapter` 成环，而适配器除了迭代 + 关闭并不需要 run 的任何东西。
+- **`AgentRun` 显式实现 `aclose()`**（转发给内部 generator）：它本身不是 async generator，缺了这个方法根 AGENTS.md 坑 16 的 `async with aclosing(run)` 就会 `AttributeError`。消费方一律照旧用 `aclosing()` 包裹，提前退出 / 被 cancel 时 loop 内 `aclosing(ai_client.stream(...))` 才会随之释放上游连接。
 
 ## SessionAgent 支持多种传输
 

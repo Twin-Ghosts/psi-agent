@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import socket as _s
 import textwrap
@@ -1356,16 +1357,25 @@ async def test_run_streamed_result_is_none_until_stream_exhausted(tmp_path: Path
 
 @pytest.mark.anyio
 async def test_agent_run_result_is_immutable() -> None:
+    """Frozen + slotted, asserted by introspection rather than by assignment.
+
+    A literal ``result.status = ...`` is a static type error on a frozen
+    dataclass, and routing around it via ``setattr`` would need a ``noqa`` —
+    the repo allows neither, so check the guarantee at its source.
+    """
     result = AgentRunResult(
         status=AgentRunStatus.COMPLETED,
         stop_cause=AgentStopCause.MODEL_COMPLETED,
         model_finish_reason="stop",
         model_turns=1,
     )
-    # Via setattr: a direct ``result.status = ...`` is a static type error on a
-    # frozen dataclass, but the point here is the *runtime* guarantee.
-    with pytest.raises((AttributeError, TypeError)):
-        setattr(result, "status", AgentRunStatus.INCOMPLETE)  # noqa: B010
+    assert result.__dataclass_params__.frozen
+    assert not hasattr(result, "__dict__")  # slots=True
+
+    # Immutability is "derive a new value", not "mutate in place".
+    evolved = dataclasses.replace(result, status=AgentRunStatus.INCOMPLETE)
+    assert evolved.status is AgentRunStatus.INCOMPLETE
+    assert result.status is AgentRunStatus.COMPLETED
 
 
 @pytest.mark.anyio

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import json
 from collections.abc import AsyncGenerator, Callable
 from contextlib import aclosing
@@ -312,35 +311,14 @@ class SessionAgent:
         Execution failure still raises ``AgentError`` out of the iteration.
 
         Layered *on top of* ``run()`` rather than beside it: ``run()`` stays the
-        single implementation, so a subclass that overrides it — or a test that
-        replaces it outright — keeps taking effect here.  An override that does
-        not accept the sink still streams normally and just leaves ``result`` at
-        ``None``, which is what "never reported a terminal state" already means.
+        single implementation of the loop, so a subclass that overrides it keeps
+        taking effect here.  An override that ignores ``_result_sink`` simply
+        leaves ``result`` at ``None`` — which is already what "never reported a
+        terminal state" means.
         """
-        return AgentRun(lambda sink: self._run_with_sink(user_message, extra_params, response_kind, sink))
-
-    def _run_with_sink(
-        self,
-        user_message: dict[str, Any],
-        extra_params: dict[str, Any] | None,
-        response_kind: str | None,
-        sink: AgentRun,
-    ) -> AsyncGenerator[AgentChunk]:
-        """Call ``run()``, passing only the keyword arguments it accepts.
-
-        ``run()`` gets replaced by test doubles with a narrower
-        ``(user_message, extra_params)`` signature, so the extra keywords are
-        offered rather than assumed — otherwise handing a stub an argument it
-        never declared is a ``TypeError`` at request time.  Real overrides keep
-        the full signature and get the sink.
-        """
-        params = inspect.signature(self.run).parameters
-        kwargs: dict[str, Any] = {}
-        if "response_kind" in params:
-            kwargs["response_kind"] = response_kind
-        if "_result_sink" in params:
-            kwargs["_result_sink"] = sink
-        return self.run(user_message, extra_params, **kwargs)
+        return AgentRun(
+            lambda sink: self.run(user_message, extra_params, response_kind=response_kind, _result_sink=sink)
+        )
 
     async def run(
         self,
