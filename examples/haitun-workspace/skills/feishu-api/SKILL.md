@@ -31,6 +31,12 @@ category: integration
 | 解散群 / 转让群主 | `feishu_chat_dismiss` / `feishu_chat_transfer_owner` | 解散**不可逆且不保留群记录**，工具要求显式 `confirm="解散群"` |
 | 群菜单 / 群标签页 | `feishu_chat_menu_*` / `feishu_chat_tab*` | 菜单是三层嵌套包装对象、带子菜单的一级菜单不能有链接；标签页 11 种类型只有 2 种能建 |
 | 搜索消息 | `feishu_message_search` | 只吃 user token，且**只返回 message_id**，必须回查才有正文 |
+| 建/改用户、办离职 | `feishu_user_manage` | 离职**不可逆**且无上级时日历/问卷被直接删除，工具要求 `confirm="离职用户"`；改用户没传的字段不能变成清空 |
+| 建/改/删/移动部门 | `feishu_department_manage` | 删部门**不可逆**且要求部门先清空（有人 43011 / 有子部门 43012，只能最深层往上删），工具要求 `confirm="删除部门"` |
+| 建/改/删用户组 | `feishu_user_group` | 删组会让引用它的文档权限/审批流失去主体，要求 `confirm="删除用户组"`；建组硬要求通讯录范围=全部成员 |
+| 增删用户组成员 | `feishu_user_group_members` | 飞书**一次只收一个成员**，工具循环并逐人回报成败；三个 member_* 参数不一致就 41072 |
+| 按手机号/邮箱查人 | `feishu_contact_find` | 是 **POST** 不是 GET；企业邮箱一律查不到；离职的人默认**静默漏掉** |
+| 部门树 / 部门详情 | `feishu_department_tree` / `feishu_department_get` | 递归+分页+去重，且 43010「部门过大」必须暴露出来而不是静默少一层 |
 
 判断方法：先用 `tool_search` 找一下有没有 `feishu_` 开头的对应工具；有就用它。
 
@@ -70,8 +76,71 @@ feishu_api(
 | 查部门成员 | `GET /open-apis/contact/v3/users/find_by_department` | `query: department_id, page_size(≤50), page_token` |
 | 按名字全局搜人 | `GET /open-apis/search/v1/user` | `query: query, page_size`；**只支持 user token**，必须 `prefer="user"` + `user_key` |
 | 部门列表 | `GET /open-apis/contact/v3/departments/:department_id/children` | `query: page_size` |
+| 批量查部门 | `GET /open-apis/contact/v3/departments/batch` | `query: department_ids` **重复同名 key** 传多个（`?department_ids=a&department_ids=b`），一次最多 50 个 |
+| 父部门链 | `GET /open-apis/contact/v3/departments/parent` | `query: department_id(必填), page_size(≤50)`；返回**子→父**顺序且不含根部门 |
+| 搜索部门 | `POST /open-apis/contact/v3/departments/search` | body `{"query":"部门名"}`；**只吃 user token**（`prefer="user"` + `user_key`），只匹配中文名不匹配国际化名 |
+| 恢复离职成员 | `POST /open-apis/contact/v3/users/:user_id/resurrect` | 办错离职的回退路径；用户被删太久可能已不可恢复 |
+| 人员类型枚举 | `GET /open-apis/contact/v3/employee_type_enums` | 建用户的 `employee_type` 自定义枚举号从这儿查 |
 
 根部门 id 是 `0`。`user_id_type` 不传默认可能不是 open_id，查人时显式写上。
+部门树和部门详情用 `feishu_department_tree` / `feishu_department_get`（已含递归、分页、
+父链拼接和 43010 处理），别用上面两行手搓。
+
+#### 角色（functional_role）
+
+**飞书没有「列出所有角色」的接口** —— 这是最容易凭直觉试错的地方。`role_id` 只能从
+建角色的返回值拿，或让用户去管理后台「组织架构 > 角色管理」里抄。别去猜一个
+`/functional_roles` 的 GET，那个端点不存在。
+
+| 要什么 | method + uri | 说明 |
+|---|---|---|
+| 查角色下全部成员 | `GET /open-apis/contact/v3/functional_roles/:role_id/members` | `query: page_size(≤100), user_id_type`；返回 `members[]` 含 `scope_type`（All/Part/None）与 `department_ids`（仅 Part 时有） |
+| 查某成员管理范围 | `GET /open-apis/contact/v3/functional_roles/:role_id/members/:member_id` | 单人的管理范围 |
+| 建角色 | `POST /open-apis/contact/v3/functional_roles` | body `{"role_name":"考勤管理员"}`，租户内唯一；返回 `role_id`（**记下来**，没有列表接口可以再查） |
+| 改角色名 | `PUT /open-apis/contact/v3/functional_roles/:role_id` | |
+| 删角色 | `DELETE /open-apis/contact/v3/functional_roles/:role_id` | |
+| 批量加角色成员 | `POST /open-apis/contact/v3/functional_roles/:role_id/members/batch_create` | body `{"members":["ou_..."]}`（1-100）；返回逐人 `reason`：1 成功 / 2 id 非法 / 3 无该用户权限 / 4 已在角色 / 5 不在角色 |
+| 批量删角色成员 | `POST /open-apis/contact/v3/functional_roles/:role_id/members/batch_delete` | |
+| 批量设管理范围 | `PATCH /open-apis/contact/v3/functional_roles/:role_id/members/scopes` | |
+
+scope 是 `contact:functional_role`（只读用 `contact:functional_role:readonly`）；
+只吃 tenant token。`41202` = role_id 不存在，`41209` = 角色成员超 1000。
+
+#### 用户组查询
+
+用户组的增删改和成员增删用 `feishu_user_group` / `feishu_user_group_members`。
+补充两个只读端点：详情 `GET /open-apis/contact/v3/group/:group_id`、
+列表 `GET /open-apis/contact/v3/group/simplelist`（`query: type` 1 普通 2 动态）——
+注意路径是**单数 `group`**，没有 `/groups`。
+
+反查「这个人在哪些用户组」的端点是 `GET /open-apis/contact/v3/group/member_belong`
+（本文档未逐字核对其 query 参数名，第一次调用先看飞书的报错提示）。
+
+#### 关联组织（外部联系人）
+
+飞书 `contact/v3` 里**没有 `external_user` 端点**。组织级的「外部联系人」是
+**关联组织**（trust_party），scope `trust_party:collaboration.tenant:readonly`：
+
+| 要什么 | method + uri |
+|---|---|
+| 可见关联组织列表 | `GET /open-apis/trust_party/v1/collaboration_tenants` — `query: page_size(1-100, 默认10), page_token` |
+| 关联组织详情 | `GET /open-apis/trust_party/v1/collaboration_tenants/:tenant_key` |
+| 对方可见部门/成员 | `GET /open-apis/trust_party/v1/collaboration_tenants/:tenant_key/visible_organization` |
+| 对方部门详情 | `GET .../collaboration_tenants/:tenant_key/collaboration_departments/:department_id` |
+| 对方成员详情 | `GET .../collaboration_tenants/:tenant_key/collaboration_users/:user_id` |
+
+`1970011` = page_size 越界，`1970012` = page_token 非法。
+若用户说的「外部联系人」其实是外部群里的人，那是 `feishu_chat_list_members`，不是这套。
+
+#### 通讯录写操作为什么老是失败
+
+这一批写端点**只吃 tenant token**（scope `contact:contact` / `contact:group` /
+`contact:functional_role`），让用户授权也没用。而失败最常见的真因不是参数写错：
+
+- `40004` / `41050` / `42009` —— 应用的**通讯录权限范围**没覆盖到目标部门/用户/用户组。
+  这是开发者后台配的，改代码没用。
+- `42010` —— 建用户组硬要求范围 = **全部成员**（只有这个动作要求）。
+- 用 tenant token 查根部门 `0` 的子部门同样要求范围 = 全部成员，否则**返回空而不报错**。
 
 ### 考勤
 
