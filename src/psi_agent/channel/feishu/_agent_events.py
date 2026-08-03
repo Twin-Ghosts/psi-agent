@@ -283,15 +283,29 @@ def _log_empty_mapping(edef: ChannelEventDef, raw_dict: dict[str, Any]) -> None:
     ``matched=1 fired=[]`` looks identical whether the mapper dropped the event
     or Session deduped it, so print the shape the mapper actually saw and the
     paths that hold values. A wrong field path becomes obvious by comparison.
+
+    A mapper that declares ``filters: true`` in ``EVENT.yaml`` subscribes to a
+    broad platform event on purpose and returns ``[]`` for every delivery it
+    does not care about (``identity_changed`` ignores avatar/phone edits, which
+    are most of ``contact.user.updated_v3``). For those, an empty result is
+    normal operation, so it goes to DEBUG with the same detail — WARNING on
+    every filtered delivery would be routine noise, and a diagnostic that cries
+    wolf stops being read.
     """
     body = _event_body(raw_dict)
     paths = non_null_paths(body)
     shown = ", ".join(paths[:18]) or "(none)"
+    seen = f"The mapper saw event{{{describe_shape(body)}}}. Readable paths: {shown}."
+    if edef.filters:
+        logger.debug(
+            f"{edef.name}: map_event returned no envelopes (filters: true — expected for most deliveries). {seen}"
+        )
+        return
     logger.warning(
         f"{edef.name}: map_event returned no envelopes — event dropped, "
-        f"no trigger will fire. The mapper saw event{{{describe_shape(body)}}}. "
-        f"Readable paths: {shown}. Compare these against the field paths in "
-        f"{edef.path / 'map.py'}; the channel_event_check tool replays a sample event."
+        f"no trigger will fire. {seen} Compare these against the field paths in "
+        f"{edef.path / 'map.py'}; the channel_event_check tool replays a sample event. "
+        f"If returning [] is intended here, declare `filters: true` in EVENT.yaml."
     )
 
 

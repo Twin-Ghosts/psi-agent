@@ -259,7 +259,7 @@ async def test_framework_fills_key_when_mapper_omits_it() -> None:
     assert all(k for k in keys)
 
 
-def _def_with(map_fn: Any, name: str = "feishu.test.probe") -> ChannelEventDef:
+def _def_with(map_fn: Any, name: str = "feishu.test.probe", *, filters: bool = False) -> ChannelEventDef:
     return ChannelEventDef(
         dir_name="probe",
         name=name,
@@ -270,6 +270,7 @@ def _def_with(map_fn: Any, name: str = "feishu.test.probe") -> ChannelEventDef:
         map_fn=map_fn,
         produce_fn=None,
         path=HAITUN,
+        filters=filters,
     )
 
 
@@ -313,6 +314,47 @@ async def test_raising_mapper_is_logged_with_shape() -> None:
     blob = "\n".join(messages)
     assert "map_event raised" in blob
     assert "KeyError" in blob
+
+
+@pytest.mark.anyio
+async def test_declared_filter_does_not_warn_on_empty_result() -> None:
+    """`filters: true` means [] is normal — warning on each would be routine noise.
+
+    identity_changed subscribes to contact.user.updated_v3 and drops avatar /
+    phone edits, which are most deliveries org-wide.
+    """
+    warnings: list[str] = []
+    debugs: list[str] = []
+    warn_handle = logger.add(lambda m: warnings.append(m.record["message"]), level="WARNING")
+    debug_handle = logger.add(lambda m: debugs.append(m.record["message"]), level="DEBUG")
+    try:
+        posted = await _forward(
+            _def_with(lambda _raw: [], filters=True),
+            {"header": {"event_id": "evt-f1"}, "event": {"message": {"chat_id": "oc_1"}}},
+        )
+    finally:
+        logger.remove(warn_handle)
+        logger.remove(debug_handle)
+    assert posted == []
+    assert not [m for m in warnings if "returned no envelopes" in m]
+    # Still diagnosable — same shape/paths detail, just at DEBUG.
+    blob = "\n".join(debugs)
+    assert "returned no envelopes" in blob
+    assert "message.chat_id" in blob
+
+
+@pytest.mark.anyio
+async def test_undeclared_empty_result_still_warns_and_suggests_filters() -> None:
+    """Without `filters: true`, [] stays a WARNING and names the escape hatch."""
+    messages: list[str] = []
+    handle = logger.add(lambda m: messages.append(m.record["message"]), level="WARNING")
+    try:
+        await _forward(_def_with(lambda _raw: []), {"header": {"event_id": "evt-f2"}, "event": {}})
+    finally:
+        logger.remove(handle)
+    blob = "\n".join(messages)
+    assert "returned no envelopes" in blob
+    assert "filters: true" in blob
 
 
 def test_live_defs_group_by_platform_event() -> None:

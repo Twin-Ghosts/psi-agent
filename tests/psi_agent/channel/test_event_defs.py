@@ -257,6 +257,35 @@ def test_identity_changed_skips_non_identity_fields() -> None:
     assert envs == []
 
 
+@pytest.mark.anyio
+async def test_identity_changed_declares_filters() -> None:
+    """The mapper above returns [] by design, so it must declare ``filters: true``.
+
+    Otherwise the live path warns "event dropped" on every avatar / phone edit
+    in the org — routine noise that trains readers to ignore the diagnostic.
+    """
+    defs = await load_channel_event_defs(HAITUN, "feishu")
+    by_name = {d.name: d for d in defs}
+    assert by_name["feishu.hr.identity_changed"].filters is True
+    # Mappers that only return [] on malformed payloads must NOT claim to filter.
+    assert by_name["feishu.chat.member_added"].filters is False
+    assert by_name["feishu.hr.user_created"].filters is False
+
+
+@pytest.mark.anyio
+async def test_filters_defaults_false_and_parses_from_yaml(tmp_path: Path) -> None:
+    slug = tmp_path / "channel_events" / "feishu" / "filtered"
+    await anyio.Path(str(slug)).mkdir(parents=True)
+    await anyio.Path(str(slug / "map.py")).write_text("def map_event(raw):\n    return []\n", encoding="utf-8")
+    header = "name: feishu.test.filtered\nsource: feishu\nkind: platform_map\nplatform_event: im.test.v1\n"
+    await anyio.Path(str(slug / "EVENT.yaml")).write_text(header, encoding="utf-8")
+    defs = await load_channel_event_defs(tmp_path, "feishu")
+    assert defs[0].filters is False
+    await anyio.Path(str(slug / "EVENT.yaml")).write_text(header + "filters: true\n", encoding="utf-8")
+    defs = await load_channel_event_defs(tmp_path, "feishu")
+    assert defs[0].filters is True
+
+
 def test_identity_changed_status_resigned() -> None:
     mod = _load_identity_map()
     envs = mod.map_event(

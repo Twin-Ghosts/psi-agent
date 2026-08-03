@@ -4,7 +4,7 @@ Layout (per channel name, e.g. ``feishu``)::
 
     {agent}/channel_events/<channel>/
         <event_dir>/
-            EVENT.yaml   # name, source, platform_event?, kind, …
+            EVENT.yaml   # name, source, platform_event?, kind, filters?, …
             map.py       # required for kind=platform_map: map_event(raw) -> list[dict]
             produce.py   # required for kind=synthetic: async produce(ctx) -> None
 
@@ -51,6 +51,11 @@ class ChannelEventDef:
     map_fn: MapEventFn | None
     produce_fn: ProduceFn | None
     path: Path
+    # ``filters: true`` in EVENT.yaml — this mapper returns [] as normal
+    # operation (it subscribes to a broad platform event and keeps only some
+    # deliveries), so an empty result is not evidence of a bug. Governs the log
+    # level only; see ``feishu/_agent_events._log_empty_mapping``.
+    filters: bool = False
 
 
 async def load_channel_event_defs(agent_root: Path, channel: str) -> list[ChannelEventDef]:
@@ -85,6 +90,7 @@ async def load_channel_event_defs(agent_root: Path, channel: str) -> list[Channe
             kind = str(header.get("kind") or "platform_map").strip().casefold()
             platform_event = str(header.get("platform_event") or "").strip()
             description = str(header.get("description") or "").strip()
+            filters = bool(header.get("filters") or False)
             map_fn: MapEventFn | None = None
             produce_fn: ProduceFn | None = None
             map_file = entry / "map.py"
@@ -120,6 +126,7 @@ async def load_channel_event_defs(agent_root: Path, channel: str) -> list[Channe
                     map_fn=map_fn,
                     produce_fn=produce_fn,
                     path=Path(str(entry)),
+                    filters=filters,
                 )
             )
             logger.info(

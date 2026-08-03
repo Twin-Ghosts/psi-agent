@@ -17,7 +17,7 @@
 | **首次**新的信封 `source` 字符串 | agent `channel_events/` **+** Session `event_protocol.KNOWN_SOURCES` | Channel 业务清单；不要为每条 event 改 Session |
 | 进总线后的反应 | agent `triggers/`（`trigger_manage`） | Channel 源码 |
 
-**重启 Channel**（`--agent` / `PSI_AGENT` 指向该包）后生效。只有换 Channel 种类、扩框架接口、修 bug 才动 `src/psi_agent/channel`。
+**生效方式**：`platform_map` 目录新增 / `EVENT.yaml` 与 `map.py` 改动由 Channel **自动重载**（指纹轮询，数秒内生效，无需重启）；`kind: synthetic` 的 `produce.py` 生产者**仍需重启 Channel**（运行中的常驻任务不能安全替换）。只有换 Channel 种类、扩框架接口、修 bug 才动 `src/psi_agent/channel`。
 
 **分层口诀（后人）：** `source` = 管道品牌（很少加）；`event` = 管道里的具体事（常加）。绝大多数注册 = **只动 agent 包加 event**；只有「新一类生产者 / 改信封形状」才动 Session `event_protocol`（新 source 进 `KNOWN_SOURCES`）。Session **没有**业务 event catalog，但会对未知 `source` 硬拒。
 
@@ -25,7 +25,7 @@
 
 ## 一句话
 
-**有新的、可观测的「触发器」需求 → 在 agent 包 `channel_events/<channel>/` 补一条事件定义（≈ 加 tool）→ 重启 Channel；用户订反应再写 `triggers/`（≈ 订 schedule）。**  
+**有新的、可观测的「触发器」需求 → 在 agent 包 `channel_events/<channel>/` 补一条事件定义（≈ 加 tool）→ `platform_map` 自动重载生效（`synthetic` 重启 Channel）；用户订反应再写 `triggers/`（≈ 订 schedule）。**  
 Session 只负责 `POST /events` 统一转发 + 按 TRIGGER 开火，**没有**业务事件 catalog 要维护。
 
 ---
@@ -66,7 +66,7 @@ examples/haitun-workspace/channel_events/     # 或其他 Session --agent 包根
 
 | 文件 | 作用 |
 |------|------|
-| `EVENT.yaml` | 稳定 `name`（TRIGGER 的 `event:`）、`kind`、`platform_event`（仅官方） |
+| `EVENT.yaml` | 稳定 `name`（TRIGGER 的 `event:`）、`kind`、`platform_event`（仅官方）、`filters`（可选；见下） |
 | `map.py` | **官方** `platform_map`：平台原始载荷 → Session 信封 |
 | `produce.py` | **自定义** `synthetic`：长驻协程，条件满足时 `await ctx.emit(信封)` |
 
@@ -94,9 +94,10 @@ Feishu Channel 启动需指向同一 agent 包：`--agent` 或 `PSI_AGENT`。
 
 1. 确认飞书有对应官方 event + 权限/订阅。  
 2. 新建 `channel_events/feishu/<slug>/`。  
-3. `EVENT.yaml`：`kind: platform_map` + `platform_event`。  
-4. `map.py`：`def map_event(raw: dict) -> list[dict]`。  
-5. 重启 Channel；更新 skill 对照表（只列已接通名）。  
+3. `EVENT.yaml`：`kind: platform_map` + `platform_event`；若该 mapper 对大多数投递按设计返回 `[]`（只保留部分投递），加 `filters: true`。  
+4. `map.py`：`def map_event(raw: dict) -> list[dict]`。**字段在哪一层不要猜** —— 先 `channel_event_check(action="shape", platform_event=…)`（样例由真实 lark SDK 模型生成）。  
+5. **自查**：`channel_event_check(action="probe", event=<name>)` 必须先出 `OK`，再让用户去试。mapper 返回 `[]` 在日志里与「去重跳过」无法区分，靠上线试等于没验。  
+6. 自动重载（数秒）即生效；更新 skill 对照表与 `channel_events/README.md`（只列已接通名）。  
 
 ### B. 自定义合成（`synthetic`）
 
@@ -105,7 +106,7 @@ Feishu Channel 启动需指向同一 agent 包：`--agent` 或 `PSI_AGENT`。
 3. `EVENT.yaml`：`kind: synthetic`（**不要**填 `platform_event`）。  
 4. `produce.py`：`async def produce(ctx)` — 循环/等待；`await ctx.emit({...})`；可用 `anyio.sleep`；Channel 关停会 cancel。  
 5. `ctx.event_name` / `ctx.source` 已由框架填好；信封建议带 `payload`、`idempotency_key`、`routing.open_id`。  
-6. 重启 Channel；需要时订 `triggers/`。  
+6. **重启 Channel**（`produce.py` 是常驻任务，不参与自动重载）；需要时订 `triggers/`。  
 
 挂钩（提醒文案、调哪个工具）用 `trigger_manage` / `triggers/`，**不要**在 `channel_events` 里写业务动作。
 
@@ -132,3 +133,5 @@ Feishu Channel 启动需指向同一 agent 包：`--agent` 或 `PSI_AGENT`。
 - Feishu 下新事件默认**只改 agent 包**；不要为每个事件在 Channel 再写一个 onXxx。  
 - 任意 NL「xx 事」永远可行 —— **不承诺**；未接通就明确说暂不支持。  
 - `demo_tick` 默认空转；仅 `HAITUN_CHANNEL_EVENTS_DEMO=1` 时发一次演示信封，正式业务勿复用其 `name`。
+- **`platform_map` 热重载靠「不捕获 def」**：装进 dispatcher 的 processor 每次投递现查当前定义，而不是闭包捕获 `ChannelEventDef`。lark 在 `start_background()` 重建 `_processorMap` 且已存在的 key 会被跳过，一个 `platform_event` 只有一次安装机会 —— 捕获了 def 就把首次加载的 `map.py` 焊死，之后改字段路径永不生效。
+- **`filters: true` 只降日志级别，不改行为**：声明后 `map_event` 返回 `[]` 记 DEBUG（细节一样）而非 WARNING。给宽事件里按设计只留一部分投递的 mapper 用（`identity_changed` 丢掉头像/手机号变更）；逐条 WARNING 是例行噪声，会让人学会忽略这条本来用于抓「字段路径写错」的诊断。只在畸形载荷时返回 `[]` 的 mapper 不许声明。

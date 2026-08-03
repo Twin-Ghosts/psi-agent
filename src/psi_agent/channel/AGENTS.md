@@ -9,6 +9,9 @@ channel/
 ├── _markers.py        # [RECV:]/[SEND:] 标记协议（纯函数 encode_input + 有状态扫描器 SendMarkerScanner）
 ├── _stream.py         # SSE 解析 iter_sse_events + interval 缓冲 StreamBuffer（与传输解耦）
 ├── _core.py           # ChannelCore — 连接管理 + post() 编排
+├── _event_defs.py     # 加载 agent 包 channel_events/<channel>/（EVENT.yaml + map.py|produce.py）+ 变更指纹
+├── _event_shapes.py   # 事件载荷 → 纯数据（plainify）与形状/字段路径推导；线上路径与自查工具共用
+├── _synthetic.py      # kind=synthetic 统一 runner（produce.py 的 SyntheticContext.emit）
 ├── cli/
 │   ├── __init__.py     # ChannelCli dataclass
 │   └── client.py       # 单次消息 thin client (~32行)
@@ -20,6 +23,7 @@ channel/
 │   └── client.py       # Bot handler + 流式 + 文件收发 (~186行)
 └── feishu/
     ├── __init__.py       # ChannelFeishu dataclass
+    ├── _agent_events.py  # channel_events/feishu 接线：注册平台 processor、热重载 watcher、空/异常映射诊断
     ├── _card_action.py   # 交互卡片回调解析、单次消费、上下文信封与确定性分发 (~350行)
     ├── _card_store.py    # AppData 卡片快照与持久 single-use tombstone (~150行)
     └── client.py         # Bot 生命周期、通用流式回复、文件收发、评论/审批事件与按用户路由 (~820行)
@@ -93,6 +97,8 @@ Channel 层是 psi-agent 的用户界面层，负责连接 Session socket 并通
 
 - 通过 lark-channel-sdk 的 `FeishuChannel.start_background()` 建立 WebSocket 长连接（SDK 推荐的 async 启动：后台拉起、握手就绪即返回；`connect()` 是旧的前台阻塞式），关停用 `stop_background()`
 - **触发器事件（agent ``channel_events/feishu``）**：``--agent`` / ``PSI_AGENT`` 指向 agent 包；``start_background()`` 之后 ``register_feishu_agent_events``：（1）``kind=platform_map`` 按 ``platform_event`` 注册 CustomizedEventProcessor，``map.py`` → ``post_event``；（2）``kind=synthetic`` 由统一 runner（``_synthetic.start_synthetic_producers``）在 TaskGroup 里跑各目录 ``produce.py`` 的 ``async produce(ctx)``，``await ctx.emit`` → 同一 ``post_event``。**（刻意为之）** 业务清单只在 agent 包维护（≈ 加 tool）；Feishu 已接线后新增事件**不要**再改 ``src/…/channel``。新业务 ``event`` 默认只动 agent；**新**信封 ``source`` 才外加 Session ``KNOWN_SOURCES``（见 ``session/AGENTS.md`` / developer-guide）。交付准则见 ``docs/superpowers/specs/2026-07-29-channel-events-developer-guide.md``。产品用语：**触发器**（旧称「定事」已弃用）。
+- **热重载（`platform_map` 免重启）**：``_watch_channel_events`` 每 5s 比一次 ``channel_events_fingerprint``（``EVENT.yaml``/``map.py``/``produce.py`` 的 size + ``st_mtime_ns`` 取 sha256），变了就重新 ``load_channel_event_defs`` 并补注册新增的 ``platform_event``。**（刻意为之）安装进 dispatcher 的 processor 绝不闭包捕获 ``ChannelEventDef``**，而是每次投递时从 ``_LiveEventDefs`` 现查——``start_background()`` 会重建 ``_processorMap`` 且已存在的 key 会被跳过，一个 ``platform_event`` 只有一次安装机会，捕获了 def 就等于把首次加载的 ``map.py`` 焊死，之后改字段路径永远不生效。故改 ``map.py`` / 新建目录数秒内自动生效（这也是让 agent 能「改完自己验」的前提），但 ``kind: synthetic`` 的 ``produce.py`` **仍需重启 Channel**——运行中的常驻生产者任务不能安全替换。指纹用 ``st_mtime_ns`` 而非内容哈希；``_exec_py_module`` 用 ``compile``+``exec`` 而非 ``importlib``（根 AGENTS.md 坑 13：热重载常见等长改写会命中 ``.pyc`` 缓存）。
+- **映射诊断（``_log_empty_mapping``）**：``map_event`` 返回 ``[]`` 时打印它**实际看到的**载荷形状（``describe_shape``）与有值字段路径（``non_null_paths``），因为 Session 侧 ``matched=1 fired=[]`` 无法区分「mapper 丢弃」与「去重跳过」，字段路径写错本来完全静默。**（刻意为之）``EVENT.yaml`` 的 ``filters: true`` 只降日志级别**：声明后空结果记 DEBUG（同样细节）而非 WARNING——``identity_changed`` 订阅 ``contact.user.updated_v3`` 却按设计丢掉头像/手机号变更（占绝大多数投递），逐条 WARNING 属例行噪声，会训练读者忽略这条诊断；只在**大多数投递按设计返回 []** 时才加，仅对畸形载荷返回 ``[]`` 的 mapper 不许声明。
 - **并发模型（刻意为之）**：lark SDK 在自己的后台线程/event loop 上派发消息回调；`_on_message` 通过 `anyio.from_thread.BlockingPortal.start_task_soon` 把处理协程桥接回主 anyio loop（取代 asyncio `run_coroutine_threadsafe`，遵守「一切异步用 anyio」原则）。`run_feishu` / `run_telegram` 把**启动调用**（telegram: initialize/start/start_polling；feishu: start_background）一并纳入 `try`，`finally` 用 `anyio.CancelScope(shield=True)` 保护——**启动中途失败与正常 cancel 两条路径都会执行关停**，不泄露 bot 连接。**（刻意为之）关停按步骤 best-effort：逐个 `try/except Exception` 吞掉清理异常并 WARNING**——partial-startup 下库会抛 "not running" 之类错误，吞掉以免遮蔽原始异常或中断后续 teardown；`except Exception` 不吞 `CancelledError`，勿把这层 swallow 当 bug "修掉"
 - **（刻意为之）`_handle_and_stream` 外层防御 try/except**：它是 `start_task_soon` 投递的任务，内部任何未捕获异常（包括错误通知 `channel.send` 失败）都会逃逸到 portal。外层 `except Exception` 兜底并记录 ERROR，确保单条消息处理崩溃不拖垮整个 bot；不吞 `CancelledError`，勿把这层 try 当 bug "修掉"
 - 所有消息（text/post/file/audio）均转化为 InputChunk：文本→TextChunk，文件→下载→FileChunk

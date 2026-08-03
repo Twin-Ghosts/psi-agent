@@ -113,7 +113,7 @@ service tools:
 
 | 情况 | 最小改动 | 不要动 |
 |------|----------|--------|
-| 已有 `source` 下加新 `event` | **仅本 agent 包** `channel_events/`（+ README；重启 Channel） | Session / Channel 框架 |
+| 已有 `source` 下加新 `event` | **仅本 agent 包** `channel_events/`（+ README；`platform_map` 由 Channel 自动重载，`synthetic` 的 `produce.py` 才需重启） | Session / Channel 框架 |
 | **首次**新 `source` 字符串 | agent `channel_events/` **+** Session `KNOWN_SOURCES` | Channel 业务清单；不要为每条 event 改 Session |
 | 改信封字段 / `POST /events` 形状 | Session `event_protocol` | 不要用改协议冒充「加一条业务事件」 |
 | 事件已接通，只要「每次就提醒」 | 只写 `triggers/` | 不必再注册 event |

@@ -58,7 +58,7 @@
 | 稳定 `event` | slug | `platform_event` | 主要 SOP |
 |--------------|------|------------------|----------|
 | `feishu.chat.member_added` | `member_added` | `im.chat.member.user.added_v1` | 通用 |
-| `feishu.hr.identity_changed` | `identity_changed` | `contact.user.updated_v3` | 10（字段级身份变） |
+| `feishu.hr.identity_changed` | `identity_changed` | `contact.user.updated_v3` | 10（字段级身份变，`filters: true`） |
 | `feishu.hr.user_created` | `user_created` | `contact.user.created_v3` | 3 / 10 入职入口 |
 
 ---
@@ -70,6 +70,19 @@ channel_events/feishu/<slug>/{EVENT.yaml, map.py|produce.py}
 ```
 
 加事件 = 加目录 + **更新本表**。`platform_map` 目录新增或 `map.py` 改动由 Channel 自动重载（数秒内生效，无需重启）；`produce.py` 的合成事件生产者仍需重启 Channel。挂钩用 `trigger_manage` / skill `feishu-event-remind`。禁止 invent 表外名。
+
+### `EVENT.yaml` 的 `filters`（可选，默认 `false`）
+
+只在**大多数投递按设计返回 `[]`** 时声明 `filters: true`：这类 mapper 订阅一个很宽的
+`platform_event`，只挑其中一部分留下。例如 `identity_changed` 订阅
+`contact.user.updated_v3`，但组织里绝大多数是改头像/手机号，它一律丢弃。
+
+声明后**只有日志级别变化**：空结果记 DEBUG 而非 WARNING，细节（形状 + 有值路径）完全一样。
+不声明的话每次改头像都刷一条「event dropped」警告，属例行噪声，读者很快就学会忽略它 ——
+而这条诊断本来是用来抓「字段路径写错」的。
+
+反过来，**只在畸形载荷时返回 `[]`** 的 mapper（如 `member_added` / `user_created`）**不要**声明：
+它们的空结果确实说明出了问题，该报警。
 
 ## 自查（写完先验，别靠上线试）
 
@@ -83,4 +96,6 @@ channel_event_check(action="probe", event="feishu.chat.member_added")         # 
 
 `shape` 用真实 `lark_channel` SDK 模型造样例，所以它给的路径就是线上路径 —— 例如
 `im.message.receive_v1` 的 `chat_id` 在 `event['message']['chat_id']`，**不在** `event['chat_id']`。
-`probe` 返回空时会把 mapper 实际拿到的结构和可读路径一并打出来，照着改字段路径即可。
+`probe` 返回空时会把 mapper 实际拿到的结构和可读路径一并打出来，照着改字段路径即可；
+若该事件声明了 `filters: true`，`probe` 会提示空结果可能是正常过滤（样例是通用的，过滤器有权拒绝），
+要验接受分支就得让样例带上 `map.py` 真正需要的字段。

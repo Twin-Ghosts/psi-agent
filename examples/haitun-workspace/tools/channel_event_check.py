@@ -245,7 +245,8 @@ def _render_list(defs: list[Any]) -> str:
     for edef in sorted(defs, key=lambda d: d.name):
         if edef.kind == "platform_map":
             probe = " (probe: platform_event known)" if edef.platform_event in _SAMPLES else " (no sample available)"
-            lines.append(f"- {edef.name}  ← {edef.platform_event}{probe}")
+            filt = "  [filters: true — [] is normal for most deliveries]" if getattr(edef, "filters", False) else ""
+            lines.append(f"- {edef.name}  ← {edef.platform_event}{probe}{filt}")
         else:
             lines.append(f"- {edef.name}  ({edef.kind}, produce.py)")
     lines += [
@@ -278,21 +279,43 @@ def _render_probe(edef: Any, raw_dict: dict[str, Any], note: str, envelopes: Any
             f"  map_event returned {type(envelopes).__name__}, must be list[dict].",
         ]
     elif not envelopes:
-        lines += [
-            "## Result: EMPTY — no envelope, no trigger would fire",
-            "",
-            "The mapper read at least one field that does not exist. It was given:",
-            f"  event{{{describe_shape(body)}}}",
-            "",
-            "Paths that actually hold a value:",
-        ]
-        lines.extend(f"  {_as_subscript(path)}" for path in non_null_paths(body))
-        lines += [
-            "",
-            "Compare those against the paths in map.py. Note a filter that",
-            "compares against a missing field (e.g. chat_type != 'group' when",
-            "chat_type is None) also returns [] and looks identical to dedup.",
-        ]
+        if getattr(edef, "filters", False):
+            lines += [
+                "## Result: EMPTY — but this event declares `filters: true`",
+                "",
+                "So [] may be correct: this mapper subscribes to a broad platform",
+                "event and keeps only some deliveries. The sample below is a generic",
+                "one, which the filter is entitled to reject. It was given:",
+                f"  event{{{describe_shape(body)}}}",
+                "",
+                "Paths that actually hold a value:",
+            ]
+            lines.extend(f"  {_as_subscript(path)}" for path in non_null_paths(body))
+            lines += [
+                "",
+                "To exercise the accepting branch, check which fields map.py requires",
+                "and confirm the sample carries them — for a field-change filter the",
+                "sample needs the changed field present in both `object` and",
+                "`old_object`. If the filter rejects everything, that is the bug.",
+            ]
+        else:
+            lines += [
+                "## Result: EMPTY — no envelope, no trigger would fire",
+                "",
+                "The mapper read at least one field that does not exist. It was given:",
+                f"  event{{{describe_shape(body)}}}",
+                "",
+                "Paths that actually hold a value:",
+            ]
+            lines.extend(f"  {_as_subscript(path)}" for path in non_null_paths(body))
+            lines += [
+                "",
+                "Compare those against the paths in map.py. Note a filter that",
+                "compares against a missing field (e.g. chat_type != 'group' when",
+                "chat_type is None) also returns [] and looks identical to dedup.",
+                "If returning [] is intended for most deliveries, declare",
+                "`filters: true` in EVENT.yaml so the live log stops warning.",
+            ]
     else:
         lines += [f"## Result: OK — {len(envelopes)} envelope(s)", ""]
         for index, env in enumerate(envelopes):

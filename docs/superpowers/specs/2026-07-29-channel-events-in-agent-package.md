@@ -35,12 +35,15 @@ TriggerRegistry 匹配 triggers/ → fire
 
 ```text
 {agent}/channel_events/feishu/<slug>/
-  EVENT.yaml     # name, source, kind=platform_map|synthetic, platform_event?
+  EVENT.yaml     # name, source, kind=platform_map|synthetic, platform_event?, filters?
   map.py         # platform_map: def map_event(raw) -> list[envelope_dict]
   produce.py     # synthetic: async def produce(ctx); await ctx.emit(envelope)
 ```
 
-Feishu Channel：`--agent` / `PSI_AGENT` 指向该包；启动后注册 `platform_event`，并在 TaskGroup 中启动全部 `synthetic` 的 `produce.py`。
+`filters: true`（可选）声明本 mapper 按设计对大多数投递返回 `[]`（订阅宽事件只留一部分），
+仅影响空结果的日志级别：DEBUG 而非 WARNING。
+
+Feishu Channel：`--agent` / `PSI_AGENT` 指向该包；启动后注册 `platform_event`，并在 TaskGroup 中启动全部 `synthetic` 的 `produce.py`。此后 `EVENT.yaml` / `map.py` 的改动与新增 `platform_map` 目录由指纹 watcher **自动重载**（无需重启）；`produce.py` 是常驻任务，改动仍需重启 Channel。
 
 **验收**：Feishu 接线完成后，后续开发者只按 developer guide 改 agent 包即可，不必再为每个事件改 Channel 源码。
 ---
