@@ -3866,14 +3866,16 @@ async def _hydrate_message(message_id: str, user_key: str) -> dict[str, Any]:
     data = res["data"] if isinstance(res["data"], dict) else {}
     items = data.get("items")
     item = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else data
-    sender = item.get("sender") if isinstance(item.get("sender"), dict) else {}
-    body = item.get("body") if isinstance(item.get("body"), dict) else {}
+    raw_sender = item.get("sender")
+    sender = raw_sender if isinstance(raw_sender, dict) else {}
+    raw_body = item.get("body")
+    body = raw_body if isinstance(raw_body, dict) else {}
     return {
         "message_id": message_id,
         "readable": True,
         "chat_id": item.get("chat_id", "") or "",
-        "sender_id": sender.get("id", "") if isinstance(sender, dict) else "",
-        "sender_type": sender.get("sender_type", "") if isinstance(sender, dict) else "",
+        "sender_id": sender.get("id", ""),
+        "sender_type": sender.get("sender_type", ""),
         "msg_type": body.get("message_type") or item.get("msg_type", "") or "",
         "create_time": item.get("create_time", "") or "",
         "text": _message_plain_text(item),
