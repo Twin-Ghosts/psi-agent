@@ -15,6 +15,7 @@ from __future__ import annotations
 
 # ruff: noqa: E402
 import json
+import pathlib
 import sys
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,8 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 import _feishu_impl as _f
+import _feishu_spec as _spec
+import _runtime_paths as _paths
 from lark_channel.core.enum import AccessTokenType, HttpMethod
 from lark_channel.core.model import BaseRequest
 
@@ -118,6 +121,89 @@ def _warning_for(uri: str) -> str:
     return ""
 
 
+def _skills_dir() -> str:
+    """Where the endpoint tables live. Agent root, same place the model reads them from."""
+    return str(pathlib.Path(_paths.agent_dir()) / "skills")
+
+
+def _spec_refusal(
+    rule: Any, body: dict[str, Any], query: dict[str, Any], paths: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Refuse this call if the endpoint table says it cannot succeed as written.
+
+    This is the difference between a table the model *reads* and a table that
+    *executes*. Feishu accepts a bare ``!A1`` range and a mismatched Bitable column
+    with ``code: 0`` and writes nothing — a warning attached to a successful-looking
+    result is indistinguishable from success to the caller, so the only useful place
+    to stop is before the request goes out.
+    """
+    if rule is None:
+        return None
+    if rule.prefer_tool and rule.prefer_hard:
+        why = f" — {rule.why}" if rule.why else ""
+        return _f.error_result(
+            f"这个端点请用 {rule.prefer_tool}{why}",
+            code="use_dedicated_tool",
+            tool=rule.prefer_tool,
+            endpoint=rule.endpoint,
+        )
+    if violations := _spec.validate(rule, body, query, paths):
+        return _f.error_result(
+            "请求没有发出 —— 端点表校验未通过: " + "; ".join(violations),
+            code="spec_violation",
+            endpoint=rule.endpoint,
+            violations=violations,
+            pitfalls=rule.pitfalls or None,
+            note="若确认飞书已放宽该限制, 改 skills/*/SKILL.md 里这条 rules 而不是绕过校验",
+        )
+    return None
+
+
+async def _send_paged(
+    build: Any,
+    paginate: dict[str, Any],
+    invoke_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Follow ``page_token`` until Feishu says there is no more, concatenating items.
+
+    This is what makes a paging endpoint expressible as a table row. The protocol is
+    the same everywhere — ask with ``page_size``, read ``has_more`` and the next
+    ``page_token`` back — so the only per-endpoint facts are which key holds the items
+    and how big a page to ask for, both of which come from the rule.
+
+    A partial failure returns what was already collected alongside the error: for a
+    roster read, three pages of members plus "page 4 was rate-limited" is useful,
+    while discarding everything is not. Callers can tell the difference because
+    ``ok`` is false and ``partial`` is set.
+    """
+    key = paginate["items"]
+    collected: list[Any] = []
+    token = ""
+    for page in range(1, paginate["max_pages"] + 1):
+        res = await _f._invoke(build(token), **invoke_kwargs)
+        if not res.get("ok"):
+            if collected:
+                return {**res, "partial": True, key: collected, "count": len(collected), "pages": page - 1}
+            return res
+        data = res.get("data") if isinstance(res.get("data"), dict) else {}
+        chunk = data.get(key)
+        if isinstance(chunk, list):
+            collected.extend(chunk)
+        token = str(data.get("page_token", "") or "")
+        if not data.get("has_more") or not token:
+            return {"ok": True, "code": 0, key: collected, "count": len(collected), "pages": page}
+    return {
+        "ok": True,
+        "code": 0,
+        key: collected,
+        "count": len(collected),
+        "pages": paginate["max_pages"],
+        "truncated": True,
+        "message": f"已读 {paginate['max_pages']} 页后停止 —— 飞书仍报 has_more。"
+        f"若结果确实该更多, 检查 skills 里这条 rules 的 paginate.items 是否写对了键名。",
+    }
+
+
 def _query_pairs(query: dict[str, Any]) -> dict[str, Any]:
     """Stringify query values; keep lists as lists so the SDK repeats the key."""
     out: dict[str, Any] = {}
@@ -198,14 +284,44 @@ async def call_api_impl(
             code="missing_path_params",
         )
 
+    # Endpoint table: refuse what it says cannot work, then fill the defaults it
+    # declares. Both happen before the request is built, so a violation costs nothing.
+    rule = _spec.rules_for(_skills_dir(), verb, path)
+    if refusal := _spec_refusal(rule, body, query, paths):
+        return refusal
+    for name, value in _spec.defaults_for(rule)["query"].items():
+        query.setdefault(name, value)
+    for name, value in _spec.defaults_for(rule)["body"].items():
+        body.setdefault(name, value)
+
     strategy = "user" if (prefer or "").strip().lower() == "user" else "tenant"
+    # A rule that names its token strategy overrides the default, not an explicit
+    # caller choice: "user" is the caller insisting, and some endpoints only accept it.
+    if rule is not None and rule.token and (prefer or "").strip().lower() != "user":
+        strategy = "user" if rule.token == "user" else "tenant"
+
+    invoke_kwargs = {
+        "user_key": user_key or None,
+        "prefer": strategy,
+        "identity": (identity or "").strip(),
+    }
+    paginate = rule.paginate if rule is not None else None
+    if paginate and verb in ("GET", "POST"):
+        # A fresh request per page: `_invoke` mutates what it is given (token_types
+        # narrowed by verify, files stripped from the body), so re-sending one object
+        # with a new token would send it under an identity the caller never chose.
+        def build_page(token: str, _pg: dict[str, Any] = paginate) -> BaseRequest:
+            paged = dict(query)
+            paged.setdefault(_pg["param"], _pg["page_size"])
+            if token:
+                paged["page_token"] = token
+            return _build_request(_METHODS[verb], path, body, paged, paths, strategy)
+
+        res = await _send_paged(build_page, paginate, invoke_kwargs)
+        return _f._with_hint(res, _ALL_HINTS)
+
     request = _build_request(_METHODS[verb], path, body, query, paths, strategy)
-    res = await _f._invoke(
-        request,
-        user_key=user_key or None,
-        prefer=strategy,
-        identity=(identity or "").strip(),
-    )
+    res = await _f._invoke(request, **invoke_kwargs)
     res = _f._with_hint(res, _ALL_HINTS)
     if (note := _warning_for(path)) and not res.get("ok", True):
         res = {**res, "warning": note}
