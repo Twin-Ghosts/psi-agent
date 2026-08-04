@@ -12,12 +12,14 @@ from aiohttp import ClientSession, ClientTimeout, web
 
 from psi_agent.session.agent import SessionAgent
 from psi_agent.session.ai_client import AiClient
+from psi_agent.session.conversation import Conversation
 from psi_agent.session.event_protocol import (
     EVENT_FEISHU_CHAT_MEMBER_ADDED,
     EventProtocolError,
     filter_matches,
     parse_event_envelope,
 )
+from psi_agent.session.runtime_context import get_agent, get_session_id, get_workspace
 from psi_agent.session.schedule_registry import FIRE_TOOL
 from psi_agent.session.tool_registry import FileEntry, ToolFunction, ToolRegistry
 from psi_agent.session.trigger_registry import TriggerRegistry
@@ -232,10 +234,10 @@ async def test_dispatch_fire_tool(tmp_path: Path) -> None:
 
 @pytest.mark.anyio
 async def test_post_events_http(tmp_path: Path) -> None:
-    called: list[str] = []
+    called: list[tuple[str, str, str, str]] = []
 
     async def ping(text: str = "") -> str:
-        called.append(text)
+        called.append((text, get_session_id(), get_workspace(), get_agent()))
         return "ok"
 
     tools = ToolRegistry()
@@ -266,11 +268,15 @@ async def test_post_events_http(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     registry = await TriggerRegistry.load(tmp_path / "triggers")
+    workspace_path = tmp_path / "workspace"
+    agent_path = tmp_path / "agent"
     agent = SessionAgent(
         ai_client=AiClient("http://nonexistent/v1"),
+        conversation=Conversation(path=tmp_path / "histories" / "event-session.jsonl"),
         tool_registry=tools,
         trigger_registry=registry,
-        workspace_path=tmp_path,
+        workspace_path=workspace_path,
+        agent_path=agent_path,
     )
     app = web.Application()
     app.router.add_post("/events", agent.handle_event)
@@ -300,7 +306,7 @@ async def test_post_events_http(tmp_path: Path) -> None:
             assert data["ok"] is True
             assert data["matched"] == 1
             assert data["fired"] == ["http-t"]
-        assert called == ["from-http"]
+        assert called == [("from-http", "event-session", str(workspace_path), str(agent_path))]
 
         async with (
             ClientSession(timeout=timeout) as s,

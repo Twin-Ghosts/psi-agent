@@ -5,7 +5,8 @@ and cannot identify which Session is executing a tool.
 
 **Scope (keep narrow — see ``session/AGENTS.md``):**
 
-- **Writer**: only ``SessionAgent.run`` via ``runtime_scope``.
+- **Writers**: only ``SessionAgent.run`` and ``SessionAgent.handle_event`` via
+  ``runtime_scope``.
 - **Readers**: workspace tools only (``get_session_id`` / ``get_workspace`` /
   ``get_agent``). Framework code must use explicit ``workspace_path`` /
   ``agent_path`` / ``Conversation.session_id``, not these getters.
@@ -13,7 +14,8 @@ and cannot identify which Session is executing a tool.
   ContextVars; prefer DI / dataclass fields.
 
 ``SessionAgent.run`` enters ``runtime_scope`` for the duration of a turn;
-anyio tasks started from that context inherit the values.
+``SessionAgent.handle_event`` enters it while matching and dispatching triggers.
+Anyio tasks started from either context inherit the values.
 """
 
 from __future__ import annotations
@@ -76,6 +78,6 @@ def path_scope(*, workspace: str = "", agent: str = "") -> Iterator[None]:
 
 @contextmanager
 def runtime_scope(*, session_id: str, workspace: str = "", agent: str = "") -> Iterator[None]:
-    """Bind session id + workspace + agent for one agent turn."""
+    """Bind session id + workspace + agent for one turn or event dispatch."""
     with session_id_scope(session_id), path_scope(workspace=workspace, agent=agent):
         yield

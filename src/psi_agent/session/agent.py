@@ -281,8 +281,13 @@ class SessionAgent:
             return web.json_response({"error": str(e)}, status=400)
 
         async with self._lock:
-            matched = self._trigger_registry.match(envelope)
-            fired = await self._trigger_registry.dispatch(envelope, self)
+            with runtime_scope(
+                session_id=self._conversation.session_id,
+                workspace=str(self._workspace_path) if self._workspace_path is not None else "",
+                agent=str(self._agent_path) if self._agent_path is not None else "",
+            ):
+                matched = self._trigger_registry.match(envelope)
+                fired = await self._trigger_registry.dispatch(envelope, self)
 
         logger.info(f"POST /events ok event={envelope.event!r} matched={len(matched)} fired={fired!r}")
         return web.json_response(

@@ -20,7 +20,7 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 
 | | 约定 |
 |--|------|
-| **唯一写入方** | 仅 `SessionAgent.run` 经 `runtime_scope`（整轮含 tool 执行）。禁止 Gateway / Channel / AI / 测试外业务代码自行 `set_*` |
+| **唯一写入方** | 仅 `SessionAgent.run`（对话整轮）和 `SessionAgent.handle_event`（事件匹配与触发器执行）经 `runtime_scope`。禁止 Gateway / Channel / AI / 测试外业务代码自行 `set_*` |
 | **`get_session_id()`** | 仅 **workspace 工具**需要「当前会话 id」时（如 `todo`、fusion memory）。框架内部用 `Conversation.session_id` / 显式参数 |
 | **`get_workspace()` / `get_agent()`** | 仅 **workspace 工具**在解析相对路径、找 agent 包根时（`write`/`bash`/`read` 等）。**框架核心**（`SessionAgent` / registries / Gateway / Channel）一律用构造时的 `workspace_path` / `agent_path` 或 REST 入参，**禁止**回读 ContextVar |
 | **禁止扩进 ContextVar 的** | AppData / 记忆区根、API key、provider、Gateway listen、任意「方便全局拿一下」的配置——这些走显式字段 / DI / CLI |
