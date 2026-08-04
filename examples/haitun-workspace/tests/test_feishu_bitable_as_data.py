@@ -483,10 +483,10 @@ def test_kept_tool_rule_says_why(method: str, uri: str, tool: str) -> None:
 
 def test_kept_tools_still_exist() -> None:
     """A hard rule pointing at a deleted tool would be a dead end with no way forward."""
-    import feishu_bitable  # noqa: PLC0415
+    tools: Any = importlib.import_module("feishu_bitable")
 
     for _, _, tool in KEPT_TOOLS:
-        assert hasattr(feishu_bitable, tool), f"{tool} is named by a hard rule but no longer exists"
+        assert hasattr(tools, tool), f"{tool} is named by a hard rule but no longer exists"
 
 
 # --------------------------------------------------------- refusals stay in their lane

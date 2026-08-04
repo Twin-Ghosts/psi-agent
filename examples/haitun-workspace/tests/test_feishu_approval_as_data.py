@@ -374,8 +374,8 @@ def test_approve_and_reject_are_separate_endpoints(monkeypatch: pytest.MonkeyPat
     """
     approved, _ = _call(monkeypatch, "approve")
     rejected, _ = _call(monkeypatch, "reject")
-    assert approved.requests[0].uri.endswith("/tasks/approve")
-    assert rejected.requests[0].uri.endswith("/tasks/reject")
+    assert approved.requests[0].uri == WAS["approve"]["uri"]
+    assert rejected.requests[0].uri == WAS["reject"]["uri"]
     assert approved.requests[0].uri != rejected.requests[0].uri
 
 
@@ -493,7 +493,7 @@ def test_subscribe_is_not_swallowed_by_the_definition_rule(monkeypatch: pytest.M
     cap, out = _call(monkeypatch, "subscribe")
     assert out.get("ok") is not False, out
     assert cap.requests, "subscribe was refused by its parent rule"
-    assert cap.requests[0].uri.endswith("/subscribe")
+    assert cap.requests[0].uri == WAS["subscribe"]["uri"]
 
 
 def test_listing_instances_is_not_swallowed_by_the_create_rule(monkeypatch: pytest.MonkeyPatch) -> None:
