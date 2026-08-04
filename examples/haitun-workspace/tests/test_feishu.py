@@ -236,85 +236,6 @@ async def test_drive_add_comment_tool_returns_json(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.asyncio
-async def test_find_chat_builds_search_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"items": [{"chat_id": "oc_1", "name": "主群", "description": "d"}], "has_more": False})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.find_chat_impl("主群", False, 50, "")
-    req = cap.request
-    assert req.http_method.name == "GET"
-    assert req.uri.endswith("/chats/search")
-    assert _qdict(req).get("query") == "主群"
-    assert result["matches"][0]["chat_id"] == "oc_1"
-    assert result["count"] == 1
-
-
-@pytest.mark.asyncio
-async def test_find_chat_exact_filters(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {"items": [{"chat_id": "oc_1", "name": "主群"}, {"chat_id": "oc_2", "name": "主群通知"}], "has_more": False}
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.find_chat_impl("主群", True)
-    assert result["count"] == 1
-    assert result["matches"][0]["chat_id"] == "oc_1"
-
-
-@pytest.mark.asyncio
-async def test_create_chat_builds_request_and_returns_chat_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"chat_id": "oc_new", "name": "项目群", "invalid_user_id_list": []})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_chat_impl("项目群", ["ou_a", "ou_b"], description="d")
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri.endswith("/im/v1/chats")
-    assert _qdict(req).get("user_id_type") == "open_id"
-    assert req.body["name"] == "项目群"
-    assert req.body["description"] == "d"
-    assert req.body["user_id_list"] == ["ou_a", "ou_b"]
-    assert "set_bot_manager" not in _qdict(req)  # no owner → bot stays owner
-    assert result["ok"] is True
-    assert result["chat_id"] == "oc_new"
-    assert result["invited_count"] == 2
-
-
-@pytest.mark.asyncio
-async def test_create_chat_owner_is_requester_bot_stays_admin(monkeypatch: pytest.MonkeyPatch) -> None:
-    # owner_id is the requester's sender_open_id: the group is handed to them, and
-    # set_bot_manager keeps the bot on as admin so it can still post afterwards.
-    cap = _CapturedInvoke({"chat_id": "oc_o", "owner_id": "ou_requester"})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_chat_impl("群", ["ou_a"], owner_id="ou_requester")
-    assert cap.request.body["owner_id"] == "ou_requester"
-    assert _qdict(cap.request).get("set_bot_manager") == "true"
-    assert result["owner_id"] == "ou_requester"
-
-
-@pytest.mark.asyncio
-async def test_create_chat_no_owner_leaves_bot_as_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    # No requester → bot owns the group; set_bot_manager is not sent.
-    cap = _CapturedInvoke({"chat_id": "oc_b"})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    await _impl.create_chat_impl("群", ["ou_a"])
-    assert "owner_id" not in cap.request.body
-    assert "set_bot_manager" not in _qdict(cap.request)
-
-
-@pytest.mark.asyncio
-async def test_create_chat_requires_name() -> None:
-    result = await _impl.create_chat_impl("   ", ["ou_a"])
-    assert result["ok"] is False
-
-
-@pytest.mark.asyncio
-async def test_create_chat_rejects_over_50_members(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"chat_id": "oc_x"})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_chat_impl("群", [f"ou_{i}" for i in range(51)])
-    assert result["ok"] is False
-    assert cap.request is None  # never sent
-
-
-@pytest.mark.asyncio
 async def test_send_message_builds_create_and_returns_thread(monkeypatch: pytest.MonkeyPatch) -> None:
     cap = _CapturedInvoke({"message_id": "om_1", "thread_id": "omt_1", "chat_id": "oc_1"})
     monkeypatch.setattr(_impl, "_invoke", cap)
@@ -784,33 +705,6 @@ async def test_reaction_tools_return_json(monkeypatch: pytest.MonkeyPatch) -> No
     assert json.loads(await mod.feishu_message_unreact("om_1", reaction_id="re1"))["removed"] is True
 
 
-def test_im_tools_are_async_with_docstrings() -> None:
-    chat_mod = importlib.import_module("feishu_chat")
-    msg_mod = importlib.import_module("feishu_message")
-    fns = [
-        chat_mod.feishu_chat_find,
-        chat_mod.feishu_chat_create,
-        msg_mod.feishu_message_send,
-        msg_mod.feishu_message_send_card,
-        msg_mod.feishu_message_reply,
-        msg_mod.feishu_message_recall,
-        msg_mod.feishu_message_list,
-        msg_mod.feishu_message_edit,
-        msg_mod.feishu_message_edit_card,
-        msg_mod.feishu_message_react,
-        msg_mod.feishu_message_unreact,
-        msg_mod.feishu_message_reactions,
-        msg_mod.feishu_message_send_image,
-        msg_mod.feishu_message_send_file,
-        msg_mod.feishu_message_send_audio,
-        msg_mod.feishu_message_send_video,
-        msg_mod.feishu_message_send_post,
-    ]
-    for fn in fns:
-        assert inspect.iscoroutinefunction(fn), fn.__name__
-        assert (inspect.getdoc(fn) or "").strip(), f"{fn.__name__} needs a docstring"
-
-
 @pytest.mark.asyncio
 async def test_message_send_tool_returns_json(monkeypatch: pytest.MonkeyPatch) -> None:
     mod = importlib.import_module("feishu_message")
@@ -1261,70 +1155,6 @@ async def test_chat_find_member_tool_returns_json(monkeypatch: pytest.MonkeyPatc
     assert json.loads(out)["matches"][0]["id"] == "ou_9"
 
 
-@pytest.mark.asyncio
-async def test_list_chat_members_returns_full_roster(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "items": [
-                {"name": "张三", "member_id": "ou_1"},
-                {"name": "李四", "member_id": "ou_2"},
-            ],
-            "has_more": False,
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_chat_members_impl("oc_x", "open_id")
-    req = cap.request
-    assert req.uri == "/open-apis/im/v1/chats/:chat_id/members"
-    assert req.paths["chat_id"] == "oc_x"
-    assert result["count"] == 2
-    assert result["members"] == [
-        {"name": "张三", "id": "ou_1", "member_id_type": "open_id"},
-        {"name": "李四", "id": "ou_2", "member_id_type": "open_id"},
-    ]
-
-
-@pytest.mark.asyncio
-async def test_list_chat_members_paginates(monkeypatch: pytest.MonkeyPatch) -> None:
-    paged = _PagedInvoke(
-        [
-            {"items": [{"name": "张三", "member_id": "ou_1"}], "has_more": True, "page_token": "pt2"},
-            {"items": [{"name": "李四", "member_id": "ou_2"}], "has_more": False, "page_token": ""},
-        ]
-    )
-    monkeypatch.setattr(_impl, "_invoke", paged)
-    result = await _impl.list_chat_members_impl("oc_x", "open_id")
-    assert len(paged.requests) == 2
-    assert _qdict(paged.requests[1]).get("page_token") == "pt2"
-    assert result["count"] == 2
-
-
-@pytest.mark.asyncio
-async def test_chat_list_members_tool_returns_json(monkeypatch: pytest.MonkeyPatch) -> None:
-    mod = importlib.import_module("feishu_chat")
-
-    async def _fake(*a: Any, **k: Any) -> dict[str, Any]:
-        return {"ok": True, "members": [{"name": "张三", "id": "ou_9", "member_id_type": "open_id"}], "count": 1}
-
-    monkeypatch.setattr(_impl, "list_chat_members_impl", _fake)
-    out = await mod.feishu_chat_list_members(chat_id="oc_x")
-    assert inspect.iscoroutinefunction(mod.feishu_chat_list_members)
-    assert json.loads(out)["members"][0]["id"] == "ou_9"
-
-
-@pytest.mark.asyncio
-async def test_chat_create_tool_returns_json(monkeypatch: pytest.MonkeyPatch) -> None:
-    mod = importlib.import_module("feishu_chat")
-
-    async def _fake(*a: Any, **k: Any) -> dict[str, Any]:
-        return {"ok": True, "chat_id": "oc_new", "invited": ["ou_a"], "invited_count": 1}
-
-    monkeypatch.setattr(_impl, "create_chat_impl", _fake)
-    out = await mod.feishu_chat_create(name="项目群", user_ids=["ou_a"])
-    assert inspect.iscoroutinefunction(mod.feishu_chat_create)
-    assert json.loads(out)["chat_id"] == "oc_new"
-
-
 # ── Group administration — chat details, add/remove members ───────────────────
 
 
@@ -1421,122 +1251,15 @@ async def test_get_chat_requires_chat_id_and_hints_errors(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
-async def test_add_chat_members_builds_post_and_classifies_leftovers(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "invalid_id_list": ["ou_gone"],
-            "not_existed_id_list": ["ou_nope"],
-            "pending_approval_id_list": ["ou_wait"],
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.add_chat_members_impl("oc_x", ["ou_a", "ou_gone", "ou_nope", "ou_wait"])
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri == "/open-apis/im/v1/chats/:chat_id/members"
-    assert req.paths["chat_id"] == "oc_x"
-    assert req.body == {"id_list": ["ou_a", "ou_gone", "ou_nope", "ou_wait"]}
-    q = _qdict(req)
-    assert q.get("member_id_type") == "open_id"
-    # succeed_type=1 by default: Feishu's own default (0) would add nobody over one bad id.
-    assert q.get("succeed_type") == "1"
-    assert result["added"] == ["ou_a"]
-    assert result["added_count"] == 1
-    # Kept apart because the fixes differ (scope/离职 vs no such id vs owner approval).
-    assert result["invalid_ids"] == ["ou_gone"]
-    assert result["not_existed_ids"] == ["ou_nope"]
-    assert result["pending_approval_ids"] == ["ou_wait"]
-
-
-@pytest.mark.asyncio
-async def test_add_chat_members_validates_input(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    assert "chat_id is required" in (await _impl.add_chat_members_impl("", ["ou_a"]))["message"]
-    assert "user_ids is required" in (await _impl.add_chat_members_impl("oc_x", []))["message"]
-    assert "user_ids is required" in (await _impl.add_chat_members_impl("oc_x", ["  "]))["message"]
-    assert "member_id_type must be" in (await _impl.add_chat_members_impl("oc_x", ["ou_a"], "email"))["message"]
-    assert "at most 50" in (await _impl.add_chat_members_impl("oc_x", [f"ou_{i}" for i in range(51)]))["message"]
-    assert "succeed_type must be" in (await _impl.add_chat_members_impl("oc_x", ["ou_a"], succeed_type=7))["message"]
-    assert cap.request is None  # all rejected before spending a request
-
-
-@pytest.mark.asyncio
-async def test_add_chat_members_dedupes_and_takes_app_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.add_chat_members_impl("oc_x", ["ou_a", " ou_a ", "ou_b"], "app_id", user_key="ou_owner")
-    assert cap.request.body == {"id_list": ["ou_a", "ou_b"]}
-    assert _qdict(cap.request).get("member_id_type") == "app_id"
-    assert cap.user_key == "ou_owner"  # acts as the owner when the bot isn't an admin
-    assert result["requested"] == ["ou_a", "ou_b"]
-
-
-@pytest.mark.asyncio
-async def test_add_chat_members_hints_permission_and_cap(monkeypatch: pytest.MonkeyPatch) -> None:
-    for code, needle in ((232017, "群主"), (232013, "上限"), (232006, "chat_id 无效"), (232028, "外部成员")):
-
-        async def _fail(*a: Any, _code: int = code, **k: Any) -> dict[str, Any]:
-            return {"ok": False, "code": _code, "msg": "nope", "message": "err"}
-
-        monkeypatch.setattr(_impl, "_invoke", _fail)
-        result = await _impl.add_chat_members_impl("oc_x", ["ou_a"])
-        assert needle in result["hint"], code
-        assert result["requested"] == ["ou_a"]  # what was attempted survives the failure
-
-
-@pytest.mark.asyncio
-async def test_remove_chat_members_builds_delete(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"invalid_id_list": ["ou_bad"]})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.remove_chat_members_impl("oc_x", ["ou_a", "ou_bad"])
-    req = cap.request
-    assert req.http_method.name == "DELETE"
-    assert req.uri == "/open-apis/im/v1/chats/:chat_id/members"
-    assert req.body == {"id_list": ["ou_a", "ou_bad"]}
-    # succeed_type is an add-only query; sending it on a DELETE would be noise.
-    assert "succeed_type" not in _qdict(req)
-    assert result["removed"] == ["ou_a"]
-    assert result["removed_count"] == 1
-    assert result["invalid_ids"] == ["ou_bad"]
-
-
-@pytest.mark.asyncio
-async def test_remove_chat_members_validates_and_hints_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    assert "chat_id is required" in (await _impl.remove_chat_members_impl("", ["ou_a"]))["message"]
-    assert "user_ids is required" in (await _impl.remove_chat_members_impl("oc_x", None))["message"]
-    assert cap.request is None
-
-    async def _fail(*a: Any, **k: Any) -> dict[str, Any]:
-        return {"ok": False, "code": 232076, "msg": "cannot kick owner", "message": "err"}
-
-    monkeypatch.setattr(_impl, "_invoke", _fail)
-    assert "群主不能被移出" in (await _impl.remove_chat_members_impl("oc_x", ["ou_owner"]))["hint"]
-
-
-@pytest.mark.asyncio
 async def test_chat_admin_tools_return_json(monkeypatch: pytest.MonkeyPatch) -> None:
     mod = importlib.import_module("feishu_chat")
 
     async def _get(*a: Any, **k: Any) -> dict[str, Any]:
         return {"ok": True, "chat_id": "oc_x", "owner_id": "ou_o", "user_count": 7}
 
-    async def _add(*a: Any, **k: Any) -> dict[str, Any]:
-        return {"ok": True, "added": ["ou_a"], "added_count": 1}
-
-    async def _remove(*a: Any, **k: Any) -> dict[str, Any]:
-        return {"ok": True, "removed": ["ou_a"], "removed_count": 1}
-
     monkeypatch.setattr(_impl, "get_chat_impl", _get)
-    monkeypatch.setattr(_impl, "add_chat_members_impl", _add)
-    monkeypatch.setattr(_impl, "remove_chat_members_impl", _remove)
     assert json.loads(await mod.feishu_chat_get(chat_id="oc_x"))["user_count"] == 7
-    assert json.loads(await mod.feishu_chat_add_members(chat_id="oc_x", user_ids=["ou_a"]))["added_count"] == 1
-    assert json.loads(await mod.feishu_chat_remove_members(chat_id="oc_x", user_ids=["ou_a"]))["removed_count"] == 1
-    for fn in (mod.feishu_chat_get, mod.feishu_chat_add_members, mod.feishu_chat_remove_members):
-        assert inspect.iscoroutinefunction(fn)
+    assert inspect.iscoroutinefunction(mod.feishu_chat_get)
 
 
 # ── Approval — list tasks, read instance, approve/reject ──────────────────────

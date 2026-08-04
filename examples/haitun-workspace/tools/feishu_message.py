@@ -53,7 +53,7 @@ async def feishu_topic_start(
     ``feishu_message_reply(message_id, ..., reply_in_thread=True)``.
 
     Args:
-        chat_id: The target group's chat_id (from ``feishu_chat_find``). Must be a topic group.
+        chat_id: The target group's chat_id (from a 群名搜索 via ``feishu_api``). Must be a topic group.
         text: The topic's opening message.
         at_open_ids: Open_ids to @-mention at the start of the message (optional).
         at_all: When true, prepend an @everyone mention (group must allow @all).
@@ -837,7 +837,7 @@ async def feishu_message_pins(
     the content matters.
 
     Args:
-        chat_id: The group whose pins you want (``oc_...``, from ``feishu_chat_find``
+        chat_id: The group whose pins you want (``oc_...``, from a 群名搜索 via ``feishu_api``
             or ``<feishu_context>``). Pins can only be listed per group.
         start_time: Only pins created at/after this millisecond timestamp (optional;
             empty reaches back to the group's oldest pin).

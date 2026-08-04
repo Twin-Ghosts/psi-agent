@@ -221,212 +221,13 @@ async def test_clear_announcement_on_empty_notice_is_a_no_op(monkeypatch: pytest
 # ── 群设置变更 (update) ──────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
-async def test_update_chat_sends_only_named_fields(monkeypatch: pytest.MonkeyPatch) -> None:
-    seq = _Sequenced([{"data": {}}])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    result = await _impl.update_chat_impl("oc_x", name="新群名")
-    req = seq.request
-    assert req.http_method.name == "PUT"
-    assert req.uri == "/open-apis/im/v1/chats/:chat_id"
-    assert req.paths["chat_id"] == "oc_x"
-    # Renaming must not carry along permission fields Feishu would then apply.
-    assert req.body == {"name": "新群名"}
-    assert result["updated"] == {"name": "新群名"}
-
-
-@pytest.mark.asyncio
-async def test_update_chat_couples_share_card_to_add_member(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Feishu refuses only_owner + allowed, and one half alone leaves the pair
-    # contradictory — so the partner field is derived rather than left to the caller.
-    seq = _Sequenced([{"data": {}}, {"data": {}}])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    await _impl.update_chat_impl("oc_x", add_member_permission="only_owner")
-    assert seq.requests[0].body == {
-        "add_member_permission": "only_owner",
-        "share_card_permission": "not_allowed",
-    }
-    await _impl.update_chat_impl("oc_x", add_member_permission="all_members")
-    assert seq.requests[1].body == {
-        "add_member_permission": "all_members",
-        "share_card_permission": "allowed",
-    }
-
-
-@pytest.mark.asyncio
-async def test_update_chat_accepts_chinese_enum_words(monkeypatch: pytest.MonkeyPatch) -> None:
-    seq = _Sequenced([{"data": {}}])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    await _impl.update_chat_impl(
-        "oc_x",
-        at_all_permission="仅群主和管理员",
-        edit_permission="所有群成员",
-        membership_approval="需审批",
-        chat_type="公开",
-    )
-    assert seq.request.body == {
-        "at_all_permission": "only_owner",
-        "edit_permission": "all_members",
-        "membership_approval": "approval_required",
-        "chat_type": "public",
-    }
-
-
-@pytest.mark.asyncio
-async def test_update_chat_refuses_unknown_values_and_empty_change(monkeypatch: pytest.MonkeyPatch) -> None:
-    seq = _Sequenced([])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    bad_who = await _impl.update_chat_impl("oc_x", add_member_permission="everyone")
-    assert bad_who["ok"] is False
-    assert "all_members" in bad_who["message"]
-
-    bad_approval = await _impl.update_chat_impl("oc_x", membership_approval="maybe")
-    assert bad_approval["ok"] is False
-    assert "approval_required" in bad_approval["message"]
-
-    nothing = await _impl.update_chat_impl("oc_x")
-    assert nothing["ok"] is False
-    # Point at the two things that deliberately are NOT on this endpoint.
-    assert "feishu_chat_mute" in nothing["message"]
-    assert "feishu_chat_transfer_owner" in nothing["message"]
-    assert seq.requests == []  # nothing was sent
-
-
-@pytest.mark.asyncio
-async def test_update_chat_hints_edit_restriction(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_impl, "_invoke", _failing(232002))
-    assert "仅群主和管理员可编辑群信息" in (await _impl.update_chat_impl("oc_x", name="x"))["hint"]
-
-    monkeypatch.setattr(_impl, "_invoke", _failing(232021))
-    assert "image_type='avatar'" in (await _impl.update_chat_impl("oc_x", avatar="img_x"))["hint"]
-
-
 # ── 转让群主 (transfer owner) ────────────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_transfer_owner_sets_owner_id_on_the_update_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
-    seq = _Sequenced([{"data": {}}])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    result = await _impl.transfer_chat_owner_impl("oc_x", "ou_new", user_key="ou_owner")
-    req = seq.request
-    assert req.http_method.name == "PUT"
-    assert req.body == {"owner_id": "ou_new"}
-    assert _qdict(req).get("user_id_type") == "open_id"
-    assert seq.kwargs[0]["user_key"] == "ou_owner"
-    assert result["new_owner_id"] == "ou_new"
-
-
-@pytest.mark.asyncio
-async def test_transfer_owner_requires_target_and_hints_non_member(monkeypatch: pytest.MonkeyPatch) -> None:
-    seq = _Sequenced([])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    assert (await _impl.transfer_chat_owner_impl("oc_x", "  "))["ok"] is False
-    assert (await _impl.transfer_chat_owner_impl("", "ou_new"))["ok"] is False
-    assert (await _impl.transfer_chat_owner_impl("oc_x", "ou_new", "email"))["ok"] is False
-    assert seq.requests == []
-
-    # 232012 is the one an agent will actually hit: the new owner isn't in the group yet.
-    monkeypatch.setattr(_impl, "_invoke", _failing(232012))
-    assert "先用 feishu_chat_add_members" in (await _impl.transfer_chat_owner_impl("oc_x", "ou_new"))["hint"]
 
 
 # ── 解散群 (dismiss) ────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
-async def test_dismiss_requires_explicit_confirmation(monkeypatch: pytest.MonkeyPatch) -> None:
-    seq = _Sequenced([])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    for confirm in ("", "yes", "确认", "解散", "解散群聊"):
-        blocked = await _impl.dismiss_chat_impl("oc_x", confirm)
-        assert blocked["ok"] is False, confirm
-        assert blocked["need_confirmation"] is True
-    # A loosely-worded instruction must not be able to dissolve a group.
-    assert seq.requests == []
-
-
-@pytest.mark.asyncio
-async def test_dismiss_with_confirmation_sends_delete(monkeypatch: pytest.MonkeyPatch) -> None:
-    seq = _Sequenced([{"data": {}}])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    result = await _impl.dismiss_chat_impl("oc_x", "解散群", user_key="ou_owner")
-    req = seq.request
-    assert req.http_method.name == "DELETE"
-    assert req.uri == "/open-apis/im/v1/chats/:chat_id"
-    assert req.paths["chat_id"] == "oc_x"
-    assert result["dismissed"] is True
-
-
-@pytest.mark.asyncio
-async def test_dismiss_hints_owner_only_and_already_gone(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_impl, "_invoke", _failing(232017))
-    assert "群主" in (await _impl.dismiss_chat_impl("oc_x", "解散群"))["hint"]
-
-    monkeypatch.setattr(_impl, "_invoke", _failing(232009))
-    assert "已解散" in (await _impl.dismiss_chat_impl("oc_x", "解散群"))["hint"]
-
-
 # ── 全员禁言 (moderation) ────────────────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_mute_uses_the_moderation_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The trap this guards: the 谁可以发言 value chat_get *reads* cannot be written
-    # through the chat-update body — it needs this separate endpoint.
-    seq = _Sequenced([{"data": {}}])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    result = await _impl.update_chat_moderation_impl("oc_x", "全员禁言", user_key="ou_owner")
-    req = seq.request
-    assert req.http_method.name == "PUT"
-    assert req.uri == "/open-apis/im/v1/chats/:chat_id/moderation"
-    assert req.body == {"moderation_setting": "only_owner"}
-    assert result["moderation_setting"] == "only_owner"
-
-
-@pytest.mark.asyncio
-async def test_mute_maps_release_and_moderator_list(monkeypatch: pytest.MonkeyPatch) -> None:
-    seq = _Sequenced([{"data": {}}, {"data": {}}])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    await _impl.update_chat_moderation_impl("oc_x", "解除禁言")
-    assert seq.requests[0].body == {"moderation_setting": "all_members"}
-
-    await _impl.update_chat_moderation_impl(
-        "oc_x", "moderator_list", speaker_ids=["ou_a", " ou_b "], revoke_ids=["ou_c"]
-    )
-    assert seq.requests[1].body == {
-        "moderation_setting": "moderator_list",
-        "moderator_added_list": ["ou_a", "ou_b"],
-        "moderator_removed_list": ["ou_c"],
-    }
-
-
-@pytest.mark.asyncio
-async def test_mute_rejects_bad_setting_overlap_and_empty_list(monkeypatch: pytest.MonkeyPatch) -> None:
-    seq = _Sequenced([])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    bad = await _impl.update_chat_moderation_impl("oc_x", "禁言所有人")
-    assert bad["ok"] is False
-    assert "moderator_list" in bad["message"]
-
-    # Feishu rejects an id in both lists; catching it here names the id.
-    overlap = await _impl.update_chat_moderation_impl(
-        "oc_x", "moderator_list", speaker_ids=["ou_a"], revoke_ids=["ou_a"]
-    )
-    assert overlap["ok"] is False
-    assert "ou_a" in overlap["message"]
-
-    # moderator_list with nobody named would mute everyone — not what was asked.
-    empty = await _impl.update_chat_moderation_impl("oc_x", "moderator_list")
-    assert empty["ok"] is False
-    assert seq.requests == []
-
-
-@pytest.mark.asyncio
-async def test_mute_hints_meeting_in_progress(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_impl, "_invoke", _failing(232092))
-    hint = (await _impl.update_chat_moderation_impl("oc_x", "全员禁言"))["hint"]
-    assert "开会" in hint
 
 
 # ── 群菜单 (menu) ───────────────────────────────────────────────────────────────
@@ -454,85 +255,6 @@ def _menu_reply(*names: str) -> dict[str, Any]:
     }
 
 
-@pytest.mark.asyncio
-async def test_get_menu_flattens_ids_and_children(monkeypatch: pytest.MonkeyPatch) -> None:
-    seq = _Sequenced([_menu_reply("帮助")])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    result = await _impl.get_chat_menu_impl("oc_x")
-    assert seq.request.uri == "/open-apis/im/v1/chats/:chat_id/menu_tree"
-    assert seq.request.http_method.name == "GET"
-    # The id is the only way to delete a menu, so it has to survive the flattening.
-    assert result["menus"][0]["id"] == "top_0"
-    assert result["menus"][0]["url"] == "https://x/0"
-    assert result["menus"][0]["children"][0]["id"] == "sub_0"
-    assert result["count"] == 1
-
-
-@pytest.mark.asyncio
-async def test_add_menu_builds_feishu_nested_tree(monkeypatch: pytest.MonkeyPatch) -> None:
-    seq = _Sequenced([_menu_reply("值班表")])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    await _impl.add_chat_menu_impl(
-        "oc_x",
-        [
-            {"name": "值班表", "url": "https://example.com/duty", "image_key": "img_1"},
-            {"name": "常用", "children": [{"name": "报销", "url": "https://example.com/fee"}]},
-        ],
-    )
-    body = seq.request.body
-    top = body["menu_tree"]["chat_menu_top_levels"]
-    # A menu with a URL redirects; the icon rides along.
-    assert top[0]["chat_menu_item"]["action_type"] == "REDIRECT_LINK"
-    assert top[0]["chat_menu_item"]["redirect_link"] == {"common_url": "https://example.com/duty"}
-    assert top[0]["chat_menu_item"]["image_key"] == "img_1"
-    assert "children" not in top[0]
-    # A menu with children is a container: action_type NONE and no link of its own.
-    assert top[1]["chat_menu_item"]["action_type"] == "NONE"
-    assert "redirect_link" not in top[1]["chat_menu_item"]
-    assert top[1]["children"][0]["chat_menu_item"]["name"] == "报销"
-
-
-@pytest.mark.asyncio
-async def test_add_menu_enforces_feishu_shape_rules(monkeypatch: pytest.MonkeyPatch) -> None:
-    seq = _Sequenced([])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    assert (await _impl.add_chat_menu_impl("oc_x", []))["ok"] is False
-    # 3 top-level max, 5 children max.
-    assert (await _impl.add_chat_menu_impl("oc_x", [{"name": f"m{i}"} for i in range(4)]))["ok"] is False
-    deep = await _impl.add_chat_menu_impl(
-        "oc_x", [{"name": "多", "children": [{"name": f"c{i}", "url": "https://y"} for i in range(6)]}]
-    )
-    assert deep["ok"] is False
-
-    # A parent with children may not itself redirect or carry an icon.
-    both = await _impl.add_chat_menu_impl(
-        "oc_x", [{"name": "混", "url": "https://y", "children": [{"name": "c", "url": "https://y"}]}]
-    )
-    assert both["ok"] is False
-    assert "只能是分组" in both["message"]
-
-    # A relative link would be accepted by Feishu and then do nothing useful.
-    scheme = await _impl.add_chat_menu_impl("oc_x", [{"name": "x", "url": "example.com"}])
-    assert scheme["ok"] is False
-    assert "http://" in scheme["message"]
-    assert (await _impl.add_chat_menu_impl("oc_x", [{"name": "  "}]))["ok"] is False
-    assert seq.requests == []
-
-
-@pytest.mark.asyncio
-async def test_delete_menu_takes_ids_not_names(monkeypatch: pytest.MonkeyPatch) -> None:
-    seq = _Sequenced([_menu_reply()])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    result = await _impl.delete_chat_menu_impl("oc_x", ["top_0", " top_1 "])
-    assert seq.request.http_method.name == "DELETE"
-    assert seq.request.body == {"chat_menu_top_level_ids": ["top_0", "top_1"]}
-    assert result["deleted"] == ["top_0", "top_1"]
-
-    empty = await _impl.delete_chat_menu_impl("oc_x", [])
-    assert empty["ok"] is False
-    assert "不是菜单名" in empty["message"]
-
-
 # ── 群标签页 (tabs) ─────────────────────────────────────────────────────────────
 
 
@@ -545,62 +267,6 @@ def _tabs_reply(*specs: tuple[str, str, str]) -> dict[str, Any]:
             ]
         }
     }
-
-
-@pytest.mark.asyncio
-async def test_list_tabs_uses_list_tabs_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    seq = _Sequenced([_tabs_reply(("tab_1", "周报", "doc"), ("tab_2", "Pin", "pin"))])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    result = await _impl.list_chat_tabs_impl("oc_x")
-    assert seq.request.uri == "/open-apis/im/v1/chats/:chat_id/chat_tabs/list_tabs"
-    assert seq.request.http_method.name == "GET"
-    # Built-in tabs are listed too — a tab_id from here is not necessarily deletable.
-    assert [t["type"] for t in result["tabs"]] == ["doc", "pin"]
-    assert result["count"] == 2
-
-
-@pytest.mark.asyncio
-async def test_add_tab_builds_content_keyed_by_type(monkeypatch: pytest.MonkeyPatch) -> None:
-    seq = _Sequenced([_tabs_reply(("tab_1", "周报", "doc"))])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    await _impl.add_chat_tab_impl("oc_x", "周报", "doc", "https://feishu.cn/docx/abc")
-    assert seq.request.uri == "/open-apis/im/v1/chats/:chat_id/chat_tabs"
-    assert seq.request.body == {
-        "chat_tabs": [{"tab_name": "周报", "tab_type": "doc", "tab_content": {"doc": "https://feishu.cn/docx/abc"}}]
-    }
-
-
-@pytest.mark.asyncio
-async def test_add_tab_refuses_read_only_types_and_bad_links(monkeypatch: pytest.MonkeyPatch) -> None:
-    seq = _Sequenced([])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    # Nine of Feishu's eleven tab types are built-in; asking for one must not become an
-    # opaque parameter error.
-    for kind in ("pin", "meeting_minute", "task", "images_videos"):
-        refused = await _impl.add_chat_tab_impl("oc_x", "x", kind, "https://y")
-        assert refused["ok"] is False, kind
-        assert "只能读不能建" in refused["message"]
-
-    assert (await _impl.add_chat_tab_impl("oc_x", "  ", "url", "https://y"))["ok"] is False
-    assert (await _impl.add_chat_tab_impl("oc_x", "x" * 61, "url", "https://y"))["ok"] is False
-    assert (await _impl.add_chat_tab_impl("oc_x", "x", "url", ""))["ok"] is False
-    assert (await _impl.add_chat_tab_impl("oc_x", "x", "url", "feishu.cn/x"))["ok"] is False
-    assert seq.requests == []
-
-
-@pytest.mark.asyncio
-async def test_delete_tabs_and_hints(monkeypatch: pytest.MonkeyPatch) -> None:
-    seq = _Sequenced([_tabs_reply()])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    result = await _impl.delete_chat_tabs_impl("oc_x", ["tab_1"])
-    assert seq.request.uri == "/open-apis/im/v1/chats/:chat_id/chat_tabs/delete_tabs"
-    assert seq.request.body == {"tab_ids": ["tab_1"]}
-    assert result["deleted"] == ["tab_1"]
-
-    assert (await _impl.delete_chat_tabs_impl("oc_x", []))["ok"] is False
-
-    monkeypatch.setattr(_impl, "_invoke", _failing(232046))
-    assert "20 个" in (await _impl.add_chat_tab_impl("oc_x", "x", "url", "https://y"))["hint"]
 
 
 @pytest.mark.asyncio
@@ -648,60 +314,6 @@ def _chat_page(*names: str, has_more: bool = False, token: str = "") -> dict[str
             "page_token": token,
         }
     }
-
-
-@pytest.mark.asyncio
-async def test_list_chats_bot_uses_tenant_and_creation_order(monkeypatch: pytest.MonkeyPatch) -> None:
-    seq = _Sequenced([_chat_page("研发群", "产品群")])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    result = await _impl.list_chats_impl()
-    req = seq.request
-    assert req.uri == "/open-apis/im/v1/chats"
-    # Creation order on purpose: Feishu warns that paging an activity-ordered list can
-    # skip groups as the order shifts underfoot.
-    assert _qdict(req).get("sort_type") == "ByCreateTimeAsc"
-    assert seq.kwargs[0]["prefer"] == "tenant"
-    assert result["count"] == 2
-    # A missing owner_id means a bot owns it, not that the group has no owner.
-    assert result["chats"][0]["owner_is_bot"] is True
-    assert result["chats"][1]["owner_is_bot"] is False
-    assert result["chats"][0]["status_label"] == "正常"
-
-
-@pytest.mark.asyncio
-async def test_list_chats_me_requires_user_key_and_user_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    seq = _Sequenced([_chat_page("我的群")])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    # "我在哪些群" answered with the bot's groups is a wrong answer that looks right —
-    # so whose="me" must switch the token, and needs to know who is asking.
-    missing = await _impl.list_chats_impl("me")
-    assert missing["ok"] is False
-    assert "sender_open_id" in missing["message"]
-    assert seq.requests == []
-
-    result = await _impl.list_chats_impl("me", user_key="ou_me")
-    assert seq.kwargs[0]["prefer"] == "user"
-    assert seq.kwargs[0]["user_key"] == "ou_me"
-    assert result["whose"] == "me"
-
-    assert (await _impl.list_chats_impl("everyone"))["ok"] is False
-
-
-@pytest.mark.asyncio
-async def test_list_chats_pages_and_reports_truncation(monkeypatch: pytest.MonkeyPatch) -> None:
-    seq = _Sequenced([_chat_page("a", "b", has_more=True, token="pt1"), _chat_page("c")])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    result = await _impl.list_chats_impl(limit=100)
-    assert _qdict(seq.requests[1]).get("page_token") == "pt1"
-    assert result["count"] == 3
-    assert result["truncated"] is False
-
-    # A limit smaller than what exists must say so rather than look complete.
-    seq = _Sequenced([_chat_page("a", "b", has_more=True, token="pt1")])
-    monkeypatch.setattr(_impl, "_invoke", seq)
-    capped = await _impl.list_chats_impl(limit=2)
-    assert capped["count"] == 2
-    assert capped["truncated"] is True
 
 
 # ── 消息搜索 (message search) ────────────────────────────────────────────────────
@@ -849,17 +461,6 @@ async def test_chat_tools_return_json(monkeypatch: pytest.MonkeyPatch) -> None:
         "read_chat_announcement_impl": {"ok": True, "text": "值班表"},
         "set_chat_announcement_impl": {"ok": True, "added": 2},
         "clear_chat_announcement_impl": {"ok": True, "deleted": 3},
-        "update_chat_impl": {"ok": True, "updated": {"name": "新群名"}},
-        "transfer_chat_owner_impl": {"ok": True, "new_owner_id": "ou_new"},
-        "dismiss_chat_impl": {"ok": True, "dismissed": True},
-        "update_chat_moderation_impl": {"ok": True, "moderation_setting": "only_owner"},
-        "get_chat_menu_impl": {"ok": True, "count": 1},
-        "add_chat_menu_impl": {"ok": True, "count": 2},
-        "delete_chat_menu_impl": {"ok": True, "deleted": ["top_0"]},
-        "list_chat_tabs_impl": {"ok": True, "count": 4},
-        "add_chat_tab_impl": {"ok": True, "count": 5},
-        "delete_chat_tabs_impl": {"ok": True, "deleted": ["tab_1"]},
-        "list_chats_impl": {"ok": True, "count": 7},
         "upload_chat_avatar_impl": {"ok": True, "image_key": "img_a"},
     }
     for name, payload in stubs.items():
@@ -868,17 +469,6 @@ async def test_chat_tools_return_json(monkeypatch: pytest.MonkeyPatch) -> None:
     assert json.loads(await mod.feishu_chat_announcement("oc_x"))["text"] == "值班表"
     assert json.loads(await mod.feishu_chat_announcement_set("oc_x", "x"))["added"] == 2
     assert json.loads(await mod.feishu_chat_announcement_clear("oc_x"))["deleted"] == 3
-    assert json.loads(await mod.feishu_chat_update("oc_x", name="新群名"))["updated"]["name"] == "新群名"
-    assert json.loads(await mod.feishu_chat_transfer_owner("oc_x", "ou_new"))["new_owner_id"] == "ou_new"
-    assert json.loads(await mod.feishu_chat_dismiss("oc_x", "解散群"))["dismissed"] is True
-    assert json.loads(await mod.feishu_chat_mute("oc_x", "全员禁言"))["moderation_setting"] == "only_owner"
-    assert json.loads(await mod.feishu_chat_menu_get("oc_x"))["count"] == 1
-    assert json.loads(await mod.feishu_chat_menu_add("oc_x", [{"name": "x"}]))["count"] == 2
-    assert json.loads(await mod.feishu_chat_menu_delete("oc_x", ["top_0"]))["deleted"] == ["top_0"]
-    assert json.loads(await mod.feishu_chat_tabs("oc_x"))["count"] == 4
-    assert json.loads(await mod.feishu_chat_tab_add("oc_x", "周报", "doc", "https://y"))["count"] == 5
-    assert json.loads(await mod.feishu_chat_tab_delete("oc_x", ["tab_1"]))["deleted"] == ["tab_1"]
-    assert json.loads(await mod.feishu_chat_list())["count"] == 7
     assert json.loads(await mod.feishu_chat_upload_avatar("a.png"))["image_key"] == "img_a"
 
 
@@ -896,21 +486,10 @@ def test_new_tools_are_async_and_documented() -> None:
     expected = [
         (chat, name)
         for name in (
-            "feishu_chat_list",
             "feishu_chat_announcement",
             "feishu_chat_announcement_set",
             "feishu_chat_announcement_clear",
-            "feishu_chat_update",
             "feishu_chat_upload_avatar",
-            "feishu_chat_mute",
-            "feishu_chat_transfer_owner",
-            "feishu_chat_dismiss",
-            "feishu_chat_menu_get",
-            "feishu_chat_menu_add",
-            "feishu_chat_menu_delete",
-            "feishu_chat_tabs",
-            "feishu_chat_tab_add",
-            "feishu_chat_tab_delete",
         )
     ]
     expected.append((message, "feishu_message_search"))
