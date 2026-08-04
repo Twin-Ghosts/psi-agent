@@ -91,7 +91,8 @@ async def feishu_file_download(source: str, save_path: str, is_url: bool = False
       has expired, re-read the approval instance for a fresh URL.
 
     To read a PDF/attachment that lives in the user's wiki or drive: resolve it
-    (e.g. ``feishu_wiki_get_node(token, user_key)`` → obj_token), download here with
+    (resolve it with ``feishu_api`` on ``GET /open-apis/wiki/v2/spaces/get_node`` → obj_token),
+    download here with
     ``user_key`` so it's fetched as that user, then extract text with the
     ``ocr-and-documents`` skill (PyMuPDF).
 

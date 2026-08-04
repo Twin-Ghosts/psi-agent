@@ -13,7 +13,7 @@ category: knowledge-base
 用到的现成工具：
 - 本地库：`wiki_write` / `wiki_read` / `wiki_search` / `wiki_list` / `wiki_links`（详见 [`llm-wiki`] 技能）
 - 公开来源抓取：`fetch`（司法解释/地方法规/监管规定等**可抓取**的网页，带 URL）、`search`（找候选链接）
-- 公司内部制度：`feishu_docs_search` / `feishu_wiki_get_node` / `feishu_doc_read`（把制度同步进本地库）
+- 公司内部制度：`feishu_docs_search` / `feishu_api` 打 `wiki/v2/spaces/get_node` / `feishu_doc_read`（把制度同步进本地库）
 - 交付：直接回话；需要时 `feishu_message_send` 发给提问人
 
 ## 权威出处以国家法律法规数据库为准

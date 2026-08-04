@@ -3,15 +3,17 @@
 Complements ``feishu_doc_read(file_type="sheet", ...)``, which dumps every sheet
 whole. These tools target an explicit range:
 
-- ``feishu_sheet_tabs`` — list worksheets (get a ``SHEET_ID`` for the ranges below).
 - ``feishu_sheet_read`` — read a range as plain-text rows (mentions flattened).
 - ``feishu_sheet_write`` — overwrite a range with a grid of values/formulas.
 - ``feishu_sheet_append`` — append rows after the last used row.
 - ``feishu_sheet_format`` — set cell style (font/color/border/align/number-format).
 
-Get the spreadsheet ``token`` and a worksheet's ``SHEET_ID`` from the sheet URL /
-from ``feishu_docs_search``. Ranges use the ``"<SHEET_ID>!<A1:B2>"`` form; a bare
-``"<SHEET_ID>"`` targets the sheet's used range.
+Get the spreadsheet ``token`` from the sheet URL / from ``feishu_docs_search``. Ranges
+use the ``"<SHEET_ID>!<A1:B2>"`` form; a bare ``"<SHEET_ID>"`` targets the sheet's used
+range. A ``SHEET_ID`` is **not** in the sheet URL — list the worksheets first via
+``feishu_api(method="GET",
+uri="/open-apis/sheets/v3/spreadsheets/:spreadsheet_token/sheets/query")``, see the
+``feishu-api`` skill.
 """
 
 from __future__ import annotations
@@ -27,24 +29,6 @@ if str(TOOLS_DIR) not in sys.path:
 import _feishu_impl as _f
 
 
-async def feishu_sheet_tabs(token: str, user_key: str = "") -> str:
-    """List a spreadsheet's worksheets — their ``sheet_id``, title and size.
-
-    Every range is addressed as ``"<SHEET_ID>!A1:B2"``, and a ``SHEET_ID`` cannot be
-    read off the spreadsheet URL — so call this first whenever you don't already know
-    it, then pass it to ``feishu_sheet_read`` / ``feishu_sheet_write``.
-
-    Args:
-        token: The spreadsheet_token (from the sheet URL, the part after ``/sheets/``).
-            For a wiki-hosted sheet, convert the node token first with
-            ``feishu_wiki_get_node`` and use its ``obj_token``.
-        user_key: The sender's open_id (from ``<feishu_context>``). Reads try the bot's
-            tenant token first and only fall back to this user's identity when the bot
-            is denied — pass it whenever the sheet may be user-owned.
-    """
-    return _f.dumps_result(await _f.list_sheet_tabs_impl(token, user_key))
-
-
 async def feishu_sheet_read(token: str, range: str, max_chars: int = 20000, user_key: str = "") -> str:
     """Read one range of a spreadsheet as rows of plain-text cells.
 
@@ -58,8 +42,8 @@ async def feishu_sheet_read(token: str, range: str, max_chars: int = 20000, user
 
     Args:
         token: The spreadsheet_token (from the sheet URL, the part after ``/sheets/``).
-            For a wiki-hosted sheet, convert the node token first with
-            ``feishu_wiki_get_node`` and use its ``obj_token``.
+            For a wiki-hosted sheet, convert the node token first via ``feishu_api`` on
+            ``GET /open-apis/wiki/v2/spaces/get_node`` and use its ``obj_token``.
         range: Range to read, e.g. ``"SHEET_ID!A1:H30"`` or just ``"SHEET_ID"``
             for the sheet's used range.
         max_chars: Stop after roughly this many characters of cell text (0 = no

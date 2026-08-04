@@ -210,6 +210,25 @@ scope 是 `contact:functional_role`（只读用 `contact:functional_role:readonl
 wiki 节点的 `obj_token` 才是文档 id，读内容要用它而不是 `node_token`。
 建 wiki 文档用 `feishu_wiki_create_doc*`。
 
+**知识库读的空结果不代表没有**：机器人通常不是任何知识库的成员，这时飞书**返回成功但内容是空的**
+（不是报没权限）。所以上面三个 wiki 读端点拿到空 `items` / 空 `node` 时，别当成「没有知识库」
+或「节点不存在」—— 带上 `user_key` 用 `prefer="user"` 再问一次，以那个人的身份看。第二次
+还是空，才是真的空。
+
+### 电子表格（读工作表清单）
+
+| 要什么 | method + uri |
+|---|---|
+| 列工作表（拿 `sheet_id`） | `GET /open-apis/sheets/v3/spreadsheets/:spreadsheet_token/sheets/query` |
+
+返回 `data.sheets[]`，每项里 `sheet_id`、`title`、`index`，行列数在 `grid_properties.row_count` /
+`.column_count`。**每个区间都写成 `"<sheet_id>!A1:B2"`，而 `sheet_id` 在表格网址里是没有的**，
+所以不知道时先打这个端点。`:spreadsheet_token` 是网址 `/sheets/` 后面那段；wiki 里的表格要先
+用节点详情换 `obj_token`。
+
+读区间、写入、套格式都还是专用工具（`feishu_sheet_read` / `_write` / `_append` / `_format`）——
+读要把 @人 和富文本压平成可见文字，写要校验网格坐标，裸 `!A1` 会静默丢数据。
+
 **群的运营看 `feishu-chat` 那份接口表**（建群拉人、群列表、群设置、禁言、转让群主、
 解散群、群菜单、群标签页都在里面）。这些端点各自都有一个「照着文档写也会错」的地方，
 所以护栏在那份 rules 里 —— 禁言不在群设置那个 body 里、加人权限和群名片权限必须成对、
@@ -220,6 +239,32 @@ wiki 节点的 `obj_token` 才是文档 id，读内容要用它而不是 `node_t
 
 课程报名记录跟着任务一起搬走了，**看 `feishu-task` 那份接口表**。`user_ids` 是
 **重复同名 key** 的查询参数，逗号拼成一个串会得到一页空结果而不是报错。
+
+## 两条有护栏的端点
+
+上面绝大多数端点是纯转发，填错了飞书会报错。这两条不是 —— 它们的错法是静默的，
+所以写成可执行的 `rules`，发请求之前就拦：
+
+```rules
+- endpoint: GET /open-apis/sheets/v3/spreadsheets/:spreadsheet_token/sheets/query
+  token: tenant_then_user
+  pitfalls:
+    - 返回的 sheet_id 才是区间前缀, 表格网址里没有它;区间一律写成 "<sheet_id>!A1:B2"。
+    - 行列数在 grid_properties.row_count / column_count 里, 不在 sheets[] 的顶层。
+    - row_count 是表格的上限而不是有数据的行数, 拿它当数据范围会读回一大片空行。
+    - wiki 里的表格要先用 GET /open-apis/wiki/v2/spaces/get_node 换 obj_token, 别拿 node token 打这里。
+
+- endpoint: GET /open-apis/wiki/v2/spaces/get_node
+  token: tenant_then_user
+  required: [query.token]
+  pitfalls:
+    - token 是网址 /wiki/ 后面那段 node token, 放 query 而不是 uri 占位符(这个端点没有占位符)。
+    - obj_token 才是文档 id, 读正文用它;obj_type 是 docx/sheet/bitable 等, 决定后面用哪个读法。
+    - 机器人不是知识库成员时飞书返回成功但 data.node 是空的, 不是报错。空了要带 user_key 用 prefer=user 再问一次, 别当成节点不存在。
+```
+
+`token: tenant_then_user` 只在**被拒**时回落到用户身份，而空结果不是被拒 —— 所以第二条的
+空结果重试要你自己发起，rules 只负责把这件事讲在你眼前。
 
 ## 分页
 

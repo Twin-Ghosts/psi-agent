@@ -29,7 +29,7 @@ HaiTun 先判断这个卡点属于**谁的工作范围**，再告诉员工**该�
 拿 `app_token`：
 1. 用户给的多维表格链接形如 `https://<域名>.feishu.cn/base/<app_token>?table=<table_id>&...`，
    `/base/` 后那段就是 `app_token`，URL 里的 `table` 参数就是 `table_id`。
-2. 若是 wiki 链接（`/wiki/<node_token>`），先 `feishu_wiki_get_node(node_token)` 拿到
+2. 若是 wiki 链接（`/wiki/<node_token>`），先 `feishu_api` 打 `wiki/v2/spaces/get_node` 拿到
    `obj_token` 当 `app_token`。
 3. 不知道 `table_id` 就 `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables 列出来选对的那张。
 

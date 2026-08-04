@@ -1,6 +1,6 @@
 ---
 name: feishu-mentor-feedback
-description: "Collect and summarize mentor feedback on new hires, stored in a Feishu bitable (多维表格). Use when a mentor gives feedback about a mentee and you should record it, or when asked to summarize/review a person's feedback history. Records go into a Feishu base via the feishu_bitable_* tools (create rows, read rows, list tables); resolve the base app_token from a feishu.cn/base/... link (or a wiki link via feishu_wiki_get_node). Needs the app to have bitable:app scope and be a collaborator on the feedback base."
+description: "Collect and summarize mentor feedback on new hires, stored in a Feishu bitable (多维表格). Use when a mentor gives feedback about a mentee and you should record it, or when asked to summarize/review a person's feedback history. Records go into a Feishu base via the feishu_bitable_* tools (create rows, read rows, list tables); resolve the base app_token from a feishu.cn/base/... link (or a wiki link via `feishu_api` on `GET /open-apis/wiki/v2/spaces/get_node`). Needs the app to have bitable:app scope and be a collaborator on the feedback base."
 category: knowledge-base
 ---
 
@@ -19,7 +19,8 @@ Uses the generic `feishu_bitable_*` tools:
 
 - The user gives a **feedback base** link. Get its `app_token`:
   - `feishu.cn/base/<app_token>` → the `<app_token>` segment is it.
-  - `feishu.cn/wiki/<token>` → call `feishu_wiki_get_node(token)`; when `obj_type`
+  - `feishu.cn/wiki/<token>` → call `feishu_api` with
+    `GET /open-apis/wiki/v2/spaces/get_node`, `query_json='{"token": "<token>"}'`; when `obj_type`
     is `bitable`, its `obj_token` is the `app_token`.
 - The app must have the `bitable:app` scope and be added as a **collaborator
   (editor)** on that base, or reads/writes return 403 (error 1254302).

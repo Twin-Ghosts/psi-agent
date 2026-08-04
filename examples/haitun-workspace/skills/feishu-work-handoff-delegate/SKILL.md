@@ -25,7 +25,7 @@ category: productivity
 - `feishu_api` 调 `GET /open-apis/contact/v3/users/batch` — 用 open_id 取负责人联系方式（电话/邮箱/职位）；先读 `feishu-contact` skill
 - `feishu_chat_find_member(...)` / `feishu_department_members(...)` — 按姓名反查 open_id
 - `feishu_message_send(receive_id, text, on_behalf_of=...)` — 通知本人有人来交接，或代人带话署名
-- `feishu_wiki_get_node(node_token)` — wiki 链接换 `app_token`
+- `feishu_api` 打 `wiki/v2/spaces/get_node` — wiki 链接换 `app_token`
 
 ## 台账数据源（一张团队可见的多维表格）
 
@@ -46,7 +46,7 @@ category: productivity
 拿 `app_token`：
 1. 用户给的多维表格链接形如 `https://<域名>.feishu.cn/base/<app_token>?table=<table_id>&...`，
    `/base/` 后那段就是 `app_token`，URL 里的 `table` 参数就是 `table_id`。
-2. 若是 wiki 链接（`/wiki/<node_token>`），先 `feishu_wiki_get_node(node_token)` 拿到
+2. 若是 wiki 链接（`/wiki/<node_token>`），先 `feishu_api` 打 `wiki/v2/spaces/get_node` 拿到
    `obj_token` 当 `app_token`。
 3. 不知道 `table_id` 就 `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables 列出来选对的那张。
 

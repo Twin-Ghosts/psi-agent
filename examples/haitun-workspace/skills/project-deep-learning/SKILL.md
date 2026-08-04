@@ -58,7 +58,7 @@ LOAD：
 - 用户给出的本地文档、代码、表格、会议记录和链接；
 - 飞书文档搜索 `feishu_docs_search`，然后用 `feishu_doc_read` 读取命中文档；
 - 飞书知识库：`feishu_wiki_list_spaces` / `feishu_wiki_list_nodes` /
-  `feishu_wiki_get_node`，再读取对应正文；
+  `feishu_api` 打 `wiki/v2/spaces/get_node`，再读取对应正文；
 - 项目任务与长期状态：[`taskflow`]、会话历史或用户明确提供的看板；
 - 既往用户背景：优先 `memory_answer_context` 获取与当前问题有关的上下文；
 - 必须了解代码结构时，读取仓库、README、架构和测试；不要只靠目录名猜业务。

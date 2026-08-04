@@ -60,7 +60,7 @@ body:   {"member_type": "openid", "member_id": "ou_xxx", "perm": "edit", "type":
 ## token 从哪来、以谁的身份调
 
 `:token` 是文件自己的 token，从它的网址里取。**wiki 节点要用 `obj_token`**，不是网址里的
-node token —— 先 `feishu_wiki_get_node` 拿 `obj_token`。
+node token —— 先 `feishu_api` 打 `wiki/v2/spaces/get_node` 拿 `obj_token`。
 
 调用身份：机器人往往**不是**这份文件的协作者，那它就无权改别人文件的权限。所以写操作
 （加/删）默认按文件所有者的身份走，要带上 `user_key`，并用 `prefer=user`；读列表用机器人

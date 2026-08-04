@@ -12,14 +12,14 @@ category: knowledge-base
 
 用到的现成工具：
 - 抓源：`feishu_docs_search` / `feishu_wiki_list_spaces` / `feishu_wiki_list_nodes` /
-  `feishu_wiki_get_node` / `feishu_doc_read`（大附件 PDF 用 `feishu_file_download` + `ocr-and-documents` 技能）
+  `feishu_api` 打 `wiki/v2/spaces/get_node` / `feishu_doc_read`（大附件 PDF 用 `feishu_file_download` + `ocr-and-documents` 技能）
 - 本地库：`wiki_write` / `wiki_read` / `wiki_search` / `wiki_list` / `wiki_links`（详见 [`llm-wiki`] 技能）
 - 交付：直接回话；需要时 `feishu_message_send` 发给提问人
 
 ## 知识底座：飞书 → 本地 llm-wiki 同步
 
 用户指定要纳管的制度文档（wiki 链接 / 文档链接 / 搜索关键词）后：
-1. 解析并读取原文：wiki 链接先 `feishu_wiki_get_node` 拿 `obj_token`，docx 用 `feishu_doc_read`；
+1. 解析并读取原文：wiki 链接先 `feishu_api` 打 `wiki/v2/spaces/get_node` 拿 `obj_token`，docx 用 `feishu_doc_read`；
    搜不到具体位置用 `feishu_docs_search`。PDF/扫描件用 `feishu_file_download` 下来再走 ocr 技能取文本。
    涉及用户私有文档时，传 `<feishu_context>` 的 `sender_open_id` 作 `user_key` 以本人身份读。
 2. 用 `wiki_write` 把每份制度存成本地页，**每条要点都带出处**（原文档名 + 飞书链接 + 同步日期），

@@ -14,7 +14,7 @@ category: productivity
 > 的定性结论、放行对外用印、涉诉讼仲裁风险，都是**大事**，交人拍板。
 
 用到的现成工具：
-- 读合同：`feishu_docs_search` / `feishu_wiki_get_node` / `feishu_doc_read`；
+- 读合同：`feishu_docs_search` / `feishu_api` 打 `wiki/v2/spaces/get_node` / `feishu_doc_read`；
   PDF/扫描件/WPS 导出件用 `feishu_file_download` + [`ocr-and-documents`] 技能取文本
 - 法条出处：走 [`contract-law-source`]（法条小助手），每条结论带 **《法律全称》第X条 + [flk.npc.gov.cn](https://flk.npc.gov.cn) 链接**
 - 制度出处：`wiki_search` / `wiki_read` 查本地已同步的公司制度页（带 slug + 飞书原链，见 [`llm-wiki`]）

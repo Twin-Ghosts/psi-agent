@@ -8,7 +8,8 @@ column definitions to validate, a whole-object PUT to pre-fill, a paged delete l
 Read the skill for the endpoint table; call ``feishu_api`` for anything not listed below.
 
 The ``app_token`` is the segment in a ``feishu.cn/base/<app_token>`` URL. For a
-wiki link (``feishu.cn/wiki/...``), resolve it with ``feishu_wiki_get_node``
+wiki link (``feishu.cn/wiki/...``), resolve it with ``feishu_api`` on
+``GET /open-apis/wiki/v2/spaces/get_node``
 first — its ``obj_token`` is the ``app_token`` when ``obj_type`` is ``bitable``.
 
 Requires ``PSI_FEISHU_APP_ID`` / ``PSI_FEISHU_APP_SECRET``, the ``bitable:app``

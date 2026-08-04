@@ -17,13 +17,13 @@ category: productivity
 - `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records（query 里带 `filter`）— 检索 / 防重查已有行
 - `feishu_api` POST /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records — 追加一行合同
 - `feishu_bitable_clear_table` — 清默认空行（新表首次）
-- `feishu_wiki_get_node` / `feishu_docs_search` / `feishu_doc_read` — 从飞书里定位/读合同原件
+- `feishu_api` 打 `wiki/v2/spaces/get_node` / `feishu_docs_search` / `feishu_doc_read` — 从飞书里定位/读合同原件
 - `schedule_manage` + `feishu_message_send` — 到期提醒定时扫描并推送负责人（见 [`schedule-manage`]）
 
 ## app_token / table_id 怎么来
 
 台账建在一个飞书多维表格里。`app_token` 是 `feishu.cn/base/<app_token>` URL 里的那段；
-若是 wiki 链接（`feishu.cn/wiki/...`），先 `feishu_wiki_get_node` 拿 `obj_token`（obj_type 为 bitable 时即 app_token）。
+若是 wiki 链接（`feishu.cn/wiki/...`），先 `feishu_api` 打 `wiki/v2/spaces/get_node` 拿 `obj_token`（obj_type 为 bitable 时即 app_token）。
 拿到 `app_token` 后 `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables 取 `table_id`。**每次操作前先解析出 table_id，别猜。**
 
 ## 台账字段设计（建议列）
@@ -52,7 +52,7 @@ category: productivity
 
 ## 登记 / 更新一份合同（流程）
 
-1. **解析原件**：拿到合同链接或搜索词，`feishu_docs_search` / `feishu_wiki_get_node` 定位，
+1. **解析原件**：拿到合同链接或搜索词，`feishu_docs_search` / `feishu_api` 打 `wiki/v2/spaces/get_node` 定位，
    `feishu_doc_read`（docx/doc/sheet）或 `feishu_file_download` + [`ocr-and-documents`]（PDF/扫描件/WPS 导出件）读正文，
    抽出编号、名称、双方主体、金额、各日期。**抽不到的字段不臆造，留空并问负责人。**
 2. **防重**：写前先 `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records，`filter` 按合同编号查是否已有该编号的行。

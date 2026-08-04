@@ -174,7 +174,8 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
 
 ### 免授权优先：手上有链接就直接读
 
-如果用户已经给了文档/wiki 链接，直接 `feishu_doc_read` / `feishu_wiki_get_node` 读即可，
+如果用户已经给了文档/wiki 链接，直接 `feishu_doc_read`（wiki 链接先用 `feishu_api` 打
+`GET /open-apis/wiki/v2/spaces/get_node` 换 `obj_token`）读即可，
 **不要多此一举去搜索或授权**。只有当诉求确实需要全库搜索（如「帮我在公司知识库找报销 SOP」
 而你手上没有链接）时，才用 `feishu_docs_search`（这一步才需授权）。
 
@@ -242,9 +243,11 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
     定位不到的 id 一律以 `not_found` 回报，**绝不猜序号**。块若是嵌套的（在表格单元格、
     高亮块里，看列块结果的 `parent_id`）要传 `parent_block_id`，留空即文档根。
     删除经 API 不可撤销，动手前先用 `list_blocks` 核对一下要删的正是那段文字。
-- **列出电子表格的工作表**：`feishu_sheet_tabs(token)` 返回每个工作表的
-  `sheet_id`/`title`/行列数。**`SHEET_ID` 不在表格 URL 里**，而所有区域都写成
-  `"SHEET_ID!A1:B2"`，所以不知道 `SHEET_ID` 时先调它，再去读写区域。
+- **列出电子表格的工作表**：走 `feishu-api` 技能的接口表——`feishu_api` 打
+  `GET /open-apis/sheets/v3/spreadsheets/:spreadsheet_token/sheets/query`，`data.sheets[]` 里
+  是每个工作表的 `sheet_id`/`title`/`index`，行列数在 `grid_properties` 里。**`SHEET_ID` 不在
+  表格 URL 里**，而所有区域都写成 `"SHEET_ID!A1:B2"`，所以不知道 `SHEET_ID` 时先打这个端点，
+  再去读写区域。`row_count` 是表格上限而不是有数据的行数，拿它当数据范围会读回一大片空行。
 - **读电子表格的一个区域**：`feishu_sheet_read(token, range, max_chars)`——只读指定区域
   （`feishu_doc_read(file_type="sheet", ...)` 是整本工作簿一次性倒出来，定位不了单格）。
   返回拍平成纯文本的行数组：**mention 单元格（`@某人`）和带样式的富文本都会拍成可见文字**，
@@ -260,17 +263,21 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
   留空即沿用记住的选择）。
 - **删除文档/文件**：走 `feishu-drive` 技能的接口表——`DELETE /open-apis/drive/v1/files/:file_token`
   带 `type`，删除进**回收站可恢复**。type 是 docx/doc/sheet/bitable/mindnote/slides/file/folder/shortcut。
-  删**知识库(wiki)里的文档**：飞书没有独立删 wiki 节点的接口——先 `feishu_wiki_get_node`
-  取 `obj_token`+`obj_type`，再拿 `obj_token` 当 `file_token`、`obj_type` 当 `type` 删。
+  删**知识库(wiki)里的文档**：飞书没有独立删 wiki 节点的接口——先 `feishu_api` 打
+  `GET /open-apis/wiki/v2/spaces/get_node` 取 `obj_token`+`obj_type`，再拿 `obj_token` 当
+  `file_token`、`obj_type` 当 `type` 删。
   删除不可轻率，动手前先跟用户确认清楚删的是哪一个。
-- **访问/浏览知识库**：`feishu_wiki_list_spaces` / `feishu_wiki_list_nodes` / `feishu_wiki_get_node`
+- **访问/浏览知识库**：`feishu_wiki_list_spaces` / `feishu_wiki_list_nodes` 两个列表工具
   已做「tenant 先试，返回空且带了 user_key 时自动改用户身份重试」。带上 `user_key=<sender_open_id>`：
   `feishu_wiki_list_spaces(user_key=...)` 列库 → `feishu_wiki_list_nodes(space_id, user_key=...)` 列文档
-  → `feishu_wiki_get_node(token, user_key=...)` 拿 obj_token → `feishu_doc_read` 读正文。
-  **不要因为一时返回空就说"企业没有知识库"**——确认带了 user_key 即可。
+  → `feishu_api` 打 `GET /open-apis/wiki/v2/spaces/get_node`（`query_json='{"token": …}'`）拿 obj_token
+  → `feishu_doc_read` 读正文。**不要因为一时返回空就说"企业没有知识库"**——两个列表工具确认带了
+  user_key 即可；而**节点详情那一步的空结果重试要你自己发起**（它走通用端点，没有那层自动重试）:
+  `data.node` 是空的就带 `user_key` 加 `prefer="user"` 再问一次，别当成节点不存在。
 - **读知识库里的 PDF/附件（下载）**：飞书文档 API 只能直接读 docx/doc/sheet；PDF、图片等要先下载再解析。
   `feishu_file_download(source, save_path, user_key=...)` 已 tenant 优先、机器人下不到时自动回退到用户身份。
-  流程：`feishu_wiki_get_node(token, user_key)` 拿 `obj_token` → `feishu_file_download`（带 user_key）
+  流程：`feishu_api` 打 `GET /open-apis/wiki/v2/spaces/get_node`（带 user_key）拿 `obj_token`
+  → `feishu_file_download`（带 user_key）
   存到本地 → 用 `read_pdf(pdf_path)` 抽文本（数字版 PDF 直接读文本层；扫描件/图片型 PDF 自动逐页
   渲染成图走 MiniMax 视觉 OCR，和 `describe_image` 同一套 `.env.multimodal` 凭据）。**下载失败不要直接让用户手动复制粘贴，
   先确认带了 user_key**；返回 `need_auth=True` 时才按上面分步引导授权。

@@ -1,6 +1,6 @@
 ---
 name: feishu-todo-board-sync
-description: "把个人 ToDoList 文档搬进团队看板表格 — 读一篇飞书 docx 周志/ToDoList（形如「某人ToDoList」，按日期倒序分段、大目标/子目标/ToDo 层级缩进、任务行里用 @人名 点名），按 @人名 把条目拆到各人名下，转成团队 TODO LIST 电子表格（列=日期、行=人）的单元格格式，写进调用方指定的列/单元格。表结构每次现场探（表头行/人名列/SHEET_ID 都读出来，不写死）。Use when someone asks to sync / 搬运 / 汇总 a personal Feishu ToDoList doc into a team todo board spreadsheet, or says 「把 XX 的 todo 提取出来填到 TODO LIST 表里」. Target column/cell is always given by the caller (never guessed from the date); a non-empty target cell is reported for confirmation before overwriting. Uses feishu_wiki_get_node (wiki 链接换 obj_token), feishu_doc_read (读 docx 源), feishu_sheet_tabs (查 SHEET_ID), feishu_sheet_read (认表头 / 定位人名行 / 查目标单元格是否已占), feishu_sheet_write (写入). Needs the app as a collaborator on both docs, or a user token via feishu_auth_start."
+description: "把个人 ToDoList 文档搬进团队看板表格 — 读一篇飞书 docx 周志/ToDoList（形如「某人ToDoList」，按日期倒序分段、大目标/子目标/ToDo 层级缩进、任务行里用 @人名 点名），按 @人名 把条目拆到各人名下，转成团队 TODO LIST 电子表格（列=日期、行=人）的单元格格式，写进调用方指定的列/单元格。表结构每次现场探（表头行/人名列/SHEET_ID 都读出来，不写死）。Use when someone asks to sync / 搬运 / 汇总 a personal Feishu ToDoList doc into a team todo board spreadsheet, or says 「把 XX 的 todo 提取出来填到 TODO LIST 表里」. Target column/cell is always given by the caller (never guessed from the date); a non-empty target cell is reported for confirmation before overwriting. Uses feishu_api (wiki/v2/spaces/get_node 换 obj_token; sheets/v3 sheets/query 查 SHEET_ID), feishu_doc_read (读 docx 源), feishu_sheet_read (认表头 / 定位人名行 / 查目标单元格是否已占), feishu_sheet_write (写入). Needs the app as a collaborator on both docs, or a user token via feishu_auth_start."
 category: productivity
 ---
 
@@ -31,8 +31,8 @@ category: productivity
 | 读法 | `feishu_doc_read("docx", obj_token)` | `feishu_sheet_read(obj_token, "SHEET_ID!A1:H30")` |
 
 链接是 `/wiki/` 开头时,后面那串是 **node_token,不能直接当文档 id 用**:
-先 `feishu_wiki_get_node(node_token)` 换 `obj_token` + `obj_type`,再按 `obj_type`
-决定走 docx 还是 sheet 读法。**先换 token,再读**,顺序错了就是一路 404。
+先用 `feishu_api` 打 `GET /open-apis/wiki/v2/spaces/get_node` 换 `obj_token` + `obj_type`,
+再按 `obj_type` 决定走 docx 还是 sheet 读法。**先换 token,再读**,顺序错了就是一路 404。
 链接本来就是 `/docx/` 或 `/sheets/` 的,那串就是 `obj_token`,不用换。
 
 ### 源 docx 的结构
@@ -89,16 +89,23 @@ ToDo：
 `/wiki/` 链接先换 token(`/docx/`、`/sheets/` 链接跳过这步):
 
 ```
-feishu_wiki_get_node("<源 node_token>")    → obj_token=…, obj_type=docx
-feishu_wiki_get_node("<目标 node_token>")  → obj_token=…, obj_type=sheet
+feishu_api(method="GET", uri="/open-apis/wiki/v2/spaces/get_node",
+           query_json='{"token": "<源 node_token>"}', user_key=…)    → node.obj_token=…, node.obj_type=docx
+feishu_api(method="GET", uri="/open-apis/wiki/v2/spaces/get_node",
+           query_json='{"token": "<目标 node_token>"}', user_key=…)  → node.obj_token=…, node.obj_type=sheet
 ```
+
+结果在 `data.node` 里。**返回成功但 `node` 是空的**说明机器人不是这个知识库的成员 ——
+不是节点不存在,带 `user_key` 加 `prefer="user"` 再问一次。
 
 `obj_type` 与预期不符(比如目标是 docx 不是 sheet)就**停下来说清楚**,别硬写。
 
 再拿目标表的 `SHEET_ID` —— **它不在 URL 里,必须查**:
 
 ```
-feishu_sheet_tabs("<目标 obj_token>")  → sheets:[{sheet_id, title, row_count, column_count}]
+feishu_api(method="GET", uri="/open-apis/sheets/v3/spreadsheets/:spreadsheet_token/sheets/query",
+           paths_json='{"spreadsheet_token": "<目标 obj_token>"}', user_key=…)
+  → data.sheets:[{sheet_id, title, index, grid_properties:{row_count, column_count}}]
 ```
 
 多个工作表时按 title 选(或问调用方),别默认第一个。
@@ -135,7 +142,7 @@ feishu_sheet_tabs("<目标 obj_token>")  → sheets:[{sheet_id, title, row_count
 ### 4. 定位每个人的行
 
 `feishu_sheet_read(<目标 obj_token>, "<SHEET_ID>!A1:J40")` 一次读够表头 + 人名列
-(行数不够就把范围调大,`feishu_sheet_tabs` 给的 `row_count` 是上限)。先认出:
+(行数不够就把范围调大,`sheets/query` 给的 `row_count` 是表格上限而不是有数据的行数)。先认出:
 
 - **表头在第几行** — 那行里出现日期样式(`7.24` / `7-24` / `7月24日`)的就是它。
 - **人名在第几列** — 该列大部分单元格拍平后形如 `@某人` / 两三个字的姓名。
@@ -199,10 +206,11 @@ feishu_sheet_write(<obj_token>, "<SHEET_ID>!E7:E7", '[["大目标：\n1. …"]]'
 两篇文档都要该 app 是协作者,否则 tenant token 读写都 403。
 拿不到就走 `feishu_auth_start()` 让本人授权,再带 `user_key=<sender_open_id>` 以本人身份读写。
 
-**读类工具(`feishu_wiki_get_node` / `feishu_sheet_tabs` / `feishu_sheet_read`)也都收
+**读的两步(`feishu_api` 打 get_node / sheets query)和 `feishu_sheet_read` 也都收
 `user_key`**:它们是 tenant 优先,只在机器人被拒时才回落到该用户身份,所以**表格可能归个人时
 就一路把 `user_key` 带上**,别等 403 了才补。写操作默认就以用户身份走(`prefer="user"`),
-`user_key` 空则回落 tenant。整条链路(get_node → tabs → read → write)要用**同一个** `user_key`。
+`user_key` 空则回落 tenant。整条链路(get_node → sheets query → read → write)要用**同一个**
+`user_key`。
 
 ## 别做的事
 

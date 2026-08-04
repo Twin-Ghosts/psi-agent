@@ -49,11 +49,11 @@ description: "把分散在飞书群聊、话题线程、文档、知识库、评
 | 当前群或指定群 | `feishu_api` 调 `GET /open-apis/im/v1/messages`，用 `container_id` 传 `chat_id` 分页读取（见 `feishu-message` 技能） |
 | 话题线程 | `feishu_thread_read`；需要原始结构时同上换 `container_id_type="thread"` |
 | 飞书 docx/doc/sheet 链接 | 从链接解析类型和 token → `feishu_doc_read` |
-| 飞书 wiki 链接 | `feishu_wiki_get_node` → 按 `obj_type` 读取 |
+| 飞书 wiki 链接 | `feishu_api` 打 `wiki/v2/spaces/get_node` → 按 `obj_type` 读取 |
 | 不知道文档位置 | `feishu_docs_search` → 核对候选标题/所有者 → 读取正文 |
 | 文档评论与回复 | `feishu_api` 调 `GET /open-apis/drive/v1/files/:file_token/comments`，再按 `comment_id` 调 `GET /open-apis/drive/v1/files/:file_token/comments/:comment_id/replies`（见 `feishu-drive` 技能） |
 | 消息图片或附件 | `feishu_image_get`；云盘附件用 `feishu_file_download` |
-| 电子表格 | `feishu_sheet_tabs` → `feishu_sheet_read` |
+| 电子表格 | `feishu_api` 打 `sheets/v3` 的 `sheets/query` 拿 `sheet_id` → `feishu_sheet_read` |
 | 多维表格 | `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables → `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records |
 | 人员与群消歧 | `feishu_chat_find_member`；群成员列表与查人走 `feishu_api`（`GET /open-apis/im/v1/chats/:chat_id/members`、`GET /open-apis/contact/v3/users/batch`，见 `feishu-chat` / `feishu-contact` skill） |
 | 用户直接提供的文件 | 读取 `[RECV:]` 路径；PDF/扫描件遵循 `ocr-and-documents` |

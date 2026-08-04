@@ -49,7 +49,7 @@ description: 飞书云盘（drive）接口表 —— 列文档评论、列评论
 要确认结果得拿这个 task_id 去查任务状态。删文档没有这个字段。
 
 要删的东西在**知识库（wiki）里**的话，`file_token` 不能直接用 wiki 节点的 token：
-先用 `feishu_wiki_get_node` 换出 `obj_token` / `obj_type`，再删那个。
+先用 `feishu_api` 打 `wiki/v2/spaces/get_node` 换出 `obj_token` / `obj_type`，再删那个。
 
 ## 为什么下载和上传不在表格里
 
@@ -109,7 +109,7 @@ description: 飞书云盘（drive）接口表 —— 列文档评论、列评论
   pitfalls:
     - 进回收站, 可恢复; 但调用方必须是所有者或对父文件夹有编辑权限, 删用户的文件要带他的 user_key
     - 删文件夹是异步的, 响应回一个 task_id, 删除没有当场完成; 删文档没有这个字段
-    - wiki 里的文档不能直接用节点 token, 先 feishu_wiki_get_node 换出 obj_token 再删
+    - wiki 里的文档不能直接用节点 token, 先 `feishu_api` 打 `wiki/v2/spaces/get_node` 换出 obj_token 再删
 
 - endpoint: POST /open-apis/drive/v1/medias/upload_all
   prefer_tool: feishu_drive_upload

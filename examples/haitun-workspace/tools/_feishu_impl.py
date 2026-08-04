@@ -24,7 +24,6 @@ import _oauth_receiver as _oauth_rx
 import _runtime_paths as _paths
 import anyio
 from lark_channel.api.drive import comment as _comment
-from lark_channel.api.wiki import node as _wiki_node
 from lark_channel.core.enum import AccessTokenType, HttpMethod
 from lark_channel.core.model import BaseRequest
 from loguru import logger
@@ -610,36 +609,6 @@ def _sheet_values_to_text(data: dict[str, Any]) -> str:
         cells = [("" if c is None else str(c)) for c in (row if isinstance(row, list) else [])]
         lines.append("\t".join(cells))
     return "\n".join(lines)
-
-
-async def list_sheet_tabs_impl(token: str, user_key: str = "") -> dict[str, Any]:
-    """List a spreadsheet's worksheets (sheet_id + title + size).
-
-    Ranges are addressed as ``"<SHEET_ID>!A1:B2"``, and a SHEET_ID is not derivable
-    from the spreadsheet URL — so anything that reads or writes a range generically
-    needs this first.
-    """
-    if not token.strip():
-        return _error("token (spreadsheet_token) is required.")
-    res = await _invoke(_build_sheet_meta_request(token.strip()), user_key=user_key)
-    if not res["ok"]:
-        return res
-    raw = res["data"].get("sheets", []) if isinstance(res["data"], dict) else []
-    sheets: list[dict[str, Any]] = []
-    for sh in raw if isinstance(raw, list) else []:
-        if not isinstance(sh, dict):
-            continue
-        grid = sh.get("grid_properties") or {}
-        sheets.append(
-            {
-                "sheet_id": sh.get("sheet_id") or sh.get("sheetId") or "",
-                "title": sh.get("title", ""),
-                "index": sh.get("index"),
-                "row_count": grid.get("row_count") if isinstance(grid, dict) else None,
-                "column_count": grid.get("column_count") if isinstance(grid, dict) else None,
-            }
-        )
-    return {"ok": True, "token": token.strip(), "sheets": sheets, "count": len(sheets)}
 
 
 def _flatten_sheet_cell(cell: Any) -> str:
@@ -3091,39 +3060,6 @@ async def create_approval_instance_impl(
 # definition is enough (repeat calls are a no-op on Feishu's side).
 
 
-# ── Wiki — resolve a wiki node token to its underlying document ───────────────
-#
-# A Feishu wiki URL (.../wiki/<node_token>) is a shell; the real content lives in
-# an underlying docx/sheet/bitable/... This resolves the node token to obj_token
-# + obj_type so the agent can then read it (docx/doc/sheet via read_doc_impl).
-
-
-async def get_wiki_node_impl(token: str, user_key: str = "") -> dict[str, Any]:
-    """Resolve a wiki node token to its underlying document (obj_token + obj_type).
-
-    Pass ``user_key`` to resolve as that user (needed when the wiki is user-owned and
-    the bot isn't a member); empty uses the bot's tenant token.
-    """
-    res = await _invoke_wiki_read(
-        _wiki_node.build_wiki_node_get_request(token=token),
-        user_key,
-        lambda r: not (r.get("data", {}) or {}).get("node"),
-    )
-    if not res["ok"]:
-        return res
-    data = res["data"] if isinstance(res["data"], dict) else {}
-    node = data.get("node", {}) if isinstance(data.get("node"), dict) else {}
-    return {
-        "ok": True,
-        "node_token": node.get("node_token", ""),
-        "obj_token": node.get("obj_token", ""),
-        "obj_type": node.get("obj_type", ""),
-        "title": node.get("title", ""),
-        "space_id": node.get("space_id", ""),
-        "has_child": bool(node.get("has_child")),
-    }
-
-
 # ── Start a group topic with @-mentions ──────────────────────────────────────
 #
 # Text messages' <at> tags do NOT render as real mentions for bots (Feishu shows
@@ -4375,7 +4311,8 @@ def _parse_resp_body(resp: Any) -> dict[str, Any]:
 # Generic read/write for Feishu bases; the bot's tenant token can read+write
 # records provided the app is a collaborator on the base (scope bitable:app).
 # app_token is the segment in a feishu.cn/base/<app_token> URL (for wiki links,
-# resolve via feishu_wiki_get_node — obj_token is the app_token when obj_type=bitable).
+# resolve via feishu_api on /open-apis/wiki/v2/spaces/get_node — obj_token is the
+# app_token when obj_type=bitable).
 
 
 def _build_list_records_request(

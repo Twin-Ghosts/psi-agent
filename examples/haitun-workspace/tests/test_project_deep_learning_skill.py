@@ -24,7 +24,6 @@ REQUIRED_TOOLS = {
     "feishu_doc_read": "feishu_doc.py",
     "feishu_wiki_list_spaces": "feishu_wiki.py",
     "feishu_wiki_list_nodes": "feishu_wiki.py",
-    "feishu_wiki_get_node": "feishu_wiki.py",
     "memory_answer_context": "memory_answer_context.py",
     "memory_add": "memory_add.py",
     "schedule_manage": "schedule_manage.py",

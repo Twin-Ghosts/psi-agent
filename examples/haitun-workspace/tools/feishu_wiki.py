@@ -1,12 +1,17 @@
-"""Feishu/Lark wiki tools — create docs in a knowledge base + resolve nodes.
+"""Feishu/Lark wiki tools — create docs in a knowledge base + browse it.
 
 A Feishu wiki URL (``.../wiki/<node_token>``) is a shell: the real content lives
 in an underlying docx / sheet / bitable / etc.
 
 - ``feishu_wiki_list_spaces`` — list accessible knowledge bases (to get a space_id).
+- ``feishu_wiki_list_nodes`` — browse the pages inside one knowledge base.
 - ``feishu_wiki_create_doc`` — create a new docx document inside a knowledge base.
-- ``feishu_wiki_get_node`` — resolve a wiki node token to its ``obj_token`` +
-  ``obj_type`` so you can read the body (docx/doc/sheet → ``feishu_doc_read``).
+
+To resolve a single node token to its ``obj_token`` + ``obj_type`` (so you can read the
+body with ``feishu_doc_read``), call ``feishu_api(method="GET",
+uri="/open-apis/wiki/v2/spaces/get_node", query_json='{"token": "<node_token>"}')`` —
+see the ``feishu-api`` skill, which also explains why an empty result means "ask again
+as the user" rather than "no such node".
 
 Requires ``PSI_FEISHU_APP_ID`` / ``PSI_FEISHU_APP_SECRET``; creating needs edit
 permission on the target space / parent node.
@@ -23,22 +28,6 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 import _feishu_impl as _f
-
-
-async def feishu_wiki_get_node(token: str, user_key: str = "") -> str:
-    """Resolve a wiki node token to its underlying document.
-
-    Given the token from a wiki URL (e.g. ``NFOnwDvrPiVjs5k0xXxchuwWnru`` in
-    ``.../wiki/NFOnwDvrPiVjs5k0xXxchuwWnru``), returns ``obj_token``, ``obj_type``,
-    and ``title``. Then read the content with ``feishu_doc_read(obj_type, obj_token)``
-    when ``obj_type`` is docx/doc/sheet.
-
-    Args:
-        token: The wiki node token (the segment after ``/wiki/`` in the URL).
-        user_key: The sender's open_id (from ``<feishu_context>``). Pass it to resolve
-            as that user (the bot often can't see user-owned wikis); empty uses tenant token.
-    """
-    return _f.dumps_result(await _f.get_wiki_node_impl(token, user_key))
 
 
 async def feishu_wiki_list_spaces(page_size: int = 20, page_token: str = "", user_key: str = "") -> str:

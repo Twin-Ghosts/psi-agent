@@ -82,16 +82,26 @@ def test_skill_only_references_real_tools() -> None:
 
 
 def test_skill_names_the_tools_the_flow_needs() -> None:
-    """The docx→sheet flow is impossible without these five; a rename must fail loudly."""
+    """The docx→sheet flow is impossible without these three; a rename must fail loudly."""
     text = _skill_text()
     for tool in (
-        "feishu_wiki_get_node",  # wiki node_token → obj_token
         "feishu_doc_read",  # read the source docx
-        "feishu_sheet_tabs",  # discover SHEET_ID (not derivable from the URL)
         "feishu_sheet_read",  # locate the person's row / probe the target cell
         "feishu_sheet_write",  # write the cell
     ):
         assert tool in text, f"{SKILL} must tell the agent to use {tool}"
+
+
+def test_skill_names_the_two_endpoints_that_lost_their_tools() -> None:
+    """Resolving the wiki node and discovering the ``SHEET_ID`` are ``feishu_api`` calls now.
+
+    Both were pure forwards, so they became rows in the ``feishu-api`` skill. The flow
+    still needs both steps — a wiki link is not a spreadsheet token, and a ``SHEET_ID``
+    is not in the sheet URL — so the skill has to name the endpoints instead.
+    """
+    text = _skill_text()
+    assert "/open-apis/wiki/v2/spaces/get_node" in text
+    assert "/open-apis/sheets/v3/spreadsheets/:spreadsheet_token/sheets/query" in text
 
 
 def test_skill_discovers_structure_instead_of_hardcoding() -> None:

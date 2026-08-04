@@ -9,7 +9,7 @@ description: 飞书多维表格（bitable）接口表 —— 建 base、建/删�
 参数不合规会在**发请求之前**被拦下来。
 
 `app_token` 是 `feishu.cn/base/<app_token>` 里的那一段。wiki 链接（`feishu.cn/wiki/...`）要先用
-`feishu_wiki_get_node` 换：`obj_type` 是 `bitable` 时它的 `obj_token` 才是 `app_token`。
+`feishu_api` 打 `wiki/v2/spaces/get_node` 换：`obj_type` 是 `bitable` 时它的 `obj_token` 才是 `app_token`。
 
 **写操作要带 `prefer=user` 和本人 `user_key`。** 这不是可选项：base 归谁所有由它决定，
 `identity` 空着且这个人从没被问过时，请求**不会发出**，返回 `need_identity_choice` —— 那时候去问用户
