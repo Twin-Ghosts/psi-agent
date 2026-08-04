@@ -120,6 +120,16 @@ feishu_api(
 管理后台「组织架构 > 角色管理」抄。别去猜一个 `/functional_roles` 的 GET，那个端点不存在。
 
 ```rules
+- endpoint: GET /open-apis/contact/v3/group/simplelist
+  paginate: {items: grouplist, page_size: 100}
+  fields:
+    page_size: {max: 100}
+    type: {choices: [1, 2]}
+- endpoint: GET /open-apis/contact/v3/group/:group_id/member/simplelist
+  paginate: {items: memberlist, page_size: 100}
+  fields:
+    page_size: {max: 100}
+    member_type: {choices: [user, department]}
 - endpoint: GET /open-apis/contact/v3/functional_roles/:role_id/members
   paginate: {items: members, page_size: 100}
   fields:
@@ -166,40 +176,83 @@ feishu_api(
 ```rules
 - endpoint: POST /open-apis/contact/v3/users
   token: tenant
-  required: [name, department_ids]
+  required: [name, mobile, department_ids]
   fields:
-    employee_type: {default: 1, in: body}
+    employee_type: {default: 1, in: body, choices: [1, 2, 3, 4, 5]}
+    department_ids: {max_items: 50}
   pitfalls:
     - 40004/41050/42009 = 应用通讯录权限范围没覆盖目标部门，改代码没用
+    - mobile 租户内唯一；中国大陆外要带 + 和国家码(如 +8190...)
+    - employee_type 1 正式 2 实习 3 外包 4 劳务 5 顾问；自定义人员类型传后台配的枚举号
 - endpoint: DELETE /open-apis/contact/v3/users/:user_id
   token: tenant
+  confirm: 离职用户
+  fields:
+    email_processing_type: {choices: ["1", "2", "3"]}
+    email_acceptor_user_id: {in: query}
   pitfalls:
     - 离职不可逆；无上级时该人的日历/问卷被直接删除
-    - 调用前必须向用户确认
+    - email_processing_type='1'(转移) 时必须同时给 email_acceptor_user_id
+- endpoint: POST /open-apis/contact/v3/users/:user_id/resurrect
+  token: tenant
+  pitfalls:
+    - 办错离职的唯一回退路径
 - endpoint: PATCH /open-apis/contact/v3/users/:user_id
   token: tenant
   pitfalls:
     - 没传的字段不能变成清空，只传要改的那几个
+- endpoint: POST /open-apis/contact/v3/departments
+  token: tenant
+  required: [name, parent_department_id]
+  fields:
+    name: {forbid: "/", on_fail: "部门名不能含斜杠 '/'，飞书会报 43029"}
+    custom_department_id: {forbid: "^(od-|0$|1$)", on_fail: "custom_department_id 不能以 'od-' 开头，也不能是 '0' 或 '1'(飞书保留)"}
+  pitfalls:
+    - 建在组织根下就传 parent_department_id='0'
+- endpoint: PATCH /open-apis/contact/v3/departments/:department_id
+  token: tenant
+  fields:
+    name: {forbid: "/", on_fail: "部门名不能含斜杠 '/'，飞书会报 43029"}
+  pitfalls:
+    - 只传要改的字段；换 parent_department_id 就是移动整棵子树
+    - 根部门 '0' 不能修改，飞书返回 40002
 - endpoint: DELETE /open-apis/contact/v3/departments/:department_id
   token: tenant
+  confirm: 删除部门
   pitfalls:
     - 不可逆，且要求部门先清空(有人 43011 / 有子部门 43012)，只能最深层往上删
-    - 调用前必须向用户确认
+    - 根部门 '0' 删不了，飞书返回 40002
 - endpoint: POST /open-apis/contact/v3/group
   token: tenant
   required: [name]
+  fields:
+    name: {max: 100}
   pitfalls:
     - 42010 = 建用户组硬要求通讯录范围为全部成员(只有这个动作要求)
+    - name 租户内唯一
+- endpoint: PATCH /open-apis/contact/v3/group/:group_id
+  token: tenant
+  pitfalls:
+    - name 和 description 至少给一个，否则这一趟什么也没改
 - endpoint: DELETE /open-apis/contact/v3/group/:group_id
   token: tenant
+  confirm: 删除用户组
   pitfalls:
     - 不可逆；引用该组的文档权限/审批流会失去主体
-    - 调用前必须向用户确认
 - endpoint: POST /open-apis/contact/v3/group/:group_id/member/add
   token: tenant
+  fields:
+    member_type: {choices: [user]}
   pitfalls:
-    - 飞书一次只收一个成员，多人要循环并逐人回报
+    - 飞书一次只收一个成员，多人要循环并逐人回报成败
     - 三个 member_* 参数不一致会 41072
+    - 增删组成员目前只支持 member_type='user'，部门做主体不支持
+- endpoint: POST /open-apis/contact/v3/group/:group_id/member/remove
+  token: tenant
+  fields:
+    member_type: {choices: [user]}
+  pitfalls:
+    - 一次只收一个成员；只支持 member_type='user'
 ```
 
 ## 关联组织（外部联系人）

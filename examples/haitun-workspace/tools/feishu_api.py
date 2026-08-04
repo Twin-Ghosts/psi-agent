@@ -37,6 +37,7 @@ async def feishu_api(
     prefer: str = "tenant",
     identity: str = "",
     user_key: str = "",
+    confirm: str = "",
 ) -> str:
     """Call any Feishu/Lark Open Platform endpoint and return the raw JSON result.
 
@@ -68,6 +69,11 @@ async def feishu_api(
             stays the bot. Leave empty unless the endpoint creates owned content.
         user_key: The caller's open_id from ``<feishu_context>``. Required whenever a
             user token may be needed — without it there is no token to fall back to.
+        confirm: Echo the token an irreversible endpoint asks for. Leave empty; if the
+            endpoint is guarded, the first call comes back with ``need_confirmation``
+            and the exact token — tell the user what is about to happen, then repeat
+            the call with it. Guarded today: resigning a user, deleting a department,
+            deleting a user group.
     """
     return _api.dumps_result(
         await _api.call_api_impl(
@@ -79,5 +85,6 @@ async def feishu_api(
             prefer=prefer,
             identity=identity,
             user_key=user_key,
+            confirm=confirm,
         )
     )

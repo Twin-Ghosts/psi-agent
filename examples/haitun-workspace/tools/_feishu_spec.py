@@ -22,9 +22,11 @@ Rule fields, all optional except ``endpoint``:
     prefer_tool   name of a dedicated tool; set ``hard: true`` to refuse outright
     why           shown with prefer_tool, explains what hand-building gets wrong
     required      body/query field names that must be present
-    fields        per-field: pattern / max / min / choices / default / requires
+    fields        per-field: pattern / forbid / max / min / choices / default /
+                  requires / max_items / in / on_fail
     pitfalls      free text surfaced on failure — never enforced, only explained
     paginate      true, or a mapping — follow ``page_token`` until ``has_more`` is false
+    confirm       a token the caller must echo before an irreversible call goes out
 
 ``paginate`` is what lets a table row replace a hand-written tool. Feishu's paging
 protocol is uniform (``page_token`` out, ``has_more`` + ``page_token`` back), so
@@ -35,6 +37,20 @@ items and what page size they ask for. Both are declarable:
 
 ``items`` defaults to ``items`` (19 of 23 endpoints); ``tasks``,
 ``instance_code_list``, ``grouplist`` and ``memberlist`` are the ones that differ.
+
+``confirm`` is the other capability a table row has to carry, and for a sharper
+reason. The dedicated tools guarded their irreversible calls — resigning a user,
+deleting a department, deleting a user group — behind a literal token the caller had
+to echo back. That is a *gate*, not a warning: it forces a round trip in which the
+model has to tell the user what is about to happen. Deleting such a tool in favour of
+a table row would quietly remove the gate and leave only prose behind, which is a
+downgrade no amount of documentation makes up for. So the token moves into the rule:
+
+    confirm: DELETE_DEPT
+
+and the request is refused until ``confirm`` matches. Resigning a user has no undo
+beyond ``/resurrect``, and deleting a group silently strips the permission subject
+from every document and approval that referenced it.
 """
 
 from __future__ import annotations
@@ -55,6 +71,7 @@ class Rule:
 
     __slots__ = (
         "_segments",
+        "confirm",
         "endpoint",
         "fields",
         "method",
@@ -75,6 +92,7 @@ class Rule:
         self.method, self.uri = _split_endpoint(endpoint)
         self._segments = [p for p in self.uri.split("/") if p]
         self.token = str(raw.get("token", "") or "").strip()
+        self.confirm = str(raw.get("confirm", "") or "").strip()
         tool = raw.get("prefer_tool")
         self.prefer_tool = str(tool).strip() if tool else ""
         self.prefer_hard = bool(raw.get("hard", False))
@@ -244,6 +262,11 @@ def _check_field(name: str, spec: Any, value: Any) -> str | None:
         return None
     if (pattern := spec.get("pattern")) and isinstance(value, str) and not re.search(str(pattern), value):
         return spec.get("on_fail") or f"{name}={value!r} 不符合要求的格式 ({pattern})"
+    # Some of Feishu's rules are about what a value may *not* contain — a department
+    # name with a slash returns 43029 — and those cannot be written as a positive
+    # pattern without enumerating every legal string.
+    if (forbid := spec.get("forbid")) and isinstance(value, str) and re.search(str(forbid), value):
+        return spec.get("on_fail") or f"{name}={value!r} 含有不允许的内容 ({forbid})"
     if (choices := spec.get("choices")) and value not in choices:
         return spec.get("on_fail") or f"{name}={value!r} 不在允许取值 {list(choices)} 内"
     for bound, cmp, label in (("max", lambda a, b: a > b, "上限"), ("min", lambda a, b: a < b, "下限")):

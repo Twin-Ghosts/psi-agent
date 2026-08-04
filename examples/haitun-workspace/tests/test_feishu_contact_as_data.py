@@ -210,6 +210,147 @@ def test_irreversible_delete_surfaces_its_warning() -> None:
     assert rule.pitfalls
 
 
+# --------------------------------------------------- gates the deleted tools held
+#
+# The five dispatcher tools that this skill replaces are gone, so every safety
+# property they enforced has to be reachable from the table instead. These are the
+# ones whose loss would not have shown up as a failure — only as a destructive call
+# that used to be stopped and now isn't.
+
+
+@pytest.mark.parametrize(
+    ("uri", "token"),
+    [
+        ("/open-apis/contact/v3/users/ou_abc", "离职用户"),
+        ("/open-apis/contact/v3/departments/od-x", "删除部门"),
+        ("/open-apis/contact/v3/group/g1", "删除用户组"),
+    ],
+)
+def test_irreversible_delete_is_gated(monkeypatch: pytest.MonkeyPatch, uri: str, token: str) -> None:
+    """Feishu accepts these on the first try and there is no undo, so the gate is the
+    only thing that forces the model to say out loud what it is about to do."""
+    cap = _CapturedInvoke()
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    res = anyio.run(lambda: _api.call_api_impl(method="DELETE", uri=uri))
+    assert res["ok"] is False
+    assert res["need_confirmation"] is True
+    assert res["confirm_token"] == token
+    assert cap.requests == [], "an unconfirmed irreversible call must send nothing"
+
+
+def test_confirmed_delete_goes_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _generic(
+        monkeypatch,
+        method="DELETE",
+        uri="/open-apis/contact/v3/departments/:department_id",
+        paths_json=json.dumps({"department_id": "od-x"}),
+        confirm="删除部门",
+    )
+    assert cap.request.http_method == HttpMethod.DELETE
+    assert cap.request.paths == {"department_id": "od-x"}
+
+
+def test_wrong_confirm_token_still_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturedInvoke()
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    res = anyio.run(
+        lambda: _api.call_api_impl(
+            method="DELETE",
+            uri="/open-apis/contact/v3/departments/:department_id",
+            paths_json=json.dumps({"department_id": "od-x"}),
+            confirm="yes",
+        )
+    )
+    assert res["ok"] is False
+    assert cap.requests == []
+
+
+def test_reversible_writes_are_not_gated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the unrecoverable calls pay the extra round trip."""
+    cap = _generic(
+        monkeypatch,
+        method="PATCH",
+        uri="/open-apis/contact/v3/users/:user_id",
+        paths_json=json.dumps({"user_id": "ou_abc"}),
+        body_json=json.dumps({"name": "李四"}),
+    )
+    assert len(cap.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("uri", "body", "expect_ok"),
+    [
+        # A department name with a slash returns 43029 — a positive pattern can't say this.
+        ("/open-apis/contact/v3/departments", {"name": "研发/中心", "parent_department_id": "0"}, False),
+        ("/open-apis/contact/v3/departments", {"name": "研发中心", "parent_department_id": "0"}, True),
+        # Feishu reserves the "od-" prefix and the ids "0" and "1".
+        (
+            "/open-apis/contact/v3/departments",
+            {"name": "x", "parent_department_id": "0", "custom_department_id": "od-mine"},
+            False,
+        ),
+        (
+            "/open-apis/contact/v3/departments",
+            {"name": "x", "parent_department_id": "0", "custom_department_id": "rd-1"},
+            True,
+        ),
+        ("/open-apis/contact/v3/departments", {"name": "x"}, False),
+    ],
+)
+def test_department_create_constraints(
+    monkeypatch: pytest.MonkeyPatch, uri: str, body: dict[str, Any], expect_ok: bool
+) -> None:
+    cap = _CapturedInvoke()
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    res = anyio.run(lambda: _api.call_api_impl(method="POST", uri=uri, body_json=json.dumps(body)))
+    assert res.get("ok") is expect_ok, res.get("violations")
+    assert bool(cap.requests) is expect_ok
+
+
+@pytest.mark.parametrize(
+    ("body", "expect_ok"),
+    [
+        ({"name": "张三", "mobile": "+8613800000000", "department_ids": ["od-x"]}, True),
+        ({"name": "张三", "department_ids": ["od-x"]}, False),
+        ({"name": "张三", "mobile": "1", "department_ids": [f"od-{i}" for i in range(51)]}, False),
+        ({"name": "张三", "mobile": "1", "department_ids": ["od-x"], "employee_type": 9}, False),
+        ({"name": "张三", "mobile": "1", "department_ids": ["od-x"], "employee_type": 2}, True),
+    ],
+)
+def test_user_create_constraints(monkeypatch: pytest.MonkeyPatch, body: dict[str, Any], expect_ok: bool) -> None:
+    """mobile is required and tenant-unique; 50 departments max; employee_type 1-5."""
+    cap = _CapturedInvoke()
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    res = anyio.run(
+        lambda: _api.call_api_impl(method="POST", uri="/open-apis/contact/v3/users", body_json=json.dumps(body))
+    )
+    assert res.get("ok") is expect_ok, res.get("violations")
+
+
+def test_group_member_add_rejects_department_subject(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Feishu documents department subjects but does not accept them here."""
+    cap = _CapturedInvoke()
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    res = anyio.run(
+        lambda: _api.call_api_impl(
+            method="POST",
+            uri="/open-apis/contact/v3/group/:group_id/member/add",
+            paths_json=json.dumps({"group_id": "g1"}),
+            body_json=json.dumps({"member_type": "department", "member_id": "od-x"}),
+        )
+    )
+    assert res["ok"] is False
+    assert cap.requests == []
+
+
+def test_group_list_pages_on_its_own_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``group/simplelist`` returns ``grouplist``, one of the four non-``items`` keys."""
+    cap = _CapturedInvoke([{"ok": True, "data": {"grouplist": [{"id": "g1"}], "has_more": False}}])
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    res = anyio.run(lambda: _api.call_api_impl(method="GET", uri="/open-apis/contact/v3/group/simplelist"))
+    assert res["grouplist"] == [{"id": "g1"}]
+
+
 # ------------------------------------------------------------------ paging parity
 
 
@@ -254,6 +395,6 @@ def test_write_endpoints_are_not_paged(monkeypatch: pytest.MonkeyPatch) -> None:
         pages=[{"ok": True, "data": {"items": [], "has_more": True, "page_token": "t2"}}],
         method="POST",
         uri="/open-apis/contact/v3/users",
-        body_json=json.dumps({"name": "张三", "department_ids": ["od-x"]}),
+        body_json=json.dumps({"name": "张三", "mobile": "+8613800000000", "department_ids": ["od-x"]}),
     )
     assert len(cap.requests) == 1

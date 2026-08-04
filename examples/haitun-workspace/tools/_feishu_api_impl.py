@@ -127,7 +127,11 @@ def _skills_dir() -> str:
 
 
 def _spec_refusal(
-    rule: Any, body: dict[str, Any], query: dict[str, Any], paths: dict[str, Any]
+    rule: Any,
+    body: dict[str, Any],
+    query: dict[str, Any],
+    paths: dict[str, Any],
+    confirm: str = "",
 ) -> dict[str, Any] | None:
     """Refuse this call if the endpoint table says it cannot succeed as written.
 
@@ -136,9 +140,24 @@ def _spec_refusal(
     with ``code: 0`` and writes nothing — a warning attached to a successful-looking
     result is indistinguishable from success to the caller, so the only useful place
     to stop is before the request goes out.
+
+    The ``confirm`` gate is here for a different reason than the field checks. Those
+    catch calls Feishu would reject anyway; this one catches calls Feishu would
+    cheerfully *accept*. Resigning a user or deleting a department succeeds on the
+    first try and cannot be undone, so the token exists to force a round trip in which
+    the model has to say out loud what it is about to do.
     """
     if rule is None:
         return None
+    if rule.confirm and (confirm or "").strip() != rule.confirm:
+        return _f.error_result(
+            f"这一步不可逆, 没有执行。确认要做就带 confirm='{rule.confirm}' 再调一次 —— 先跟用户说清楚将要发生什么。",
+            code="need_confirmation",
+            need_confirmation=True,
+            endpoint=rule.endpoint,
+            confirm_token=rule.confirm,
+            pitfalls=rule.pitfalls or None,
+        )
     if rule.prefer_tool and rule.prefer_hard:
         why = f" — {rule.why}" if rule.why else ""
         return _f.error_result(
@@ -256,6 +275,7 @@ async def call_api_impl(
     prefer: str = "tenant",
     identity: str = "",
     user_key: str = "",
+    confirm: str = "",
 ) -> dict[str, Any]:
     """Send one arbitrary Open Platform request, reusing the shared invoke path."""
     verb = (method or "").strip().upper()
@@ -287,7 +307,7 @@ async def call_api_impl(
     # Endpoint table: refuse what it says cannot work, then fill the defaults it
     # declares. Both happen before the request is built, so a violation costs nothing.
     rule = _spec.rules_for(_skills_dir(), verb, path)
-    if refusal := _spec_refusal(rule, body, query, paths):
+    if refusal := _spec_refusal(rule, body, query, paths, confirm):
         return refusal
     for name, value in _spec.defaults_for(rule)["query"].items():
         query.setdefault(name, value)
