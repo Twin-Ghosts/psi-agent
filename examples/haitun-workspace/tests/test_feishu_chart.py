@@ -19,7 +19,9 @@ import anyio
 import matplotlib
 import numpy as np
 import pytest
-from lark_channel.core.enum import AccessTokenType
+from conftest import body_dict, body_field
+from lark_oapi.core.enum import AccessTokenType
+from lark_oapi.core.utils import Files
 from PIL import Image
 
 # Before pyplot is imported: these tests render off-screen, and importing pyplot first
@@ -640,9 +642,9 @@ async def test_append_doc_image_runs_create_upload_patch(monkeypatch: pytest.Mon
     assert methods == ["POST", "POST", "PATCH"]  # create block, upload media, bind token
     # The upload must target the new block, not a Drive folder.
     upload = fake.calls[1]
-    assert upload.body["parent_type"] == "docx_image"
-    assert upload.body["parent_node"] == "blk1"
-    assert fake.calls[2].body["replace_image"]["token"] == "tok_img"
+    assert body_dict(upload)["parent_type"] == "docx_image"
+    assert body_dict(upload)["parent_node"] == "blk1"
+    assert body_dict(fake.calls[2])["replace_image"]["token"] == "tok_img"
 
 
 @pytest.mark.asyncio
@@ -744,21 +746,24 @@ def test_upload_request_carries_the_binary_as_a_file_object() -> None:
     went out as application/json and Feishu answered ``400 boundary not found``.
     """
     req = _impl._build_media_upload_all_request("chart.png", "docx_image", "blk1", 3, b"png", None)
-    extracted = _impl.Files.extract_files(req.body) if hasattr(_impl, "Files") else None
-    assert isinstance(req.body["file"], io.IOBase)
-    assert req.body["file"].name == "chart.png"
-    assert req.body["file"].read() == b"png"
-    assert extracted is None or "file" in extracted
+    # Assert on the body *before* extraction: the real send calls extract_files, which
+    # empties the field, so reading it afterwards would only ever see None.
+    sent = body_field(req, "file")
+    assert isinstance(sent, io.IOBase)
+    assert sent.name == "chart.png"
+    assert sent.read() == b"png"
+    # And extract_files must find it there — that is what makes the request multipart.
+    assert "file" in Files.extract_files(req.body)
 
 
 def test_upload_request_is_rebuildable_for_a_second_identity() -> None:
     """Sending consumes the body's file entry, so a retry needs a freshly built request."""
     build = lambda: _impl._build_media_upload_all_request("c.png", "docx_image", "b", 3, b"png", None)  # noqa: E731
     first = build()
-    del first.body["file"]  # what the SDK does on send
+    del body_dict(first)["file"]  # what the SDK does on send
     second = _impl._fresh(build)
-    assert isinstance(second.body["file"], io.IOBase)
-    assert second.body["file"].read() == b"png"
+    assert isinstance(body_field(second, "file"), io.IOBase)
+    assert body_field(second, "file").read() == b"png"
 
 
 @pytest.mark.asyncio
@@ -858,7 +863,10 @@ async def test_plain_requests_survive_the_tenant_retry(monkeypatch: pytest.Monke
         sent = _impl._fresh(request)
         seen.append(set(sent.token_types))
         sent.token_types = {AccessTokenType.USER}  # what verify() does
-        sent.body.pop("file", None)  # what extract_files() does
+        # What extract_files() does to a typed request body: the attribute survives but
+        # is emptied, unlike a dict body which loses the key outright. ``_restorable``
+        # has to undo both, or an upload retried under a second identity sends no file.
+        Files.extract_files(sent.body)
         return {"ok": False, "code": 1770032, "msg": "forBidden"}
 
     async def as_tenant(request: Any) -> dict[str, Any]:
@@ -874,7 +882,7 @@ async def test_plain_requests_survive_the_tenant_retry(monkeypatch: pytest.Monke
     # The tenant attempt must see both token types again, not the narrowed {USER}.
     assert AccessTokenType.TENANT in seen[1]
     # and the file must be back in the body, rewound, so the retry re-sends the bytes
-    assert req.body["file"].read() == b"png"
+    assert body_field(req, "file").read() == b"png"
 
 
 @pytest.mark.asyncio
@@ -900,7 +908,7 @@ async def test_failed_upload_deletes_the_placeholder_without_an_index(
             # No index on create, so cleanup has to find the block by listing children.
             return {"ok": True, "data": {"items": [{"block_id": "other"}, {"block_id": "blk1"}]}}
         if method == "DELETE":
-            deleted.append(dict(req.body))
+            deleted.append(body_dict(req))
             return {"ok": True, "data": {}}
         if "children" in uri:
             return {"ok": True, "data": {"children": [{"block_id": "blk1"}], "document_revision_id": 11}}
@@ -1296,7 +1304,7 @@ class _FakeDoc:
         self, request: Any, user_key: str | None = None, prefer: str = "tenant", **_kw: Any
     ) -> dict[str, Any]:
         req = request() if callable(request) else request
-        uri, body = getattr(req, "uri", ""), getattr(req, "body", None) or {}
+        uri, body = getattr(req, "uri", ""), body_dict(req)
         if "raw_content" in uri:
             return {"ok": True, "data": {"content": self.content}}
         if "medias/upload_all" in uri:
@@ -1417,7 +1425,7 @@ async def test_table_caption_goes_above_the_table_with_its_own_sequence(monkeypa
         req = request() if callable(request) else request
         if "descendant" in getattr(req, "uri", ""):
             order.append("table")
-        elif getattr(req, "body", None) and (req.body.get("children") or [{}])[0].get("block_type") == 2:
+        elif getattr(req, "body", None) and (body_dict(req).get("children") or [{}])[0].get("block_type") == 2:
             order.append("caption")
         return await original(req, **kw)
 

@@ -3,7 +3,7 @@
 Answers the questions you cannot answer by reading files alone:
 
 1. ``shape`` — what does the platform event actually look like once it reaches
-   ``map_event``? Field layout lives in the ``lark_channel`` SDK model classes,
+   ``map_event``? Field layout lives in the ``lark_oapi`` SDK model classes,
    not in docs, so sample events here are built from those real models.
 2. ``probe`` — does my ``map.py`` return an envelope for that event, and if it
    returns nothing, which field paths did it have available?
@@ -163,7 +163,7 @@ def _build_sample(platform_event: str, overrides: dict[str, Any] | None = None) 
     if not module_suffix:
         return envelope, "plain dict (no P2 model in this SDK build)"
     try:
-        module = __import__(f"lark_channel.api.im.v1.model.{module_suffix}", fromlist=[class_name])
+        module = __import__(f"lark_oapi.api.im.v1.model.{module_suffix}", fromlist=[class_name])
         cls = getattr(module, class_name)
         return cls(envelope), f"real SDK model {class_name}"
     except Exception as e:

@@ -24,8 +24,8 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 import _feishu_impl as _f
-from lark_channel.core.enum import AccessTokenType, HttpMethod
-from lark_channel.core.model import BaseRequest
+from lark_oapi.core.enum import AccessTokenType, HttpMethod
+from lark_oapi.core.model import BaseRequest
 
 dumps_result = _f.dumps_result
 

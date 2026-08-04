@@ -779,8 +779,8 @@ wheels = [
 ]
 
 [[package]]
-name = "lark-channel-sdk"
-version = "1.2.0"
+name = "lark-oapi"
+version = "1.7.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
@@ -789,9 +789,9 @@ dependencies = [
     { name = "requests-toolbelt" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2f/09/1f914c7d834953c8a41589b1850fce63a501c5ed9af97a48239109d654e2/lark_channel_sdk-1.2.0.tar.gz", hash = "sha256:5e9e8f275446be13cb1ab2cc5085fb34eb334cab53876acf5fc6207166ca1451", size = 384430, upload-time = "2026-07-14T09:07:22.941Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/57/d0/0d4abc5e6dce888d71683d84a8ceb6fa9b798c2766e0f070eaacbdca5770/lark_oapi-1.7.1.tar.gz", hash = "sha256:57dc4616010cb9355dba11be3cf9b571b1a088b13abc22baf233c7e3527dd396", size = 2282040, upload-time = "2026-07-08T06:21:40.23Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/dd/3a/7dc6f49866902b86232d2b8de0299d3c59a972abb9746ce30d23daf26317/lark_channel_sdk-1.2.0-py3-none-any.whl", hash = "sha256:c08690572a099377cdeddc3a2a1402d9645879ad137e780d80060053dc8c1570", size = 561156, upload-time = "2026-07-14T09:07:19.728Z" },
+    { url = "https://files.pythonhosted.org/packages/a5/32/3650ba9230ade1245fa8d6021c9fe8febd27c9b5fdec78ffa465dbbc962e/lark_oapi-1.7.1-py3-none-any.whl", hash = "sha256:16945576a8c783a10e50911c00e421c1212fde3a76b2c2a6a4879b8606c1af8f", size = 7807753, upload-time = "2026-07-08T06:21:30.818Z" },
 ]
 
 [[package]]
@@ -1231,7 +1231,7 @@ dependencies = [
     { name = "anyio" },
     { name = "croniter" },
     { name = "hikari" },
-    { name = "lark-channel-sdk" },
+    { name = "lark-oapi" },
     { name = "loguru" },
     { name = "markdownify" },
     { name = "matplotlib" },
@@ -1271,7 +1271,7 @@ requires-dist = [
     { name = "anyio", specifier = ">=4.14.2" },
     { name = "croniter", specifier = ">=6.2.4" },
     { name = "hikari", specifier = ">=2.5.0" },
-    { name = "lark-channel-sdk", specifier = ">=1.2.0" },
+    { name = "lark-oapi", specifier = ">=1.7.1" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "markdownify", specifier = ">=1.2.3" },
     { name = "matplotlib", specifier = ">=3.11.0" },

@@ -8,12 +8,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import anyio
 import pytest
-from lark_channel import PolicyConfig
 
 from psi_agent.channel._core import ChannelCore
 from psi_agent.channel._types import FileChunk, TextChunk
 from psi_agent.channel.feishu import ChannelFeishu, client
 from psi_agent.channel.feishu._card_action import _consumed_card_content
+from psi_agent.channel.feishu._channel import FeishuChannel
+from psi_agent.channel.feishu._inbound import PolicyConfig
 from psi_agent.channel.feishu.client import (
     _EMOJI_FAILED,
     _EMOJI_PROCESSING,
@@ -220,27 +221,34 @@ def _patch_feishu(monkeypatch, channel: MagicMock) -> None:
 
 
 @pytest.mark.anyio
-async def test_run_feishu_cleans_up_on_startup_failure(monkeypatch):
-    """start_background failure must trigger shielded stop_background and re-raise."""
+async def test_run_feishu_propagates_startup_failure(monkeypatch):
+    """A failure inside channel.start must reach the caller rather than being swallowed.
+
+    Shutdown itself is the task group's job now: the WebSocket runs as a task inside it,
+    so leaving the group closes the socket. There is no separate stop call to assert on —
+    what matters is that a connect failure still surfaces.
+    """
     channel = MagicMock()
     channel.on = MagicMock()
-    channel.start_background = AsyncMock(side_effect=RuntimeError("connect boom"))
-    channel.stop_background = AsyncMock()
+    channel.start = AsyncMock(side_effect=RuntimeError("connect boom"))
     _patch_feishu(monkeypatch, channel)
 
-    with pytest.raises(RuntimeError, match="connect boom"):
+    # The WebSocket now lives in a task group, and anyio reports a failure inside one as
+    # an ExceptionGroup. The cause must still be reachable — a bad app secret has to be
+    # diagnosable from the traceback, not buried.
+    with pytest.raises(BaseExceptionGroup) as caught:
         await run_feishu(session_socket="/tmp/nonexistent.sock", app_id="a", app_secret="s")
-
-    channel.stop_background.assert_awaited()
+    causes = [str(exc) for exc in caught.value.exceptions]
+    assert any("connect boom" in text for text in causes), causes
 
 
 @pytest.mark.anyio
-async def test_run_feishu_cleans_up_on_cancel(monkeypatch):
-    """On cancel, stop_background must run under a shielded scope."""
+async def test_run_feishu_exits_cleanly_on_cancel(monkeypatch):
+    """Cancelling the caller must unwind run_feishu without raising."""
     channel = MagicMock()
     channel.on = MagicMock()
-    channel.start_background = AsyncMock()
-    channel.stop_background = AsyncMock()
+    channel.start = AsyncMock()
+    channel.bot_identity = SimpleNamespace(open_id="ou_bot", name="Haitun")
     _patch_feishu(monkeypatch, channel)
 
     async with anyio.create_task_group() as tg:
@@ -248,7 +256,7 @@ async def test_run_feishu_cleans_up_on_cancel(monkeypatch):
         await anyio.sleep(0.1)
         tg.cancel_scope.cancel()
 
-    channel.stop_background.assert_awaited()
+    channel.start.assert_awaited()
 
 
 @pytest.mark.anyio
@@ -256,8 +264,7 @@ async def test_run_feishu_passes_policy_to_channel(monkeypatch):
     """run_feishu must build a PolicyConfig and hand it to FeishuChannel."""
     channel = MagicMock()
     channel.on = MagicMock()
-    channel.start_background = AsyncMock()
-    channel.stop_background = AsyncMock()
+    channel.start = AsyncMock()
     channel.bot_identity = SimpleNamespace(open_id="ou_bot", name="Haitun")
 
     captured: dict[str, object] = {}
@@ -298,8 +305,7 @@ async def test_run_feishu_defaults_require_mention(monkeypatch):
     """Default policy: require_mention True, respond_to_mention_all False."""
     channel = MagicMock()
     channel.on = MagicMock()
-    channel.start_background = AsyncMock()
-    channel.stop_background = AsyncMock()
+    channel.start = AsyncMock()
     channel.bot_identity = SimpleNamespace(open_id="ou_bot", name="Haitun")
 
     captured: dict[str, object] = {}
@@ -317,41 +323,66 @@ async def test_run_feishu_defaults_require_mention(monkeypatch):
     assert policy.respond_to_mention_all is False
 
 
-@pytest.mark.anyio
-async def test_ensure_bot_identity_uses_cached_identity():
+# Identity is now resolved inside ``channel.start()`` (before connecting, so the group
+# policy gate has the bot's open_id from the first message). What client.py still owns is
+# reporting the outcome, because an unresolved identity shows up to the user as "the bot
+# ignores group @s" — a symptom that reads as unrelated unless the log says otherwise.
+
+
+def test_log_bot_identity_reports_resolved():
     channel = MagicMock()
     channel.bot_identity = SimpleNamespace(open_id="ou_bot", name="Haitun")
-    channel.resolve_bot_identity = AsyncMock()
-    await client._ensure_bot_identity(channel)
-    channel.resolve_bot_identity.assert_not_awaited()
+    client._log_bot_identity(channel)
 
 
-@pytest.mark.anyio
-async def test_ensure_bot_identity_resolves_when_missing():
+def test_log_bot_identity_warns_when_unresolved():
     channel = MagicMock()
     channel.bot_identity = None
-    channel.resolve_bot_identity = AsyncMock(return_value=SimpleNamespace(open_id="ou_bot", name="Haitun"))
-    await client._ensure_bot_identity(channel)
-    channel.resolve_bot_identity.assert_awaited_once()
-
-
-@pytest.mark.anyio
-async def test_ensure_bot_identity_warns_when_unresolved(caplog):
-    channel = MagicMock()
-    channel.bot_identity = None
-    channel.resolve_bot_identity = AsyncMock(return_value=None)
     # Must not raise even though group @-detection will be unavailable.
-    await client._ensure_bot_identity(channel)
-    channel.resolve_bot_identity.assert_awaited_once()
+    client._log_bot_identity(channel)
+
+
+def test_log_bot_identity_warns_on_blank_open_id():
+    """An identity object with no open_id is as unusable as no identity at all."""
+    channel = MagicMock()
+    channel.bot_identity = SimpleNamespace(open_id="", name="")
+    client._log_bot_identity(channel)
 
 
 @pytest.mark.anyio
-async def test_ensure_bot_identity_swallows_resolve_error():
-    channel = MagicMock()
-    channel.bot_identity = None
-    channel.resolve_bot_identity = AsyncMock(side_effect=RuntimeError("boom"))
-    # Startup must survive a failing identity lookup.
-    await client._ensure_bot_identity(channel)
+async def test_channel_start_resolves_identity_before_connecting(monkeypatch):
+    """Identity must be resolved before the socket starts taking messages.
+
+    Connecting first would leave a window where every group message is rejected for
+    "not mentioning the bot", because there is no open_id to compare mentions against.
+    """
+    order: list[str] = []
+    ch = FeishuChannel(app_id="a", app_secret="s")
+
+    async def _fake_resolve() -> None:
+        order.append("identity")
+
+    monkeypatch.setattr(ch, "resolve_bot_identity", _fake_resolve)
+
+    class _FakeTaskGroup:
+        async def start(self, *args: object, **kwargs: object) -> None:
+            order.append("connect")
+
+    monkeypatch.setattr("lark_oapi.ws.client.Client", lambda **kwargs: MagicMock(), raising=True)
+
+    class _Runner:
+        def __init__(self, ws: object) -> None:
+            pass
+
+        async def run(self, *, task_status: object = None) -> None:
+            pass
+
+        async def wait_connected(self, *, wait_seconds: float = 30.0) -> bool:
+            return True
+
+    monkeypatch.setattr("psi_agent.channel.feishu._channel.WebSocketRunner", _Runner)
+    await ch.start(task_group=_FakeTaskGroup())
+    assert order == ["identity", "connect"]
 
 
 def test_log_reject_swallows_and_reads_fields():
@@ -615,8 +646,7 @@ async def test_handle_comment_swallows_reply_error(monkeypatch, tmp_path):
 async def test_run_feishu_registers_comment_when_enabled(monkeypatch):
     channel = MagicMock()
     channel.on = MagicMock()
-    channel.start_background = AsyncMock()
-    channel.stop_background = AsyncMock()
+    channel.start = AsyncMock()
     channel.bot_identity = SimpleNamespace(open_id="ou_bot", name="Haitun")
     monkeypatch.setattr(client, "FeishuChannel", lambda **kw: channel)
     monkeypatch.setattr(client, "BlockingPortal", lambda: _FakePortal())
@@ -634,8 +664,7 @@ async def test_run_feishu_registers_comment_when_enabled(monkeypatch):
 async def test_run_feishu_skips_comment_when_disabled(monkeypatch):
     channel = MagicMock()
     channel.on = MagicMock()
-    channel.start_background = AsyncMock()
-    channel.stop_background = AsyncMock()
+    channel.start = AsyncMock()
     channel.bot_identity = SimpleNamespace(open_id="ou_bot", name="Haitun")
     monkeypatch.setattr(client, "FeishuChannel", lambda **kw: channel)
     monkeypatch.setattr(client, "BlockingPortal", lambda: _FakePortal())
@@ -859,8 +888,7 @@ def test_register_approval_processor_degrades_without_processor_map():
 async def test_run_feishu_registers_approval_processor(monkeypatch):
     channel = MagicMock()
     channel.on = MagicMock()
-    channel.start_background = AsyncMock()
-    channel.stop_background = AsyncMock()
+    channel.start = AsyncMock()
     channel.bot_identity = SimpleNamespace(open_id="ou_bot", name="Haitun")
     calls: list = []
     monkeypatch.setattr(client, "FeishuChannel", lambda **kw: channel)

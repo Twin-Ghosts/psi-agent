@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import body_dict
 
 TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
 if str(TOOLS_DIR) not in sys.path:
@@ -112,8 +113,8 @@ async def test_contact_find_posts_lookup_keys_in_body(monkeypatch: pytest.Monkey
     req = cap.request
     assert req.http_method.name == "POST"
     assert req.uri.endswith("/contact/v3/users/batch_get_id")
-    assert req.body["mobiles"] == ["13011111111"]
-    assert req.body["emails"] == ["a@b.com"]
+    assert body_dict(req)["mobiles"] == ["13011111111"]
+    assert body_dict(req)["emails"] == ["a@b.com"]
     assert _qdict(req).get("user_id_type") == "open_id"
 
 
@@ -124,7 +125,7 @@ async def test_contact_find_includes_resigned_by_default(monkeypatch: pytest.Mon
     cap = _Captured({"user_list": []})
     monkeypatch.setattr(_impl, "_invoke", cap)
     await _impl.find_users_by_contact_impl(mobiles="13011111111")
-    assert cap.request.body["include_resigned"] is True
+    assert body_dict(cap.request)["include_resigned"] is True
 
 
 @pytest.mark.asyncio
@@ -132,7 +133,7 @@ async def test_contact_find_can_exclude_resigned(monkeypatch: pytest.MonkeyPatch
     cap = _Captured({"user_list": []})
     monkeypatch.setattr(_impl, "_invoke", cap)
     await _impl.find_users_by_contact_impl(mobiles="13011111111", include_resigned=False)
-    assert cap.request.body["include_resigned"] is False
+    assert body_dict(cap.request)["include_resigned"] is False
 
 
 @pytest.mark.asyncio
@@ -142,8 +143,8 @@ async def test_contact_find_omits_empty_lookup_arrays(monkeypatch: pytest.Monkey
     cap = _Captured({"user_list": []})
     monkeypatch.setattr(_impl, "_invoke", cap)
     await _impl.find_users_by_contact_impl(mobiles="13011111111")
-    assert "emails" not in cap.request.body
-    assert "mobiles" in cap.request.body
+    assert "emails" not in body_dict(cap.request)
+    assert "mobiles" in body_dict(cap.request)
 
 
 @pytest.mark.asyncio
@@ -250,7 +251,7 @@ async def test_contact_find_dedupes_inputs(monkeypatch: pytest.MonkeyPatch) -> N
     cap = _Captured({"user_list": []})
     monkeypatch.setattr(_impl, "_invoke", cap)
     await _impl.find_users_by_contact_impl(mobiles="130, 130 ,131")
-    assert cap.request.body["mobiles"] == ["130", "131"]
+    assert body_dict(cap.request)["mobiles"] == ["130", "131"]
 
 
 @pytest.mark.asyncio
@@ -481,11 +482,11 @@ async def test_user_create_builds_request(monkeypatch: pytest.MonkeyPatch) -> No
     req = cap.request
     assert req.http_method.name == "POST"
     assert req.uri.endswith("/contact/v3/users")
-    assert req.body["name"] == "张三"
-    assert req.body["mobile"] == "13011111111"
-    assert req.body["department_ids"] == ["od-a", "od-b"]
-    assert req.body["employee_type"] == 1
-    assert req.body["email"] == "z@b.com"
+    assert body_dict(req)["name"] == "张三"
+    assert body_dict(req)["mobile"] == "13011111111"
+    assert body_dict(req)["department_ids"] == ["od-a", "od-b"]
+    assert body_dict(req)["employee_type"] == 1
+    assert body_dict(req)["email"] == "z@b.com"
     assert result["created"] is True
     assert result["user"]["open_id"] == "ou_new"
 
@@ -541,9 +542,9 @@ async def test_user_update_is_patch_and_omits_untouched(monkeypatch: pytest.Monk
     req = cap.request
     assert req.http_method.name == "PATCH"
     assert req.paths["user_id"] == "ou_1"
-    assert req.body == {"job_title": "架构师"}
-    assert "name" not in req.body
-    assert "mobile" not in req.body
+    assert body_dict(req) == {"job_title": "架构师"}
+    assert "name" not in body_dict(req)
+    assert "mobile" not in body_dict(req)
     assert result["updated_fields"] == ["job_title"]
 
 
@@ -596,8 +597,8 @@ async def test_user_resign_builds_delete_with_acceptors(monkeypatch: pytest.Monk
     assert req.http_method.name == "DELETE"
     assert req.uri.endswith("/contact/v3/users/:user_id")
     assert req.paths["user_id"] == "ou_1"
-    assert req.body["docs_acceptor_user_id"] == "ou_boss"
-    assert req.body["calendar_acceptor_user_id"] == "ou_boss"
+    assert body_dict(req)["docs_acceptor_user_id"] == "ou_boss"
+    assert body_dict(req)["calendar_acceptor_user_id"] == "ou_boss"
     assert result["resigned"] is True
 
 
@@ -616,7 +617,7 @@ async def test_user_resign_email_acceptor_shape(monkeypatch: pytest.MonkeyPatch)
     await _impl.user_resign_impl(
         "ou_1", confirm="离职用户", email_processing_type="1", email_acceptor_user_id="ou_boss"
     )
-    assert cap.request.body["email_acceptor"] == {"processing_type": "1", "acceptor_user_id": "ou_boss"}
+    assert body_dict(cap.request)["email_acceptor"] == {"processing_type": "1", "acceptor_user_id": "ou_boss"}
 
 
 @pytest.mark.asyncio
@@ -646,9 +647,9 @@ async def test_department_create_builds_request(monkeypatch: pytest.MonkeyPatch)
     req = cap.request
     assert req.http_method.name == "POST"
     assert req.uri.endswith("/contact/v3/departments")
-    assert req.body["name"] == "平台组"
-    assert req.body["parent_department_id"] == "od-a"
-    assert req.body["leader_user_id"] == "ou_boss"
+    assert body_dict(req)["name"] == "平台组"
+    assert body_dict(req)["parent_department_id"] == "od-a"
+    assert body_dict(req)["leader_user_id"] == "ou_boss"
     assert result["created"] is True
 
 
@@ -683,7 +684,7 @@ async def test_department_update_moves_department(monkeypatch: pytest.MonkeyPatc
     req = cap.request
     assert req.http_method.name == "PATCH"
     assert req.paths["department_id"] == "od-b"
-    assert req.body == {"parent_department_id": "0"}
+    assert body_dict(req) == {"parent_department_id": "0"}
     assert result["updated_fields"] == ["parent_department_id"]
 
 
@@ -745,9 +746,9 @@ async def test_user_group_create_uses_singular_path(monkeypatch: pytest.MonkeyPa
     req = cap.request
     assert req.http_method.name == "POST"
     assert req.uri.endswith("/contact/v3/group")
-    assert req.body["name"] == "IT 外包组"
-    assert req.body["description"] == "外包人员"
-    assert req.body["type"] == 1
+    assert body_dict(req)["name"] == "IT 外包组"
+    assert body_dict(req)["description"] == "外包人员"
+    assert body_dict(req)["type"] == 1
     assert result["group_id"] == "g_new"
     assert "动态用户组" in result["note"]
 
@@ -820,7 +821,7 @@ async def test_user_group_update_is_patch(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(_impl, "_invoke", cap)
     result = await _impl.user_group_manage_impl("update", group_id="g1", name="新名字")
     assert cap.request.http_method.name == "PATCH"
-    assert cap.request.body == {"name": "新名字"}
+    assert body_dict(cap.request) == {"name": "新名字"}
     assert result["updated_fields"] == ["name"]
 
 
@@ -888,7 +889,7 @@ async def test_group_members_add_loops_one_per_call(monkeypatch: pytest.MonkeyPa
     first = seq.requests[0]
     assert first.http_method.name == "POST"
     assert first.uri.endswith("/contact/v3/group/:group_id/member/add")
-    assert first.body == {"member_type": "user", "member_id_type": "open_id", "member_id": "ou_1"}
+    assert body_dict(first) == {"member_type": "user", "member_id_type": "open_id", "member_id": "ou_1"}
     assert result["ok"] is True
     assert result["succeeded_count"] == 3
 

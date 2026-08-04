@@ -41,8 +41,15 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 import _feishu_impl as _f  # noqa: E402
-from lark_channel.core.enum import AccessTokenType, HttpMethod  # noqa: E402
-from lark_channel.core.model import BaseRequest  # noqa: E402
+from lark_oapi.api.docx.v1 import (  # noqa: E402
+    BatchUpdateDocumentBlockRequest,
+    BatchUpdateDocumentBlockRequestBody,
+    ConvertDocumentRequest,
+    ConvertDocumentRequestBody,
+    PatchDocumentBlockRequest,
+    UpdateBlockRequest,
+)
+from lark_oapi.core.model import BaseRequest  # noqa: E402
 
 TABLE_BLOCK = 31
 TABLE_CELL_BLOCK = 32
@@ -93,12 +100,11 @@ def build_convert_request(content: str) -> BaseRequest:
     Tenant-only: converting is a pure transformation that touches no document, so it
     needs no user identity even when the *write* that follows does.
     """
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/docx/v1/documents/blocks/convert"
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"content_type": "markdown", "content": content}
-    return req
+    return (
+        ConvertDocumentRequest.builder()
+        .request_body(ConvertDocumentRequestBody.builder().content_type("markdown").content(content).build())
+        .build()
+    )
 
 
 def sanitize_converted(blocks: list[dict[str, Any]], *, header_row: bool = True) -> list[dict[str, Any]]:
@@ -272,25 +278,19 @@ def build_insert_row_request(document_id: str, block_id: str, row_index: int = -
     ``row_index`` -1 appends. Feishu creates the row's cells *and* an empty text block in
     each, which is what makes the fill step a text update rather than a block creation.
     """
-    req = BaseRequest()
-    req.http_method = HttpMethod.PATCH
-    req.uri = "/open-apis/docx/v1/documents/:document_id/blocks/:block_id"
-    req.paths["document_id"] = document_id
-    req.paths["block_id"] = block_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"insert_table_row": {"row_index": row_index}}
-    return req
+    payload = UpdateBlockRequest.builder().build()
+    payload.insert_table_row = {"row_index": row_index}
+    return PatchDocumentBlockRequest.builder().document_id(document_id).block_id(block_id).request_body(payload).build()
 
 
 def build_batch_update_request(document_id: str, requests: list[dict[str, Any]]) -> BaseRequest:
     """``PATCH …/blocks/batch_update`` — up to 100 block edits in one call."""
-    req = BaseRequest()
-    req.http_method = HttpMethod.PATCH
-    req.uri = "/open-apis/docx/v1/documents/:document_id/blocks/batch_update"
-    req.paths["document_id"] = document_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"requests": requests}
-    return req
+    return (
+        BatchUpdateDocumentBlockRequest.builder()
+        .document_id(document_id)
+        .request_body(BatchUpdateDocumentBlockRequestBody.builder().requests(requests).build())
+        .build()
+    )
 
 
 def fill_requests(cell_ids: list[str], texts: list[str], children: dict[str, list[str]]) -> list[dict[str, Any]]:

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import body_dict
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 TOOLS_DIR = WORKSPACE_ROOT / "tools"
@@ -217,7 +218,7 @@ def test_convert_request_shape() -> None:
     req = _md.build_convert_request("# H")
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/docx/v1/documents/blocks/convert"
-    assert req.body == {"content_type": "markdown", "content": "# H"}
+    assert body_dict(req) == {"content_type": "markdown", "content": "# H"}
 
 
 def test_insert_row_request_appends_by_default() -> None:
@@ -225,14 +226,14 @@ def test_insert_row_request_appends_by_default() -> None:
     assert req.http_method.name == "PATCH"
     assert req.uri == "/open-apis/docx/v1/documents/:document_id/blocks/:block_id"
     assert req.paths["block_id"] == "tbl1"
-    assert req.body == {"insert_table_row": {"row_index": -1}}
+    assert body_dict(req) == {"insert_table_row": {"row_index": -1}}
 
 
 def test_batch_update_request_shape() -> None:
     req = _md.build_batch_update_request("doc1", [{"block_id": "b1"}])
     assert req.uri == "/open-apis/docx/v1/documents/:document_id/blocks/batch_update"
     assert req.paths["document_id"] == "doc1"
-    assert req.body == {"requests": [{"block_id": "b1"}]}
+    assert body_dict(req) == {"requests": [{"block_id": "b1"}]}
 
 
 def test_real_block_id_resolves_temporary_ids() -> None:
@@ -275,7 +276,7 @@ class _FakeFeishu:
                 "data": {"blocks": self.blocks, "first_level_block_ids": self.first_level},
             }
         if uri.endswith("/descendant"):
-            body = getattr(req, "body", {}) or {}
+            body = body_dict(req)
             rel = [
                 {"temporary_block_id": str(b.get("block_id")), "block_id": f"real_{b.get('block_id')}"}
                 for b in body.get("descendants", [])
@@ -300,7 +301,7 @@ async def test_append_markdown_converts_then_writes(monkeypatch: pytest.MonkeyPa
         "/open-apis/docx/v1/documents/blocks/convert",
         "/open-apis/docx/v1/documents/:document_id/blocks/:block_id/descendant",
     ]
-    body = fake.sent[1].body
+    body = body_dict(fake.sent[1])
     assert body["children_id"] == ["tbl", "p1"]
     # The payload that goes out is the sanitized one, not what convert handed us.
     table = next(b for b in body["descendants"] if b["block_type"] == 31)
@@ -393,9 +394,9 @@ async def test_oversized_table_is_clipped_then_grown(monkeypatch: pytest.MonkeyP
     assert uris.count("/open-apis/docx/v1/documents/:document_id/blocks/:block_id") == 2
     assert uris[-1].endswith("/blocks/batch_update")
 
-    created = fake.sent[1].body
+    created = body_dict(fake.sent[1])
     assert created["descendants"][0]["table"]["property"]["row_size"] == 2
-    filled = fake.sent[-1].body["requests"]
+    filled = body_dict(fake.sent[-1])["requests"]
     # The grown rows' text is re-applied to the cells Feishu created (rows 3-4, 2 cols).
     assert [r["block_id"] for r in filled] == ["c2_0_t", "c2_1_t", "c3_0_t", "c3_1_t"]
     assert filled[0]["update_text_elements"]["elements"][0]["text_run"]["content"] == "vc2_0"

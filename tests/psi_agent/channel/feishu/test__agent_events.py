@@ -29,7 +29,7 @@ HAITUN = Path(__file__).resolve().parents[4] / "examples" / "haitun-workspace"
 
 
 class _UserId:
-    """Stand-in for lark_channel's UserId: plain attrs, no dict()/to_dict()."""
+    """Stand-in for lark_oapi's UserId: plain attrs, no dict()/to_dict()."""
 
     def __init__(self, open_id: str) -> None:
         self.open_id = open_id
@@ -62,7 +62,7 @@ class _Header:
 
 
 class _P2Event:
-    """Shape of lark_channel's P2ImChatMemberUserAddedV1."""
+    """Shape of lark_oapi's P2ImChatMemberUserAddedV1."""
 
     def __init__(self, event_id: str, chat_id: str, members: list[_Member]) -> None:
         self.header = _Header(event_id)
@@ -160,7 +160,7 @@ def test_raw_to_dict_unwraps_every_p2_model(
     event_type: str, module: str, cls_name: str, body: dict[str, Any], path: tuple[str, ...]
 ) -> None:
     """Any P2 event must reach map_event as plain data with its header intact."""
-    mod = pytest.importorskip(f"lark_channel.api.im.v1.model.{module}")
+    mod = pytest.importorskip(f"lark_oapi.api.im.v1.model.{module}")
     cls = getattr(mod, cls_name)
     raw = _raw_to_dict(cls({"header": {"event_id": f"e-{event_type}", "event_type": event_type}, "event": body}))
     event = raw["event"]

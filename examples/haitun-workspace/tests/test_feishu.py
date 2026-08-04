@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlparse
 
 import anyio
 import pytest
+from conftest import body_dict, body_field
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 TOOLS_DIR = WORKSPACE_ROOT / "tools"
@@ -193,7 +194,7 @@ async def test_reply_comment_plain(monkeypatch: pytest.MonkeyPatch) -> None:
     req = cap.request
     assert req.http_method.name == "POST"
     assert "replies" in req.uri
-    els = req.body["content"]["elements"]
+    els = body_dict(req)["content"]["elements"]
     assert els[0]["text_run"]["text"] == "hi"
     assert all(e["type"] != "person" for e in els)
 
@@ -203,7 +204,7 @@ async def test_reply_comment_with_mention(monkeypatch: pytest.MonkeyPatch) -> No
     cap = _CapturedInvoke({"reply_id": "r2"})
     monkeypatch.setattr(_impl, "_invoke", cap)
     await _impl.reply_comment_impl("tok", "docx", "cid", "hi", "ou_abc")
-    els = cap.request.body["content"]["elements"]
+    els = body_dict(cap.request)["content"]["elements"]
     assert any(e["type"] == "person" and e["person"]["user_id"] == "ou_abc" for e in els)
 
 
@@ -268,9 +269,9 @@ async def test_create_chat_builds_request_and_returns_chat_id(monkeypatch: pytes
     assert req.http_method.name == "POST"
     assert req.uri.endswith("/im/v1/chats")
     assert _qdict(req).get("user_id_type") == "open_id"
-    assert req.body["name"] == "项目群"
-    assert req.body["description"] == "d"
-    assert req.body["user_id_list"] == ["ou_a", "ou_b"]
+    assert body_dict(req)["name"] == "项目群"
+    assert body_dict(req)["description"] == "d"
+    assert body_dict(req)["user_id_list"] == ["ou_a", "ou_b"]
     assert "set_bot_manager" not in _qdict(req)  # no owner → bot stays owner
     assert result["ok"] is True
     assert result["chat_id"] == "oc_new"
@@ -284,7 +285,7 @@ async def test_create_chat_owner_is_requester_bot_stays_admin(monkeypatch: pytes
     cap = _CapturedInvoke({"chat_id": "oc_o", "owner_id": "ou_requester"})
     monkeypatch.setattr(_impl, "_invoke", cap)
     result = await _impl.create_chat_impl("群", ["ou_a"], owner_id="ou_requester")
-    assert cap.request.body["owner_id"] == "ou_requester"
+    assert body_dict(cap.request)["owner_id"] == "ou_requester"
     assert _qdict(cap.request).get("set_bot_manager") == "true"
     assert result["owner_id"] == "ou_requester"
 
@@ -295,7 +296,7 @@ async def test_create_chat_no_owner_leaves_bot_as_owner(monkeypatch: pytest.Monk
     cap = _CapturedInvoke({"chat_id": "oc_b"})
     monkeypatch.setattr(_impl, "_invoke", cap)
     await _impl.create_chat_impl("群", ["ou_a"])
-    assert "owner_id" not in cap.request.body
+    assert "owner_id" not in body_dict(cap.request)
     assert "set_bot_manager" not in _qdict(cap.request)
 
 
@@ -323,9 +324,9 @@ async def test_send_message_builds_create_and_returns_thread(monkeypatch: pytest
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/im/v1/messages"
     assert _qdict(req).get("receive_id_type") == "chat_id"
-    assert req.body["receive_id"] == "oc_1"
-    assert req.body["msg_type"] == "text"
-    assert json.loads(req.body["content"])["text"] == "hello 待办"
+    assert body_dict(req)["receive_id"] == "oc_1"
+    assert body_dict(req)["msg_type"] == "text"
+    assert json.loads(body_dict(req)["content"])["text"] == "hello 待办"
     assert result["message_id"] == "om_1"
     assert result["thread_id"] == "omt_1"
 
@@ -336,7 +337,7 @@ async def test_send_message_no_on_behalf_keeps_text_verbatim(monkeypatch: pytest
     cap = _CapturedInvoke({"message_id": "om_1"})
     monkeypatch.setattr(_impl, "_invoke", cap)
     await _impl.send_message_impl("oc_1", "看板已更新", "chat_id")
-    assert json.loads(cap.request.body["content"])["text"] == "看板已更新"
+    assert json.loads(body_dict(cap.request)["content"])["text"] == "看板已更新"
 
 
 @pytest.mark.asyncio
@@ -350,7 +351,7 @@ async def test_send_message_on_behalf_wraps_with_resolved_name(monkeypatch: pyte
 
     monkeypatch.setattr(_impl, "get_users_batch_impl", _fake_batch)
     await _impl.send_message_impl("ou_lisi", "记得交周报", "open_id", on_behalf_of="ou_zhangsan")
-    assert json.loads(cap.request.body["content"])["text"] == "张三给你发了一条消息：「记得交周报」"  # noqa: RUF001
+    assert json.loads(body_dict(cap.request)["content"])["text"] == "张三给你发了一条消息：「记得交周报」"  # noqa: RUF001
 
 
 @pytest.mark.asyncio
@@ -364,7 +365,7 @@ async def test_send_message_on_behalf_falls_back_to_open_id(monkeypatch: pytest.
 
     monkeypatch.setattr(_impl, "get_users_batch_impl", _fail_batch)
     await _impl.send_message_impl("ou_lisi", "记得交周报", "open_id", on_behalf_of="ou_zhangsan")
-    assert json.loads(cap.request.body["content"])["text"] == "ou_zhangsan给你发了一条消息：「记得交周报」"  # noqa: RUF001
+    assert json.loads(body_dict(cap.request)["content"])["text"] == "ou_zhangsan给你发了一条消息：「记得交周报」"  # noqa: RUF001
 
 
 @pytest.mark.asyncio
@@ -376,8 +377,8 @@ async def test_reply_message_sets_reply_in_thread(monkeypatch: pytest.MonkeyPatc
     assert req.http_method.name == "POST"
     assert req.paths["message_id"] == "om_1"
     assert req.uri.endswith("/reply")
-    assert req.body["reply_in_thread"] is True
-    assert json.loads(req.body["content"])["text"] == "评价内容"
+    assert body_dict(req)["reply_in_thread"] is True
+    assert json.loads(body_dict(req)["content"])["text"] == "评价内容"
     assert result["thread_id"] == "omt_1"
 
 
@@ -480,8 +481,8 @@ async def test_edit_message_builds_put_request(monkeypatch: pytest.MonkeyPatch) 
     assert req.http_method.name == "PUT"
     assert req.uri == "/open-apis/im/v1/messages/:message_id"
     assert req.paths["message_id"] == "om_abc"
-    assert req.body["msg_type"] == "text"
-    assert json.loads(req.body["content"]) == {"text": "改好的内容"}
+    assert body_dict(req)["msg_type"] == "text"
+    assert json.loads(body_dict(req)["content"]) == {"text": "改好的内容"}
     # tenant first: the bot edits its own messages, the UAT is only the fallback
     assert cap.prefer == "tenant"
     assert cap.user_key == "ou_sender"
@@ -494,8 +495,8 @@ async def test_edit_message_with_mention_becomes_post(monkeypatch: pytest.Monkey
     monkeypatch.setattr(_impl, "_invoke", cap)
     result = await _impl.edit_message_impl("om_abc", '<at user_id="ou_z"></at> 看一下')
     # A plain-text <at> renders as a raw tag, so an edit that mentions must switch to post
-    assert cap.request.body["msg_type"] == "post"
-    line = json.loads(cap.request.body["content"])["zh_cn"]["content"][0]
+    assert body_dict(cap.request)["msg_type"] == "post"
+    line = json.loads(body_dict(cap.request)["content"])["zh_cn"]["content"][0]
     assert line[0] == {"tag": "at", "user_id": "ou_z"}
     assert result["msg_type"] == "post"
 
@@ -546,8 +547,8 @@ async def test_edit_card_patches_and_forces_update_multi(monkeypatch: pytest.Mon
     # A card is updated with PATCH (not the text/post PUT) and takes only content
     assert req.http_method.name == "PATCH"
     assert req.uri == "/open-apis/im/v1/messages/:message_id"
-    assert set(req.body) == {"content"}
-    sent = json.loads(req.body["content"])
+    assert set(body_dict(req)) == {"content"}
+    sent = json.loads(body_dict(req)["content"])
     # Without update_multi Feishu updates the card for a single viewer only
     assert sent["config"] == {"wide_screen_mode": True, "update_multi": True}
     assert sent["elements"] == card["elements"]
@@ -561,7 +562,7 @@ async def test_edit_card_leaves_card_2_schema_alone(monkeypatch: pytest.MonkeyPa
     card = {"schema": "2.0", "body": {"elements": []}}
     await _impl.edit_card_impl("om_card", json.dumps(card))
     # Card 2.0 has no update_multi flag; adding one would be inventing a field
-    assert json.loads(cap.request.body["content"]) == card
+    assert json.loads(body_dict(cap.request)["content"]) == card
 
 
 @pytest.mark.asyncio
@@ -604,7 +605,7 @@ async def test_add_reaction_builds_post_request(monkeypatch: pytest.MonkeyPatch)
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/im/v1/messages/:message_id/reactions"
     assert req.paths["message_id"] == "om_abc"
-    assert req.body == {"reaction_type": {"emoji_type": "THUMBSUP"}}
+    assert body_dict(req) == {"reaction_type": {"emoji_type": "THUMBSUP"}}
     assert cap.user_key == "ou_me"
     assert result["reaction_id"] == "re1"
     assert result["emoji_type"] == "THUMBSUP"
@@ -618,7 +619,7 @@ async def test_add_reaction_normalizes_chinese_emoji_and_casing(monkeypatch: pyt
         cap = _CapturedInvoke({"reaction_id": "re1"})
         monkeypatch.setattr(_impl, "_invoke", cap)
         result = await _impl.add_reaction_impl("om_abc", given)
-        assert cap.request.body["reaction_type"]["emoji_type"] == expected, given
+        assert body_dict(cap.request)["reaction_type"]["emoji_type"] == expected, given
         assert result["emoji_type"] == expected
 
 
@@ -629,7 +630,7 @@ async def test_add_reaction_passes_unknown_emoji_through(monkeypatch: pytest.Mon
     cap = _CapturedInvoke({"reaction_id": "re1"})
     monkeypatch.setattr(_impl, "_invoke", cap)
     await _impl.add_reaction_impl("om_abc", "SomeNewEmoji2027")
-    assert cap.request.body["reaction_type"]["emoji_type"] == "SomeNewEmoji2027"
+    assert body_dict(cap.request)["reaction_type"]["emoji_type"] == "SomeNewEmoji2027"
 
 
 @pytest.mark.asyncio
@@ -836,9 +837,9 @@ async def test_send_card_builds_interactive_request(monkeypatch: pytest.MonkeyPa
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/im/v1/messages"
     assert _qdict(req).get("receive_id_type") == "chat_id"
-    assert req.body["msg_type"] == "interactive"
+    assert body_dict(req)["msg_type"] == "interactive"
     # card content is posted verbatim as a JSON string
-    assert json.loads(req.body["content"]) == card
+    assert json.loads(body_dict(req)["content"]) == card
     assert result["message_id"] == "om_c"
     assert result["thread_id"] == "omt_c"
 
@@ -1070,8 +1071,8 @@ async def test_sheet_write_builds_put_request(monkeypatch: pytest.MonkeyPatch) -
     assert req.http_method.name == "PUT"
     assert req.paths["spreadsheet_token"] == "sht1"
     assert "sheets/v2/spreadsheets/:spreadsheet_token/values" in req.uri
-    assert req.body["valueRange"]["range"] == "S1!A1:B2"
-    assert req.body["valueRange"]["values"] == [["a", 1], ["=SUM(B1:B1)", 2]]
+    assert body_dict(req)["valueRange"]["range"] == "S1!A1:B2"
+    assert body_dict(req)["valueRange"]["values"] == [["a", 1], ["=SUM(B1:B1)", 2]]
     # writes act as the user so the content is owned by them
     assert cap.prefer == "user"
     assert cap.user_key == "ou_1"
@@ -1122,7 +1123,7 @@ async def test_sheet_append_builds_post_request(monkeypatch: pytest.MonkeyPatch)
     assert req.http_method.name == "POST"
     assert "values_append" in req.uri
     assert _qdict(req).get("insertDataOption") == "INSERT_ROWS"
-    assert req.body["valueRange"]["values"] == [["x", 1]]
+    assert body_dict(req)["valueRange"]["values"] == [["x", 1]]
 
 
 @pytest.mark.asyncio
@@ -1141,8 +1142,8 @@ async def test_sheet_format_builds_style_request(monkeypatch: pytest.MonkeyPatch
     req = cap.request
     assert req.http_method.name == "PUT"
     assert req.uri.endswith("/style")
-    assert req.body["appendStyle"]["range"] == "S1!A1:B2"
-    assert req.body["appendStyle"]["style"]["font"]["bold"] is True
+    assert body_dict(req)["appendStyle"]["range"] == "S1!A1:B2"
+    assert body_dict(req)["appendStyle"]["style"]["font"]["bold"] is True
 
 
 @pytest.mark.asyncio
@@ -1435,7 +1436,7 @@ async def test_add_chat_members_builds_post_and_classifies_leftovers(monkeypatch
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/im/v1/chats/:chat_id/members"
     assert req.paths["chat_id"] == "oc_x"
-    assert req.body == {"id_list": ["ou_a", "ou_gone", "ou_nope", "ou_wait"]}
+    assert body_dict(req) == {"id_list": ["ou_a", "ou_gone", "ou_nope", "ou_wait"]}
     q = _qdict(req)
     assert q.get("member_id_type") == "open_id"
     # succeed_type=1 by default: Feishu's own default (0) would add nobody over one bad id.
@@ -1466,7 +1467,7 @@ async def test_add_chat_members_dedupes_and_takes_app_id(monkeypatch: pytest.Mon
     cap = _CapturedInvoke({})
     monkeypatch.setattr(_impl, "_invoke", cap)
     result = await _impl.add_chat_members_impl("oc_x", ["ou_a", " ou_a ", "ou_b"], "app_id", user_key="ou_owner")
-    assert cap.request.body == {"id_list": ["ou_a", "ou_b"]}
+    assert body_dict(cap.request) == {"id_list": ["ou_a", "ou_b"]}
     assert _qdict(cap.request).get("member_id_type") == "app_id"
     assert cap.user_key == "ou_owner"  # acts as the owner when the bot isn't an admin
     assert result["requested"] == ["ou_a", "ou_b"]
@@ -1493,7 +1494,7 @@ async def test_remove_chat_members_builds_delete(monkeypatch: pytest.MonkeyPatch
     req = cap.request
     assert req.http_method.name == "DELETE"
     assert req.uri == "/open-apis/im/v1/chats/:chat_id/members"
-    assert req.body == {"id_list": ["ou_a", "ou_bad"]}
+    assert body_dict(req) == {"id_list": ["ou_a", "ou_bad"]}
     # succeed_type is an add-only query; sending it on a DELETE would be noise.
     assert "succeed_type" not in _qdict(req)
     assert result["removed"] == ["ou_a"]
@@ -1595,11 +1596,11 @@ async def test_decide_approve_builds_post(monkeypatch: pytest.MonkeyPatch) -> No
     req = cap.request
     assert req.http_method.name == "POST"
     assert req.uri.endswith("/tasks/approve")
-    assert req.body["approval_code"] == "appr1"
-    assert req.body["instance_code"] == "inst1"
-    assert req.body["user_id"] == "ou_boss"
-    assert req.body["task_id"] == "t1"
-    assert req.body["comment"] == "同意"
+    assert body_dict(req)["approval_code"] == "appr1"
+    assert body_dict(req)["instance_code"] == "inst1"
+    assert body_dict(req)["user_id"] == "ou_boss"
+    assert body_dict(req)["task_id"] == "t1"
+    assert body_dict(req)["comment"] == "同意"
     assert result["action"] == "approve"
 
 
@@ -1609,7 +1610,7 @@ async def test_decide_reject_uses_reject_endpoint(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(_impl, "_invoke", cap)
     result = await _impl.decide_approval_task_impl(False, "appr1", "inst1", "ou_boss", "t1")
     assert cap.request.uri.endswith("/tasks/reject")
-    assert "comment" not in cap.request.body  # empty comment omitted
+    assert "comment" not in body_dict(cap.request)  # empty comment omitted
     assert result["action"] == "reject"
 
 
@@ -1666,11 +1667,11 @@ async def test_create_instance_builds_body(monkeypatch: pytest.MonkeyPatch) -> N
     req = cap.request
     assert req.http_method.name == "POST"
     assert req.uri.endswith("/approval/v4/instances")
-    assert req.body["approval_code"] == "appr1"
-    assert req.body["open_id"] == "ou_emp"
-    assert "user_id" not in req.body
-    assert req.body["title"] == "张三的请假"
-    assert json.loads(req.body["form"]) == [{"id": "w1", "type": "input", "value": "年假"}]
+    assert body_dict(req)["approval_code"] == "appr1"
+    assert body_dict(req)["open_id"] == "ou_emp"
+    assert "user_id" not in body_dict(req)
+    assert body_dict(req)["title"] == "张三的请假"
+    assert json.loads(body_dict(req)["form"]) == [{"id": "w1", "type": "input", "value": "年假"}]
     assert result["instance_code"] == "inst_new"
 
 
@@ -1685,7 +1686,7 @@ async def test_create_instance_passes_node_approvers_and_user_key(monkeypatch: p
         node_approver_open_id_list_json='[{"key":"n1","value":["ou_boss"]}]',
         user_key="ou_emp",
     )
-    assert cap.request.body["node_approver_open_id_list"] == [{"key": "n1", "value": ["ou_boss"]}]
+    assert body_dict(cap.request)["node_approver_open_id_list"] == [{"key": "n1", "value": ["ou_boss"]}]
     assert cap.user_key == "ou_emp"
 
 
@@ -1802,9 +1803,9 @@ async def test_start_topic_uses_post_when_mentions(monkeypatch: pytest.MonkeyPat
     req = cap.request
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/im/v1/messages"
-    assert req.body["receive_id"] == "oc_1"
-    assert req.body["msg_type"] == "post"  # mentions -> post rich text
-    line = json.loads(req.body["content"])["zh_cn"]["content"][0]
+    assert body_dict(req)["receive_id"] == "oc_1"
+    assert body_dict(req)["msg_type"] == "post"  # mentions -> post rich text
+    line = json.loads(body_dict(req)["content"])["zh_cn"]["content"][0]
     assert {"tag": "at", "user_id": "ou_a"} in line
     assert result["thread_id"] == "omt_1"
 
@@ -1814,8 +1815,8 @@ async def test_start_topic_no_mentions_plain_text(monkeypatch: pytest.MonkeyPatc
     cap = _CapturedInvoke({"message_id": "om_1", "thread_id": "omt_1", "chat_id": "oc_1"})
     monkeypatch.setattr(_impl, "_invoke", cap)
     await _impl.start_topic_impl("oc_1", "hello", None, False)
-    assert cap.request.body["msg_type"] == "text"  # no mentions -> plain text
-    assert json.loads(cap.request.body["content"])["text"] == "hello"
+    assert body_dict(cap.request)["msg_type"] == "text"  # no mentions -> plain text
+    assert json.loads(body_dict(cap.request)["content"])["text"] == "hello"
 
 
 @pytest.mark.asyncio
@@ -1892,10 +1893,10 @@ async def test_search_docs_builds_request_and_parses(monkeypatch: pytest.MonkeyP
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/suite/docs-api/search/object"
     assert _impl.AccessTokenType.USER in req.token_types
-    assert req.body["search_key"] == "周报"
-    assert req.body["count"] == 10
-    assert req.body["offset"] == 5
-    assert req.body["docs_types"] == ["docx", "sheet"]
+    assert body_dict(req)["search_key"] == "周报"
+    assert body_dict(req)["count"] == 10
+    assert body_dict(req)["offset"] == 5
+    assert body_dict(req)["docs_types"] == ["docx", "sheet"]
     assert client.option.user_access_token == "uat_tok"
     assert result["docs"][0] == {"title": "周报", "token": "doccnX", "obj_type": "docx", "owner_id": "ou_o"}
     assert result["count"] == 1
@@ -3039,10 +3040,10 @@ async def test_search_bitable_records(monkeypatch: pytest.MonkeyPatch) -> None:
     req = cap.request
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/search"
-    assert req.body["filter"]["conjunction"] == "and"
-    assert req.body["filter"]["conditions"][0]["field_name"] == "状态"
-    assert req.body["sort"] == [{"field_name": "日期", "desc": True}]
-    assert req.body["field_names"] == ["状态"]
+    assert body_dict(req)["filter"]["conjunction"] == "and"
+    assert body_dict(req)["filter"]["conditions"][0]["field_name"] == "状态"
+    assert body_dict(req)["sort"] == [{"field_name": "日期", "desc": True}]
+    assert body_dict(req)["field_names"] == ["状态"]
     assert result["records"][0]["record_id"] == "rec1"
     assert result["total"] == 1
 
@@ -3052,7 +3053,7 @@ async def test_search_bitable_records_view_only(monkeypatch: pytest.MonkeyPatch)
     cap = _CapturedInvoke({"items": [], "has_more": False})
     monkeypatch.setattr(_impl, "_invoke", cap)
     result = await _impl.search_bitable_records_impl("appX", "tbl1", view_id="vewA", automatic_fields=True)
-    assert cap.request.body == {"view_id": "vewA", "automatic_fields": True}
+    assert body_dict(cap.request) == {"view_id": "vewA", "automatic_fields": True}
     assert result["ok"] is True
 
 
@@ -3140,7 +3141,7 @@ async def test_create_bitable_records_batch(monkeypatch: pytest.MonkeyPatch) -> 
     req = paged.requests[-1]
     assert req.http_method.name == "POST"
     assert req.uri.endswith("/records/batch_create")
-    assert req.body["records"] == [{"fields": {"姓名": "张三"}}, {"fields": {"姓名": "李四"}}]
+    assert body_dict(req)["records"] == [{"fields": {"姓名": "张三"}}, {"fields": {"姓名": "李四"}}]
     assert result["created"] == ["recA", "recB"]
     assert result["count"] == 2
 
@@ -3152,7 +3153,7 @@ async def test_create_bitable_records_accepts_fields_wrapper(monkeypatch: pytest
     result = await _impl.create_bitable_records_impl(
         "appX", "tbl1", '[{"fields":{"姓名":"张三"}}]', validate_fields=False
     )
-    assert cap.request.body["records"] == [{"fields": {"姓名": "张三"}}]
+    assert body_dict(cap.request)["records"] == [{"fields": {"姓名": "张三"}}]
     assert result["ok"] is True
 
 
@@ -3193,7 +3194,7 @@ async def test_create_bitable_record(monkeypatch: pytest.MonkeyPatch) -> None:
     req = cap.request
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records"
-    assert req.body["fields"] == {"新人": "张三", "评分": 4}
+    assert body_dict(req)["fields"] == {"新人": "张三", "评分": 4}
     assert result["record_id"] == "recNew"
 
 
@@ -3224,7 +3225,7 @@ async def test_update_bitable_record(monkeypatch: pytest.MonkeyPatch) -> None:
     assert req.http_method.name == "PUT"
     assert req.uri == "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/:record_id"
     assert req.paths["record_id"] == "rec1"
-    assert req.body["fields"] == {"状态": "已完成"}
+    assert body_dict(req)["fields"] == {"状态": "已完成"}
     assert result["ok"] is True
     assert result["updated_fields"] == ["状态"]
     assert "dropped_fields" not in result
@@ -3281,7 +3282,7 @@ async def test_update_bitable_record_allows_null_clear(monkeypatch: pytest.Monke
     )
     monkeypatch.setattr(_impl, "_invoke", paged)
     result = await _impl.update_bitable_record_impl("appX", "tbl1", "rec1", '{"备注":null}')
-    assert paged.requests[-1].body["fields"] == {"备注": None}
+    assert body_dict(paged.requests[-1])["fields"] == {"备注": None}
     # A cleared cell is absent from the echo by design — not a dropped write.
     assert result["ok"] is True
     assert "dropped_fields" not in result
@@ -3312,7 +3313,7 @@ async def test_update_bitable_records_batch(monkeypatch: pytest.MonkeyPatch) -> 
     req = paged.requests[-1]
     assert req.http_method.name == "POST"
     assert req.uri.endswith("/records/batch_update")
-    assert req.body["records"][1]["record_id"] == "recB"
+    assert body_dict(req)["records"][1]["record_id"] == "recB"
     assert result["updated"] == ["recA", "recB"]
     assert result["count"] == 2
     # recB came back with no fields written at all.
@@ -3366,7 +3367,7 @@ async def test_delete_bitable_records(monkeypatch: pytest.MonkeyPatch) -> None:
     assert req.http_method.name == "POST"
     assert req.uri.endswith("/records/batch_delete")
     assert req.paths["table_id"] == "tbl1"
-    assert req.body["records"] == ["recA", "recB"]
+    assert body_dict(req)["records"] == ["recA", "recB"]
     assert result["deleted"] == 2
 
 
@@ -3389,7 +3390,7 @@ async def test_clear_bitable_table(monkeypatch: pytest.MonkeyPatch) -> None:
     result = await _impl.clear_bitable_table_impl("appX", "tbl1")
     assert result["deleted"] == 3
     # last request is the batch_delete carrying all 3 ids
-    assert paged.requests[-1].body["records"] == ["r1", "r2", "r3"]
+    assert body_dict(paged.requests[-1])["records"] == ["r1", "r2", "r3"]
 
 
 @pytest.mark.asyncio
@@ -3460,7 +3461,7 @@ async def test_create_bitable_app_builds_post(monkeypatch: pytest.MonkeyPatch) -
     req = cap.request
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/bitable/v1/apps"
-    assert req.body == {"name": "合同台账", "folder_token": "fldA", "time_zone": "Asia/Shanghai"}
+    assert body_dict(req) == {"name": "合同台账", "folder_token": "fldA", "time_zone": "Asia/Shanghai"}
     assert cap.prefer == "user"
     assert cap.user_key == "ou_1"
     assert result["app_token"] == "bascnNew"
@@ -3473,7 +3474,7 @@ async def test_create_bitable_app_omits_blank_optionals(monkeypatch: pytest.Monk
     cap = _CapturedInvoke({"app": {"app_token": "bascnX"}})
     monkeypatch.setattr(_impl, "_invoke", cap)
     result = await _impl.create_bitable_app_impl("台账")
-    assert cap.request.body == {"name": "台账"}
+    assert body_dict(cap.request) == {"name": "台账"}
     # No url in the response: derive one from the app_token so the user gets a link.
     assert result["url"] == "https://feishu.cn/base/bascnX"
 
@@ -3488,9 +3489,9 @@ async def test_create_bitable_table_with_fields(monkeypatch: pytest.MonkeyPatch)
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/bitable/v1/apps/:app_token/tables"
     assert req.paths["app_token"] == "appX"
-    assert req.body["table"]["name"] == "合同"
-    assert req.body["table"]["fields"][0] == {"field_name": "编号", "type": 1}
-    assert req.body["table"]["default_view_name"] == "表格视图"
+    assert body_dict(req)["table"]["name"] == "合同"
+    assert body_dict(req)["table"]["fields"][0] == {"field_name": "编号", "type": 1}
+    assert body_dict(req)["table"]["default_view_name"] == "表格视图"
     assert cap.prefer == "user"
     assert result["table_id"] == "tblNew"
     assert result["field_ids"] == ["fld1", "fld2"]
@@ -3501,7 +3502,7 @@ async def test_create_bitable_table_without_fields(monkeypatch: pytest.MonkeyPat
     cap = _CapturedInvoke({"table_id": "tblBare"})
     monkeypatch.setattr(_impl, "_invoke", cap)
     result = await _impl.create_bitable_table_impl("appX", "空表")
-    assert cap.request.body == {"table": {"name": "空表"}}
+    assert body_dict(cap.request) == {"table": {"name": "空表"}}
     assert result["table_id"] == "tblBare"
     assert result["field_ids"] == []
 
@@ -3556,10 +3557,10 @@ async def test_create_bitable_field_builds_post(monkeypatch: pytest.MonkeyPatch)
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields"
     assert req.paths["table_id"] == "tbl1"
-    assert req.body["field_name"] == "状态"
-    assert req.body["type"] == 3
-    assert req.body["property"] == {"options": [{"name": "生效", "color": 0}]}
-    assert req.body["ui_type"] == "SingleSelect"
+    assert body_dict(req)["field_name"] == "状态"
+    assert body_dict(req)["type"] == 3
+    assert body_dict(req)["property"] == {"options": [{"name": "生效", "color": 0}]}
+    assert body_dict(req)["ui_type"] == "SingleSelect"
     assert cap.prefer == "user"
     assert result["field_id"] == "fldNew"
     assert result["type"] == "单选"  # decoded via _BITABLE_FIELD_TYPES
@@ -3570,7 +3571,7 @@ async def test_create_bitable_field_minimal(monkeypatch: pytest.MonkeyPatch) -> 
     cap = _CapturedInvoke({"field": {"field_id": "fldT", "field_name": "备注", "type": 1}})
     monkeypatch.setattr(_impl, "_invoke", cap)
     result = await _impl.create_bitable_field_impl("appX", "tbl1", "备注")
-    assert cap.request.body == {"field_name": "备注", "type": 1}
+    assert body_dict(cap.request) == {"field_name": "备注", "type": 1}
     assert result["type"] == "文本"
 
 
@@ -3622,9 +3623,9 @@ async def test_update_bitable_field_renames_and_keeps_property(monkeypatch: pyte
     assert req.http_method.name == "PUT"
     assert req.uri == "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields/:field_id"
     assert req.paths["field_id"] == "fldA"
-    assert req.body["field_name"] == "审批意见"
-    assert req.body["type"] == 3
-    assert req.body["property"] == {"options": [{"name": "高", "color": 0}]}
+    assert body_dict(req)["field_name"] == "审批意见"
+    assert body_dict(req)["type"] == 3
+    assert body_dict(req)["property"] == {"options": [{"name": "高", "color": 0}]}
     assert result["name"] == "审批意见"
 
 
@@ -3634,7 +3635,7 @@ async def test_update_bitable_field_explicit_args_skip_lookup(monkeypatch: pytes
     monkeypatch.setattr(_impl, "_invoke", cap)
     result = await _impl.update_bitable_field_impl("appX", "tbl1", "fldA", "金额", 2, '{"formatter":"0.00"}')
     assert cap.request.http_method.name == "PUT"  # no GET for the field list
-    assert cap.request.body["property"] == {"formatter": "0.00"}
+    assert body_dict(cap.request)["property"] == {"formatter": "0.00"}
     assert result["type"] == "数字"
 
 
@@ -3680,7 +3681,7 @@ async def test_create_bitable_tables(monkeypatch: pytest.MonkeyPatch) -> None:
     req = cap.request
     assert req.http_method.name == "POST"
     assert req.uri.endswith("/tables/batch_create")
-    assert req.body["tables"] == [{"name": "合同"}, {"name": "付款"}]
+    assert body_dict(req)["tables"] == [{"name": "合同"}, {"name": "付款"}]
     assert result["tables"] == [{"table_id": "tblA", "name": "合同"}, {"table_id": "tblB", "name": "付款"}]
     assert result["count"] == 2
 
@@ -3700,7 +3701,7 @@ async def test_delete_bitable_tables(monkeypatch: pytest.MonkeyPatch) -> None:
     result = await _impl.delete_bitable_tables_impl("appX", "tblA, tblB")
     req = cap.request
     assert req.uri.endswith("/tables/batch_delete")
-    assert req.body["table_ids"] == ["tblA", "tblB"]
+    assert body_dict(req)["table_ids"] == ["tblA", "tblB"]
     assert result["deleted"] == ["tblA", "tblB"]
 
 
@@ -3752,7 +3753,7 @@ async def test_update_bitable_app(monkeypatch: pytest.MonkeyPatch) -> None:
     result = await _impl.update_bitable_app_impl("appX", "新名字", "true")
     req = cap.request
     assert req.http_method.name == "PUT"
-    assert req.body == {"name": "新名字", "is_advanced": True}
+    assert body_dict(req) == {"name": "新名字", "is_advanced": True}
     assert result["changed"] == ["is_advanced", "name"]
     assert result["is_advanced"] is True
 
@@ -3787,7 +3788,7 @@ async def test_copy_bitable_app(monkeypatch: pytest.MonkeyPatch) -> None:
     req = cap.request
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/bitable/v1/apps/:app_token/copy"
-    assert req.body == {
+    assert body_dict(req) == {
         "name": "台账副本",
         "folder_token": "fldA",
         "without_content": True,
@@ -3802,7 +3803,7 @@ async def test_copy_bitable_app_omits_blanks(monkeypatch: pytest.MonkeyPatch) ->
     cap = _CapturedInvoke({"app": {"app_token": "appNew"}})
     monkeypatch.setattr(_impl, "_invoke", cap)
     result = await _impl.copy_bitable_app_impl("appX")
-    assert cap.request.body == {}
+    assert body_dict(cap.request) == {}
     assert result["url"].endswith("/base/appNew")
 
 
@@ -3883,8 +3884,8 @@ async def test_query_attendance_builds_request_and_parses(monkeypatch: pytest.Mo
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/attendance/v1/user_tasks/query"
     assert _qdict(req).get("employee_type") == "employee_id"
-    assert req.body["user_ids"] == ["e1", "e2"]  # comma string split
-    assert req.body["check_date_from"] == 20260714
+    assert body_dict(req)["user_ids"] == ["e1", "e2"]  # comma string split
+    assert body_dict(req)["check_date_from"] == 20260714
     r0 = result["results"][0]
     assert r0["name"] == "张三"
     assert r0["check_in_result"] == "Normal"
@@ -4088,15 +4089,15 @@ async def test_create_task_builds_members_and_due(monkeypatch: pytest.MonkeyPatc
     req = cap.request
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/task/v2/tasks"
-    assert req.body["summary"] == "写周报"
-    assert req.body["description"] == "本周总结"
-    assert req.body["due"]["timestamp"].isdigit()
-    roles = [(m["id"], m["role"]) for m in req.body["members"]]
+    assert body_dict(req)["summary"] == "写周报"
+    assert body_dict(req)["description"] == "本周总结"
+    assert body_dict(req)["due"]["timestamp"].isdigit()
+    roles = [(m["id"], m["role"]) for m in body_dict(req)["members"]]
     assert ("ou_a", "assignee") in roles
     assert ("ou_b", "assignee") in roles
     assert ("ou_c", "follower") in roles
     # member kind must be "user" + id_type "open_id" (type="open_id" is rejected 1470400)
-    assert all(m["type"] == "user" and m["id_type"] == "open_id" for m in req.body["members"])
+    assert all(m["type"] == "user" and m["id_type"] == "open_id" for m in body_dict(req)["members"])
     assert result["task_guid"] == "g1"
 
 
@@ -4111,8 +4112,8 @@ async def test_create_task_no_due_no_members(monkeypatch: pytest.MonkeyPatch) ->
     cap = _CapturedInvoke({"task": {"guid": "g2", "summary": "s"}})
     monkeypatch.setattr(_impl, "_invoke", cap)
     await _impl.create_task_impl("s", "", "", "", "")
-    assert "due" not in cap.request.body
-    assert "members" not in cap.request.body
+    assert "due" not in body_dict(cap.request)
+    assert "members" not in body_dict(cap.request)
 
 
 @pytest.mark.asyncio
@@ -4163,13 +4164,13 @@ async def test_complete_task_patch(monkeypatch: pytest.MonkeyPatch) -> None:
     req = cap.request
     assert req.http_method.name == "PATCH"
     assert req.paths["task_guid"] == "g1"
-    assert req.body["update_fields"] == ["completed_at"]
-    assert req.body["task"]["completed_at"] != "0"
+    assert body_dict(req)["update_fields"] == ["completed_at"]
+    assert body_dict(req)["task"]["completed_at"] != "0"
     # reopen
     cap2 = _CapturedInvoke({})
     monkeypatch.setattr(_impl, "_invoke", cap2)
     await _impl.complete_task_impl("g1", False)
-    assert cap2.request.body["task"]["completed_at"] == "0"
+    assert body_dict(cap2.request)["task"]["completed_at"] == "0"
 
 
 @pytest.mark.asyncio
@@ -4177,8 +4178,8 @@ async def test_update_task_only_provided_fields(monkeypatch: pytest.MonkeyPatch)
     cap = _CapturedInvoke({})
     monkeypatch.setattr(_impl, "_invoke", cap)
     result = await _impl.update_task_impl("g1", "新标题", "", "")
-    assert cap.request.body["update_fields"] == ["summary"]  # description/due omitted -> not cleared
-    assert cap.request.body["task"] == {"summary": "新标题"}
+    assert body_dict(cap.request)["update_fields"] == ["summary"]  # description/due omitted -> not cleared
+    assert body_dict(cap.request)["task"] == {"summary": "新标题"}
     assert result["updated"] == ["summary"]
 
 
@@ -4264,9 +4265,9 @@ async def test_create_event_builds_request(monkeypatch: pytest.MonkeyPatch) -> N
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/calendar/v4/calendars/:calendar_id/events"
     assert req.paths["calendar_id"] == "cal_1"
-    assert req.body["summary"] == "周会"
-    assert req.body["start_time"]["timestamp"].isdigit()
-    assert req.body["end_time"]["timezone"] == "Asia/Shanghai"
+    assert body_dict(req)["summary"] == "周会"
+    assert body_dict(req)["start_time"]["timestamp"].isdigit()
+    assert body_dict(req)["end_time"]["timezone"] == "Asia/Shanghai"
     assert result["event_id"] == "ev_1"
 
 
@@ -4283,9 +4284,9 @@ async def test_create_event_with_attendees(monkeypatch: pytest.MonkeyPatch) -> N
     att_req = paged.requests[1]
     assert att_req.uri == "/open-apis/calendar/v4/calendars/:calendar_id/events/:event_id/attendees"
     assert att_req.paths["event_id"] == "ev_1"
-    ids = [a["user_id"] for a in att_req.body["attendees"]]
+    ids = [a["user_id"] for a in body_dict(att_req)["attendees"]]
     assert ids == ["ou_a", "ou_b"]
-    assert all(a["type"] == "user" for a in att_req.body["attendees"])
+    assert all(a["type"] == "user" for a in body_dict(att_req)["attendees"])
     assert result["attendees_added"] == ["ou_a", "ou_b"]
 
 
@@ -4399,7 +4400,7 @@ async def test_create_per_person_one_event_each(monkeypatch: pytest.MonkeyPatch)
     assert [c["open_id"] for c in result["created"]] == ["ou_a", "ou_b", "ou_c"]
     # each add-attendees request invites exactly that one person
     att_reqs = [r for r in paged.requests if "attendees" in r.uri]
-    invited = [[a["user_id"] for a in r.body["attendees"]] for r in att_reqs]
+    invited = [[a["user_id"] for a in body_dict(r)["attendees"]] for r in att_reqs]
     assert invited == [["ou_a"], ["ou_b"], ["ou_c"]]
 
 
@@ -4990,7 +4991,7 @@ async def test_create_docx_builds_request_and_parses_id(monkeypatch: pytest.Monk
     req = cap.request
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/docx/v1/documents"
-    assert req.body == {"title": "My Doc", "folder_token": "fld123"}
+    assert body_dict(req) == {"title": "My Doc", "folder_token": "fld123"}
 
 
 @pytest.mark.asyncio
@@ -4998,7 +4999,7 @@ async def test_create_docx_omits_empty_folder(monkeypatch: pytest.MonkeyPatch) -
     cap = _CapturedInvoke({"document": {"document_id": "d1"}})
     monkeypatch.setattr(_impl, "_invoke", cap)
     await _impl.create_docx_impl("Title", "")
-    assert cap.request.body == {"title": "Title"}
+    assert body_dict(cap.request) == {"title": "Title"}
 
 
 @pytest.mark.asyncio
@@ -5015,7 +5016,7 @@ async def test_create_wiki_node_builds_request(monkeypatch: pytest.MonkeyPatch) 
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/wiki/v2/spaces/:space_id/nodes"
     assert req.paths["space_id"] == "sp1"
-    assert req.body == {
+    assert body_dict(req) == {
         "obj_type": "docx",
         "node_type": "origin",
         "parent_node_token": "parentTok",
@@ -5028,7 +5029,7 @@ async def test_create_wiki_node_upgrades_deprecated_doc_type(monkeypatch: pytest
     cap = _CapturedInvoke({"node": {"node_token": "n", "obj_token": "o"}})
     monkeypatch.setattr(_impl, "_invoke", cap)
     await _impl.create_wiki_node_impl("sp1", "T", "doc", "")  # 'doc' is deprecated (131010)
-    assert cap.request.body["obj_type"] == "docx"
+    assert body_dict(cap.request)["obj_type"] == "docx"
 
 
 @pytest.mark.asyncio
@@ -5123,7 +5124,7 @@ async def test_create_wiki_space_builds_uat_request(monkeypatch: pytest.MonkeyPa
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/wiki/v2/spaces"
     assert _impl.AccessTokenType.USER in req.token_types
-    assert req.body == {"name": "团队库", "description": "描述", "open_sharing": "closed"}
+    assert body_dict(req) == {"name": "团队库", "description": "描述", "open_sharing": "closed"}
     assert client.option.user_access_token == "uat_tok"
     assert result["ok"] is True
     assert result["space_id"] == "spNEW"
@@ -5561,7 +5562,7 @@ async def test_append_doc_content_builds_root_request(monkeypatch: pytest.Monkey
     # root block: document_id doubles as block_id
     assert req.paths["document_id"] == "doc1"
     assert req.paths["block_id"] == "doc1"
-    assert len(req.body["children"]) == 2
+    assert len(body_dict(req)["children"]) == 2
 
 
 @pytest.mark.asyncio
@@ -5575,7 +5576,7 @@ async def test_append_doc_content_batches_over_50(monkeypatch: pytest.MonkeyPatc
         identity: str = "",
         capabilities: list[str] | None = None,
     ) -> dict[str, Any]:
-        calls.append(len(request.body["children"]))
+        calls.append(len(body_dict(request)["children"]))
         return {"ok": True, "code": 0, "msg": "", "data": {}}
 
     monkeypatch.setattr(_impl, "_invoke", fake_invoke)
@@ -5644,9 +5645,9 @@ async def test_append_doc_table_builds_descendant_request(monkeypatch: pytest.Mo
     assert req.uri == "/open-apis/docx/v1/documents/:document_id/blocks/:block_id/descendant"
     assert req.paths["document_id"] == "doc1"
     # the table block_id is the sole top-level child at the insert point
-    assert len(req.body["children_id"]) == 1
-    assert req.body["children_id"][0] == req.body["descendants"][0]["block_id"]
-    assert req.body["descendants"][0]["table"]["property"]["column_width"] == [120, 200]
+    assert len(body_dict(req)["children_id"]) == 1
+    assert body_dict(req)["children_id"][0] == body_dict(req)["descendants"][0]["block_id"]
+    assert body_dict(req)["descendants"][0]["table"]["property"]["column_width"] == [120, 200]
 
 
 @pytest.mark.asyncio
@@ -5668,7 +5669,7 @@ async def test_append_doc_flowchart_interleaves_arrows(monkeypatch: pytest.Monke
     monkeypatch.setattr(_impl, "_invoke", cap)
     result = await _impl.append_doc_flowchart_impl("doc1", '["开始","审批","结束"]', "请假流程")
     assert result["ok"] is True
-    desc = cap.request.body["descendants"]
+    desc = body_dict(cap.request)["descendants"]
     texts = [d["text"]["elements"][0]["text_run"]["content"] for d in desc if d["block_type"] == 2]
     # title + 3 steps + 2 arrows between them
     assert texts == ["请假流程", "开始", "↓", "审批", "↓", "结束"]
@@ -5689,7 +5690,7 @@ async def test_append_doc_swimlane_from_object(monkeypatch: pytest.MonkeyPatch) 
     # 2 lanes → 2 columns; header row + 2 stage rows (deepest lane has 2)
     assert result["columns"] == 2
     assert result["rows"] == 3
-    desc = cap.request.body["descendants"]
+    desc = body_dict(cap.request)["descendants"]
     header_texts = [
         desc[i]["text"]["elements"][0]["text_run"]["content"] for i, d in enumerate(desc) if d["block_type"] == 2
     ][:2]
@@ -5744,7 +5745,7 @@ async def test_append_doc_sheet_creates_block_and_returns_write_coordinates(
     assert result["ok"] is True
     req = cap.request
     assert req.uri == "/open-apis/docx/v1/documents/:document_id/blocks/:block_id/children"
-    assert req.body["children"][0] == {"block_type": 30, "sheet": {"row_size": 4, "column_size": 3}}
+    assert body_dict(req)["children"][0] == {"block_type": 30, "sheet": {"row_size": 4, "column_size": 3}}
     # The split token is the whole point: these are what feishu_sheet_write takes.
     assert result["spreadsheet_token"] == "shtTok"
     assert result["sheet_id"] == "pY34sT"
@@ -5774,7 +5775,7 @@ async def test_append_doc_sheet_clamps_creation_and_grows_by_writing(monkeypatch
     result = await _impl.append_doc_sheet_impl("doc1", values_json=rows, header_row=False)
     assert result["ok"] is True
     assert result["values_written"] is True
-    created = calls[0].body["children"][0]["sheet"]
+    created = body_dict(calls[0])["children"][0]["sheet"]
     assert created == {"row_size": 9, "column_size": 3}
     # The result reports the size the reader ends up seeing, not the clamped block.
     assert (result["rows"], result["columns"]) == (12, 3)
@@ -5782,7 +5783,7 @@ async def test_append_doc_sheet_clamps_creation_and_grows_by_writing(monkeypatch
     assert calls[1].uri == "/open-apis/sheets/v2/spreadsheets/:spreadsheet_token/values"
     assert calls[1].paths["spreadsheet_token"] == "shtTok"
     # A bare "s1!A1" is accepted by Feishu but writes nothing, so the range spans the grid.
-    assert calls[1].body["valueRange"]["range"] == "s1!A1:C12"
+    assert body_dict(calls[1])["valueRange"]["range"] == "s1!A1:C12"
 
 
 @pytest.mark.asyncio
@@ -5793,7 +5794,7 @@ async def test_append_doc_sheet_never_creates_a_block_over_the_cap(monkeypatch: 
     async def fake_invoke(request: Any, **kwargs: Any) -> dict[str, Any]:
         req = request() if callable(request) else request
         if "docx" in req.uri:
-            seen.append(req.body["children"][0]["sheet"])
+            seen.append(body_dict(req)["children"][0]["sheet"])
         return {
             "ok": True,
             "data": {"children": [{"block_id": "b1", "block_type": 30, "sheet": {"token": "tok_s1"}}]},
@@ -5827,7 +5828,7 @@ async def test_append_doc_sheet_lets_the_data_decide_the_size(monkeypatch: pytes
     grid = json.dumps([["a", "b", "c", "d"], [1, 2, 3, 4]])
     result = await _impl.append_doc_sheet_impl("doc1", values_json=grid, header_row=False)
     assert (result["rows"], result["columns"]) == (2, 4)
-    assert calls[1].body["valueRange"]["range"] == "s1!A1:D2"
+    assert body_dict(calls[1])["valueRange"]["range"] == "s1!A1:D2"
 
 
 @pytest.mark.asyncio
@@ -5849,8 +5850,8 @@ async def test_append_doc_sheet_grows_an_empty_sheet_with_blanks(monkeypatch: py
     assert (result["rows"], result["columns"]) == (20, 6)
     assert "values_written" not in result  # nothing was written *as data*
     grow = calls[1]
-    assert grow.body["valueRange"]["range"] == "s1!A1:F20"
-    values = grow.body["valueRange"]["values"]
+    assert body_dict(grow)["valueRange"]["range"] == "s1!A1:F20"
+    values = body_dict(grow)["valueRange"]["values"]
     assert len(values) == 20
     assert values[0] == [None] * 6  # blank cells, not placeholder text
 
@@ -5892,8 +5893,8 @@ async def test_append_doc_sheet_bolds_header_row(monkeypatch: pytest.MonkeyPatch
     assert result["header_styled"] is True
     style_req = seen[-1]
     assert style_req.uri == "/open-apis/sheets/v2/spreadsheets/:spreadsheet_token/style"
-    assert style_req.body["appendStyle"]["range"] == "s1!A1:B1"
-    assert style_req.body["appendStyle"]["style"]["font"]["bold"] is True
+    assert body_dict(style_req)["appendStyle"]["range"] == "s1!A1:B1"
+    assert body_dict(style_req)["appendStyle"]["style"]["font"]["bold"] is True
 
 
 @pytest.mark.asyncio
@@ -5946,7 +5947,7 @@ async def test_append_doc_bitable_returns_app_and_table(monkeypatch: pytest.Monk
     result = await _impl.append_doc_bitable_impl("doc1")
     assert result["ok"] is True
     # An empty bitable object is rejected by Feishu (1770001), so view_type is explicit.
-    assert cap.request.body["children"][0] == {"block_type": 18, "bitable": {"view_type": 1}}
+    assert body_dict(cap.request)["children"][0] == {"block_type": 18, "bitable": {"view_type": 1}}
     assert result["app_token"] == "appTok"
     assert result["table_id"] == "tblXYZ"
 
@@ -6058,9 +6059,9 @@ async def test_add_permission_member_builds_post(monkeypatch: pytest.MonkeyPatch
     assert req.uri.endswith("/permissions/:token/members")
     assert req.paths["token"] == "tok"
     assert _qdict(req).get("type") == "docx"
-    assert req.body["member_id"] == "od_dept"
-    assert req.body["perm"] == "view"
-    assert req.body["type"] == "department"
+    assert body_dict(req)["member_id"] == "od_dept"
+    assert body_dict(req)["perm"] == "view"
+    assert body_dict(req)["type"] == "department"
 
 
 @pytest.mark.asyncio
@@ -6121,8 +6122,8 @@ async def test_create_bitable_role_builds_post(monkeypatch: pytest.MonkeyPatch) 
     req = cap.request
     assert req.http_method.name == "POST"
     assert req.paths["app_token"] == "app1"
-    assert req.body["role_name"] == "读者"
-    assert req.body["table_roles"][0]["table_id"] == "tbl1"
+    assert body_dict(req)["role_name"] == "读者"
+    assert body_dict(req)["table_roles"][0]["table_id"] == "tbl1"
 
 
 @pytest.mark.asyncio
@@ -6157,7 +6158,7 @@ async def test_add_bitable_role_member_builds_post(monkeypatch: pytest.MonkeyPat
     req = cap.request
     assert req.http_method.name == "POST"
     assert req.paths["role_id"] == "r1"
-    assert req.body["member_id"] == "u1"
+    assert body_dict(req)["member_id"] == "u1"
     assert _qdict(req).get("member_id_type") == "open_id"
 
 
@@ -6222,12 +6223,15 @@ async def test_upload_media_builds_multipart(monkeypatch: pytest.MonkeyPatch, tm
     # The binary must be an io.IOBase in the BODY. Asserting on req.files instead would
     # pass while the request goes out as application/json: the SDK overwrites req.files
     # with whatever it can extract from the body, and ignores what we put there.
-    sent = req.body["file"]
+    sent = body_field(req, "file")
     assert isinstance(sent, io.IOBase)
     assert sent.name == "proof.mp4"
     assert sent.read() == b"video-bytes"
-    assert req.body["parent_node"] == "fldrtok"
-    assert req.body["size"] == str(len(b"video-bytes"))
+    assert body_dict(req)["parent_node"] == "fldrtok"
+    # ``size`` is an int on the request model where the hand-built version carried a
+    # string. Both leave as the same multipart field — the form encoder stringifies every
+    # value — so this asserts the type the SDK declares.
+    assert body_dict(req)["size"] == len(b"video-bytes")
 
 
 @pytest.mark.asyncio
@@ -7079,7 +7083,7 @@ async def test_update_doc_block_patches_text_elements(monkeypatch: pytest.Monkey
     assert req.http_method.name == "PATCH"
     assert req.uri == "/open-apis/docx/v1/documents/:document_id/blocks/:block_id"
     assert req.paths["block_id"] == "b2"
-    els = req.body["update_text_elements"]["elements"]
+    els = body_dict(req)["update_text_elements"]["elements"]
     assert els == [{"text_run": {"content": "改好的正文"}}]
     # a write goes as the user when there is one, so the edit is attributable
     assert cap.prefer == "user"
@@ -7115,7 +7119,7 @@ async def test_delete_doc_blocks_resolves_id_to_index(monkeypatch: pytest.Monkey
     assert delete_req.http_method.name == "DELETE"
     assert delete_req.uri.endswith("/children/batch_delete")
     # b2 sits at index 1, and the range is half-open
-    assert delete_req.body == {"start_index": 1, "end_index": 2}
+    assert body_dict(delete_req) == {"start_index": 1, "end_index": 2}
     assert delete_req.paths["block_id"] == "doc1"
 
 
@@ -7127,7 +7131,7 @@ async def test_delete_doc_blocks_deletes_highest_index_first(monkeypatch: pytest
     monkeypatch.setattr(_impl, "_invoke", scripted)
     result = await _impl.delete_doc_blocks_impl("doc1", '["b1","b3"]')
     assert result["deleted"] == ["b3", "b1"]
-    assert [r.body["start_index"] for r in scripted.requests[1:]] == [2, 0]
+    assert [body_dict(r)["start_index"] for r in scripted.requests[1:]] == [2, 0]
 
 
 @pytest.mark.asyncio
@@ -7264,11 +7268,11 @@ async def test_upload_image_puts_binary_in_body(monkeypatch: pytest.MonkeyPatch,
     req = cap.requests[0]
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/im/v1/images"
-    assert req.body["image_type"] == "message"
+    assert body_dict(req)["image_type"] == "message"
     # Same trap as drive uploads: the SDK overwrites req.files from the body right
     # before sending, so the binary must be an io.IOBase *in the body* with a .name —
     # otherwise the request goes out as JSON and Feishu says "boundary not found".
-    sent = req.body["image"]
+    sent = body_field(req, "image")
     assert isinstance(sent, io.IOBase)
     assert sent.name == "chart.png"
     assert sent.read() == b"png-bytes"
@@ -7310,10 +7314,10 @@ async def test_upload_file_derives_file_type_from_suffix(monkeypatch: pytest.Mon
         result = await _impl.upload_file_impl(str(f))
         req = cap.requests[0]
         assert req.uri == "/open-apis/im/v1/files"
-        assert req.body["file_type"] == expected, name
-        assert req.body["file_name"] == name
-        assert isinstance(req.body["file"], io.IOBase)
-        assert "duration" not in req.body  # only sent when a real length is given
+        assert body_dict(req)["file_type"] == expected, name
+        assert body_dict(req)["file_name"] == name
+        assert isinstance(body_field(req, "file"), io.IOBase)
+        assert "duration" not in body_dict(req)  # only sent when a real length is given
         assert result["file_key"] == "file_v3_1"
         assert result["file_type"] == expected
 
@@ -7327,7 +7331,7 @@ async def test_upload_file_passes_duration_and_rejects_bad_type(
     cap = _MediaInvoke()
     monkeypatch.setattr(_impl, "_invoke", cap)
     await _impl.upload_file_impl(str(f), duration_ms=3200)
-    assert cap.requests[0].body["duration"] == 3200
+    assert body_dict(cap.requests[0])["duration"] == 3200
     bad = await _impl.upload_file_impl(str(f), file_type="mp3")
     assert bad["ok"] is False
     assert "file_type must be one of" in bad["message"]
@@ -7342,9 +7346,9 @@ async def test_send_image_message_uploads_then_sends(monkeypatch: pytest.MonkeyP
     result = await _impl.send_media_message_impl("oc_1", str(f), "image")
     assert [r.uri for r in cap.requests] == ["/open-apis/im/v1/images", "/open-apis/im/v1/messages"]
     send = cap.requests[1]
-    assert send.body["msg_type"] == "image"
+    assert body_dict(send)["msg_type"] == "image"
     # A picture message carries image_key; using file_key here is Feishu error 230001
-    assert json.loads(send.body["content"]) == {"image_key": "img_v3_1"}
+    assert json.loads(body_dict(send)["content"]) == {"image_key": "img_v3_1"}
     assert result["message_id"] == "om_new"
     assert result["image_key"] == "img_v3_1"
 
@@ -7363,10 +7367,10 @@ async def test_send_file_audio_video_use_file_key(monkeypatch: pytest.MonkeyPatc
         result = await _impl.send_media_message_impl("oc_1", str(f), kind)
         assert [r.uri for r in cap.requests] == ["/open-apis/im/v1/files", "/open-apis/im/v1/messages"]
         # audio/video force the enum Feishu requires rather than trusting the extension
-        assert cap.requests[0].body["file_type"] == forced, kind
+        assert body_dict(cap.requests[0])["file_type"] == forced, kind
         send = cap.requests[1]
-        assert send.body["msg_type"] == kind
-        assert json.loads(send.body["content"]) == {"file_key": "file_v3_1"}
+        assert body_dict(send)["msg_type"] == kind
+        assert json.loads(body_dict(send)["content"]) == {"file_key": "file_v3_1"}
         assert result["msg_type"] == kind
 
 
@@ -7384,7 +7388,7 @@ async def test_send_video_uploads_cover_as_image(monkeypatch: pytest.MonkeyPatch
         "/open-apis/im/v1/images",
         "/open-apis/im/v1/messages",
     ]
-    assert json.loads(cap.requests[2].body["content"]) == {"file_key": "file_v3_1", "image_key": "img_v3_1"}
+    assert json.loads(body_dict(cap.requests[2])["content"]) == {"file_key": "file_v3_1", "image_key": "img_v3_1"}
     assert result["cover_image_key"] == "img_v3_1"
 
 
@@ -7397,7 +7401,7 @@ async def test_send_video_survives_failed_cover(monkeypatch: pytest.MonkeyPatch,
     # The video is uploaded and sendable; a cover that can't be read must not lose it
     result = await _impl.send_media_message_impl("oc_1", str(video), "media", cover_image_path=str(tmp_path / "no.png"))
     assert result["ok"] is True
-    assert json.loads(cap.requests[-1].body["content"]) == {"file_key": "file_v3_1"}
+    assert json.loads(body_dict(cap.requests[-1])["content"]) == {"file_key": "file_v3_1"}
     assert "cover_image_key" not in result
 
 
@@ -7492,8 +7496,8 @@ async def test_send_post_builds_paragraphs_and_uploads_images(monkeypatch: pytes
     result = await _impl.send_post_message_impl("oc_1", json.dumps(blocks), title="周报")
     assert [r.uri for r in cap.requests] == ["/open-apis/im/v1/images", "/open-apis/im/v1/messages"]
     send = cap.requests[1]
-    assert send.body["msg_type"] == "post"
-    post = json.loads(send.body["content"])["zh_cn"]
+    assert body_dict(send)["msg_type"] == "post"
+    post = json.loads(body_dict(send)["content"])["zh_cn"]
     assert post["title"] == "周报"
     # Feishu requires img/hr/md to occupy their own paragraph; adjacent text/link/mention
     # nodes share one. Getting this wrong renders as a broken layout, so it is asserted.
@@ -7520,7 +7524,7 @@ async def test_send_post_accepts_existing_image_key_without_uploading(
     blocks = [{"tag": "img", "image_key": "img_already"}]
     result = await _impl.send_post_message_impl("oc_1", json.dumps(blocks))
     assert [r.uri for r in cap.requests] == ["/open-apis/im/v1/messages"]
-    assert json.loads(cap.requests[0].body["content"])["zh_cn"]["content"] == [
+    assert json.loads(body_dict(cap.requests[0])["content"])["zh_cn"]["content"] == [
         [{"tag": "img", "image_key": "img_already"}]
     ]
     assert result["uploaded_image_keys"] == []
@@ -7710,7 +7714,7 @@ async def test_pin_message_builds_post_request(monkeypatch: pytest.MonkeyPatch) 
     req = cap.request
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/im/v1/pins"
-    assert req.body == {"message_id": "om_abc"}
+    assert body_dict(req) == {"message_id": "om_abc"}
     assert cap.prefer == "tenant"
     assert cap.user_key == "ou_admin"
     assert result["pinned"] is True
@@ -7804,7 +7808,7 @@ async def test_forward_builds_post_request(monkeypatch: pytest.MonkeyPatch) -> N
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/im/v1/messages/:message_id/forward"
     assert req.paths["message_id"] == "om_abc"
-    assert req.body == {"receive_id": "oc_2"}
+    assert body_dict(req) == {"receive_id": "oc_2"}
     assert _qdict(req).get("receive_id_type") == "chat_id"
     assert cap.user_key == "ou_me"
     assert result["forwarded"] is True
@@ -7869,7 +7873,7 @@ async def test_merge_forward_builds_post_request(monkeypatch: pytest.MonkeyPatch
     req = cap.request
     assert req.http_method.name == "POST"
     assert req.uri == "/open-apis/im/v1/messages/merge_forward"
-    assert req.body == {"receive_id": "oc_2", "message_id_list": ["om_a", "om_b"]}
+    assert body_dict(req) == {"receive_id": "oc_2", "message_id_list": ["om_a", "om_b"]}
     assert _qdict(req).get("receive_id_type") == "chat_id"
     assert result["forwarded_count"] == 2
     assert result["message_id"] == "om_bundle"
@@ -7882,7 +7886,7 @@ async def test_merge_forward_accepts_comma_separated_ids(monkeypatch: pytest.Mon
     cap = _CapturedInvoke({"message": {"message_id": "om_bundle"}})
     monkeypatch.setattr(_impl, "_invoke", cap)
     await _impl.merge_forward_messages_impl("om_a, om_b", "oc_2")
-    assert cap.request.body["message_id_list"] == ["om_a", "om_b"]
+    assert body_dict(cap.request)["message_id_list"] == ["om_a", "om_b"]
 
 
 @pytest.mark.asyncio

@@ -2,10 +2,50 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
+
+
+def body_dict(request: Any) -> dict[str, Any]:
+    """The request body as the dict Feishu will actually receive.
+
+    Feishu tools build requests with the SDK's typed builders, so ``request.body`` is a
+    model object rather than a mapping — comparing it to a literal dict would compare
+    object identity and always fail. This serializes it the same way the transport does,
+    which keeps assertions pinned to the wire format instead of to the SDK's in-memory
+    representation.
+
+    Plain dicts (hand-built requests for the endpoints the SDK doesn't model) pass
+    through unchanged, so one helper covers both kinds of call site. ``None`` bodies
+    read as ``{}`` so tests can assert on a key's absence without special-casing.
+    """
+    body = getattr(request, "body", None)
+    if body is None:
+        return {}
+    if isinstance(body, dict):
+        return body
+    from lark_oapi.core.json import JSON  # noqa: PLC0415
+
+    parsed = json.loads(JSON.marshal(body))
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def body_field(request: Any, name: str) -> Any:
+    """One field of the request body as the live Python object.
+
+    Distinct from ``body_dict`` on purpose: upload tests must assert the binary is a real
+    ``io.IOBase`` sitting in the body, because that is what makes the SDK send multipart
+    instead of JSON. Serializing first would turn the stream into whatever JSON stands in
+    for it and the assertion would no longer guard anything.
+    """
+    body = getattr(request, "body", None)
+    if isinstance(body, dict):
+        return body.get(name)
+    return getattr(body, name, None)
 
 
 @pytest.fixture(autouse=True)

@@ -1,11 +1,27 @@
 """Private helper for the Feishu tools — authenticated client + request execution.
 
-Wraps the ``lark_channel`` SDK (already a project dependency): builds one
-authenticated ``Client`` from ``PSI_FEISHU_APP_ID`` / ``PSI_FEISHU_APP_SECRET``,
-caches it module-level, and runs ``BaseRequest`` objects through the SDK's native
-async ``arequest``. Drive-comment requests reuse the SDK's ready-made builders;
-docx/doc/sheet raw-content and create-reply requests are hand-built the same way
-the SDK's own ``api/drive/comment.py`` does it.
+Wraps the ``lark_oapi`` SDK (the Open Platform's full-coverage SDK): builds one
+authenticated ``Client`` from ``PSI_FEISHU_APP_ID`` / ``PSI_FEISHU_APP_SECRET``, caches it
+module-level, and sends every request through ``Client.arequest``.
+
+Requests are built with the SDK's typed builders (``CreateMessageRequest.builder()…``), so
+URIs, HTTP verbs, query names and body fields all come from the SDK rather than from
+hand-written strings. They still go out through ``arequest`` rather than the per-service
+resource methods, because a typed request *is* a ``BaseRequest`` with ``uri`` /
+``http_method`` / ``token_types`` pre-filled — which lets ``_invoke`` keep owning the
+identity strategy (tenant first, user token on refusal), rate-limit backoff, and
+capability inference for every endpoint uniformly.
+
+Nine call sites are still assembled by hand, each for a reason worth knowing:
+
+* ``sheets/v2`` cell values (read / write / append / style), ``doc/v2`` raw content,
+  ``search/v1/user``, the docs-api object search, and eLearning course registrations —
+  ``lark_oapi`` 1.7.1 models none of these. ``sheets/v2`` is the notable one: the SDK
+  ships ``sheets/v3``, which has no cell-value endpoints at all.
+* bitable record writes (create / update / batch_create / batch_update) — clearing a cell
+  means sending ``{"column": null}``, and the SDK's serializer drops ``None`` recursively,
+  which would silently turn "clear this cell" into "change nothing". See the comment above
+  ``_record_write_request``.
 """
 
 from __future__ import annotations
@@ -23,10 +39,227 @@ import _feishu_auth_watch as _auth_watch
 import _oauth_receiver as _oauth_rx
 import _runtime_paths as _paths
 import anyio
-from lark_channel.api.drive import comment as _comment
-from lark_channel.api.wiki import node as _wiki_node
-from lark_channel.core.enum import AccessTokenType, HttpMethod
-from lark_channel.core.model import BaseRequest
+from lark_oapi.api.approval.v4 import (
+    ApproveTaskRequest,
+    CreateInstanceRequest,
+    GetApprovalRequest,
+    GetInstanceRequest,
+    InstanceCreate,
+    ListInstanceRequest,
+    QueryTaskRequest,
+    RejectTaskRequest,
+    SubscribeApprovalRequest,
+    TaskApprove,
+    UnsubscribeApprovalRequest,
+)
+from lark_oapi.api.attendance.v1 import (
+    GetGroupRequest as GetAttendanceGroupRequest,
+)
+from lark_oapi.api.attendance.v1 import (
+    GetShiftRequest,
+    ListGroupRequest,
+    ListShiftRequest,
+    QueryUserTaskRequest,
+    QueryUserTaskRequestBody,
+)
+from lark_oapi.api.bitable.v1 import (
+    AppRole,
+    AppRoleMember,
+    AppTableField,
+    BatchCreateAppTableRequest,
+    BatchCreateAppTableRequestBody,
+    BatchDeleteAppTableRecordRequest,
+    BatchDeleteAppTableRecordRequestBody,
+    BatchDeleteAppTableRequest,
+    BatchDeleteAppTableRequestBody,
+    CopyAppRequest,
+    CopyAppRequestBody,
+    CreateAppRequest,
+    CreateAppRoleMemberRequest,
+    CreateAppRoleRequest,
+    CreateAppTableFieldRequest,
+    CreateAppTableRequest,
+    CreateAppTableRequestBody,
+    DeleteAppTableFieldRequest,
+    GetAppRequest,
+    GetAppTableRecordRequest,
+    ListAppRoleRequest,
+    ListAppTableFieldRequest,
+    ListAppTableRecordRequest,
+    ListAppTableRequest,
+    ReqApp,
+    ReqTable,
+    SearchAppTableRecordRequest,
+    SearchAppTableRecordRequestBody,
+    UpdateAppRequest,
+    UpdateAppRequestBody,
+    UpdateAppTableFieldRequest,
+)
+from lark_oapi.api.calendar.v4 import (
+    CalendarEvent,
+    CalendarEventAttendee,
+    CreateCalendarEventAttendeeRequest,
+    CreateCalendarEventAttendeeRequestBody,
+    CreateCalendarEventRequest,
+    ListCalendarEventRequest,
+    PrimaryCalendarRequest,
+)
+from lark_oapi.api.contact.v3 import (
+    AddGroupMemberRequest,
+    AddGroupMemberRequestBody,
+    BatchGetIdUserRequest,
+    BatchGetIdUserRequestBody,
+    BatchUserRequest,
+    ChildrenDepartmentRequest,
+    CreateDepartmentRequest,
+    CreateGroupRequest,
+    CreateUserRequest,
+    DeleteDepartmentRequest,
+    DeleteGroupRequest,
+    DeleteUserRequest,
+    DeleteUserRequestBody,
+    Department,
+    FindByDepartmentUserRequest,
+    GetDepartmentRequest,
+    GetGroupRequest,
+    Group,
+    ParentDepartmentRequest,
+    PatchDepartmentRequest,
+    PatchGroupRequest,
+    PatchUserRequest,
+    RemoveGroupMemberRequest,
+    RemoveGroupMemberRequestBody,
+    SimplelistGroupMemberRequest,
+    SimplelistGroupRequest,
+    User,
+)
+from lark_oapi.api.docx.v1 import (
+    BatchDeleteChatAnnouncementBlockChildrenRequest,
+    BatchDeleteChatAnnouncementBlockChildrenRequestBody,
+    BatchDeleteDocumentBlockChildrenRequest,
+    BatchDeleteDocumentBlockChildrenRequestBody,
+    CreateChatAnnouncementBlockChildrenRequest,
+    CreateChatAnnouncementBlockChildrenRequestBody,
+    CreateDocumentBlockChildrenRequest,
+    CreateDocumentBlockChildrenRequestBody,
+    CreateDocumentBlockDescendantRequest,
+    CreateDocumentBlockDescendantRequestBody,
+    CreateDocumentRequest,
+    CreateDocumentRequestBody,
+    GetChatAnnouncementRequest,
+    GetDocumentBlockChildrenRequest,
+    ListChatAnnouncementBlockRequest,
+    ListDocumentBlockRequest,
+    PatchDocumentBlockRequest,
+    RawContentDocumentRequest,
+    UpdateBlockRequest,
+)
+from lark_oapi.api.drive.v1 import (
+    BaseMember,
+    CreateFileCommentReplyRequest,
+    CreateFileCommentReplyRequestBody,
+    CreateFileCommentRequest,
+    CreatePermissionMemberRequest,
+    DeleteFileRequest,
+    DeletePermissionMemberRequest,
+    DeletePermissionMemberRequestBody,
+    DownloadMediaRequest,
+    FileComment,
+    FileCommentReply,
+    ListFileCommentReplyRequest,
+    ListFileCommentRequest,
+    ListPermissionMemberRequest,
+    Person,
+    ReplyContent,
+    ReplyElement,
+    ReplyList,
+    TextRun,
+    UploadAllMediaRequest,
+    UploadAllMediaRequestBody,
+)
+from lark_oapi.api.im.v1 import (
+    CreateChatMembersRequest,
+    CreateChatMembersRequestBody,
+    CreateChatMenuTreeRequest,
+    CreateChatMenuTreeRequestBody,
+    CreateChatRequest,
+    CreateChatRequestBody,
+    CreateChatTabRequest,
+    CreateChatTabRequestBody,
+    CreateFileRequest,
+    CreateFileRequestBody,
+    CreateImageRequest,
+    CreateImageRequestBody,
+    CreateMessageReactionRequest,
+    CreateMessageReactionRequestBody,
+    CreateMessageRequest,
+    CreateMessageRequestBody,
+    CreatePinRequest,
+    DeleteChatMembersRequest,
+    DeleteChatMembersRequestBody,
+    DeleteChatMenuTreeRequest,
+    DeleteChatMenuTreeRequestBody,
+    DeleteChatRequest,
+    DeleteMessageReactionRequest,
+    DeleteMessageRequest,
+    DeletePinRequest,
+    DeleteTabsChatTabRequest,
+    DeleteTabsChatTabRequestBody,
+    Emoji,
+    ForwardMessageRequest,
+    ForwardMessageRequestBody,
+    GetChatMembersRequest,
+    GetChatMenuTreeRequest,
+    GetChatRequest,
+    GetMessageRequest,
+    GetMessageResourceRequest,
+    ListChatRequest,
+    ListMessageReactionRequest,
+    ListMessageRequest,
+    ListPinRequest,
+    ListTabsChatTabRequest,
+    MergeForwardMessageRequest,
+    MergeForwardMessageRequestBody,
+    PatchMessageRequest,
+    PatchMessageRequestBody,
+    Pin,
+    ReadUsersMessageRequest,
+    ReplyMessageRequest,
+    ReplyMessageRequestBody,
+    SearchChatRequest,
+    UpdateChatModerationRequest,
+    UpdateChatModerationRequestBody,
+    UpdateChatRequest,
+    UpdateChatRequestBody,
+    UpdateMessageRequest,
+    UpdateMessageRequestBody,
+)
+from lark_oapi.api.search.v2 import (
+    CreateMessageRequest as SearchMessageRequest,
+)
+from lark_oapi.api.search.v2 import (
+    CreateMessageRequestBody as SearchMessageRequestBody,
+)
+from lark_oapi.api.sheets.v3 import QuerySpreadsheetSheetRequest
+from lark_oapi.api.task.v2 import (
+    CreateTaskRequest,
+    GetTaskRequest,
+    InputTask,
+    ListTaskRequest,
+    PatchTaskRequest,
+    PatchTaskRequestBody,
+)
+from lark_oapi.api.wiki.v2 import (
+    CreateSpaceNodeRequest,
+    CreateSpaceRequest,
+    GetNodeSpaceRequest,
+    ListSpaceNodeRequest,
+    ListSpaceRequest,
+    Node,
+    Space,
+)
+from lark_oapi.core.enum import AccessTokenType, HttpMethod
+from lark_oapi.core.model import BaseRequest
 from loguru import logger
 
 from psi_agent.channel.feishu._card_store import save_card_snapshot
@@ -68,7 +301,7 @@ def _get_client() -> Any:
     creds = _config()
     if creds is None:
         return None
-    from lark_channel.client import Client  # noqa: PLC0415
+    from lark_oapi.client import Client  # noqa: PLC0415
 
     app_id, app_secret = creds
     _client = Client.builder().app_id(app_id).app_secret(app_secret).build()
@@ -146,6 +379,13 @@ def _restorable(request: Any) -> Any:
     them before handing the object over again. Streams in the body are rewound rather
     than copied, so an upload retry re-sends the same bytes.
 
+    Two body shapes need rewinding, because ``Files.extract_files`` treats them
+    differently. A plain ``dict`` body loses the file *key*; a typed request body (what
+    the SDK's own builders produce) keeps the attribute but sets it to ``None``. Only
+    restoring the dict case would let an upload retry send no file at all — the retry
+    happens on the tenant→user fallback, so the symptom is a silent empty upload under
+    the second identity rather than an error.
+
     Objects that don't accept attribute assignment (test doubles, bare sentinels) are
     passed through untouched — rewinding is an optimization for retries, never a
     precondition for sending.
@@ -155,6 +395,12 @@ def _restorable(request: Any) -> Any:
     token_types = set(getattr(request, "token_types", set()) or set())
     body = getattr(request, "body", None)
     snapshot = dict(body) if isinstance(body, dict) else None
+    # Typed bodies: snapshot the attributes rather than the mapping.
+    attr_snapshot = dict(vars(body)) if snapshot is None and hasattr(body, "__dict__") else None
+
+    def _rewind_stream(value: Any) -> None:
+        if isinstance(value, io.IOBase) and value.seekable():
+            value.seek(0)
 
     def rewind() -> Any:
         with contextlib.suppress(AttributeError, TypeError):
@@ -162,8 +408,11 @@ def _restorable(request: Any) -> Any:
             if snapshot is not None:
                 request.body = dict(snapshot)
                 for value in request.body.values():
-                    if isinstance(value, io.IOBase) and value.seekable():
-                        value.seek(0)
+                    _rewind_stream(value)
+            elif attr_snapshot is not None:
+                for name, value in attr_snapshot.items():
+                    _rewind_stream(value)
+                    setattr(request.body, name, value)
             request.files = None
         return request
 
@@ -192,7 +441,7 @@ async def _send_as_user(request: Any, user_key: str) -> dict[str, Any] | None:
     uat = await _get_valid_uat(user_key)
     if uat is None or not uat.access_token:
         return None
-    from lark_channel.core.model import RequestOption  # noqa: PLC0415
+    from lark_oapi.core.model import RequestOption  # noqa: PLC0415
 
     option = RequestOption.builder().user_access_token(uat.access_token).build()
     try:
@@ -527,50 +776,88 @@ async def add_comment_impl(
     user_key: str = "",
     identity: str = "",
 ) -> dict[str, Any]:
-    req = _comment.build_comment_create_request(file_token=file_token, file_type=file_type, content=content)
+    body = (
+        FileComment.builder()
+        .reply_list(
+            ReplyList.builder()
+            .replies(
+                [
+                    FileCommentReply.builder()
+                    .content(
+                        ReplyContent.builder()
+                        .elements(
+                            [
+                                ReplyElement.builder()
+                                .type("text_run")
+                                .text_run(TextRun.builder().text(content).build())
+                                .build()
+                            ]
+                        )
+                        .build()
+                    )
+                    .build()
+                ]
+            )
+            .build()
+        )
+        .build()
+    )
+    req = CreateFileCommentRequest.builder().file_token(file_token).file_type(file_type).request_body(body).build()
     return await _invoke(req, user_key=user_key, prefer="user", identity=identity)
 
 
 async def list_comments_impl(file_token: str, file_type: str, page_size: int, page_token: str) -> dict[str, Any]:
-    req = _comment.build_comment_list_request(
-        file_token=file_token,
-        file_type=file_type,
-        page_size=page_size,
-        page_token=page_token or None,
-        is_whole="true",
+    # ``is_whole`` goes on the wire as a query string, and the SDK stringifies whatever
+    # it is given: a Python ``True`` would become ``"True"``, which Feishu rejects.
+    # Pass the JSON spelling explicitly.
+    builder = (
+        ListFileCommentRequest.builder()
+        .file_token(file_token)
+        .file_type(file_type)
+        .is_whole("true")
+        .page_size(page_size)
     )
-    return await _invoke(req)
+    if page_token:
+        builder = builder.page_token(page_token)
+    return await _invoke(builder.build())
 
 
 async def list_comment_replies_impl(
     file_token: str, file_type: str, comment_id: str, page_size: int, page_token: str
 ) -> dict[str, Any]:
-    req = _comment.build_comment_reply_list_request(
-        file_token=file_token,
-        file_type=file_type,
-        comment_id=comment_id,
-        page_size=page_size,
-        page_token=page_token or None,
+    builder = (
+        ListFileCommentReplyRequest.builder()
+        .file_token(file_token)
+        .file_type(file_type)
+        .comment_id(comment_id)
+        .page_size(page_size)
     )
-    return await _invoke(req)
+    if page_token:
+        builder = builder.page_token(page_token)
+    return await _invoke(builder.build())
 
 
 def _build_reply_create_request(
     *, file_token: str, file_type: str, comment_id: str, content: str, at_user_id: str
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/drive/v1/files/:file_token/comments/:comment_id/replies"
-    req.paths["file_token"] = file_token
-    req.paths["comment_id"] = comment_id
-    req.add_query("file_type", file_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    elements: list[dict[str, Any]] = []
+    elements: list[Any] = []
     if at_user_id:
-        elements.append({"type": "person", "person": {"user_id": at_user_id}})
-    elements.append({"type": "text_run", "text_run": {"text": content}})
-    req.body = {"content": {"elements": elements}}
-    return req
+        elements.append(
+            ReplyElement.builder().type("person").person(Person.builder().user_id(at_user_id).build()).build()
+        )
+    elements.append(ReplyElement.builder().type("text_run").text_run(TextRun.builder().text(content).build()).build())
+    return (
+        CreateFileCommentReplyRequest.builder()
+        .file_token(file_token)
+        .comment_id(comment_id)
+        .file_type(file_type)
+        .request_body(
+            CreateFileCommentReplyRequestBody.builder()
+            .content(ReplyContent.builder().elements(elements).build())
+            .build()
+        )
+        .build()
+    )
 
 
 async def reply_comment_impl(
@@ -593,6 +880,11 @@ async def reply_comment_impl(
 
 
 def _raw_get(uri: str, path_name: str, path_value: str) -> BaseRequest:
+    """A hand-built GET for an endpoint the SDK does not model.
+
+    Only ``doc/v2`` raw content still needs this — everything else that used to go
+    through here now has a typed request class.
+    """
     req = BaseRequest()
     req.http_method = HttpMethod.GET
     req.uri = uri
@@ -602,19 +894,17 @@ def _raw_get(uri: str, path_name: str, path_value: str) -> BaseRequest:
 
 
 def _build_docx_raw_request(document_id: str) -> BaseRequest:
-    return _raw_get("/open-apis/docx/v1/documents/:document_id/raw_content", "document_id", document_id)
+    return RawContentDocumentRequest.builder().document_id(document_id).build()
 
 
 def _build_doc_raw_request(doc_token: str) -> BaseRequest:
+    # ``doc/v2`` is Feishu's retired first-generation document API; lark-oapi models only
+    # the ``docx`` successor, so this one stays hand-built.
     return _raw_get("/open-apis/doc/v2/:doc_token/raw_content", "doc_token", doc_token)
 
 
 def _build_sheet_meta_request(spreadsheet_token: str) -> BaseRequest:
-    return _raw_get(
-        "/open-apis/sheets/v3/spreadsheets/:spreadsheet_token/sheets/query",
-        "spreadsheet_token",
-        spreadsheet_token,
-    )
+    return QuerySpreadsheetSheetRequest.builder().spreadsheet_token(spreadsheet_token).build()
 
 
 def _build_sheet_values_request(spreadsheet_token: str, range_: str) -> BaseRequest:
@@ -962,15 +1252,10 @@ async def read_doc_impl(file_type: str, token: str, max_chars: int) -> dict[str,
 
 
 def _build_chat_search_request(query: str, page_size: int, page_token: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/im/v1/chats/search"
-    req.add_query("query", query)
-    req.add_query("page_size", page_size)
+    builder = SearchChatRequest.builder().query(query).page_size(page_size)
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 async def find_chat_impl(name: str, exact: bool, page_size: int = 50, page_token: str = "") -> dict[str, Any]:
@@ -1019,17 +1304,14 @@ def _infer_receive_id_type(receive_id: str, given: str) -> str:
 
 
 def _build_send_message_request(receive_id: str, receive_id_type: str, msg_type: str, content: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/im/v1/messages"
-    req.add_query("receive_id_type", receive_id_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {
-        "receive_id": receive_id,
-        "msg_type": msg_type,
-        "content": content,
-    }
-    return req
+    return (
+        CreateMessageRequest.builder()
+        .receive_id_type(receive_id_type)
+        .request_body(
+            CreateMessageRequestBody.builder().receive_id(receive_id).msg_type(msg_type).content(content).build()
+        )
+        .build()
+    )
 
 
 async def _resolve_sender_name(open_id: str) -> str:
@@ -1235,17 +1517,18 @@ async def send_card_impl(
 
 
 def _build_reply_message_request(message_id: str, text: str, reply_in_thread: bool) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/im/v1/messages/:message_id/reply"
-    req.paths["message_id"] = message_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {
-        "content": json.dumps({"text": text}, ensure_ascii=False),
-        "msg_type": "text",
-        "reply_in_thread": reply_in_thread,
-    }
-    return req
+    return (
+        ReplyMessageRequest.builder()
+        .message_id(message_id)
+        .request_body(
+            ReplyMessageRequestBody.builder()
+            .content(json.dumps({"text": text}, ensure_ascii=False))
+            .msg_type("text")
+            .reply_in_thread(reply_in_thread)
+            .build()
+        )
+        .build()
+    )
 
 
 async def reply_message_impl(message_id: str, text: str, reply_in_thread: bool) -> dict[str, Any]:
@@ -1284,12 +1567,7 @@ _RECALL_ERROR_HINTS = {
 
 
 def _build_recall_message_request(message_id: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.DELETE
-    req.uri = "/open-apis/im/v1/messages/:message_id"
-    req.paths["message_id"] = message_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+    return DeleteMessageRequest.builder().message_id(message_id).build()
 
 
 async def recall_message_impl(message_id: str, user_key: str = "") -> dict[str, Any]:
@@ -1360,13 +1638,12 @@ _EDIT_ERROR_HINTS = {
 
 
 def _build_edit_message_request(message_id: str, msg_type: str, content: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.PUT
-    req.uri = "/open-apis/im/v1/messages/:message_id"
-    req.paths["message_id"] = message_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"msg_type": msg_type, "content": content}
-    return req
+    return (
+        UpdateMessageRequest.builder()
+        .message_id(message_id)
+        .request_body(UpdateMessageRequestBody.builder().msg_type(msg_type).content(content).build())
+        .build()
+    )
 
 
 def _require_message_id(message_id: str, what: str) -> tuple[str, dict[str, Any] | None]:
@@ -1441,13 +1718,12 @@ _CARD_EDIT_ERROR_HINTS = {
 
 
 def _build_edit_card_request(message_id: str, content: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.PATCH
-    req.uri = "/open-apis/im/v1/messages/:message_id"
-    req.paths["message_id"] = message_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"content": content}
-    return req
+    return (
+        PatchMessageRequest.builder()
+        .message_id(message_id)
+        .request_body(PatchMessageRequestBody.builder().content(content).build())
+        .build()
+    )
 
 
 def _ensure_update_multi(card: dict[str, Any]) -> dict[str, Any]:
@@ -1615,37 +1891,29 @@ def _normalize_emoji_type(emoji_type: str) -> str:
 
 
 def _build_add_reaction_request(message_id: str, emoji_type: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/im/v1/messages/:message_id/reactions"
-    req.paths["message_id"] = message_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"reaction_type": {"emoji_type": emoji_type}}
-    return req
+    return (
+        CreateMessageReactionRequest.builder()
+        .message_id(message_id)
+        .request_body(
+            CreateMessageReactionRequestBody.builder()
+            .reaction_type(Emoji.builder().emoji_type(emoji_type).build())
+            .build()
+        )
+        .build()
+    )
 
 
 def _build_remove_reaction_request(message_id: str, reaction_id: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.DELETE
-    req.uri = "/open-apis/im/v1/messages/:message_id/reactions/:reaction_id"
-    req.paths["message_id"] = message_id
-    req.paths["reaction_id"] = reaction_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+    return DeleteMessageReactionRequest.builder().message_id(message_id).reaction_id(reaction_id).build()
 
 
 def _build_list_reactions_request(message_id: str, emoji_type: str, page_size: int, page_token: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/im/v1/messages/:message_id/reactions"
-    req.paths["message_id"] = message_id
+    builder = ListMessageReactionRequest.builder().message_id(message_id).page_size(max(1, min(page_size, 50)))
     if emoji_type:
-        req.add_query("reaction_type", emoji_type)
-    req.add_query("page_size", max(1, min(page_size, 50)))
+        builder = builder.reaction_type(emoji_type)
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 def _reaction_record(item: Any) -> dict[str, Any]:
@@ -1826,26 +2094,23 @@ _SEND_MEDIA_ERROR_HINTS = {
 
 
 def _build_image_upload_request(image_type: str, file_name: str, data: bytes) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/im/v1/images"
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    # Binary in the body (not req.files) — see the note above _IMAGE_UPLOAD_MAX_BYTES.
-    req.body = {"image_type": image_type, "image": _NamedBytes(data, file_name)}
-    return req
+    # The stream goes in the request *body*, not ``req.files`` — see the note above
+    # _IMAGE_UPLOAD_MAX_BYTES. ``_NamedBytes`` is an ``io.BytesIO``, which is what the
+    # SDK looks for when deciding to send multipart.
+    return (
+        CreateImageRequest.builder()
+        .request_body(
+            CreateImageRequestBody.builder().image_type(image_type).image(_NamedBytes(data, file_name)).build()
+        )
+        .build()
+    )
 
 
 def _build_file_upload_request(file_type: str, file_name: str, data: bytes, duration_ms: int) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/im/v1/files"
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    body: dict[str, Any] = {"file_type": file_type, "file_name": file_name}
+    body = CreateFileRequestBody.builder().file_type(file_type).file_name(file_name)
     if duration_ms > 0:
-        body["duration"] = duration_ms
-    body["file"] = _NamedBytes(data, file_name)
-    req.body = body
-    return req
+        body = body.duration(duration_ms)
+    return CreateFileRequest.builder().request_body(body.file(_NamedBytes(data, file_name)).build()).build()
 
 
 async def _read_upload_bytes(file_path: str, limit: int, what: str) -> tuple[bytes, str, dict[str, Any] | None]:
@@ -2139,17 +2404,16 @@ async def send_post_message_impl(
 def _build_list_messages_request(
     container_id: str, container_id_type: str, sort_type: str, page_size: int, page_token: str
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/im/v1/messages"
-    req.add_query("container_id_type", container_id_type)
-    req.add_query("container_id", container_id)
-    req.add_query("sort_type", sort_type)
-    req.add_query("page_size", page_size)
+    builder = (
+        ListMessageRequest.builder()
+        .container_id_type(container_id_type)
+        .container_id(container_id)
+        .sort_type(sort_type)
+        .page_size(page_size)
+    )
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 async def list_messages_impl(
@@ -2241,16 +2505,10 @@ async def read_thread_impl(thread_id: str, page_size: int = 50) -> dict[str, Any
 
 
 def _build_chat_members_request(chat_id: str, member_id_type: str, page_size: int, page_token: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/im/v1/chats/:chat_id/members"
-    req.paths["chat_id"] = chat_id
-    req.add_query("member_id_type", member_id_type)
-    req.add_query("page_size", page_size)
+    builder = GetChatMembersRequest.builder().chat_id(chat_id).member_id_type(member_id_type).page_size(page_size)
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 async def find_member_id_impl(
@@ -2343,22 +2601,19 @@ def _build_create_chat_request(
     user_id_type: str,
     set_bot_manager: bool,
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/im/v1/chats"
-    req.add_query("user_id_type", user_id_type)
-    if set_bot_manager:
-        req.add_query("set_bot_manager", "true")
-    body: dict[str, Any] = {"name": name}
+    body = CreateChatRequestBody.builder().name(name)
     if description:
-        body["description"] = description
+        body = body.description(description)
     if user_id_list:
-        body["user_id_list"] = user_id_list
+        body = body.user_id_list(user_id_list)
     if owner_id:
-        body["owner_id"] = owner_id
-    req.body = body
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        body = body.owner_id(owner_id)
+    builder = CreateChatRequest.builder().user_id_type(user_id_type)
+    if set_bot_manager:
+        # Query booleans are stringified as-is: a Python ``True`` would go on the wire
+        # as ``"True"``, which Feishu rejects. Send the JSON spelling.
+        builder = builder.set_bot_manager("true")
+    return builder.request_body(body.build()).build()
 
 
 async def create_chat_impl(
@@ -2461,13 +2716,7 @@ _CHAT_SETTING_FIELDS = (
 
 
 def _build_get_chat_request(chat_id: str, user_id_type: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/im/v1/chats/:chat_id"
-    req.paths["chat_id"] = chat_id
-    req.add_query("user_id_type", user_id_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+    return GetChatRequest.builder().chat_id(chat_id).user_id_type(user_id_type).build()
 
 
 def _chat_settings(data: dict[str, Any]) -> dict[str, str]:
@@ -2545,16 +2794,24 @@ async def get_chat_impl(chat_id: str, user_id_type: str = "open_id", user_key: s
 def _build_chat_members_change_request(
     chat_id: str, id_list: list[str], member_id_type: str, add: bool, succeed_type: int
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST if add else HttpMethod.DELETE
-    req.uri = "/open-apis/im/v1/chats/:chat_id/members"
-    req.paths["chat_id"] = chat_id
-    req.add_query("member_id_type", member_id_type)
+    # Add and remove are separate request types in the SDK (POST vs DELETE), and only
+    # the add side takes ``succeed_type``.
     if add:
-        req.add_query("succeed_type", succeed_type)
-    req.body = {"id_list": id_list}
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        return (
+            CreateChatMembersRequest.builder()
+            .chat_id(chat_id)
+            .member_id_type(member_id_type)
+            .succeed_type(succeed_type)
+            .request_body(CreateChatMembersRequestBody.builder().id_list(id_list).build())
+            .build()
+        )
+    return (
+        DeleteChatMembersRequest.builder()
+        .chat_id(chat_id)
+        .member_id_type(member_id_type)
+        .request_body(DeleteChatMembersRequestBody.builder().id_list(id_list).build())
+        .build()
+    )
 
 
 _CHAT_MEMBER_ID_TYPES = ("open_id", "union_id", "user_id", "app_id")
@@ -2699,55 +2956,45 @@ _ANNOUNCEMENT_ERROR_HINTS = {
 
 
 def _build_announcement_get_request(chat_id: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/docx/v1/chats/:chat_id/announcement"
-    req.paths["chat_id"] = chat_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+    return GetChatAnnouncementRequest.builder().chat_id(chat_id).build()
 
 
 def _build_announcement_blocks_request(chat_id: str, page_size: int, page_token: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/docx/v1/chats/:chat_id/announcement/blocks"
-    req.paths["chat_id"] = chat_id
-    req.add_query("page_size", page_size)
+    builder = ListChatAnnouncementBlockRequest.builder().chat_id(chat_id).page_size(page_size)
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 def _build_announcement_children_request(
     chat_id: str, children: list[dict[str, Any]], revision_id: int, index: int
 ) -> BaseRequest:
     """Append blocks under the announcement root (whose block_id IS the chat_id)."""
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/docx/v1/chats/:chat_id/announcement/blocks/:block_id/children"
-    req.paths["chat_id"] = chat_id
-    req.paths["block_id"] = chat_id
-    req.add_query("revision_id", revision_id)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    body: dict[str, Any] = {"children": children}
+    body = CreateChatAnnouncementBlockChildrenRequestBody.builder().children(children)
     if index >= 0:
-        body["index"] = index
-    req.body = body
-    return req
+        body = body.index(index)
+    return (
+        CreateChatAnnouncementBlockChildrenRequest.builder()
+        .chat_id(chat_id)
+        .block_id(chat_id)
+        .revision_id(revision_id)
+        .request_body(body.build())
+        .build()
+    )
 
 
 def _build_announcement_delete_request(chat_id: str, start: int, end: int, revision_id: int) -> BaseRequest:
     """Delete children [start, end) of the announcement root — the range is half-open."""
-    req = BaseRequest()
-    req.http_method = HttpMethod.DELETE
-    req.uri = "/open-apis/docx/v1/chats/:chat_id/announcement/blocks/:block_id/children/batch_delete"
-    req.paths["chat_id"] = chat_id
-    req.paths["block_id"] = chat_id
-    req.add_query("revision_id", revision_id)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"start_index": start, "end_index": end}
-    return req
+    return (
+        BatchDeleteChatAnnouncementBlockChildrenRequest.builder()
+        .chat_id(chat_id)
+        .block_id(chat_id)
+        .revision_id(revision_id)
+        .request_body(
+            BatchDeleteChatAnnouncementBlockChildrenRequestBody.builder().start_index(start).end_index(end).build()
+        )
+        .build()
+    )
 
 
 async def _announcement_meta(chat_id: str, user_key: str) -> dict[str, Any]:
@@ -3020,14 +3267,18 @@ def _normalize_chat_who(field: str, value: str) -> tuple[str, str]:
 
 
 def _build_update_chat_request(chat_id: str, body: dict[str, Any], user_id_type: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.PUT
-    req.uri = "/open-apis/im/v1/chats/:chat_id"
-    req.paths["chat_id"] = chat_id
-    req.add_query("user_id_type", user_id_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = body
-    return req
+    """Update a chat's settings, sending only the keys present in ``body``.
+
+    ``body`` is assembled by the callers from whichever arguments the agent actually
+    named, and that "only these fields" property is what keeps a rename from resetting
+    unrelated group settings. So the dict is applied onto the typed body rather than
+    translated field by field: an unknown key would otherwise be dropped silently here,
+    and the caller has already validated the names.
+    """
+    payload = UpdateChatRequestBody.builder().build()
+    for key, value in body.items():
+        setattr(payload, key, value)
+    return UpdateChatRequest.builder().chat_id(chat_id).user_id_type(user_id_type).request_body(payload).build()
 
 
 def _chat_update_body(
@@ -3174,12 +3425,7 @@ async def transfer_chat_owner_impl(
 
 
 def _build_delete_chat_request(chat_id: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.DELETE
-    req.uri = "/open-apis/im/v1/chats/:chat_id"
-    req.paths["chat_id"] = chat_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+    return DeleteChatRequest.builder().chat_id(chat_id).build()
 
 
 _DISMISS_CONFIRM = "解散群"
@@ -3242,19 +3488,18 @@ _MODERATION_ERROR_HINTS = {
 def _build_chat_moderation_request(
     chat_id: str, setting: str, added: list[str], removed: list[str], user_id_type: str
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.PUT
-    req.uri = "/open-apis/im/v1/chats/:chat_id/moderation"
-    req.paths["chat_id"] = chat_id
-    req.add_query("user_id_type", user_id_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    body: dict[str, Any] = {"moderation_setting": setting}
+    body = UpdateChatModerationRequestBody.builder().moderation_setting(setting)
     if added:
-        body["moderator_added_list"] = added
+        body = body.moderator_added_list(added)
     if removed:
-        body["moderator_removed_list"] = removed
-    req.body = body
-    return req
+        body = body.moderator_removed_list(removed)
+    return (
+        UpdateChatModerationRequest.builder()
+        .chat_id(chat_id)
+        .user_id_type(user_id_type)
+        .request_body(body.build())
+        .build()
+    )
 
 
 async def update_chat_moderation_impl(
@@ -3403,14 +3648,32 @@ def _menu_tree_body(menus: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[s
 
 
 def _build_chat_menu_request(chat_id: str, method: HttpMethod, suffix: str, body: dict[str, Any]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = method
-    req.uri = f"/open-apis/im/v1/chats/:chat_id/menu_tree{suffix}"
-    req.paths["chat_id"] = chat_id
-    req.token_types = {AccessTokenType.TENANT}
-    if body:
-        req.body = body
-    return req
+    """Read / replace / delete a group's bot menu.
+
+    Kept as one dispatcher (rather than three call sites) because the callers already
+    pass the verb; the SDK models each verb as its own request type, so the mapping
+    happens here. ``suffix`` is retained in the signature for the callers' sake but is
+    always empty for menus — the three operations share one path.
+    """
+    if method == HttpMethod.GET:
+        return GetChatMenuTreeRequest.builder().chat_id(chat_id).build()
+    if method == HttpMethod.POST:
+        return (
+            CreateChatMenuTreeRequest.builder()
+            .chat_id(chat_id)
+            .request_body(CreateChatMenuTreeRequestBody.builder().menu_tree(body.get("menu_tree")).build())
+            .build()
+        )
+    return (
+        DeleteChatMenuTreeRequest.builder()
+        .chat_id(chat_id)
+        .request_body(
+            DeleteChatMenuTreeRequestBody.builder()
+            .chat_menu_top_level_ids(body.get("chat_menu_top_level_ids") or [])
+            .build()
+        )
+        .build()
+    )
 
 
 def _menu_summary(data: Any) -> list[dict[str, Any]]:
@@ -3532,14 +3795,26 @@ _TAB_NAME_MAX = 60
 
 
 def _build_chat_tabs_request(chat_id: str, method: HttpMethod, suffix: str, body: dict[str, Any]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = method
-    req.uri = f"/open-apis/im/v1/chats/:chat_id/chat_tabs{suffix}"
-    req.paths["chat_id"] = chat_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    if body:
-        req.body = body
-    return req
+    """List / add / remove a group's tabs.
+
+    Unlike menus these three live on *different* paths, which is what ``suffix`` encoded.
+    The SDK names them per operation, so the verb decides the request type here.
+    """
+    if method == HttpMethod.GET:
+        return ListTabsChatTabRequest.builder().chat_id(chat_id).build()
+    if method == HttpMethod.POST:
+        return (
+            CreateChatTabRequest.builder()
+            .chat_id(chat_id)
+            .request_body(CreateChatTabRequestBody.builder().chat_tabs(body.get("chat_tabs") or []).build())
+            .build()
+        )
+    return (
+        DeleteTabsChatTabRequest.builder()
+        .chat_id(chat_id)
+        .request_body(DeleteTabsChatTabRequestBody.builder().tab_ids(body.get("tab_ids") or []).build())
+        .build()
+    )
 
 
 def _tab_summary(data: Any) -> list[dict[str, Any]]:
@@ -3686,16 +3961,10 @@ _CHAT_LIST_PAGE_MAX = 100
 
 
 def _build_chat_list_request(user_id_type: str, sort_type: str, page_size: int, page_token: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/im/v1/chats"
-    req.add_query("user_id_type", user_id_type)
-    req.add_query("sort_type", sort_type)
-    req.add_query("page_size", page_size)
+    builder = ListChatRequest.builder().user_id_type(user_id_type).sort_type(sort_type).page_size(page_size)
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 async def list_chats_impl(
@@ -3794,16 +4063,12 @@ _MESSAGE_SEARCH_CHAT_TYPES = ("group_chat", "p2p_chat")
 
 
 def _build_message_search_request(body: dict[str, Any], page_size: int, page_token: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/search/v2/message"
-    req.add_query("page_size", page_size)
+    # The SDK already declares this user-token-only, matching Feishu: the search returns
+    # what the authorizing person can see, so there is no tenant-wide equivalent.
+    builder = SearchMessageRequest.builder().page_size(page_size)
     if page_token:
-        req.add_query("page_token", page_token)
-    # User token only: this searches what the authorizing person can see.
-    req.token_types = {AccessTokenType.USER}
-    req.body = body
-    return req
+        builder = builder.page_token(page_token)
+    return builder.request_body(_apply_dict(SearchMessageRequestBody.builder().build(), body)).build()
 
 
 def _message_search_body(
@@ -3984,20 +4249,17 @@ _APPROVAL_TASK_STATUS = {1: "待办", 2: "已办", 17: "未读", 18: "已读", 3
 _APPROVAL_INSTANCE_STATUS = {0: "none", 1: "running", 2: "approved", 3: "rejected", 4: "revoked", 5: "terminated"}
 
 
+# Approval endpoints are tenant-only, which the hand-built requests here used to
+# contradict by also declaring USER. Feishu's docs list only ``tenant_access_token`` for
+# them, so the user-token retry in ``_invoke`` never had anything to gain — an approval is
+# attributed by the ``user_id`` / ``open_id`` in its body, not by whose token sent it.
 def _build_task_query_request(
     user_id: str, topic: str, user_id_type: str, page_size: int, page_token: str
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/approval/v4/tasks/query"
-    req.add_query("user_id", user_id)
-    req.add_query("topic", topic)
-    req.add_query("user_id_type", user_id_type)
-    req.add_query("page_size", page_size)
+    builder = QueryTaskRequest.builder().user_id(user_id).topic(topic).user_id_type(user_id_type).page_size(page_size)
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 async def list_approval_tasks_impl(
@@ -4034,13 +4296,7 @@ async def list_approval_tasks_impl(
 
 
 def _build_instance_get_request(instance_id: str, user_id_type: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/approval/v4/instances/:instance_id"
-    req.paths["instance_id"] = instance_id
-    req.add_query("user_id_type", user_id_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+    return GetInstanceRequest.builder().instance_id(instance_id).user_id_type(user_id_type).build()
 
 
 def _parse_approval_attachments(form: Any) -> list[dict[str, Any]]:
@@ -4099,19 +4355,14 @@ async def get_approval_instance_impl(instance_id: str, user_id_type: str = "open
 def _build_list_instances_request(
     approval_code: str, start_time: str, end_time: str, page_size: int, page_token: str
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/approval/v4/instances"
-    req.add_query("approval_code", approval_code)
+    builder = ListInstanceRequest.builder().approval_code(approval_code).page_size(page_size)
     if start_time:
-        req.add_query("start_time", start_time)
+        builder = builder.start_time(start_time)
     if end_time:
-        req.add_query("end_time", end_time)
-    req.add_query("page_size", page_size)
+        builder = builder.end_time(end_time)
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 async def list_approval_instances_impl(approval_code: str, start_time: str = "", end_time: str = "") -> dict[str, Any]:
@@ -4154,21 +4405,23 @@ async def list_approval_instances_impl(approval_code: str, start_time: str = "",
 def _build_task_action_request(
     action: str, approval_code: str, instance_code: str, user_id: str, task_id: str, comment: str, user_id_type: str
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = f"/open-apis/approval/v4/tasks/{action}"
-    req.add_query("user_id_type", user_id_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    body: dict[str, Any] = {
-        "approval_code": approval_code,
-        "instance_code": instance_code,
-        "user_id": user_id,
-        "task_id": task_id,
-    }
+    """Approve or reject one task. ``action`` used to be interpolated into the path; the
+    SDK models the two as separate request types, so it selects between them here.
+
+    Both carry the identical body, so it is built once."""
+    payload = (
+        TaskApprove.builder()
+        .approval_code(approval_code)
+        .instance_code(instance_code)
+        .user_id(user_id)
+        .task_id(task_id)
+    )
     if comment:
-        body["comment"] = comment
-    req.body = body
-    return req
+        payload = payload.comment(comment)
+    body = payload.build()
+    if action == "approve":
+        return ApproveTaskRequest.builder().user_id_type(user_id_type).request_body(body).build()
+    return RejectTaskRequest.builder().user_id_type(user_id_type).request_body(body).build()
 
 
 async def decide_approval_task_impl(
@@ -4202,15 +4455,14 @@ async def decide_approval_task_impl(
 
 
 def _build_approval_definition_request(approval_code: str, user_id_type: str, with_admin_id: bool) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/approval/v4/approvals/:approval_code"
-    req.paths["approval_code"] = approval_code
-    req.add_query("user_id_type", user_id_type)
+    builder = GetApprovalRequest.builder().approval_code(approval_code).user_id_type(user_id_type)
     if with_admin_id:
-        req.add_query("with_admin_id", True)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        # Deliberately the Python bool, which stringifies to "True" — that is what this
+        # endpoint has always sent. Feishu's docs spell query booleans lowercase, so this
+        # may well be wrong, but changing it here would smuggle a behaviour fix into a
+        # migration; see the note in the batch report.
+        builder = builder.with_admin_id(True)
+    return builder.build()
 
 
 def _parse_approval_form_schema(form: Any) -> list[dict[str, Any]]:
@@ -4284,21 +4536,19 @@ def _build_create_instance_request(
     title: str,
     user_id_type: str,
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/approval/v4/instances"
-    req.add_query("user_id_type", user_id_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    body: dict[str, Any] = {"approval_code": approval_code, "form": form}
+    body = InstanceCreate.builder().approval_code(approval_code).form(form)
     if applicant_open_id:
-        body["open_id"] = applicant_open_id
+        body = body.open_id(applicant_open_id)
     if applicant_user_id:
-        body["user_id"] = applicant_user_id
+        body = body.user_id(applicant_user_id)
     if title:
-        body["title"] = title
+        body = body.title(title)
     if node_approver_open_id_list:
-        body["node_approver_open_id_list"] = node_approver_open_id_list
-    req.body = body
+        body = body.node_approver_open_id_list(node_approver_open_id_list)
+    # ``user_id_type`` is a query param on this endpoint even though the SDK's request
+    # builder does not surface it, so it is set on the built request directly.
+    req = CreateInstanceRequest.builder().request_body(body.build()).build()
+    req.add_query("user_id_type", user_id_type)
     return req
 
 
@@ -4367,21 +4617,11 @@ async def create_approval_instance_impl(
 
 
 def _build_approval_subscribe_request(approval_code: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/approval/v4/approvals/:approval_code/subscribe"
-    req.paths["approval_code"] = approval_code
-    req.token_types = {AccessTokenType.TENANT}
-    return req
+    return SubscribeApprovalRequest.builder().approval_code(approval_code).build()
 
 
 def _build_approval_unsubscribe_request(approval_code: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/approval/v4/approvals/:approval_code/unsubscribe"
-    req.paths["approval_code"] = approval_code
-    req.token_types = {AccessTokenType.TENANT}
-    return req
+    return UnsubscribeApprovalRequest.builder().approval_code(approval_code).build()
 
 
 async def subscribe_approval_impl(approval_code: str) -> dict[str, Any]:
@@ -4423,7 +4663,7 @@ async def get_wiki_node_impl(token: str, user_key: str = "") -> dict[str, Any]:
     the bot isn't a member); empty uses the bot's tenant token.
     """
     res = await _invoke_wiki_read(
-        _wiki_node.build_wiki_node_get_request(token=token),
+        GetNodeSpaceRequest.builder().token(token).build(),
         user_key,
         lambda r: not (r.get("data", {}) or {}).get("node"),
     )
@@ -4692,7 +4932,7 @@ def _pending_auth_path(user_key: str = "") -> str:
 def _get_token_store() -> Any:
     global _token_store
     if _token_store is None:
-        from lark_channel.channel.auth.token_store import FileTokenStore  # noqa: PLC0415
+        from _feishu_uat_store import FileTokenStore  # noqa: PLC0415
 
         _token_store = FileTokenStore(_uat_store_path())
     return _token_store
@@ -4706,7 +4946,7 @@ def _get_uat_client() -> Any:
     creds = _config()
     if creds is None:
         return None
-    from lark_channel.client import Client  # noqa: PLC0415
+    from lark_oapi.client import Client  # noqa: PLC0415
 
     app_id, app_secret = creds
     _uat_client = Client.builder().app_id(app_id).app_secret(app_secret).enable_set_token(True).build()
@@ -4784,7 +5024,7 @@ async def _get_app_access_token() -> str | None:
 def _uat_from_token_response(payload: dict[str, Any]) -> Any:
     import time  # noqa: PLC0415
 
-    from lark_channel.channel.types import UAT  # noqa: PLC0415
+    from _feishu_uat_store import UAT  # noqa: PLC0415
 
     now = time.time()
     inner = payload.get("data")
@@ -5531,7 +5771,7 @@ async def auth_complete_impl(code: str, user_key: str = "") -> dict[str, Any]:
 
 async def _get_valid_uat(user_key: str = "") -> Any:
     """Return a non-expired UAT for ``user_key`` (refreshing if needed), or None."""
-    from lark_channel.channel.auth.device_flow import uat_needs_refresh  # noqa: PLC0415
+    from _feishu_uat_store import uat_needs_refresh  # noqa: PLC0415
 
     key = _norm_user_key(user_key)
     store = _get_token_store()
@@ -5577,7 +5817,7 @@ async def search_docs_impl(
 
     types_list = [t.strip() for t in docs_types.split(",") if t.strip()]
     req = _build_doc_search_request(search_key, count, offset, types_list)
-    from lark_channel.core.model import RequestOption  # noqa: PLC0415
+    from lark_oapi.core.model import RequestOption  # noqa: PLC0415
 
     option = RequestOption.builder().user_access_token(uat.access_token).build()
     try:
@@ -5613,19 +5853,16 @@ async def search_docs_impl(
 
 
 def _build_wiki_space_create_request(name: str, description: str, open_sharing: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/wiki/v2/spaces"
-    req.token_types = {AccessTokenType.USER}
-    body: dict[str, Any] = {}
+    body = Space.builder()
     if name:
-        body["name"] = name
+        body = body.name(name)
     if description:
-        body["description"] = description
+        body = body.description(description)
     if open_sharing:
-        body["open_sharing"] = open_sharing
-    req.body = body
-    return req
+        body = body.open_sharing(open_sharing)
+    # The SDK already declares this endpoint user-token-only, which matches Feishu: a
+    # wiki space belongs to a person and the bot cannot own one.
+    return CreateSpaceRequest.builder().request_body(body.build()).build()
 
 
 async def create_wiki_space_impl(
@@ -5647,7 +5884,7 @@ async def create_wiki_space_impl(
     if sharing and sharing not in ("open", "closed"):
         return _error("open_sharing must be 'open' or 'closed' (or empty).")
     req = _build_wiki_space_create_request(name.strip(), description.strip(), sharing)
-    from lark_channel.core.model import RequestOption  # noqa: PLC0415
+    from lark_oapi.core.model import RequestOption  # noqa: PLC0415
 
     option = RequestOption.builder().user_access_token(uat.access_token).build()
     try:
@@ -5697,15 +5934,10 @@ def _parse_resp_body(resp: Any) -> dict[str, Any]:
 
 
 def _build_list_tables_request(app_token: str, page_size: int, page_token: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables"
-    req.paths["app_token"] = app_token
-    req.add_query("page_size", page_size)
+    builder = ListAppTableRequest.builder().app_token(app_token).page_size(page_size)
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 async def list_bitable_tables_impl(app_token: str, page_size: int = 100, page_token: str = "") -> dict[str, Any]:
@@ -5730,22 +5962,16 @@ async def list_bitable_tables_impl(app_token: str, page_size: int = 100, page_to
 def _build_list_records_request(
     app_token: str, table_id: str, page_size: int, page_token: str, filter_: str, sort: str, field_names: str
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records"
-    req.paths["app_token"] = app_token
-    req.paths["table_id"] = table_id
-    req.add_query("page_size", page_size)
+    builder = ListAppTableRecordRequest.builder().app_token(app_token).table_id(table_id).page_size(page_size)
     if page_token:
-        req.add_query("page_token", page_token)
+        builder = builder.page_token(page_token)
     if filter_:
-        req.add_query("filter", filter_)
+        builder = builder.filter(filter_)
     if sort:
-        req.add_query("sort", sort)
+        builder = builder.sort(sort)
     if field_names:
-        req.add_query("field_names", field_names)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.field_names(field_names)
+    return builder.build()
 
 
 async def list_bitable_records_impl(
@@ -5804,17 +6030,23 @@ _SEARCH_OPERATORS = (
 def _build_search_records_request(
     app_token: str, table_id: str, body: dict[str, Any], page_size: int, page_token: str
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/search"
-    req.paths["app_token"] = app_token
-    req.paths["table_id"] = table_id
-    req.add_query("page_size", page_size)
+    # ``body`` is assembled and validated by the caller (filter conjunction, condition
+    # count, operator names), and its keys are exactly the typed body's fields. Applying
+    # it wholesale keeps that validation as the single source of truth rather than
+    # restating each field here.
+    payload = SearchAppTableRecordRequestBody.builder().build()
+    for key, value in body.items():
+        setattr(payload, key, value)
+    builder = (
+        SearchAppTableRecordRequest.builder()
+        .app_token(app_token)
+        .table_id(table_id)
+        .page_size(page_size)
+        .request_body(payload)
+    )
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = body
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 def _parse_search_filter(filter_json: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -5931,17 +6163,18 @@ async def search_bitable_records_impl(
 
 
 def _build_get_record_request(app_token: str, table_id: str, record_id: str, automatic_fields: bool) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/:record_id"
-    req.paths["app_token"] = app_token
-    req.paths["table_id"] = table_id
-    req.paths["record_id"] = record_id
-    req.add_query("with_shared_url", "true")
+    # Query booleans are stringified as given, so a Python ``True`` would go out as
+    # ``"True"`` and be rejected — pass the JSON spelling.
+    builder = (
+        GetAppTableRecordRequest.builder()
+        .app_token(app_token)
+        .table_id(table_id)
+        .record_id(record_id)
+        .with_shared_url("true")
+    )
     if automatic_fields:
-        req.add_query("automatic_fields", "true")
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.automatic_fields("true")
+    return builder.build()
 
 
 async def get_bitable_record_impl(
@@ -5978,15 +6211,36 @@ async def get_bitable_record_impl(
     return result
 
 
-def _build_create_record_request(app_token: str, table_id: str, fields: dict[str, Any]) -> BaseRequest:
+# Record writes keep a plain dict body on purpose.
+#
+# Clearing a cell means sending ``{"column": null}`` — that explicit null is what tells
+# Feishu to empty the field. The SDK's serializer drops ``None`` values recursively, so
+# routing these through the typed ``AppTableRecord`` model would turn "clear this cell"
+# into "change nothing", silently, with a success response. ``feishu_bitable_update_record``
+# and ``_update_records`` both document null-clears as a feature, so the dict body stays.
+#
+# Everything else about these requests still comes from the SDK: ``_invoke`` sends any
+# ``BaseRequest``, and the URI/method/token scope below match the typed classes exactly
+# (verified against them field by field).
+def _record_write_request(uri: str, method: Any, paths: dict[str, str], body: dict[str, Any]) -> BaseRequest:
+    """A bitable record write whose body must survive ``None`` values."""
     req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records"
-    req.paths["app_token"] = app_token
-    req.paths["table_id"] = table_id
+    req.http_method = method
+    req.uri = uri
+    for name, value in paths.items():
+        req.paths[name] = value
     req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"fields": fields}
+    req.body = body
     return req
+
+
+def _build_create_record_request(app_token: str, table_id: str, fields: dict[str, Any]) -> BaseRequest:
+    return _record_write_request(
+        "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records",
+        HttpMethod.POST,
+        {"app_token": app_token, "table_id": table_id},
+        {"fields": fields},
+    )
 
 
 async def create_bitable_record_impl(
@@ -6010,14 +6264,12 @@ async def create_bitable_record_impl(
 
 
 def _build_batch_create_records_request(app_token: str, table_id: str, records: list[dict[str, Any]]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/batch_create"
-    req.paths["app_token"] = app_token
-    req.paths["table_id"] = table_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"records": records}
-    return req
+    return _record_write_request(
+        "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/batch_create",
+        HttpMethod.POST,
+        {"app_token": app_token, "table_id": table_id},
+        {"records": records},
+    )
 
 
 async def create_bitable_records_impl(
@@ -6103,26 +6355,21 @@ async def create_bitable_records_impl(
 
 
 def _build_update_record_request(app_token: str, table_id: str, record_id: str, fields: dict[str, Any]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.PUT
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/:record_id"
-    req.paths["app_token"] = app_token
-    req.paths["table_id"] = table_id
-    req.paths["record_id"] = record_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"fields": fields}
-    return req
+    return _record_write_request(
+        "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/:record_id",
+        HttpMethod.PUT,
+        {"app_token": app_token, "table_id": table_id, "record_id": record_id},
+        {"fields": fields},
+    )
 
 
 def _build_batch_update_records_request(app_token: str, table_id: str, records: list[dict[str, Any]]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/batch_update"
-    req.paths["app_token"] = app_token
-    req.paths["table_id"] = table_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"records": records}
-    return req
+    return _record_write_request(
+        "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/batch_update",
+        HttpMethod.POST,
+        {"app_token": app_token, "table_id": table_id},
+        {"records": records},
+    )
 
 
 def _as_field_map(value: Any) -> dict[str, Any]:
@@ -6290,14 +6537,13 @@ async def update_bitable_records_impl(
 
 
 def _build_batch_delete_records_request(app_token: str, table_id: str, record_ids: list[str]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/batch_delete"
-    req.paths["app_token"] = app_token
-    req.paths["table_id"] = table_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"records": record_ids}
-    return req
+    return (
+        BatchDeleteAppTableRecordRequest.builder()
+        .app_token(app_token)
+        .table_id(table_id)
+        .request_body(BatchDeleteAppTableRecordRequestBody.builder().records(record_ids).build())
+        .build()
+    )
 
 
 async def delete_bitable_records_impl(
@@ -6387,16 +6633,10 @@ _BITABLE_FIELD_TYPES = {
 
 
 def _build_list_fields_request(app_token: str, table_id: str, page_size: int, page_token: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields"
-    req.paths["app_token"] = app_token
-    req.paths["table_id"] = table_id
-    req.add_query("page_size", page_size)
+    builder = ListAppTableFieldRequest.builder().app_token(app_token).table_id(table_id).page_size(page_size)
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 async def list_bitable_fields_impl(app_token: str, table_id: str) -> dict[str, Any]:
@@ -6425,14 +6665,7 @@ async def list_bitable_fields_impl(app_token: str, table_id: str) -> dict[str, A
 
 
 def _build_delete_field_request(app_token: str, table_id: str, field_id: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.DELETE
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields/:field_id"
-    req.paths["app_token"] = app_token
-    req.paths["table_id"] = table_id
-    req.paths["field_id"] = field_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+    return DeleteAppTableFieldRequest.builder().app_token(app_token).table_id(table_id).field_id(field_id).build()
 
 
 async def delete_bitable_fields_impl(
@@ -6473,19 +6706,14 @@ _UNCREATABLE_FIELD_TYPE = 19
 
 
 def _build_create_bitable_app_request(name: str, folder_token: str, time_zone: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/bitable/v1/apps"
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    body: dict[str, Any] = {}
+    body = ReqApp.builder()
     if name:
-        body["name"] = name
+        body = body.name(name)
     if folder_token:
-        body["folder_token"] = folder_token
+        body = body.folder_token(folder_token)
     if time_zone:
-        body["time_zone"] = time_zone
-    req.body = body
-    return req
+        body = body.time_zone(time_zone)
+    return CreateAppRequest.builder().request_body(body.build()).build()
 
 
 async def create_bitable_app_impl(
@@ -6538,13 +6766,18 @@ def _validate_bitable_fields(fields: Any, *, as_table_fields: bool) -> str | Non
 
 
 def _build_create_table_request(app_token: str, table: dict[str, Any]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables"
-    req.paths["app_token"] = app_token
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"table": table}
-    return req
+    # ``table`` carries name / fields / default_view_name, already validated by the
+    # caller (Feishu only accepts the latter two together). Its keys are the typed
+    # model's fields, so it is applied as-is rather than restated.
+    payload = ReqTable.builder().build()
+    for key, value in table.items():
+        setattr(payload, key, value)
+    return (
+        CreateAppTableRequest.builder()
+        .app_token(app_token)
+        .request_body(CreateAppTableRequestBody.builder().table(payload).build())
+        .build()
+    )
 
 
 async def create_bitable_table_impl(
@@ -6592,13 +6825,13 @@ async def create_bitable_table_impl(
 
 
 def _build_batch_create_tables_request(app_token: str, names: list[str]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/batch_create"
-    req.paths["app_token"] = app_token
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"tables": [{"name": n} for n in names]}
-    return req
+    tables = [ReqTable.builder().name(n).build() for n in names]
+    return (
+        BatchCreateAppTableRequest.builder()
+        .app_token(app_token)
+        .request_body(BatchCreateAppTableRequestBody.builder().tables(tables).build())
+        .build()
+    )
 
 
 async def create_bitable_tables_impl(
@@ -6635,13 +6868,12 @@ async def create_bitable_tables_impl(
 
 
 def _build_batch_delete_tables_request(app_token: str, table_ids: list[str]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/batch_delete"
-    req.paths["app_token"] = app_token
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"table_ids": table_ids}
-    return req
+    return (
+        BatchDeleteAppTableRequest.builder()
+        .app_token(app_token)
+        .request_body(BatchDeleteAppTableRequestBody.builder().table_ids(table_ids).build())
+        .build()
+    )
 
 
 async def delete_bitable_tables_impl(
@@ -6680,12 +6912,7 @@ async def delete_bitable_tables_impl(
 
 
 def _build_get_bitable_app_request(app_token: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/bitable/v1/apps/:app_token"
-    req.paths["app_token"] = app_token
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+    return GetAppRequest.builder().app_token(app_token).build()
 
 
 async def get_bitable_app_impl(app_token: str, user_key: str = "") -> dict[str, Any]:
@@ -6710,13 +6937,10 @@ async def get_bitable_app_impl(app_token: str, user_key: str = "") -> dict[str, 
 
 
 def _build_update_bitable_app_request(app_token: str, body: dict[str, Any]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.PUT
-    req.uri = "/open-apis/bitable/v1/apps/:app_token"
-    req.paths["app_token"] = app_token
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = body
-    return req
+    payload = UpdateAppRequestBody.builder().build()
+    for key, value in body.items():
+        setattr(payload, key, value)
+    return UpdateAppRequest.builder().app_token(app_token).request_body(payload).build()
 
 
 async def update_bitable_app_impl(
@@ -6773,22 +6997,16 @@ async def update_bitable_app_impl(
 def _build_copy_bitable_app_request(
     app_token: str, name: str, folder_token: str, without_content: bool, time_zone: str
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/copy"
-    req.paths["app_token"] = app_token
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    body: dict[str, Any] = {}
+    body = CopyAppRequestBody.builder()
     if name:
-        body["name"] = name
+        body = body.name(name)
     if folder_token:
-        body["folder_token"] = folder_token
+        body = body.folder_token(folder_token)
     if without_content:
-        body["without_content"] = True
+        body = body.without_content(True)
     if time_zone:
-        body["time_zone"] = time_zone
-    req.body = body
-    return req
+        body = body.time_zone(time_zone)
+    return CopyAppRequest.builder().app_token(app_token).request_body(body.build()).build()
 
 
 async def copy_bitable_app_impl(
@@ -6830,14 +7048,12 @@ async def copy_bitable_app_impl(
 
 
 def _build_create_field_request(app_token: str, table_id: str, field: dict[str, Any]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields"
-    req.paths["app_token"] = app_token
-    req.paths["table_id"] = table_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = field
-    return req
+    # ``field`` is the whole body (field_name / type / property / ui_type), validated by
+    # the caller against Feishu's field-type rules.
+    payload = AppTableField.builder().build()
+    for key, value in field.items():
+        setattr(payload, key, value)
+    return CreateAppTableFieldRequest.builder().app_token(app_token).table_id(table_id).request_body(payload).build()
 
 
 async def create_bitable_field_impl(
@@ -6890,15 +7106,17 @@ async def create_bitable_field_impl(
 
 
 def _build_update_field_request(app_token: str, table_id: str, field_id: str, field: dict[str, Any]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.PUT
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields/:field_id"
-    req.paths["app_token"] = app_token
-    req.paths["table_id"] = table_id
-    req.paths["field_id"] = field_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = field
-    return req
+    payload = AppTableField.builder().build()
+    for key, value in field.items():
+        setattr(payload, key, value)
+    return (
+        UpdateAppTableFieldRequest.builder()
+        .app_token(app_token)
+        .table_id(table_id)
+        .field_id(field_id)
+        .request_body(payload)
+        .build()
+    )
 
 
 async def update_bitable_field_impl(
@@ -7015,19 +7233,20 @@ def _fmt_check_time(rec: Any) -> str:
 def _build_user_tasks_query_request(
     user_ids: list[str], check_date_from: int, check_date_to: int, employee_type: str, need_overtime: bool
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/attendance/v1/user_tasks/query"
-    req.add_query("employee_type", employee_type)
-    req.add_query("ignore_invalid_users", "true")
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {
-        "user_ids": user_ids,
-        "check_date_from": check_date_from,
-        "check_date_to": check_date_to,
-        "need_overtime_result": need_overtime,
-    }
-    return req
+    return (
+        QueryUserTaskRequest.builder()
+        .employee_type(employee_type)
+        .ignore_invalid_users("true")
+        .request_body(
+            QueryUserTaskRequestBody.builder()
+            .user_ids(user_ids)
+            .check_date_from(check_date_from)
+            .check_date_to(check_date_to)
+            .need_overtime_result(need_overtime)
+            .build()
+        )
+        .build()
+    )
 
 
 async def query_attendance_impl(
@@ -7090,15 +7309,16 @@ async def query_attendance_impl(
 # fetch the detail endpoint for the full rule set.
 
 
+# Attendance *configuration* reads (groups, shifts) are tenant-only, which the hand-built
+# requests used to contradict by also declaring USER. Feishu lists only
+# ``tenant_access_token`` for them — this is admin-level data, so a user token was never
+# going to work and the retry only cost a wasted round trip. ``user_tasks/query`` is
+# different: it reads a person's own records and does accept either identity.
 def _build_list_attendance_groups_request(page_size: int, page_token: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/attendance/v1/groups"
-    req.add_query("page_size", max(1, min(page_size, 50)))
+    builder = ListGroupRequest.builder().page_size(max(1, min(page_size, 50)))
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 async def list_attendance_groups_impl(page_size: int = 50, page_token: str = "") -> dict[str, Any]:
@@ -7145,14 +7365,9 @@ _GROUP_CONFIG_FIELDS = (
 
 
 def _build_get_attendance_group_request(group_id: str, employee_type: str, dept_type: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/attendance/v1/groups/:group_id"
-    req.paths["group_id"] = group_id
-    req.add_query("employee_type", employee_type)
-    req.add_query("dept_type", dept_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+    return (
+        GetAttendanceGroupRequest.builder().group_id(group_id).employee_type(employee_type).dept_type(dept_type).build()
+    )
 
 
 async def get_attendance_group_impl(
@@ -7172,14 +7387,10 @@ async def get_attendance_group_impl(
 
 
 def _build_list_shifts_request(page_size: int, page_token: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/attendance/v1/shifts"
-    req.add_query("page_size", max(1, min(page_size, 50)))
+    builder = ListShiftRequest.builder().page_size(max(1, min(page_size, 50)))
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 async def list_shifts_impl(page_size: int = 50, page_token: str = "") -> dict[str, Any]:
@@ -7228,12 +7439,7 @@ _SHIFT_CONFIG_FIELDS = (
 
 
 def _build_get_shift_request(shift_id: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/attendance/v1/shifts/:shift_id"
-    req.paths["shift_id"] = shift_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+    return GetShiftRequest.builder().shift_id(shift_id).build()
 
 
 async def get_shift_impl(shift_id: str) -> dict[str, Any]:
@@ -7273,13 +7479,12 @@ def _due_to_ms(due: str) -> str | None:
 
 
 def _build_create_task_request(body: dict[str, Any]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/task/v2/tasks"
-    req.add_query("user_id_type", "open_id")
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = body
-    return req
+    return (
+        CreateTaskRequest.builder()
+        .user_id_type("open_id")
+        .request_body(_apply_dict(InputTask.builder().build(), body))
+        .build()
+    )
 
 
 async def create_task_impl(
@@ -7337,18 +7542,12 @@ async def create_task_impl(
 
 
 def _build_list_tasks_request(completed: str, page_size: int, page_token: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/task/v2/tasks"
-    req.add_query("page_size", page_size)
-    req.add_query("type", "my_tasks")
-    req.add_query("user_id_type", "open_id")
+    builder = ListTaskRequest.builder().page_size(page_size).type("my_tasks").user_id_type("open_id")
     if completed in ("true", "false"):
-        req.add_query("completed", completed)
+        builder = builder.completed(completed)
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 async def list_tasks_impl(completed: str = "", page_size: int = 50, page_token: str = "") -> dict[str, Any]:
@@ -7377,14 +7576,18 @@ async def list_tasks_impl(completed: str = "", page_size: int = 50, page_token: 
 
 
 def _build_patch_task_request(task_guid: str, task_fields: dict[str, Any], update_fields: list[str]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.PATCH
-    req.uri = "/open-apis/task/v2/tasks/:task_guid"
-    req.paths["task_guid"] = task_guid
-    req.add_query("user_id_type", "open_id")
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"task": task_fields, "update_fields": update_fields}
-    return req
+    return (
+        PatchTaskRequest.builder()
+        .task_guid(task_guid)
+        .user_id_type("open_id")
+        .request_body(
+            PatchTaskRequestBody.builder()
+            .task(_apply_dict(InputTask.builder().build(), task_fields))
+            .update_fields(update_fields)
+            .build()
+        )
+        .build()
+    )
 
 
 async def update_task_impl(
@@ -7433,13 +7636,7 @@ async def complete_task_impl(task_guid: str, completed: bool, user_key: str = ""
 
 
 def _build_get_task_request(task_guid: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/task/v2/tasks/:task_guid"
-    req.paths["task_guid"] = task_guid
-    req.add_query("user_id_type", "open_id")
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+    return GetTaskRequest.builder().task_guid(task_guid).user_id_type("open_id").build()
 
 
 async def get_task_impl(task_guid: str) -> dict[str, Any]:
@@ -7499,12 +7696,7 @@ async def _get_primary_calendar_id() -> str | None:
     global _primary_calendar_id
     if _primary_calendar_id:
         return _primary_calendar_id
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/calendar/v4/calendars/primary"
-    req.add_query("user_id_type", "open_id")
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    res = await _invoke(req)
+    res = await _invoke(PrimaryCalendarRequest.builder().user_id_type("open_id").build())
     if not res["ok"]:
         return None
     data = res["data"] if isinstance(res["data"], dict) else {}
@@ -7534,25 +7726,24 @@ def _time_to_info(t: str, timezone: str) -> dict[str, str] | None:
 
 
 def _build_create_event_request(calendar_id: str, body: dict[str, Any]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/calendar/v4/calendars/:calendar_id/events"
-    req.paths["calendar_id"] = calendar_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = body
-    return req
+    return (
+        CreateCalendarEventRequest.builder()
+        .calendar_id(calendar_id)
+        .request_body(_apply_dict(CalendarEvent.builder().build(), body))
+        .build()
+    )
 
 
 def _build_add_attendees_request(calendar_id: str, event_id: str, open_ids: list[str]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/calendar/v4/calendars/:calendar_id/events/:event_id/attendees"
-    req.paths["calendar_id"] = calendar_id
-    req.paths["event_id"] = event_id
-    req.add_query("user_id_type", "open_id")
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"attendees": [{"type": "user", "user_id": oid} for oid in open_ids]}
-    return req
+    attendees = [CalendarEventAttendee.builder().type("user").user_id(oid).build() for oid in open_ids]
+    return (
+        CreateCalendarEventAttendeeRequest.builder()
+        .calendar_id(calendar_id)
+        .event_id(event_id)
+        .user_id_type("open_id")
+        .request_body(CreateCalendarEventAttendeeRequestBody.builder().attendees(attendees).build())
+        .build()
+    )
 
 
 async def create_event_impl(
@@ -7620,18 +7811,17 @@ def _ts_of(t: str, timezone: str) -> str | None:
 def _build_list_events_request(
     calendar_id: str, start_ts: str, end_ts: str, page_size: int, page_token: str
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/calendar/v4/calendars/:calendar_id/events"
-    req.paths["calendar_id"] = calendar_id
-    req.add_query("start_time", start_ts)
-    req.add_query("end_time", end_ts)
-    req.add_query("page_size", page_size)
-    req.add_query("user_id_type", "open_id")
+    builder = (
+        ListCalendarEventRequest.builder()
+        .calendar_id(calendar_id)
+        .start_time(start_ts)
+        .end_time(end_ts)
+        .page_size(page_size)
+        .user_id_type("open_id")
+    )
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 def _event_time_str(t: Any) -> str:
@@ -7730,32 +7920,30 @@ async def create_events_per_person_impl(
 def _build_dept_children_request(
     department_id: str, department_id_type: str, page_size: int, page_token: str
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/contact/v3/departments/:department_id/children"
-    req.paths["department_id"] = department_id
-    req.add_query("department_id_type", department_id_type)
-    req.add_query("page_size", page_size)
+    builder = (
+        ChildrenDepartmentRequest.builder()
+        .department_id(department_id)
+        .department_id_type(department_id_type)
+        .page_size(page_size)
+    )
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 def _build_find_by_department_request(
     department_id: str, department_id_type: str, user_id_type: str, page_size: int, page_token: str
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/contact/v3/users/find_by_department"
-    req.add_query("department_id", department_id)
-    req.add_query("department_id_type", department_id_type)
-    req.add_query("user_id_type", user_id_type)
-    req.add_query("page_size", page_size)
+    builder = (
+        FindByDepartmentUserRequest.builder()
+        .department_id(department_id)
+        .department_id_type(department_id_type)
+        .user_id_type(user_id_type)
+        .page_size(page_size)
+    )
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 async def _members_of_department(
@@ -7857,15 +8045,13 @@ async def list_department_members_impl(
 
 
 def _build_batch_users_request(user_ids: list[str], user_id_type: str, department_id_type: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/contact/v3/users/batch"
-    for uid in user_ids:
-        req.add_query("user_ids", uid)
-    req.add_query("user_id_type", user_id_type)
-    req.add_query("department_id_type", department_id_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+    return (
+        BatchUserRequest.builder()
+        .user_ids(user_ids)
+        .user_id_type(user_id_type)
+        .department_id_type(department_id_type)
+        .build()
+    )
 
 
 async def get_users_batch_impl(
@@ -7952,7 +8138,7 @@ async def search_users_impl(
         return _error(_AUTH_PROMPT, need_auth=True, need_capabilities=["contact_read"])
 
     req = _build_search_user_request(query, page_size, page_token)
-    from lark_channel.core.model import RequestOption  # noqa: PLC0415
+    from lark_oapi.core.model import RequestOption  # noqa: PLC0415
 
     option = RequestOption.builder().user_access_token(uat.access_token).build()
     try:
@@ -7998,12 +8184,7 @@ async def search_users_impl(
 
 
 def _build_media_download_request(file_token: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/drive/v1/medias/:file_token/download"
-    req.paths["file_token"] = file_token
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+    return DownloadMediaRequest.builder().file_token(file_token).build()
 
 
 async def _download_url_bytes(url: str) -> tuple[bytes | None, str]:
@@ -8060,7 +8241,7 @@ async def _download_media_as_user(file_token: str, user_key: str) -> tuple[bytes
     uat = await _get_valid_uat(user_key)
     if uat is None or not uat.access_token:
         return None
-    from lark_channel.core.model import RequestOption  # noqa: PLC0415
+    from lark_oapi.core.model import RequestOption  # noqa: PLC0415
 
     option = RequestOption.builder().user_access_token(uat.access_token).build()
     try:
@@ -8120,14 +8301,7 @@ async def download_file_impl(source: str, save_path: str, is_url: bool = False, 
 
 
 def _build_message_resource_request(message_id: str, file_key: str, resource_type: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/im/v1/messages/:message_id/resources/:file_key"
-    req.paths["message_id"] = message_id
-    req.paths["file_key"] = file_key
-    req.add_query("type", resource_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+    return GetMessageResourceRequest.builder().message_id(message_id).file_key(file_key).type(resource_type).build()
 
 
 async def _download_msg_resource_as_tenant(
@@ -8153,7 +8327,7 @@ async def _download_msg_resource_as_user(
     uat = await _get_valid_uat(user_key)
     if uat is None or not uat.access_token:
         return None
-    from lark_channel.core.model import RequestOption  # noqa: PLC0415
+    from lark_oapi.core.model import RequestOption  # noqa: PLC0415
 
     option = RequestOption.builder().user_access_token(uat.access_token).build()
     try:
@@ -8217,13 +8391,7 @@ _DELETABLE_FILE_TYPES = {"file", "docx", "doc", "sheet", "bitable", "mindnote", 
 
 
 def _build_delete_file_request(file_token: str, file_type: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.DELETE
-    req.uri = "/open-apis/drive/v1/files/:file_token"
-    req.paths["file_token"] = file_token
-    req.add_query("type", file_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+    return DeleteFileRequest.builder().file_token(file_token).type(file_type).build()
 
 
 async def delete_file_impl(file_token: str, file_type: str, user_key: str = "", identity: str = "") -> dict[str, Any]:
@@ -8261,17 +8429,12 @@ _DOC_BASE_URL = "https://feishu.cn"
 
 
 def _build_docx_create_request(title: str, folder_token: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/docx/v1/documents"
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    body: dict[str, Any] = {}
+    body = CreateDocumentRequestBody.builder()
     if title:
-        body["title"] = title
+        body = body.title(title)
     if folder_token:
-        body["folder_token"] = folder_token
-    req.body = body
-    return req
+        body = body.folder_token(folder_token)
+    return CreateDocumentRequest.builder().request_body(body.build()).build()
 
 
 async def create_docx_impl(
@@ -8307,18 +8470,12 @@ async def create_docx_impl(
 def _build_wiki_node_create_request(
     *, space_id: str, obj_type: str, node_type: str, parent_node_token: str, title: str
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/wiki/v2/spaces/:space_id/nodes"
-    req.paths["space_id"] = space_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    body: dict[str, Any] = {"obj_type": obj_type, "node_type": node_type}
+    body = Node.builder().obj_type(obj_type).node_type(node_type)
     if parent_node_token:
-        body["parent_node_token"] = parent_node_token
+        body = body.parent_node_token(parent_node_token)
     if title:
-        body["title"] = title
-    req.body = body
-    return req
+        body = body.title(title)
+    return CreateSpaceNodeRequest.builder().space_id(space_id).request_body(body.build()).build()
 
 
 async def create_wiki_node_impl(
@@ -8404,14 +8561,10 @@ async def create_wiki_doc_with_content_impl(
 
 
 def _build_list_spaces_request(page_size: int, page_token: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/wiki/v2/spaces"
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.add_query("page_size", page_size)
+    builder = ListSpaceRequest.builder().page_size(page_size)
     if page_token:
-        req.add_query("page_token", page_token)
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 async def list_wiki_spaces_impl(page_size: int = 20, page_token: str = "", user_key: str = "") -> dict[str, Any]:
@@ -8446,17 +8599,12 @@ async def list_wiki_spaces_impl(page_size: int = 20, page_token: str = "", user_
 def _build_list_wiki_nodes_request(
     space_id: str, page_size: int, page_token: str, parent_node_token: str
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/wiki/v2/spaces/:space_id/nodes"
-    req.paths["space_id"] = space_id
-    req.add_query("page_size", page_size)
+    builder = ListSpaceNodeRequest.builder().space_id(space_id).page_size(page_size)
     if page_token:
-        req.add_query("page_token", page_token)
+        builder = builder.page_token(page_token)
     if parent_node_token:
-        req.add_query("parent_node_token", parent_node_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.parent_node_token(parent_node_token)
+    return builder.build()
 
 
 async def list_wiki_nodes_impl(
@@ -8535,15 +8683,14 @@ def _content_to_blocks(content: str) -> list[dict[str, Any]]:
 
 
 def _build_blocks_append_request(document_id: str, children: list[dict[str, Any]]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
     # Root block: the document_id doubles as the root block_id.
-    req.uri = "/open-apis/docx/v1/documents/:document_id/blocks/:block_id/children"
-    req.paths["document_id"] = document_id
-    req.paths["block_id"] = document_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"children": children}
-    return req
+    return (
+        CreateDocumentBlockChildrenRequest.builder()
+        .document_id(document_id)
+        .block_id(document_id)
+        .request_body(CreateDocumentBlockChildrenRequestBody.builder().children(children).build())
+        .build()
+    )
 
 
 # ── Tables (block_type 31) + flowcharts/swimlanes rendered AS tables ────────────
@@ -8618,18 +8765,17 @@ def _table_descendants(
 def _build_descendant_request(
     document_id: str, children_id: list[str], descendants: list[dict[str, Any]], index: int
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    # Root block: the document_id doubles as the root block_id (append at doc root).
-    req.uri = "/open-apis/docx/v1/documents/:document_id/blocks/:block_id/descendant"
-    req.paths["document_id"] = document_id
-    req.paths["block_id"] = document_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    body: dict[str, Any] = {"children_id": children_id, "descendants": descendants}
+    body = CreateDocumentBlockDescendantRequestBody.builder().children_id(children_id).descendants(descendants)
     if index >= 0:
-        body["index"] = index
-    req.body = body
-    return req
+        body = body.index(index)
+    # Root block: the document_id doubles as the root block_id (append at doc root).
+    return (
+        CreateDocumentBlockDescendantRequest.builder()
+        .document_id(document_id)
+        .block_id(document_id)
+        .request_body(body.build())
+        .build()
+    )
 
 
 # Public aliases for the sibling helper modules (``_feishu_md``, ``_chart_*``): they need
@@ -9249,15 +9395,18 @@ _PERM_LEVELS = {"view", "edit", "full_access"}
 def _build_add_permission_member_request(
     token: str, obj_type: str, member_type: str, member_id: str, member_kind: str, perm: str, need_notification: bool
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/drive/v1/permissions/:token/members"
-    req.paths["token"] = token
-    req.add_query("type", obj_type)
-    req.add_query("need_notification", "true" if need_notification else "false")
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"member_type": member_type, "member_id": member_id, "perm": perm, "type": member_kind}
-    return req
+    # ``need_notification`` is a query flag: the SDK stringifies it as given, so a Python
+    # bool would go out as "True"/"False" rather than the JSON spelling Feishu expects.
+    return (
+        CreatePermissionMemberRequest.builder()
+        .token(token)
+        .type(obj_type)
+        .need_notification("true" if need_notification else "false")
+        .request_body(
+            BaseMember.builder().member_type(member_type).member_id(member_id).perm(perm).type(member_kind).build()
+        )
+        .build()
+    )
 
 
 async def add_permission_member_impl(
@@ -9289,13 +9438,7 @@ async def add_permission_member_impl(
 
 
 def _build_list_permission_members_request(token: str, obj_type: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/drive/v1/permissions/:token/members"
-    req.paths["token"] = token
-    req.add_query("type", obj_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+    return ListPermissionMemberRequest.builder().token(token).type(obj_type).build()
 
 
 async def list_permission_members_impl(token: str, obj_type: str, user_key: str = "") -> dict[str, Any]:
@@ -9324,16 +9467,15 @@ async def list_permission_members_impl(token: str, obj_type: str, user_key: str 
 def _build_delete_permission_member_request(
     token: str, obj_type: str, member_id: str, member_type: str, member_kind: str
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.DELETE
-    req.uri = "/open-apis/drive/v1/permissions/:token/members/:member_id"
-    req.paths["token"] = token
-    req.paths["member_id"] = member_id
-    req.add_query("type", obj_type)
-    req.add_query("member_type", member_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"type": member_kind}
-    return req
+    return (
+        DeletePermissionMemberRequest.builder()
+        .token(token)
+        .member_id(member_id)
+        .type(obj_type)
+        .member_type(member_type)
+        .request_body(DeletePermissionMemberRequestBody.builder().type(member_kind).build())
+        .build()
+    )
 
 
 async def delete_permission_member_impl(
@@ -9360,13 +9502,10 @@ async def delete_permission_member_impl(
 # rules, and per-field permissions. Assign people to a role so everyone opens the same
 # base but each role sees different rows/fields. Requires advanced permission on the base.
 def _build_create_bitable_role_request(app_token: str, body: dict[str, Any]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/roles"
-    req.paths["app_token"] = app_token
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = body
-    return req
+    payload = AppRole.builder().build()
+    for key, value in body.items():
+        setattr(payload, key, value)
+    return CreateAppRoleRequest.builder().app_token(app_token).request_body(payload).build()
 
 
 async def create_bitable_role_impl(
@@ -9393,15 +9532,10 @@ async def create_bitable_role_impl(
 
 
 def _build_list_bitable_roles_request(app_token: str, page_size: int, page_token: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/roles"
-    req.paths["app_token"] = app_token
-    req.add_query("page_size", page_size)
+    builder = ListAppRoleRequest.builder().app_token(app_token).page_size(page_size)
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 async def list_bitable_roles_impl(
@@ -9431,15 +9565,14 @@ async def list_bitable_roles_impl(
 def _build_add_bitable_role_member_request(
     app_token: str, role_id: str, member_id: str, member_id_type: str
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/roles/:role_id/members"
-    req.paths["app_token"] = app_token
-    req.paths["role_id"] = role_id
-    req.add_query("member_id_type", member_id_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"member_id": member_id}
-    return req
+    return (
+        CreateAppRoleMemberRequest.builder()
+        .app_token(app_token)
+        .role_id(role_id)
+        .member_id_type(member_id_type)
+        .request_body(AppRoleMember.builder().member_id(member_id).build())
+        .build()
+    )
 
 
 async def add_bitable_role_member_impl(
@@ -9526,25 +9659,24 @@ class _NamedBytes(io.BytesIO):
 def _build_media_upload_all_request(
     file_name: str, parent_type: str, parent_node: str, size: int, data: bytes, extra: dict[str, Any] | None
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/drive/v1/medias/upload_all"
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    body: dict[str, Any] = {
-        "file_name": file_name,
-        "parent_type": parent_type,
-        "parent_node": parent_node,
-        "size": str(size),
-    }
-    if extra:
-        body["extra"] = json.dumps(extra, ensure_ascii=False)
     # The binary goes in the BODY, not in req.files: Client.arequest overwrites
     # req.files with Files.extract_files(req.body) right before sending, so anything
-    # assigned here is discarded — the request then goes out as application/json and
+    # assigned there is discarded — the request then goes out as application/json and
     # Feishu answers "boundary not found".
-    body["file"] = _NamedBytes(data, file_name)
-    req.body = body
-    return req
+    #
+    # ``size`` is declared int here where the hand-built version passed a string; both
+    # reach Feishu as the same multipart field, because the form encoder stringifies
+    # every value on its way out.
+    body = (
+        UploadAllMediaRequestBody.builder()
+        .file_name(file_name)
+        .parent_type(parent_type)
+        .parent_node(parent_node)
+        .size(size)
+    )
+    if extra:
+        body = body.extra(json.dumps(extra, ensure_ascii=False))
+    return UploadAllMediaRequest.builder().request_body(body.file(_NamedBytes(data, file_name)).build()).build()
 
 
 async def upload_media_impl(
@@ -9611,41 +9743,38 @@ _IMAGE_BLOCK_TYPE = 27
 
 
 def _build_image_block_create_request(document_id: str, block_id: str, index: int) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/docx/v1/documents/:document_id/blocks/:block_id/children"
-    req.paths["document_id"] = document_id
-    req.paths["block_id"] = block_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
     # An image block is created empty: width/height are the display box, and the
     # token is filled in later by the replace_image patch.
-    body: dict[str, Any] = {"children": [{"block_type": _IMAGE_BLOCK_TYPE, "image": {"token": ""}}]}
+    body = CreateDocumentBlockChildrenRequestBody.builder().children(
+        [{"block_type": _IMAGE_BLOCK_TYPE, "image": {"token": ""}}]
+    )
     if index >= 0:
-        body["index"] = index
-    req.body = body
-    return req
+        body = body.index(index)
+    return (
+        CreateDocumentBlockChildrenRequest.builder()
+        .document_id(document_id)
+        .block_id(block_id)
+        .request_body(body.build())
+        .build()
+    )
+
+
+def _build_block_patch_request(document_id: str, block_id: str, patch: dict[str, Any]) -> BaseRequest:
+    """Patch one block. ``patch`` is the update operation (``replace_image`` /
+    ``update_text_elements`` / …) — the SDK's update model carries one field per
+    operation, so the caller's dict is applied onto it rather than restated."""
+    payload = UpdateBlockRequest.builder().build()
+    for key, value in patch.items():
+        setattr(payload, key, value)
+    return PatchDocumentBlockRequest.builder().document_id(document_id).block_id(block_id).request_body(payload).build()
 
 
 def _build_image_block_patch_request(document_id: str, block_id: str, file_token: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.PATCH
-    req.uri = "/open-apis/docx/v1/documents/:document_id/blocks/:block_id"
-    req.paths["document_id"] = document_id
-    req.paths["block_id"] = block_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"replace_image": {"token": file_token}}
-    return req
+    return _build_block_patch_request(document_id, block_id, {"replace_image": {"token": file_token}})
 
 
 def _build_block_delete_request(document_id: str, block_id: str, index: int) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.DELETE
-    req.uri = "/open-apis/docx/v1/documents/:document_id/blocks/:block_id/children/batch_delete"
-    req.paths["document_id"] = document_id
-    req.paths["block_id"] = block_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"start_index": index, "end_index": index + 1}
-    return req
+    return _build_blocks_batch_delete_request(document_id, block_id, index, index + 1)
 
 
 async def _upload_into_image_block(image_path: str, block_id: str, user_key: str, identity: str = "") -> dict[str, Any]:
@@ -9753,14 +9882,7 @@ async def append_doc_image_impl(
 
 
 def _build_block_children_list_request(document_id: str, block_id: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/docx/v1/documents/:document_id/blocks/:block_id/children"
-    req.paths["document_id"] = document_id
-    req.paths["block_id"] = block_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.add_query("page_size", 500)
-    return req
+    return GetDocumentBlockChildrenRequest.builder().document_id(document_id).block_id(block_id).page_size(500).build()
 
 
 async def _discard_image_block(document_id: str, block_id: str, index: Any, user_key: str, identity: str = "") -> None:
@@ -9869,38 +9991,25 @@ _TEXTUAL_BLOCK_KEYS = {
 
 def _build_document_blocks_list_request(document_id: str, page_size: int, page_token: str) -> BaseRequest:
     """GET every block of a document (flat, with parent_id/children), not just one level."""
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/docx/v1/documents/:document_id/blocks"
-    req.paths["document_id"] = document_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.add_query("page_size", page_size)
+    builder = ListDocumentBlockRequest.builder().document_id(document_id).page_size(page_size)
     if page_token:
-        req.add_query("page_token", page_token)
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 def _build_block_text_patch_request(document_id: str, block_id: str, elements: list[dict[str, Any]]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.PATCH
-    req.uri = "/open-apis/docx/v1/documents/:document_id/blocks/:block_id"
-    req.paths["document_id"] = document_id
-    req.paths["block_id"] = block_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"update_text_elements": {"elements": elements}}
-    return req
+    return _build_block_patch_request(document_id, block_id, {"update_text_elements": {"elements": elements}})
 
 
 def _build_blocks_batch_delete_request(document_id: str, block_id: str, start: int, end: int) -> BaseRequest:
     """Delete children [start, end) of ``block_id`` — the range is half-open."""
-    req = BaseRequest()
-    req.http_method = HttpMethod.DELETE
-    req.uri = "/open-apis/docx/v1/documents/:document_id/blocks/:block_id/children/batch_delete"
-    req.paths["document_id"] = document_id
-    req.paths["block_id"] = block_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"start_index": start, "end_index": end}
-    return req
+    return (
+        BatchDeleteDocumentBlockChildrenRequest.builder()
+        .document_id(document_id)
+        .block_id(block_id)
+        .request_body(BatchDeleteDocumentBlockChildrenRequestBody.builder().start_index(start).end_index(end).build())
+        .build()
+    )
 
 
 def _block_plain_text(block: dict[str, Any]) -> str:
@@ -10166,25 +10275,19 @@ _READ_STATUS_ERROR_HINTS = {
 
 
 def _build_read_users_request(message_id: str, user_id_type: str, page_size: int, page_token: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/im/v1/messages/:message_id/read_users"
-    req.paths["message_id"] = message_id
-    req.add_query("user_id_type", user_id_type)
-    req.add_query("page_size", max(1, min(page_size, 100)))
+    builder = (
+        ReadUsersMessageRequest.builder()
+        .message_id(message_id)
+        .user_id_type(user_id_type)
+        .page_size(max(1, min(page_size, 100)))
+    )
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 def _build_get_message_request(message_id: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/im/v1/messages/:message_id"
-    req.paths["message_id"] = message_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+    return GetMessageRequest.builder().message_id(message_id).build()
 
 
 async def _message_chat_and_sender(message_id: str, user_key: str = "") -> tuple[str, str]:
@@ -10317,39 +10420,24 @@ _PIN_ERROR_HINTS = {
 
 
 def _build_pin_request(message_id: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/im/v1/pins"
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"message_id": message_id}
-    return req
+    return CreatePinRequest.builder().request_body(Pin.builder().message_id(message_id).build()).build()
 
 
 def _build_unpin_request(message_id: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.DELETE
-    req.uri = "/open-apis/im/v1/pins/:message_id"
-    req.paths["message_id"] = message_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+    return DeletePinRequest.builder().message_id(message_id).build()
 
 
 def _build_list_pins_request(
     chat_id: str, start_time: str, end_time: str, page_size: int, page_token: str
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/im/v1/pins"
-    req.add_query("chat_id", chat_id)
+    builder = ListPinRequest.builder().chat_id(chat_id).page_size(max(1, min(page_size, 50)))
     if start_time:
-        req.add_query("start_time", start_time)
+        builder = builder.start_time(start_time)
     if end_time:
-        req.add_query("end_time", end_time)
-    req.add_query("page_size", max(1, min(page_size, 50)))
+        builder = builder.end_time(end_time)
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 def _pin_record(item: Any) -> dict[str, Any]:
@@ -10500,24 +10588,24 @@ def _infer_forward_target_type(receive_id: str, given: str) -> str:
 
 
 def _build_forward_request(message_id: str, receive_id: str, receive_id_type: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/im/v1/messages/:message_id/forward"
-    req.paths["message_id"] = message_id
-    req.add_query("receive_id_type", receive_id_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"receive_id": receive_id}
-    return req
+    return (
+        ForwardMessageRequest.builder()
+        .message_id(message_id)
+        .receive_id_type(receive_id_type)
+        .request_body(ForwardMessageRequestBody.builder().receive_id(receive_id).build())
+        .build()
+    )
 
 
 def _build_merge_forward_request(message_ids: list[str], receive_id: str, receive_id_type: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/im/v1/messages/merge_forward"
-    req.add_query("receive_id_type", receive_id_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"receive_id": receive_id, "message_id_list": message_ids}
-    return req
+    return (
+        MergeForwardMessageRequest.builder()
+        .receive_id_type(receive_id_type)
+        .request_body(
+            MergeForwardMessageRequestBody.builder().receive_id(receive_id).message_id_list(message_ids).build()
+        )
+        .build()
+    )
 
 
 def _require_receive_id(receive_id: str) -> tuple[str, dict[str, Any] | None]:
@@ -10722,18 +10810,12 @@ _BATCH_GET_ID_MAX = 50
 def _build_batch_get_id_request(
     emails: list[str], mobiles: list[str], include_resigned: bool, user_id_type: str
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/contact/v3/users/batch_get_id"
-    req.add_query("user_id_type", user_id_type)
-    body: dict[str, Any] = {"include_resigned": include_resigned}
+    body = BatchGetIdUserRequestBody.builder().include_resigned(include_resigned)
     if emails:
-        body["emails"] = emails
+        body = body.emails(emails)
     if mobiles:
-        body["mobiles"] = mobiles
-    req.body = body
-    req.token_types = {AccessTokenType.TENANT}
-    return req
+        body = body.mobiles(mobiles)
+    return BatchGetIdUserRequest.builder().user_id_type(user_id_type).request_body(body.build()).build()
 
 
 def _split_contacts(raw: str) -> list[str]:
@@ -10969,30 +11051,28 @@ async def department_tree_impl(
 
 
 def _build_department_get_request(department_id: str, department_id_type: str, user_id_type: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/contact/v3/departments/:department_id"
-    req.paths["department_id"] = department_id
-    req.add_query("department_id_type", department_id_type)
-    req.add_query("user_id_type", user_id_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+    return (
+        GetDepartmentRequest.builder()
+        .department_id(department_id)
+        .department_id_type(department_id_type)
+        .user_id_type(user_id_type)
+        .build()
+    )
 
 
 def _build_department_parent_request(
     department_id: str, department_id_type: str, user_id_type: str, page_size: int, page_token: str
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/contact/v3/departments/parent"
-    req.add_query("department_id", department_id)
-    req.add_query("department_id_type", department_id_type)
-    req.add_query("user_id_type", user_id_type)
-    req.add_query("page_size", page_size)
+    builder = (
+        ParentDepartmentRequest.builder()
+        .department_id(department_id)
+        .department_id_type(department_id_type)
+        .user_id_type(user_id_type)
+        .page_size(page_size)
+    )
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 async def department_get_impl(
@@ -11082,40 +11162,55 @@ _RESIGN_CONFIRM = "离职用户"
 _EMPLOYEE_TYPES = {1: "正式", 2: "实习", 3: "外包", 4: "劳务", 5: "顾问"}
 
 
+def _apply_dict(model: Any, values: dict[str, Any]) -> Any:
+    """Set ``values`` onto an SDK model built empty.
+
+    Contact writes assemble their body from whichever arguments the caller named, and
+    only those keys may be sent — a user patch that included every field would reset
+    the ones nobody asked to change. The dicts are already validated against Feishu's
+    field names by the callers, so they are applied wholesale rather than restated
+    field by field here.
+    """
+    for key, value in values.items():
+        setattr(model, key, value)
+    return model
+
+
 def _build_user_create_request(body: dict[str, Any], user_id_type: str, department_id_type: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/contact/v3/users"
-    req.add_query("user_id_type", user_id_type)
-    req.add_query("department_id_type", department_id_type)
-    req.body = body
-    req.token_types = {AccessTokenType.TENANT}
-    return req
+    return (
+        CreateUserRequest.builder()
+        .user_id_type(user_id_type)
+        .department_id_type(department_id_type)
+        .request_body(_apply_dict(User.builder().build(), body))
+        .build()
+    )
 
 
 def _build_user_patch_request(
     user_id: str, body: dict[str, Any], user_id_type: str, department_id_type: str
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.PATCH
-    req.uri = "/open-apis/contact/v3/users/:user_id"
-    req.paths["user_id"] = user_id
-    req.add_query("user_id_type", user_id_type)
-    req.add_query("department_id_type", department_id_type)
-    req.body = body
-    req.token_types = {AccessTokenType.TENANT}
-    return req
+    # Feishu accepts a user token here as well as the bot's, so the tenant→user retry in
+    # ``_invoke`` can genuinely help. Worth knowing when reading such a failure: under a
+    # user token only ``name`` / ``en_name`` / ``avatar_key`` may change — any other field
+    # is refused outright rather than silently ignored.
+    return (
+        PatchUserRequest.builder()
+        .user_id(user_id)
+        .user_id_type(user_id_type)
+        .department_id_type(department_id_type)
+        .request_body(_apply_dict(User.builder().build(), body))
+        .build()
+    )
 
 
 def _build_user_delete_request(user_id: str, body: dict[str, Any], user_id_type: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.DELETE
-    req.uri = "/open-apis/contact/v3/users/:user_id"
-    req.paths["user_id"] = user_id
-    req.add_query("user_id_type", user_id_type)
-    req.body = body
-    req.token_types = {AccessTokenType.TENANT}
-    return req
+    return (
+        DeleteUserRequest.builder()
+        .user_id(user_id)
+        .user_id_type(user_id_type)
+        .request_body(_apply_dict(DeleteUserRequestBody.builder().build(), body))
+        .build()
+    )
 
 
 def _user_summary(raw: Any) -> dict[str, Any]:
@@ -11378,38 +11473,30 @@ _DEPARTMENT_DELETE_CONFIRM = "删除部门"
 
 
 def _build_department_create_request(body: dict[str, Any], user_id_type: str, department_id_type: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/contact/v3/departments"
-    req.add_query("user_id_type", user_id_type)
-    req.add_query("department_id_type", department_id_type)
-    req.body = body
-    req.token_types = {AccessTokenType.TENANT}
-    return req
+    return (
+        CreateDepartmentRequest.builder()
+        .user_id_type(user_id_type)
+        .department_id_type(department_id_type)
+        .request_body(_apply_dict(Department.builder().build(), body))
+        .build()
+    )
 
 
 def _build_department_patch_request(
     department_id: str, body: dict[str, Any], user_id_type: str, department_id_type: str
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.PATCH
-    req.uri = "/open-apis/contact/v3/departments/:department_id"
-    req.paths["department_id"] = department_id
-    req.add_query("user_id_type", user_id_type)
-    req.add_query("department_id_type", department_id_type)
-    req.body = body
-    req.token_types = {AccessTokenType.TENANT}
-    return req
+    return (
+        PatchDepartmentRequest.builder()
+        .department_id(department_id)
+        .user_id_type(user_id_type)
+        .department_id_type(department_id_type)
+        .request_body(_apply_dict(Department.builder().build(), body))
+        .build()
+    )
 
 
 def _build_department_delete_request(department_id: str, department_id_type: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.DELETE
-    req.uri = "/open-apis/contact/v3/departments/:department_id"
-    req.paths["department_id"] = department_id
-    req.add_query("department_id_type", department_id_type)
-    req.token_types = {AccessTokenType.TENANT}
-    return req
+    return DeleteDepartmentRequest.builder().department_id(department_id).department_id_type(department_id_type).build()
 
 
 async def department_create_impl(
@@ -11554,78 +11641,64 @@ _GROUP_TYPES = {1: "普通用户组", 2: "动态用户组"}
 
 
 def _build_group_create_request(body: dict[str, Any]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/contact/v3/group"
-    req.body = body
-    req.token_types = {AccessTokenType.TENANT}
-    return req
+    return CreateGroupRequest.builder().request_body(_apply_dict(Group.builder().build(), body)).build()
 
 
 def _build_group_list_request(group_type: int, page_size: int, page_token: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/contact/v3/group/simplelist"
-    req.add_query("type", group_type)
-    req.add_query("page_size", page_size)
+    builder = SimplelistGroupRequest.builder().type(group_type).page_size(page_size)
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT}
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 def _build_group_get_request(group_id: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/contact/v3/group/:group_id"
-    req.paths["group_id"] = group_id
-    req.token_types = {AccessTokenType.TENANT}
-    return req
+    return GetGroupRequest.builder().group_id(group_id).build()
 
 
 def _build_group_patch_request(group_id: str, body: dict[str, Any]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.PATCH
-    req.uri = "/open-apis/contact/v3/group/:group_id"
-    req.paths["group_id"] = group_id
-    req.body = body
-    req.token_types = {AccessTokenType.TENANT}
-    return req
+    return (
+        PatchGroupRequest.builder().group_id(group_id).request_body(_apply_dict(Group.builder().build(), body)).build()
+    )
 
 
 def _build_group_delete_request(group_id: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.DELETE
-    req.uri = "/open-apis/contact/v3/group/:group_id"
-    req.paths["group_id"] = group_id
-    req.token_types = {AccessTokenType.TENANT}
-    return req
+    return DeleteGroupRequest.builder().group_id(group_id).build()
 
 
 def _build_group_member_request(group_id: str, action: str, body: dict[str, Any]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = f"/open-apis/contact/v3/group/:group_id/member/{action}"
-    req.paths["group_id"] = group_id
-    req.body = body
-    req.token_types = {AccessTokenType.TENANT}
-    return req
+    """Add or remove one user group member.
+
+    ``action`` used to be interpolated into the path; the SDK models the two operations
+    as separate request types, so it selects between them here instead.
+    """
+    if action == "add":
+        return (
+            AddGroupMemberRequest.builder()
+            .group_id(group_id)
+            .request_body(_apply_dict(AddGroupMemberRequestBody.builder().build(), body))
+            .build()
+        )
+    return (
+        RemoveGroupMemberRequest.builder()
+        .group_id(group_id)
+        .request_body(_apply_dict(RemoveGroupMemberRequestBody.builder().build(), body))
+        .build()
+    )
 
 
 def _build_group_member_list_request(
     group_id: str, member_type: str, member_id_type: str, page_size: int, page_token: str
 ) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/contact/v3/group/:group_id/member/simplelist"
-    req.paths["group_id"] = group_id
-    req.add_query("member_type", member_type)
-    req.add_query("member_id_type", member_id_type)
-    req.add_query("page_size", page_size)
+    builder = (
+        SimplelistGroupMemberRequest.builder()
+        .group_id(group_id)
+        .member_type(member_type)
+        .member_id_type(member_id_type)
+        .page_size(page_size)
+    )
     if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT}
-    return req
+        builder = builder.page_token(page_token)
+    return builder.build()
 
 
 def _group_record(it: Any) -> dict[str, Any]:

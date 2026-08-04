@@ -31,7 +31,7 @@ _RELOAD_INTERVAL_SECONDS = 5.0
 
 _CustomizedEventProcessor: Any = None
 try:
-    from lark_channel.event.custom import CustomizedEventProcessor
+    from lark_oapi.event.custom import CustomizedEventProcessor
 
     _CustomizedEventProcessor = CustomizedEventProcessor
 except ImportError:  # pragma: no cover
@@ -49,7 +49,7 @@ class FeishuAgentEventsStats:
 def _plainify(value: Any, _depth: int = 0) -> Any:
     """Recursively turn lark SDK model objects into plain dicts/lists.
 
-    lark_channel models (``P2ImChatMemberUserAddedV1Data``, ``UserId``, …) are
+    lark_oapi models (``P2ImChatMemberUserAddedV1Data``, ``UserId``, …) are
     hand-rolled classes with no ``dict()``/``model_dump()``/``to_dict()`` — their
     fields live in ``__dict__``. Without unwrapping them, every P2 payload
     reaches ``map_event`` as ``repr()`` text and no mapper can read a field.
@@ -261,7 +261,7 @@ def _register_platform_map(
     installed processor resolves its mapper from *live* on each delivery.
     """
     if _CustomizedEventProcessor is None:
-        logger.warning("lark_channel CustomizedEventProcessor missing — agent events off")
+        logger.warning("lark_oapi CustomizedEventProcessor missing — agent events off")
         return 0
 
     platform_events = live.platform_events()

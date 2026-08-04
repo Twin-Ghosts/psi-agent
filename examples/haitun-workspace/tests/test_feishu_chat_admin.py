@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import body_dict
 
 TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
 if str(TOOLS_DIR) not in sys.path:
@@ -162,14 +163,14 @@ async def test_set_announcement_replaces_then_appends_with_fresh_revision(monkey
 
     delete_req, append_req = seq.requests[2], seq.requests[4]
     assert delete_req.http_method.name == "DELETE"
-    assert delete_req.body == {"start_index": 0, "end_index": 2}
+    assert body_dict(delete_req) == {"start_index": 0, "end_index": 2}
     # The delete bumps the revision, so the append must not reuse the pre-delete one —
     # Feishu rejects a stale optimistic lock.
     assert _qdict(delete_req).get("revision_id") == "4"
     assert _qdict(append_req).get("revision_id") == "5"
     # The announcement root's block_id is the chat_id itself.
     assert append_req.paths["block_id"] == "oc_x"
-    assert [b["block_type"] for b in append_req.body["children"]] == [3, 2]  # heading, paragraph
+    assert [b["block_type"] for b in body_dict(append_req)["children"]] == [3, 2]  # heading, paragraph
     assert (result["deleted"], result["added"], result["replaced"]) == (2, 2, True)
 
 
@@ -202,7 +203,7 @@ async def test_clear_announcement_deletes_the_body_range(monkeypatch: pytest.Mon
     seq = _Sequenced([_meta(11), _blocks("a", "b", "c"), {"data": {"revision_id": 12}}])
     monkeypatch.setattr(_impl, "_invoke", seq)
     result = await _impl.clear_chat_announcement_impl("oc_x")
-    assert seq.requests[2].body == {"start_index": 0, "end_index": 3}
+    assert body_dict(seq.requests[2]) == {"start_index": 0, "end_index": 3}
     assert result["deleted"] == 3
     assert result["revision_id"] == 12
 
@@ -231,7 +232,7 @@ async def test_update_chat_sends_only_named_fields(monkeypatch: pytest.MonkeyPat
     assert req.uri == "/open-apis/im/v1/chats/:chat_id"
     assert req.paths["chat_id"] == "oc_x"
     # Renaming must not carry along permission fields Feishu would then apply.
-    assert req.body == {"name": "新群名"}
+    assert body_dict(req) == {"name": "新群名"}
     assert result["updated"] == {"name": "新群名"}
 
 
@@ -242,12 +243,12 @@ async def test_update_chat_couples_share_card_to_add_member(monkeypatch: pytest.
     seq = _Sequenced([{"data": {}}, {"data": {}}])
     monkeypatch.setattr(_impl, "_invoke", seq)
     await _impl.update_chat_impl("oc_x", add_member_permission="only_owner")
-    assert seq.requests[0].body == {
+    assert body_dict(seq.requests[0]) == {
         "add_member_permission": "only_owner",
         "share_card_permission": "not_allowed",
     }
     await _impl.update_chat_impl("oc_x", add_member_permission="all_members")
-    assert seq.requests[1].body == {
+    assert body_dict(seq.requests[1]) == {
         "add_member_permission": "all_members",
         "share_card_permission": "allowed",
     }
@@ -264,7 +265,7 @@ async def test_update_chat_accepts_chinese_enum_words(monkeypatch: pytest.Monkey
         membership_approval="需审批",
         chat_type="公开",
     )
-    assert seq.request.body == {
+    assert body_dict(seq.request) == {
         "at_all_permission": "only_owner",
         "edit_permission": "all_members",
         "membership_approval": "approval_required",
@@ -311,7 +312,7 @@ async def test_transfer_owner_sets_owner_id_on_the_update_endpoint(monkeypatch: 
     result = await _impl.transfer_chat_owner_impl("oc_x", "ou_new", user_key="ou_owner")
     req = seq.request
     assert req.http_method.name == "PUT"
-    assert req.body == {"owner_id": "ou_new"}
+    assert body_dict(req) == {"owner_id": "ou_new"}
     assert _qdict(req).get("user_id_type") == "open_id"
     assert seq.kwargs[0]["user_key"] == "ou_owner"
     assert result["new_owner_id"] == "ou_new"
@@ -380,7 +381,7 @@ async def test_mute_uses_the_moderation_endpoint(monkeypatch: pytest.MonkeyPatch
     req = seq.request
     assert req.http_method.name == "PUT"
     assert req.uri == "/open-apis/im/v1/chats/:chat_id/moderation"
-    assert req.body == {"moderation_setting": "only_owner"}
+    assert body_dict(req) == {"moderation_setting": "only_owner"}
     assert result["moderation_setting"] == "only_owner"
 
 
@@ -389,12 +390,12 @@ async def test_mute_maps_release_and_moderator_list(monkeypatch: pytest.MonkeyPa
     seq = _Sequenced([{"data": {}}, {"data": {}}])
     monkeypatch.setattr(_impl, "_invoke", seq)
     await _impl.update_chat_moderation_impl("oc_x", "解除禁言")
-    assert seq.requests[0].body == {"moderation_setting": "all_members"}
+    assert body_dict(seq.requests[0]) == {"moderation_setting": "all_members"}
 
     await _impl.update_chat_moderation_impl(
         "oc_x", "moderator_list", speaker_ids=["ou_a", " ou_b "], revoke_ids=["ou_c"]
     )
-    assert seq.requests[1].body == {
+    assert body_dict(seq.requests[1]) == {
         "moderation_setting": "moderator_list",
         "moderator_added_list": ["ou_a", "ou_b"],
         "moderator_removed_list": ["ou_c"],
@@ -479,7 +480,7 @@ async def test_add_menu_builds_feishu_nested_tree(monkeypatch: pytest.MonkeyPatc
             {"name": "常用", "children": [{"name": "报销", "url": "https://example.com/fee"}]},
         ],
     )
-    body = seq.request.body
+    body = body_dict(seq.request)
     top = body["menu_tree"]["chat_menu_top_levels"]
     # A menu with a URL redirects; the icon rides along.
     assert top[0]["chat_menu_item"]["action_type"] == "REDIRECT_LINK"
@@ -525,7 +526,7 @@ async def test_delete_menu_takes_ids_not_names(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(_impl, "_invoke", seq)
     result = await _impl.delete_chat_menu_impl("oc_x", ["top_0", " top_1 "])
     assert seq.request.http_method.name == "DELETE"
-    assert seq.request.body == {"chat_menu_top_level_ids": ["top_0", "top_1"]}
+    assert body_dict(seq.request) == {"chat_menu_top_level_ids": ["top_0", "top_1"]}
     assert result["deleted"] == ["top_0", "top_1"]
 
     empty = await _impl.delete_chat_menu_impl("oc_x", [])
@@ -565,7 +566,7 @@ async def test_add_tab_builds_content_keyed_by_type(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(_impl, "_invoke", seq)
     await _impl.add_chat_tab_impl("oc_x", "周报", "doc", "https://feishu.cn/docx/abc")
     assert seq.request.uri == "/open-apis/im/v1/chats/:chat_id/chat_tabs"
-    assert seq.request.body == {
+    assert body_dict(seq.request) == {
         "chat_tabs": [{"tab_name": "周报", "tab_type": "doc", "tab_content": {"doc": "https://feishu.cn/docx/abc"}}]
     }
 
@@ -594,7 +595,7 @@ async def test_delete_tabs_and_hints(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_impl, "_invoke", seq)
     result = await _impl.delete_chat_tabs_impl("oc_x", ["tab_1"])
     assert seq.request.uri == "/open-apis/im/v1/chats/:chat_id/chat_tabs/delete_tabs"
-    assert seq.request.body == {"tab_ids": ["tab_1"]}
+    assert body_dict(seq.request) == {"tab_ids": ["tab_1"]}
     assert result["deleted"] == ["tab_1"]
 
     assert (await _impl.delete_chat_tabs_impl("oc_x", []))["ok"] is False
@@ -613,7 +614,7 @@ async def test_upload_avatar_uses_avatar_image_type(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(_impl, "_invoke", seq)
     result = await _impl.upload_chat_avatar_impl(str(picture))
     assert seq.request.uri == "/open-apis/im/v1/images"
-    assert seq.request.body["image_type"] == "avatar"
+    assert body_dict(seq.request)["image_type"] == "avatar"
     assert result["image_key"] == "img_avatar"
 
 
@@ -737,7 +738,7 @@ async def test_search_messages_hydrates_ids_into_readable_hits(monkeypatch: pyte
     search_req, hydrate_req = seq.requests
     assert search_req.http_method.name == "POST"
     assert search_req.uri == "/open-apis/search/v2/message"
-    assert search_req.body == {"query": "发布时间"}
+    assert body_dict(search_req) == {"query": "发布时间"}
     # User-token only: Feishu accepts no tenant token here at all.
     assert seq.kwargs[0]["prefer"] == "user"
     assert hydrate_req.uri == "/open-apis/im/v1/messages/:message_id"
@@ -817,7 +818,7 @@ async def test_search_messages_passes_named_filters_only(monkeypatch: pytest.Mon
         end_time="1609396809",
         user_key="ou_me",
     )
-    assert seq.requests[0].body == {
+    assert body_dict(seq.requests[0]) == {
         "query": "周报",
         "chat_ids": ["oc_1"],
         "from_ids": ["ou_a"],

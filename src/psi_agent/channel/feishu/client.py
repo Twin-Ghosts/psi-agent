@@ -15,15 +15,16 @@ import aiohttp
 import anyio
 import platformdirs
 from anyio.from_thread import BlockingPortal
-from lark_channel import FeishuChannel, PolicyConfig
-from lark_channel.api.im.v1.model.create_message_reaction_request import CreateMessageReactionRequest
-from lark_channel.api.im.v1.model.create_message_reaction_request_body import CreateMessageReactionRequestBody
-from lark_channel.api.im.v1.model.delete_message_reaction_request import DeleteMessageReactionRequest
-from lark_channel.api.im.v1.model.emoji import Emoji
-from lark_channel.api.im.v1.model.get_message_resource_request import GetMessageResourceRequest
-from lark_channel.core.enum import AccessTokenType, HttpMethod
-from lark_channel.core.model import BaseRequest
-from lark_channel.event.custom import CustomizedEventProcessor
+from lark_oapi.api.im.v1 import (
+    CreateMessageReactionRequest,
+    CreateMessageReactionRequestBody,
+    DeleteMessageReactionRequest,
+    Emoji,
+    GetMessageResourceRequest,
+)
+from lark_oapi.core.enum import AccessTokenType, HttpMethod
+from lark_oapi.core.model import BaseRequest
+from lark_oapi.event.custom import CustomizedEventProcessor
 from loguru import logger
 
 from psi_agent.channel._core import ChannelCore
@@ -31,6 +32,9 @@ from psi_agent.channel._types import FileChunk, InputChunk, ReasoningChunk, Text
 from psi_agent.channel.feishu._agent_events import register_feishu_agent_events
 
 from ._card_action import handle_card_action
+from ._channel import FeishuChannel
+from ._inbound import GROUP_CHAT_TYPES as _GROUP_CHAT_TYPES
+from ._inbound import PolicyConfig
 
 _EMOJI_PROCESSING = "Typing"
 _EMOJI_FAILED = "CrossMark"
@@ -83,9 +87,6 @@ class _CoreRegistry:
 
 
 _GATEWAY_TIMEOUT = aiohttp.ClientTimeout(total=10)
-
-
-_GROUP_CHAT_TYPES = frozenset({"group", "topic"})
 
 
 class _GatewayRouteProvider:
@@ -724,33 +725,21 @@ def _log_reject(event: Any) -> None:
         logger.warning(f"_log_reject failed — {e}")
 
 
-async def _ensure_bot_identity(channel: Any) -> None:
-    """确保机器人 open_id 已解析 — 群聊 @机器人 检测的前置依赖。
+def _log_bot_identity(channel: Any) -> None:
+    """报告机器人身份是否解析成功 — 群聊 @机器人 检测的前置依赖。
 
-    ``FeishuChannel`` 启动时会自动拉取 bot 身份, 但网络抖动或飞书后台未开启
-    "机器人" 能力会导致失败。此时 ``bot_open_id`` 为 None, 策略门会把群里每条
-    消息都判为 "未 @机器人" 而拒绝 (表现为 "群里 @ 了也不回复")。这里在启动后
-    兜底重试一次并给出明确日志。
+    身份由 ``channel.start()`` 在连接前解析。失败时 ``bot_identity`` 为 None, 策略门
+    会把群里每条消息都判为 "未 @机器人" 而拒绝 —— 表现是 "群里 @ 了也不回复", 与身份
+    解析看不出关联, 所以这里把因果关系明确写进日志。
     """
-    try:
-        if channel.bot_identity is not None:
-            identity = channel.bot_identity
-        else:
-            identity = await channel.resolve_bot_identity()
-    except Exception as e:
-        logger.warning(f"bot identity resolve failed — {e}")
-        identity = None
-
-    if identity is not None:
-        logger.info(
-            f"Feishu bot identity resolved — open_id={getattr(identity, 'open_id', None)} "
-            f"name={getattr(identity, 'name', None)}"
-        )
-    else:
-        logger.warning(
-            "Feishu bot identity unresolved — 群聊 @机器人 检测将不可用, "
-            "请确认飞书后台已开启机器人能力 (否则群里 @ 也不会触发回复)"
-        )
+    identity = channel.bot_identity
+    if identity is not None and getattr(identity, "open_id", ""):
+        logger.info(f"Feishu bot identity resolved — open_id={identity.open_id} name={getattr(identity, 'name', '')}")
+        return
+    logger.warning(
+        "Feishu bot identity unresolved — 群聊 @机器人 检测将不可用, "
+        "请确认飞书后台已开启机器人能力 (否则群里 @ 也不会触发回复)"
+    )
 
 
 async def run_feishu(
@@ -838,21 +827,26 @@ async def run_feishu(
         if respond_to_comments:
             channel.on("comment", _on_comment)
             logger.debug("comment subscription enabled (@bot in doc comments triggers reply)")
+        # One task group owns both the WebSocket and the synthetic event producers, so
+        # cancelling it (Ctrl-C, or an error escaping below) closes the socket and stops
+        # the producers together. ``channel.start`` resolves the bot identity before
+        # connecting — the group policy gate needs the bot's open_id to recognise an
+        # @-mention, and connecting first would reject every group message until it lands.
         try:
-            await channel.start_background()
-            logger.info(f"Feishu bot started (session={session_socket} interval={interval})")
-            # Inject the approval processor AFTER start_background — it rebuilds the
-            # dispatcher, so an earlier registration would be discarded.
-            _register_approval_processor(channel, _on_approval)
-            await _ensure_bot_identity(channel)
-            # Agent-package channel_events/feishu → unified POST /events
-            if agent_root.strip():
-                root = await anyio.Path(agent_root).expanduser()
-            else:
-                root = await anyio.Path.cwd()
-            root_resolved = Path(await root.resolve())
-            # TaskGroup owns synthetic producers; cancel with Channel shutdown.
             async with anyio.create_task_group() as events_tg:
+                await channel.start(task_group=events_tg)
+                logger.info(f"Feishu bot started (session={session_socket} interval={interval})")
+                _log_bot_identity(channel)
+                # The approval event has no typed processor in the SDK, so it goes in as a
+                # customized processor. Registered after start(): the dispatcher is built
+                # inside start(), and an earlier registration would target a discarded one.
+                _register_approval_processor(channel, _on_approval)
+                # Agent-package channel_events/feishu → unified POST /events
+                if agent_root.strip():
+                    root = await anyio.Path(agent_root).expanduser()
+                else:
+                    root = await anyio.Path.cwd()
+                root_resolved = Path(await root.resolve())
                 stats = await register_feishu_agent_events(
                     channel=channel,
                     agent_root=root_resolved,
@@ -867,10 +861,4 @@ async def run_feishu(
                 )
                 await anyio.sleep_forever()
         finally:
-            logger.info("Shutting down Feishu bot")
-            with anyio.CancelScope(shield=True):
-                try:
-                    await channel.stop_background()
-                except Exception as e:
-                    logger.warning(f"Feishu stop_background failed: {e}")
             logger.info("Feishu bot shutdown complete")

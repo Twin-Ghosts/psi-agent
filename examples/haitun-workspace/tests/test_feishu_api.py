@@ -21,7 +21,8 @@ from typing import Any
 
 import anyio
 import pytest
-from lark_channel.core.enum import AccessTokenType, HttpMethod
+from conftest import body_dict
+from lark_oapi.core.enum import AccessTokenType, HttpMethod
 
 TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
 if str(TOOLS_DIR) not in sys.path:
@@ -97,7 +98,7 @@ async def test_post_sends_body_and_lowercase_method_is_accepted(monkeypatch: pyt
 
     req = cap.request
     assert req.http_method is HttpMethod.POST
-    assert req.body == {"summary": "写周报", "members": [{"id": "ou_a", "role": "assignee"}]}
+    assert body_dict(req) == {"summary": "写周报", "members": [{"id": "ou_a", "role": "assignee"}]}
 
 
 @pytest.mark.asyncio
