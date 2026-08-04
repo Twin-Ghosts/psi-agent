@@ -1,4 +1,4 @@
-/** Extract File objects from a paste/drop DataTransfer (any kind, not only images). */
+/** Extract File objects from a paste/drop ``DataTransfer`` (any kind, not only images). */
 
 const MIME_EXT: Record<string, string> = {
   'image/png': 'png',

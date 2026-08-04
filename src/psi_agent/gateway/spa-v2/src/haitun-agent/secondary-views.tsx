@@ -17,6 +17,7 @@ import { NEW_TASK_PRESETS } from "./demo-fixtures";
 import { OVERVIEW_LABEL, type Task, type TaskTemplate } from "./model";
 import { AgentMark, BrandLogo } from "./primitives";
 import { filesFromClipboard } from "../services/clipboardFiles";
+import { useComposerFileDrop } from "../services/composerFileDrop";
 import { onComposerEnterKey } from "../services/composerKeys";
 
 export function NewTaskWorkspace({
@@ -42,6 +43,10 @@ export function NewTaskWorkspace({
   const [typing, setTyping] = useState(false);
   const [attachments, setAttachments] = useState<File[]>([]);
   const attachmentRef = useRef<HTMLInputElement | null>(null);
+  const { isFileDragOver, dropProps } = useComposerFileDrop({
+    enabled: !typing,
+    onFiles: (files) => setAttachments((current) => [...current, ...files]),
+  });
 
   const canSend = Boolean(draft.trim() || attachments.length);
 
@@ -83,7 +88,10 @@ export function NewTaskWorkspace({
           <p>描述希望得到的结果、截止时间，以及手头已有的材料。发送后会进入任务分屏继续对话。</p>
         </div>
 
-        <div className="new-task-compose-block">
+        <div
+          className={`new-task-compose-block${isFileDragOver ? " is-file-drag-over" : ""}`}
+          {...dropProps}
+        >
           {!typing && (
             <div className="new-task-presets">
               {NEW_TASK_PRESETS.map((preset) => {

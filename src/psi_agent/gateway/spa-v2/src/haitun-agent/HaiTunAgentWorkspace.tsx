@@ -80,6 +80,7 @@ import {
 } from "../services/bootstrapAi";
 import { chatFileToFile, filesToChatFiles } from "../services/chatFiles";
 import { filesFromClipboard } from "../services/clipboardFiles";
+import { useComposerFileDrop } from "../services/composerFileDrop";
 import { onComposerEnterKey } from "../services/composerKeys";
 import { streamSessionChat } from "../services/chatStream";
 import { applyProgressEvent, progressLogStart, type ProgressLog } from "../services/turnProgress";
@@ -1104,6 +1105,14 @@ export default function HaiTunAgentWorkspace({
     }));
   };
 
+  const { isFileDragOver, dropProps: composerDropProps } = useComposerFileDrop({
+    enabled: Boolean(currentCard?.id),
+    onFiles: (files) => {
+      addChatAttachments(currentCard.id, files);
+      setChatExpanded(true);
+    },
+  });
+
   /** Paste any clipboard file (screenshot, copied file, …) ≡ paperclip attach. */
   const handleChatPaste = (cardId: string, event: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const files = filesFromClipboard(event.clipboardData);
@@ -1486,8 +1495,9 @@ export default function HaiTunAgentWorkspace({
         </div>
 
         <section
-          className="context-chat"
+          className={`context-chat${interactive && isFileDragOver ? " is-file-drag-over" : ""}`}
           aria-label={`关于${unitCard.title}的对话`}
+          {...(interactive ? composerDropProps : {})}
           onClick={(event) => {
             if (!interactive || expanded) return;
             if ((event.target as HTMLElement).closest("[data-attach-control], button, a")) return;
