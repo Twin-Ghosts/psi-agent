@@ -1,18 +1,24 @@
-"""Feishu/Lark approval (审批) tools — submit applications and read/approve them.
+"""Feishu/Lark approval (审批) — the two calls that need more than a request.
 
-Covers both ends of an approval:
-- **发起端 (submit)** — ``feishu_approval_get_definition`` reads what fields an
-  approval requires (its form template) and ``feishu_approval_create`` submits an
-  instance *on behalf of an applicant* (records under the applicant's open_id).
-- **审核端 (audit)** — list a user's tasks, read an application's form, and
-  approve/reject on behalf of a real approver.
+Most of this domain is now endpoint knowledge in the ``feishu-approval`` skill, called
+through ``feishu_api``: listing a user's tasks, listing a definition's instances,
+reading an instance, approving, rejecting, and subscribing to status changes. What
+stays here are the two calls whose value is a *transformation* rather than a request:
 
-Important: approve/reject carries the **approver's own user_id** (the bot acts on
-behalf of a real approver). Create carries the **applicant's open_id/user_id** so
-the instance is recorded under that person; the bot's tenant token submits it, so
-no per-applicant authorization is needed. Requires the app authorized on the
-approval definition and the ``approval:*`` scopes, plus ``PSI_FEISHU_APP_ID`` /
-``PSI_FEISHU_APP_SECRET``.
+- ``feishu_approval_get_definition`` — the definition's ``form`` arrives as a JSON
+  *string* holding an array of widgets. This parses it into
+  ``{id, custom_id, name, type, required}`` so field ids can be copied instead of
+  guessed; an invented id only fails later, at submit time.
+- ``feishu_approval_create`` — the submitted ``form`` has to go out as a JSON string
+  *containing* a JSON array, and an applicant id is mandatory (without one the
+  instance is filed under nobody).
+
+Identity in this domain is carried in the body, not by the caller's token: create
+records the applicant from ``open_id``/``user_id``, and approve/reject records the
+approver from ``user_id`` — who must be the current task's real assignee. The bot's
+tenant token submits either way, so no per-applicant authorization is needed. Requires
+the app authorized on the approval definition and the ``approval:*`` scopes, plus
+``PSI_FEISHU_APP_ID`` / ``PSI_FEISHU_APP_SECRET``.
 """
 
 from __future__ import annotations
@@ -28,44 +34,6 @@ if str(TOOLS_DIR) not in sys.path:
 import _feishu_impl as _f
 
 
-async def feishu_approval_list_tasks(
-    user_id: str,
-    topic: str = "1",
-    user_id_type: str = "open_id",
-    page_size: int = 100,
-    page_token: str = "",
-) -> str:
-    """List a user's approval tasks (e.g. their pending approvals).
-
-    Returns task summaries — each with ``task_id``, ``instance_code``,
-    ``approval_code``, ``title``, ``status`` — which you feed into
-    ``feishu_approval_get`` (to read the form) and ``feishu_approval_decide``.
-
-    Args:
-        user_id: The user whose tasks to list (id form matches user_id_type).
-        topic: Task group — "1" pending/待办 (default), "2" done, "3" initiated, "17"/"18" cc.
-        user_id_type: Id form for user_id and returned ids — open_id (default), union_id, user_id.
-        page_size: Max tasks per page (default 100, max 200).
-        page_token: Pagination cursor from a previous call's has_more result (optional).
-    """
-    return _f.dumps_result(await _f.list_approval_tasks_impl(user_id, topic, user_id_type, page_size, page_token))
-
-
-async def feishu_approval_list_instances(approval_code: str, start_time: str = "", end_time: str = "") -> str:
-    """List every approval instance code for one approval definition in a time window.
-
-    Use this to enumerate all applications of a given approval (e.g. every reimbursement)
-    so you can read each one with ``feishu_approval_get``. Feeds reimbursement/attendance
-    report flows.
-
-    Args:
-        approval_code: The approval definition code (identifies which approval flow).
-        start_time: Window start as a Unix millisecond timestamp string (optional; defaults to 30 days ago).
-        end_time: Window end as a Unix millisecond timestamp string (optional; defaults to now).
-    """
-    return _f.dumps_result(await _f.list_approval_instances_impl(approval_code, start_time, end_time))
-
-
 async def feishu_approval_get(instance_id: str, user_id_type: str = "open_id") -> str:
     """Read an approval instance's detail — applicant, status, submitted form, and task_list.
 
@@ -77,41 +45,12 @@ async def feishu_approval_get(instance_id: str, user_id_type: str = "open_id") -
     kind ``"drive"`` is a media token (download with is_url=False).
 
     Args:
-        instance_id: The approval instance code (from list_tasks or list_instances).
+        instance_id: The approval instance code (from the task list or instance list —
+            ``feishu_api`` GET ``/open-apis/approval/v4/tasks/query`` or
+            ``/open-apis/approval/v4/instances``).
         user_id_type: Id form for returned user ids — open_id (default), union_id, user_id.
     """
     return _f.dumps_result(await _f.get_approval_instance_impl(instance_id, user_id_type))
-
-
-async def feishu_approval_decide(
-    approve: bool,
-    approval_code: str,
-    instance_code: str,
-    approver_user_id: str,
-    task_id: str,
-    comment: str = "",
-    user_id_type: str = "open_id",
-) -> str:
-    """Approve or reject an approval task on behalf of an approver.
-
-    ``approve=True`` approves, ``approve=False`` rejects. Feishu records the action
-    under ``approver_user_id`` — this must be the real approver's user id, and that
-    person must be the current task's assignee.
-
-    Args:
-        approve: True to approve, False to reject.
-        approval_code: The approval definition code (from the task/instance).
-        instance_code: The approval instance code.
-        approver_user_id: The approver's user id (id form matches user_id_type).
-        task_id: The approval task id (from the instance's task_list or the task list).
-        comment: Optional approval/rejection comment.
-        user_id_type: Id form for approver_user_id — open_id (default), union_id, user_id.
-    """
-    return _f.dumps_result(
-        await _f.decide_approval_task_impl(
-            approve, approval_code, instance_code, approver_user_id, task_id, comment, user_id_type
-        )
-    )
 
 
 async def feishu_approval_get_definition(
@@ -174,27 +113,3 @@ async def feishu_approval_create(
             user_key,
         )
     )
-
-
-async def feishu_approval_subscribe(approval_code: str) -> str:
-    """Subscribe to an approval definition so its status changes get pushed (no polling).
-
-    Once subscribed, Feishu pushes an event to the bot whenever any instance of this
-    approval changes status (approved / rejected / canceled / etc.), and the bot
-    proactively DMs the applicant with the update. Call this **once per approval
-    definition** — it's idempotent per app, so re-subscribing is harmless. Use this
-    instead of repeatedly polling ``feishu_approval_get`` to watch for a decision.
-
-    Args:
-        approval_code: The approval definition code to subscribe to (from a task/instance).
-    """
-    return _f.dumps_result(await _f.subscribe_approval_impl(approval_code))
-
-
-async def feishu_approval_unsubscribe(approval_code: str) -> str:
-    """Cancel a subscription so this approval's status changes stop being pushed.
-
-    Args:
-        approval_code: The approval definition code to stop receiving events for.
-    """
-    return _f.dumps_result(await _f.unsubscribe_approval_impl(approval_code))

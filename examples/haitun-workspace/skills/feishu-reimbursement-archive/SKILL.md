@@ -1,6 +1,6 @@
 ---
 name: feishu-reimbursement-archive
-description: "Pull Feishu reimbursement (报销) approval instances, download each one's attachments (receipts/invoices) into a per-claim folder, and validate each claim against the checklist the user provides, producing a summary table. Use when asked to archive/organize reimbursement documents or audit reimbursements. Enumerates instances with feishu_approval_list_instances, reads each with feishu_approval_get, downloads attachments with feishu_file_download, and applies the USER-supplied validation rules each run — hard-codes no audit rules. Needs approval:approval:readonly + drive:drive:readonly scopes."
+description: "Pull Feishu reimbursement (报销) approval instances, download each one's attachments (receipts/invoices) into a per-claim folder, and validate each claim against the checklist the user provides, producing a summary table. Use when asked to archive/organize reimbursement documents or audit reimbursements. Enumerates instances with feishu_api GET /open-apis/approval/v4/instances, reads each with feishu_approval_get, downloads attachments with feishu_file_download, and applies the USER-supplied validation rules each run — hard-codes no audit rules. Needs approval:approval:readonly + drive:drive:readonly scopes."
 category: productivity
 ---
 
@@ -12,7 +12,7 @@ recipe**: it gathers and organizes, but the **validation conditions are supplied
 by the user each run** — it hard-codes no audit rules.
 
 Uses existing tools:
-- `feishu_approval_list_instances(approval_code, start_time, end_time)` — list claims
+- `feishu_api` GET /open-apis/approval/v4/instances（`approval_code`、`start_time`/`end_time` 毫秒字符串） — list claims
 - `feishu_approval_get(instance_id)` — read one claim's form + `attachments`
 - `feishu_file_download(source, save_path, is_url)` — download receipts
 - an output tool of the user's choice for the summary table
@@ -20,7 +20,7 @@ Uses existing tools:
 ## Every run: get inputs from the user first
 
 1. **Which approval** — the reimbursement `approval_code` (from the Feishu approval
-   admin, or `feishu_approval_list_tasks` for a sample claim).
+   admin, or `feishu_api` GET /open-apis/approval/v4/tasks/query for a sample claim).
 2. **Period** — start/end as Unix millisecond strings (or let it default to 30 days).
 3. **The archive root** — a local folder to build per-claim subfolders under.
 4. **The validation checklist** — e.g. "发票金额 == 申请金额", "必须有发票附件",
@@ -42,7 +42,7 @@ fresh URL and retry.
 
 ## Flow
 
-1. `feishu_approval_list_instances(approval_code, start_time, end_time)` → all
+1. `feishu_api` GET /open-apis/approval/v4/instances（`approval_code`、`start_time`/`end_time` 毫秒字符串） → all
    `instance_codes`.
 2. For each code:
    a. `feishu_approval_get(code)` → applicant, status, `form`, `attachments`.
@@ -64,5 +64,5 @@ fresh URL and retry.
 - Reimbursement data is financial/personal — keep downloads in the user's chosen
   folder and don't broadcast details beyond the intended recipient.
 - This skill reads and archives; it does not approve/reject. To act on a claim,
-  the user drives `feishu_approval_decide` separately (which records under a real
+  the user drives `feishu_api` POST /open-apis/approval/v4/tasks/approve / POST /open-apis/approval/v4/tasks/reject separately (which records under a real
   approver).

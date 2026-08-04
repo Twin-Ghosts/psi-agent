@@ -14,7 +14,7 @@ HaiTun 查该业务的 SOP 与标准表单，把员工的口语补齐成合规�
 用到的现成工具：
 - `feishu_approval_get_definition(approval_code)` — 读该审批的表单模板（要填哪些字段、类型、是否必填）
 - `feishu_approval_create(approval_code, form_json, applicant_open_id, title, ...)` — 代员工提交申请
-- `feishu_approval_list_tasks(user_id)` / `feishu_approval_get(instance_id)` — 取样本 / 查提交后状态
+- `feishu_api` GET /open-apis/approval/v4/tasks/query（`user_id`、`topic=1` 待办） / `feishu_approval_get(instance_id)` — 取样本 / 查提交后状态
 - 制度依据用 [`feishu-admin-finance-assistant`]（真知小助手）查 SOP 标准，**带出处**
 - 需要时 `feishu_message_send` 把回执发给员工；`feishu_bitable_*` 写自助办事台账留痕
 
@@ -28,7 +28,7 @@ HaiTun 查该业务的 SOP 与标准表单，把员工的口语补齐成合规�
 ## 每次办事的流程
 
 1. **识别意图**：从私聊里判断员工要办什么业务（哪种审批）。拿不准就问清是哪类事项。
-2. **定位审批 + 读模板**：确定该业务的 `approval_code`（从飞书审批后台，或 `feishu_approval_list_tasks`
+2. **定位审批 + 读模板**：确定该业务的 `approval_code`（从飞书审批后台，或 `feishu_api` GET /open-apis/approval/v4/tasks/query
    取一条同类样本），`feishu_approval_get_definition(approval_code)` 读回表单模板：
    逐个字段的 `id` / `name` / `type` / `required`。**填单只能用模板里真实存在的字段 id，绝不编造字段。**
 3. **查 SOP 标准**：涉及标准/上限/材料要求（假别规则、报销类别与上限、抬头、单据要求等），

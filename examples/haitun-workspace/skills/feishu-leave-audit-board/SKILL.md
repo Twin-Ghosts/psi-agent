@@ -1,6 +1,6 @@
 ---
 name: feishu-leave-audit-board
-description: "Auto-audit Feishu leave/attendance (假勤) approval applications against tiered conditions, then build a dashboard (看板) and push it to the right people. Use when asked to review/approve leave, 补卡, or attendance approvals and report results. Enumerates applications with feishu_approval_list_instances, reads each with feishu_approval_get, classifies each as 小事/中事/大事 per admin-finance-governance (小事 auto-approve via feishu_approval_decide, 中事 recommend only, 大事 ask the user), logs every action to a bitable, writes a summary doc with feishu_doc_create, and pushes it via feishu_message_send / feishu_topic_start. Needs approval:* scopes and the app authorized on the leave approval definition."
+description: "Auto-audit Feishu leave/attendance (假勤) approval applications against tiered conditions, then build a dashboard (看板) and push it to the right people. Use when asked to review/approve leave, 补卡, or attendance approvals and report results. Enumerates applications with feishu_api GET /open-apis/approval/v4/instances, reads each with feishu_approval_get, classifies each as 小事/中事/大事 per admin-finance-governance (小事 auto-approve via feishu_api POST /open-apis/approval/v4/tasks/approve, 中事 recommend only, 大事 ask the user), logs every action to a bitable, writes a summary doc with feishu_doc_create, and pushes it via feishu_message_send / feishu_topic_start. Needs approval:* scopes and the app authorized on the leave approval definition."
 category: productivity
 ---
 
@@ -10,9 +10,9 @@ category: productivity
 **分级口径以 [`admin-finance-governance`] 为准**——先加载那份总纲，再按本技能执行。
 
 用到的现成工具：
-- `feishu_approval_list_instances(approval_code, start_time, end_time)` — 列本期假勤实例
+- `feishu_api` GET /open-apis/approval/v4/instances（`approval_code`、`start_time`/`end_time` 毫秒字符串） — 列本期假勤实例
 - `feishu_approval_get(instance_id)` — 读一条申请（申请人/假别/起止/天数/表单/task_list）
-- `feishu_approval_decide(approve, approval_code, instance_code, approver_user_id, task_id, comment)` — 代真实审批人放行/驳回
+- `feishu_api` POST /open-apis/approval/v4/tasks/approve / POST /open-apis/approval/v4/tasks/reject（body 带 `approval_code`、`instance_code`、`user_id`=真实审批人、`task_id`、`comment`） — 代真实审批人放行/驳回
 - `feishu_department_members(...)` — 解析人；找群用 `feishu_api` 调 `GET /open-apis/im/v1/chats/search`（见 `feishu-chat` skill）
 - `feishu_bitable_*` — 写审核台账（留痕）
 - `feishu_doc_create` / `feishu_doc_append_content` — 生成看板文档
@@ -20,7 +20,7 @@ category: productivity
 
 ## 每次运行先向用户确认
 
-1. **哪个审批** — 假勤的 `approval_code`（从飞书审批后台，或 `feishu_approval_list_tasks` 取一条样本）。
+1. **哪个审批** — 假勤的 `approval_code`（从飞书审批后台，或 `feishu_api` GET /open-apis/approval/v4/tasks/query 取一条样本）。
 2. **周期** — start/end（Unix 毫秒串，或默认近 30 天）。
 3. **代谁审批** — 小事自动放行时要用的**真实审批人 user_id**（必须是当前任务的审批人本人）。
 4. **看板推给谁** — HR/主管的 open_id 或目标群 chat_id。
@@ -31,19 +31,21 @@ category: productivity
 ## 分级判定（默认阈值见 governance，可被用户当次规则覆盖）
 
 对每条申请，从表单里取**假别、起止、天数、材料完整性**，判档：
-- **小事**：≤1 天且完全合规 → 直接 `feishu_approval_decide(approve=True, ...)` 通过，写台账留痕。
-- **中事**：≤3 天 / 中等事假调休 → **只在看板里写"建议通过/驳回 + 理由"**，不调 decide。
+- **小事**：≤1 天且完全合规 → 直接 `feishu_api` POST /open-apis/approval/v4/tasks/approve 通过，写台账留痕。
+- **中事**：≤3 天 / 中等事假调休 → **只在看板里写"建议通过/驳回 + 理由"**，不发审批动作。
 - **大事**：>3 天，或病/婚/产/陪产/丧等特殊假，或材料缺失/跨月/疑似冲突 → 汇总后**必问用户**，
-  得到明确同意才 decide。
+  得到明确同意才发 approve / reject。
 
 判不准、材料不足 → 往大事走。
 
 ## 流程
 
-1. `feishu_approval_list_instances(approval_code, start, end)` → 所有 `instance_code`。
+1. `feishu_api` GET `/open-apis/approval/v4/instances`（query 带 `approval_code`、`start_time`、`end_time`）→ 所有 `instance_code`。
 2. 逐条 `feishu_approval_get(code)`：取申请人、假别、起止、天数、状态、`task_list`（拿 `task_id`）。
 3. 判档：
-   - 小事：`feishu_approval_decide(approve=True, approval_code, instance_code=code, approver_user_id=<真实审批人>, task_id=<该条 task_id>, comment="自动审核-合规-小事")`。
+   - 小事：`feishu_api` POST `/open-apis/approval/v4/tasks/approve`，body 带 `approval_code`、
+     `instance_code=code`、`user_id=<真实审批人>`、`task_id=<该条 task_id>`、
+     `comment="自动审核-合规-小事"`（驳回换成 `.../tasks/reject`，body 一样）。
      若返回 `ok=false`，如实记录飞书错误（多为权限/审批人不符），**不要谎报成功**，降级为"建议"。
    - 中事：不动手，记"建议通过/驳回 + 依据"。
    - 大事：不动手，标"待用户确认"，附建议。

@@ -1104,38 +1104,6 @@ async def test_chat_admin_tools_return_json(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 @pytest.mark.asyncio
-async def test_list_approval_tasks_builds_query(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "tasks": [
-                {
-                    "task_id": "t1",
-                    "process_id": "inst1",
-                    "definition_code": "appr1",
-                    "title": "请假申请",
-                    "status": 1,
-                    "process_status": 1,
-                    "initiator_names": ["张三"],
-                }
-            ],
-            "has_more": False,
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_approval_tasks_impl("ou_a", "1", "open_id")
-    q = _qdict(cap.request)
-    assert cap.request.http_method.name == "GET"
-    assert cap.request.uri.endswith("/approval/v4/tasks/query")
-    assert q.get("user_id") == "ou_a"
-    assert q.get("topic") == "1"
-    t = result["tasks"][0]
-    assert t["task_id"] == "t1"
-    assert t["instance_code"] == "inst1"
-    assert t["approval_code"] == "appr1"
-    assert t["status"] == "待办"
-
-
-@pytest.mark.asyncio
 async def test_get_approval_instance_reads_form(monkeypatch: pytest.MonkeyPatch) -> None:
     cap = _CapturedInvoke(
         {"approval_code": "appr1", "status": "PENDING", "user_id": "ou_app", "form": '[{"id":"w1"}]', "task_list": []}
@@ -1146,32 +1114,6 @@ async def test_get_approval_instance_reads_form(monkeypatch: pytest.MonkeyPatch)
     assert "approval/v4/instances" in cap.request.uri
     assert result["applicant"] == "ou_app"
     assert result["form"] == '[{"id":"w1"}]'
-
-
-@pytest.mark.asyncio
-async def test_decide_approve_builds_post(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.decide_approval_task_impl(True, "appr1", "inst1", "ou_boss", "t1", "同意")
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri.endswith("/tasks/approve")
-    assert req.body["approval_code"] == "appr1"
-    assert req.body["instance_code"] == "inst1"
-    assert req.body["user_id"] == "ou_boss"
-    assert req.body["task_id"] == "t1"
-    assert req.body["comment"] == "同意"
-    assert result["action"] == "approve"
-
-
-@pytest.mark.asyncio
-async def test_decide_reject_uses_reject_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.decide_approval_task_impl(False, "appr1", "inst1", "ou_boss", "t1")
-    assert cap.request.uri.endswith("/tasks/reject")
-    assert "comment" not in cap.request.body  # empty comment omitted
-    assert result["action"] == "reject"
 
 
 @pytest.mark.asyncio
@@ -1273,29 +1215,13 @@ async def test_create_instance_rejects_bad_form_json(monkeypatch: pytest.MonkeyP
 def test_approval_tools_are_async_with_docstrings() -> None:
     mod = importlib.import_module("feishu_approval")
     for name in (
-        "feishu_approval_list_tasks",
         "feishu_approval_get",
-        "feishu_approval_decide",
         "feishu_approval_get_definition",
         "feishu_approval_create",
     ):
         fn = getattr(mod, name)
         assert inspect.iscoroutinefunction(fn), name
         assert (inspect.getdoc(fn) or "").strip(), f"{name} needs a docstring"
-
-
-@pytest.mark.asyncio
-async def test_approval_decide_tool_returns_json(monkeypatch: pytest.MonkeyPatch) -> None:
-    mod = importlib.import_module("feishu_approval")
-
-    async def _fake(*a: Any, **k: Any) -> dict[str, Any]:
-        return {"ok": True, "action": "approve", "instance_code": "inst1", "task_id": "t1"}
-
-    monkeypatch.setattr(_impl, "decide_approval_task_impl", _fake)
-    out = await mod.feishu_approval_decide(
-        approve=True, approval_code="a", instance_code="inst1", approver_user_id="ou_b", task_id="t1"
-    )
-    assert json.loads(out)["action"] == "approve"
 
 
 # ── Wiki — resolve node token to underlying document ──────────────────────────
@@ -3781,28 +3707,6 @@ async def test_department_members_recursive_walks_children(monkeypatch: pytest.M
 # ── Approval — list instances + attachment parsing ────────────────────────────
 
 
-@pytest.mark.asyncio
-async def test_list_approval_instances_builds_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"instance_code_list": ["i1", "i2"], "has_more": False})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_approval_instances_impl("APV_CODE", "1000", "2000")
-    req = cap.request
-    assert req.http_method.name == "GET"
-    assert req.uri.endswith("/approval/v4/instances")
-    q = _qdict(req)
-    assert q.get("approval_code") == "APV_CODE"
-    assert q.get("start_time") == "1000"
-    assert result["instance_codes"] == ["i1", "i2"]
-    assert result["count"] == 2
-
-
-@pytest.mark.asyncio
-async def test_list_approval_instances_requires_code() -> None:
-    result = await _impl.list_approval_instances_impl("", "1000", "2000")
-    assert result["ok"] is False
-    assert "approval_code" in result["message"]
-
-
 def test_parse_approval_attachments_url_and_drive() -> None:
     form = json.dumps(
         [
@@ -3827,13 +3731,6 @@ async def test_get_approval_instance_exposes_attachments(monkeypatch: pytest.Mon
     result = await _impl.get_approval_instance_impl("inst1", "open_id")
     assert cap.request.paths["instance_id"] == "inst1"
     assert result["attachments"] == [{"name": "发票", "type": "image", "kind": "url", "value": "https://f.co/x.png"}]
-
-
-def test_approval_list_instances_tool_async_with_docstring() -> None:
-    mod = importlib.import_module("feishu_approval")
-    fn = mod.feishu_approval_list_instances
-    assert inspect.iscoroutinefunction(fn)
-    assert (inspect.getdoc(fn) or "").strip()
 
 
 # ── Drive — download file/attachment ──────────────────────────────────────────
@@ -5432,58 +5329,6 @@ async def test_get_users_batch_rejects_over_50() -> None:
     result = await _impl.get_users_batch_impl(ids)
     assert result["ok"] is False
     assert "50" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_subscribe_approval_builds_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.subscribe_approval_impl("appr_1")
-    assert result == {"ok": True, "approval_code": "appr_1", "subscribed": True}
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri == "/open-apis/approval/v4/approvals/:approval_code/subscribe"
-    assert req.paths["approval_code"] == "appr_1"
-
-
-@pytest.mark.asyncio
-async def test_unsubscribe_approval_builds_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.unsubscribe_approval_impl("appr_1")
-    assert result == {"ok": True, "approval_code": "appr_1", "subscribed": False}
-    assert cap.request.uri == "/open-apis/approval/v4/approvals/:approval_code/unsubscribe"
-
-
-@pytest.mark.asyncio
-async def test_subscribe_approval_requires_code() -> None:
-    result = await _impl.subscribe_approval_impl("")
-    assert result["ok"] is False
-    assert "approval_code" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_subscribe_approval_propagates_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fail(
-        request: Any,
-        user_key: str | None = None,
-        prefer: str = "tenant",
-        identity: str = "",
-        capabilities: list[str] | None = None,
-    ) -> dict[str, Any]:
-        return {"ok": False, "code": 99991672, "msg": "no permission", "message": "err"}
-
-    monkeypatch.setattr(_impl, "_invoke", _fail)
-    result = await _impl.subscribe_approval_impl("appr_1")
-    assert result["ok"] is False
-
-
-def test_approval_subscribe_tools_are_async_with_docstrings() -> None:
-    mod = importlib.import_module("feishu_approval")
-    for name in ("feishu_approval_subscribe", "feishu_approval_unsubscribe"):
-        fn = getattr(mod, name)
-        assert inspect.iscoroutinefunction(fn), name
-        assert (inspect.getdoc(fn) or "").strip(), f"{name} needs a docstring"
 
 
 # ── Rate limiting (HTTP 429) ───────────────────────────────────────────────────

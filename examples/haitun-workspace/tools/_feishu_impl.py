@@ -2866,64 +2866,16 @@ async def search_messages_impl(
     }
 
 
-# ── Approval (审批) — list pending tasks, read instance, approve/reject ────────
+# ── Approval (审批) — read an instance, read a definition, submit one ──────────
 #
-# Lets the agent read an approval application's form content and decide whether
-# to approve or reject it. Feishu requires approve/reject to carry the APPROVER's
-# own user_id — the bot acts on behalf of a real approver (the action is recorded
-# under that person). All endpoints work with bot/tenant credentials.
-
-_APPROVAL_TASK_STATUS = {1: "待办", 2: "已办", 17: "未读", 18: "已读", 33: "处理中", 34: "撤回"}
-_APPROVAL_INSTANCE_STATUS = {0: "none", 1: "running", 2: "approved", 3: "rejected", 4: "revoked", 5: "terminated"}
-
-
-def _build_task_query_request(
-    user_id: str, topic: str, user_id_type: str, page_size: int, page_token: str
-) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/approval/v4/tasks/query"
-    req.add_query("user_id", user_id)
-    req.add_query("topic", topic)
-    req.add_query("user_id_type", user_id_type)
-    req.add_query("page_size", page_size)
-    if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
-
-
-async def list_approval_tasks_impl(
-    user_id: str,
-    topic: str = "1",
-    user_id_type: str = "open_id",
-    page_size: int = 100,
-    page_token: str = "",
-) -> dict[str, Any]:
-    """List a user's approval tasks. topic '1' = pending (待办). Returns task summaries + pagination."""
-    res = await _invoke(_build_task_query_request(user_id, topic, user_id_type, page_size, page_token))
-    if not res["ok"]:
-        return res
-    data = res["data"] if isinstance(res["data"], dict) else {}
-    tasks = [
-        {
-            "task_id": t.get("task_id", ""),
-            "instance_code": t.get("process_id", ""),
-            "approval_code": t.get("definition_code", "") or t.get("process_code", ""),
-            "title": t.get("title", ""),
-            "status": _APPROVAL_TASK_STATUS.get(t.get("status"), t.get("status")),
-            "process_status": _APPROVAL_INSTANCE_STATUS.get(t.get("process_status"), t.get("process_status")),
-            "initiators": t.get("initiator_names", []),
-        }
-        for t in (data.get("tasks", []) if isinstance(data.get("tasks"), list) else [])
-    ]
-    return {
-        "ok": True,
-        "tasks": tasks,
-        "count": len(tasks),
-        "has_more": bool(data.get("has_more")),
-        "page_token": data.get("page_token", ""),
-    }
+# What is left here are the calls whose value is a *transformation*: an instance's
+# and a definition's ``form`` both arrive as a JSON string holding an array, and
+# both are parsed into something callable code can use — attachments tagged by how
+# they must be downloaded, and widget ids that must be copied rather than invented.
+# Everything else in this domain (task lists, instance lists, approve, reject,
+# subscribe) is an endpoint table row in the ``feishu-approval`` skill, called
+# through ``feishu_api``. The numeric status vocabularies moved there too, as a
+# Markdown table: the rules vocabulary has checks, not value mappings.
 
 
 def _build_instance_get_request(instance_id: str, user_id_type: str) -> BaseRequest:
@@ -2987,102 +2939,6 @@ async def get_approval_instance_impl(instance_id: str, user_id_type: str = "open
         "task_list": data.get("task_list", []),
         "timeline": data.get("timeline", []),
     }
-
-
-def _build_list_instances_request(
-    approval_code: str, start_time: str, end_time: str, page_size: int, page_token: str
-) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/approval/v4/instances"
-    req.add_query("approval_code", approval_code)
-    if start_time:
-        req.add_query("start_time", start_time)
-    if end_time:
-        req.add_query("end_time", end_time)
-    req.add_query("page_size", page_size)
-    if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
-
-
-async def list_approval_instances_impl(approval_code: str, start_time: str = "", end_time: str = "") -> dict[str, Any]:
-    """List all instance codes for an approval definition in a time window (Unix ms strings).
-
-    Defaults to the last 30 days when start/end omitted. Pages through everything and
-    returns ``instance_codes`` to feed into ``get_approval_instance_impl`` one by one.
-    """
-    if not approval_code:
-        return _error("approval_code is required (the approval definition code).")
-    if not start_time or not end_time:
-        import time  # noqa: PLC0415
-
-        now_ms = int(time.time() * 1000)
-        end_time = end_time or str(now_ms)
-        start_time = start_time or str(now_ms - 30 * 24 * 3600 * 1000)
-    codes: list[str] = []
-    page_token = ""
-    while True:
-        res = await _invoke(_build_list_instances_request(approval_code, start_time, end_time, 100, page_token))
-        if not res["ok"]:
-            return res
-        data = res["data"] if isinstance(res["data"], dict) else {}
-        chunk = data.get("instance_code_list", [])
-        if isinstance(chunk, list):
-            codes.extend(str(c) for c in chunk)
-        page_token = data.get("page_token", "") or ""
-        if not data.get("has_more") or not page_token:
-            break
-    return {
-        "ok": True,
-        "approval_code": approval_code,
-        "start_time": start_time,
-        "end_time": end_time,
-        "instance_codes": codes,
-        "count": len(codes),
-    }
-
-
-def _build_task_action_request(
-    action: str, approval_code: str, instance_code: str, user_id: str, task_id: str, comment: str, user_id_type: str
-) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = f"/open-apis/approval/v4/tasks/{action}"
-    req.add_query("user_id_type", user_id_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    body: dict[str, Any] = {
-        "approval_code": approval_code,
-        "instance_code": instance_code,
-        "user_id": user_id,
-        "task_id": task_id,
-    }
-    if comment:
-        body["comment"] = comment
-    req.body = body
-    return req
-
-
-async def decide_approval_task_impl(
-    approve: bool,
-    approval_code: str,
-    instance_code: str,
-    approver_user_id: str,
-    task_id: str,
-    comment: str = "",
-    user_id_type: str = "open_id",
-) -> dict[str, Any]:
-    """Approve or reject a task on behalf of ``approver_user_id``. approve=True -> approve, else reject."""
-    action = "approve" if approve else "reject"
-    res = await _invoke(
-        _build_task_action_request(
-            action, approval_code, instance_code, approver_user_id, task_id, comment, user_id_type
-        )
-    )
-    if not res["ok"]:
-        return res
-    return {"ok": True, "action": action, "instance_code": instance_code, "task_id": task_id}
 
 
 # ── Approval (审批) —发起端: read a definition's form schema + submit an instance ─
@@ -3257,49 +3113,6 @@ async def create_approval_instance_impl(
 # turns those events into a proactive DM to the applicant — so status changes are
 # pushed, never polled. Subscribe is idempotent per app: one call per approval
 # definition is enough (repeat calls are a no-op on Feishu's side).
-
-
-def _build_approval_subscribe_request(approval_code: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/approval/v4/approvals/:approval_code/subscribe"
-    req.paths["approval_code"] = approval_code
-    req.token_types = {AccessTokenType.TENANT}
-    return req
-
-
-def _build_approval_unsubscribe_request(approval_code: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/approval/v4/approvals/:approval_code/unsubscribe"
-    req.paths["approval_code"] = approval_code
-    req.token_types = {AccessTokenType.TENANT}
-    return req
-
-
-async def subscribe_approval_impl(approval_code: str) -> dict[str, Any]:
-    """Subscribe to an approval definition's instance status-change events.
-
-    After this, Feishu pushes an ``approval_instance`` event whenever any instance
-    of ``approval_code`` changes status, and the bot DMs the applicant. Idempotent
-    per app — one call per definition is enough. Uses the bot's tenant token.
-    """
-    if not approval_code:
-        return _error("approval_code is required (the approval definition code).")
-    res = await _invoke(_build_approval_subscribe_request(approval_code))
-    if not res["ok"]:
-        return res
-    return {"ok": True, "approval_code": approval_code, "subscribed": True}
-
-
-async def unsubscribe_approval_impl(approval_code: str) -> dict[str, Any]:
-    """Cancel a previous subscription so status-change events stop being pushed."""
-    if not approval_code:
-        return _error("approval_code is required (the approval definition code).")
-    res = await _invoke(_build_approval_unsubscribe_request(approval_code))
-    if not res["ok"]:
-        return res
-    return {"ok": True, "approval_code": approval_code, "subscribed": False}
 
 
 # ── Wiki — resolve a wiki node token to its underlying document ───────────────

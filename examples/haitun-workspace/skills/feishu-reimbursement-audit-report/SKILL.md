@@ -1,6 +1,6 @@
 ---
 name: feishu-reimbursement-audit-report
-description: "Auto-audit Feishu reimbursement (报销) approvals against tiered conditions, download each verified claim's attachments into a per-claim folder, roll everything into a bitable, and produce a financial report + analysis (财务报告/分析单). Use when asked to review/approve reimbursements, archive receipts, or summarize spending. Enumerates claims with feishu_approval_list_instances, reads each with feishu_approval_get, validates + classifies as 小事/中事/大事 per admin-finance-governance (小事 auto-approve via feishu_approval_decide, 中事 recommend, 大事 ask), downloads attachments with feishu_file_download only when checks pass, aggregates via feishu_bitable_*, writes the report with feishu_doc_create, and pushes it with feishu_message_send. Needs approval:* + drive:drive:readonly scopes."
+description: "Auto-audit Feishu reimbursement (报销) approvals against tiered conditions, download each verified claim's attachments into a per-claim folder, roll everything into a bitable, and produce a financial report + analysis (财务报告/分析单). Use when asked to review/approve reimbursements, archive receipts, or summarize spending. Enumerates claims with feishu_api GET /open-apis/approval/v4/instances, reads each with feishu_approval_get, validates + classifies as 小事/中事/大事 per admin-finance-governance (小事 auto-approve via feishu_api POST /open-apis/approval/v4/tasks/approve, 中事 recommend, 大事 ask), downloads attachments with feishu_file_download only when checks pass, aggregates via feishu_bitable_*, writes the report with feishu_doc_create, and pushes it with feishu_message_send. Needs approval:* + drive:drive:readonly scopes."
 category: productivity
 ---
 
@@ -12,8 +12,8 @@ category: productivity
 与**财务报告/分析**。
 
 用到的现成工具：
-- `feishu_approval_list_instances` / `feishu_approval_get` — 列举/读取报销单（含 `attachments`）
-- `feishu_approval_decide` — 校验全过的小事，代真实审批人放行
+- `feishu_api` GET /open-apis/approval/v4/instances / `feishu_approval_get` — 列举/读取报销单（含 `attachments`）
+- `feishu_api` POST /open-apis/approval/v4/tasks/approve / POST /open-apis/approval/v4/tasks/reject — 校验全过的小事，代真实审批人放行
 - `feishu_file_download(source, save_path, is_url)` — 下载发票/附件
 - `feishu_bitable_*` — 逐单汇总台账
 - `feishu_doc_create` / `feishu_doc_append_content` — 财务报告 + 分析单
@@ -42,7 +42,7 @@ category: productivity
 对每单从 `form` 取**金额、类别、发票号/发票金额、抬头、日期**，先跑校验，再判档：
 - 校验项（默认，可被用户当次清单覆盖）：发票金额 == 申请金额；发票/附件齐全；抬头正确；
   在制度类别与本期范围内；单笔未超上限；非重复报销。
-- **小事**：金额 ≤ ¥500 且校验**全过** → 附件下载归档后 `feishu_approval_decide(approve=True,...)` 放行，写台账留痕。
+- **小事**：金额 ≤ ¥500 且校验**全过** → 附件下载归档后 `feishu_api` POST /open-apis/approval/v4/tasks/approve 放行，写台账留痕。
 - **中事**：金额 ≤ ¥2000 且校验基本过但有需人核对点 → **只出"建议通过/驳回 + 理由"**，不放行。
 - **大事**：金额 > ¥2000，或缺票 / 金额不符 / 抬头不对 / 超类别 / 疑似重复 / 跨期 → **必问用户**，附建议。
 
@@ -50,7 +50,7 @@ category: productivity
 
 ## 流程
 
-1. `feishu_approval_list_instances(approval_code, start, end)` → 所有 `instance_code`。
+1. `feishu_api` GET `/open-apis/approval/v4/instances`（query 带 `approval_code`、`start_time`、`end_time`）→ 所有 `instance_code`。
 2. 逐单：
    a. `feishu_approval_get(code)` → 申请人、状态、`form`、`attachments`、`task_list`。
    b. 建目录 `<root>/报销-<申请人>-<code>/`，把附件全部下进去（见 12h 说明），

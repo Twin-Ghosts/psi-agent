@@ -47,7 +47,7 @@ category: knowledge-base
 海豚每做一个"小事直接放行"的动作，必须：
 1. 在对应的飞书多维表格台账里写一行（申请人 / 事项 / 关键数值 / 判定档位 / 处置 / 依据 / 时间）。
 2. 用一句话说明为什么判为小事、依据哪条阈值。
-3. 放行动作若是审批，必须以**真实审批人的 user_id** 通过 `feishu_approval_decide` 执行——
+3. 放行动作若是审批，必须以**真实审批人的 user_id** 通过 `feishu_api` POST /open-apis/approval/v4/tasks/approve / POST /open-apis/approval/v4/tasks/reject 执行——
    海豚是"代该审批人操作"，记录落在真人名下（详见下游技能）。
 
 留痕不可省略：没有台账记录的自动放行视为未完成。
