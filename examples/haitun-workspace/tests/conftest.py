@@ -30,7 +30,12 @@ def body_dict(request: Any) -> dict[str, Any]:
         return body
     from lark_oapi.core.json import JSON  # noqa: PLC0415
 
-    parsed = json.loads(JSON.marshal(body))
+    # ``marshal`` is typed as possibly returning None; an empty body reads as {} rather
+    # than blowing up inside json.loads.
+    raw = JSON.marshal(body)
+    if not raw:
+        return {}
+    parsed = json.loads(raw)
     return parsed if isinstance(parsed, dict) else {}
 
 

@@ -195,6 +195,7 @@ from lark_oapi.api.im.v1 import (
     CreateMessageRequest,
     CreateMessageRequestBody,
     CreatePinRequest,
+    CreatePinRequestBody,
     DeleteChatMembersRequest,
     DeleteChatMembersRequestBody,
     DeleteChatMenuTreeRequest,
@@ -222,7 +223,6 @@ from lark_oapi.api.im.v1 import (
     MergeForwardMessageRequestBody,
     PatchMessageRequest,
     PatchMessageRequestBody,
-    Pin,
     ReadUsersMessageRequest,
     ReplyMessageRequest,
     ReplyMessageRequestBody,
@@ -266,6 +266,23 @@ from psi_agent.channel.feishu._card_store import save_card_snapshot
 from psi_agent.session.runtime_context import get_session_id
 
 _client: Any = None
+
+
+def bool_query(value: bool) -> Any:
+    """A boolean destined for a *query* parameter, spelled the way Feishu accepts.
+
+    The SDK's query builders annotate these as ``bool``, but ``BaseRequest.add_query``
+    runs every value through ``str()`` while building the request — so a Python ``True``
+    is frozen into the literal ``"True"`` long before httpx could encode it as ``true``,
+    and Feishu rejects that. (httpx *would* lowercase a real bool; it never sees one.)
+
+    Passing the JSON spelling instead is therefore the correct wire behaviour, and the
+    return type is widened to ``Any`` so the SDK's inaccurate annotation doesn't force a
+    suppression at each of the seven call sites.
+
+    Body booleans are unaffected — those are serialized as real JSON and must stay bools.
+    """
+    return "true" if value else "false"
 
 
 def dumps_result(result: dict[str, Any]) -> str:
@@ -814,7 +831,7 @@ async def list_comments_impl(file_token: str, file_type: str, page_size: int, pa
         ListFileCommentRequest.builder()
         .file_token(file_token)
         .file_type(file_type)
-        .is_whole("true")
+        .is_whole(bool_query(True))
         .page_size(page_size)
     )
     if page_token:
@@ -849,7 +866,7 @@ def _build_reply_create_request(
     return (
         CreateFileCommentReplyRequest.builder()
         .file_token(file_token)
-        .comment_id(comment_id)
+        .comment_id(comment_id)  # ty: ignore - SDK annotates int; Feishu comment ids are strings
         .file_type(file_type)
         .request_body(
             CreateFileCommentReplyRequestBody.builder()
@@ -2612,7 +2629,7 @@ def _build_create_chat_request(
     if set_bot_manager:
         # Query booleans are stringified as-is: a Python ``True`` would go on the wire
         # as ``"True"``, which Feishu rejects. Send the JSON spelling.
-        builder = builder.set_bot_manager("true")
+        builder = builder.set_bot_manager(bool_query(True))
     return builder.request_body(body.build()).build()
 
 
@@ -2970,7 +2987,7 @@ def _build_announcement_children_request(
     chat_id: str, children: list[dict[str, Any]], revision_id: int, index: int
 ) -> BaseRequest:
     """Append blocks under the announcement root (whose block_id IS the chat_id)."""
-    body = CreateChatAnnouncementBlockChildrenRequestBody.builder().children(children)
+    body = CreateChatAnnouncementBlockChildrenRequestBody.builder().children(children)  # ty: ignore - raw block dicts; the serializer passes them through unchanged
     if index >= 0:
         body = body.index(index)
     return (
@@ -3661,7 +3678,11 @@ def _build_chat_menu_request(chat_id: str, method: HttpMethod, suffix: str, body
         return (
             CreateChatMenuTreeRequest.builder()
             .chat_id(chat_id)
-            .request_body(CreateChatMenuTreeRequestBody.builder().menu_tree(body.get("menu_tree")).build())
+            .request_body(
+                CreateChatMenuTreeRequestBody.builder()
+                .menu_tree(body.get("menu_tree"))  # ty: ignore - caller-built menu_tree dict
+                .build()
+            )
             .build()
         )
     return (
@@ -4256,7 +4277,7 @@ _APPROVAL_INSTANCE_STATUS = {0: "none", 1: "running", 2: "approved", 3: "rejecte
 def _build_task_query_request(
     user_id: str, topic: str, user_id_type: str, page_size: int, page_token: str
 ) -> BaseRequest:
-    builder = QueryTaskRequest.builder().user_id(user_id).topic(topic).user_id_type(user_id_type).page_size(page_size)
+    builder = QueryTaskRequest.builder().user_id(user_id).topic(topic)  # ty: ignore - SDK annotates int; sent as a query string either way.user_id_type(user_id_type).page_size(page_size)
     if page_token:
         builder = builder.page_token(page_token)
     return builder.build()
@@ -4357,9 +4378,9 @@ def _build_list_instances_request(
 ) -> BaseRequest:
     builder = ListInstanceRequest.builder().approval_code(approval_code).page_size(page_size)
     if start_time:
-        builder = builder.start_time(start_time)
+        builder = builder.start_time(start_time)  # ty: ignore - ms-epoch carried as str
     if end_time:
-        builder = builder.end_time(end_time)
+        builder = builder.end_time(end_time)  # ty: ignore - ms-epoch carried as str
     if page_token:
         builder = builder.page_token(page_token)
     return builder.build()
@@ -4544,7 +4565,9 @@ def _build_create_instance_request(
     if title:
         body = body.title(title)
     if node_approver_open_id_list:
-        body = body.node_approver_open_id_list(node_approver_open_id_list)
+        body = body.node_approver_open_id_list(
+            node_approver_open_id_list,  # ty: ignore[invalid-argument-type] - caller-built approver dicts
+        )
     # ``user_id_type`` is a query param on this endpoint even though the SDK's request
     # builder does not surface it, so it is set on the built request directly.
     req = CreateInstanceRequest.builder().request_body(body.build()).build()
@@ -6170,10 +6193,10 @@ def _build_get_record_request(app_token: str, table_id: str, record_id: str, aut
         .app_token(app_token)
         .table_id(table_id)
         .record_id(record_id)
-        .with_shared_url("true")
+        .with_shared_url(bool_query(True))
     )
     if automatic_fields:
-        builder = builder.automatic_fields("true")
+        builder = builder.automatic_fields(bool_query(True))
     return builder.build()
 
 
@@ -7236,7 +7259,7 @@ def _build_user_tasks_query_request(
     return (
         QueryUserTaskRequest.builder()
         .employee_type(employee_type)
-        .ignore_invalid_users("true")
+        .ignore_invalid_users(bool_query(True))
         .request_body(
             QueryUserTaskRequestBody.builder()
             .user_ids(user_ids)
@@ -7544,7 +7567,7 @@ async def create_task_impl(
 def _build_list_tasks_request(completed: str, page_size: int, page_token: str) -> BaseRequest:
     builder = ListTaskRequest.builder().page_size(page_size).type("my_tasks").user_id_type("open_id")
     if completed in ("true", "false"):
-        builder = builder.completed(completed)
+        builder = builder.completed(bool_query(completed == "true"))
     if page_token:
         builder = builder.page_token(page_token)
     return builder.build()
@@ -7922,7 +7945,7 @@ def _build_dept_children_request(
 ) -> BaseRequest:
     builder = (
         ChildrenDepartmentRequest.builder()
-        .department_id(department_id)
+        .department_id(department_id)  # ty: ignore - SDK annotates int; open_department_id is a string
         .department_id_type(department_id_type)
         .page_size(page_size)
     )
@@ -8688,7 +8711,7 @@ def _build_blocks_append_request(document_id: str, children: list[dict[str, Any]
         CreateDocumentBlockChildrenRequest.builder()
         .document_id(document_id)
         .block_id(document_id)
-        .request_body(CreateDocumentBlockChildrenRequestBody.builder().children(children).build())
+        .request_body(CreateDocumentBlockChildrenRequestBody.builder().children(children).build())  # ty: ignore - raw block dicts; the serializer passes them through unchanged
         .build()
     )
 
@@ -8765,7 +8788,13 @@ def _table_descendants(
 def _build_descendant_request(
     document_id: str, children_id: list[str], descendants: list[dict[str, Any]], index: int
 ) -> BaseRequest:
-    body = CreateDocumentBlockDescendantRequestBody.builder().children_id(children_id).descendants(descendants)
+    body = (
+        CreateDocumentBlockDescendantRequestBody.builder()
+        .children_id(children_id)
+        .descendants(
+            descendants  # ty: ignore - raw block dicts; the serializer passes them through unchanged
+        )
+    )
     if index >= 0:
         body = body.index(index)
     # Root block: the document_id doubles as the root block_id (append at doc root).
@@ -9401,7 +9430,7 @@ def _build_add_permission_member_request(
         CreatePermissionMemberRequest.builder()
         .token(token)
         .type(obj_type)
-        .need_notification("true" if need_notification else "false")
+        .need_notification(bool_query(need_notification))
         .request_body(
             BaseMember.builder().member_type(member_type).member_id(member_id).perm(perm).type(member_kind).build()
         )
@@ -9746,7 +9775,7 @@ def _build_image_block_create_request(document_id: str, block_id: str, index: in
     # An image block is created empty: width/height are the display box, and the
     # token is filled in later by the replace_image patch.
     body = CreateDocumentBlockChildrenRequestBody.builder().children(
-        [{"block_type": _IMAGE_BLOCK_TYPE, "image": {"token": ""}}]
+        [{"block_type": _IMAGE_BLOCK_TYPE, "image": {"token": ""}}]  # ty: ignore - raw block dicts; the serializer passes them through unchanged
     )
     if index >= 0:
         body = body.index(index)
@@ -10420,7 +10449,9 @@ _PIN_ERROR_HINTS = {
 
 
 def _build_pin_request(message_id: str) -> BaseRequest:
-    return CreatePinRequest.builder().request_body(Pin.builder().message_id(message_id).build()).build()
+    return (
+        CreatePinRequest.builder().request_body(CreatePinRequestBody.builder().message_id(message_id).build()).build()
+    )
 
 
 def _build_unpin_request(message_id: str) -> BaseRequest:

@@ -279,7 +279,9 @@ def build_insert_row_request(document_id: str, block_id: str, row_index: int = -
     each, which is what makes the fill step a text update rather than a block creation.
     """
     payload = UpdateBlockRequest.builder().build()
-    payload.insert_table_row = {"row_index": row_index}
+    # The SDK types this as a model object; a plain dict serializes to the same JSON and
+    # is what the rest of this module builds.
+    payload.insert_table_row = {"row_index": row_index}  # ty: ignore[invalid-assignment]
     return PatchDocumentBlockRequest.builder().document_id(document_id).block_id(block_id).request_body(payload).build()
 
 
@@ -288,7 +290,11 @@ def build_batch_update_request(document_id: str, requests: list[dict[str, Any]])
     return (
         BatchUpdateDocumentBlockRequest.builder()
         .document_id(document_id)
-        .request_body(BatchUpdateDocumentBlockRequestBody.builder().requests(requests).build())
+        .request_body(
+            BatchUpdateDocumentBlockRequestBody.builder()
+            .requests(requests)  # ty: ignore - caller-built edit dicts; serialized as-is
+            .build()
+        )
         .build()
     )
 

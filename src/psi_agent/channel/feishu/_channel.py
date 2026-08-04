@@ -88,6 +88,16 @@ class FeishuChannel:
         return self._sender
 
     @property
+    def _im(self) -> Any:
+        """The client's ``im`` service.
+
+        ``lark_oapi`` declares every service as ``Optional`` on the client but fills them
+        all in during construction, so this is never ``None`` in practice. Going through
+        one accessor states that once instead of at each call site.
+        """
+        return self._client.im
+
+    @property
     def bot_identity(self) -> BotIdentity | None:
         return self._bot_identity
 
@@ -276,7 +286,7 @@ class FeishuChannel:
                 .request_body(PatchMessageRequestBody.builder().content(content).build())
                 .build()
             )
-            resp = await self._client.im.v1.message.apatch(req)
+            resp = await self._im.v1.message.apatch(req)
         except Exception as exc:
             logger.warning(f"update_card {message_id} failed — {exc!r}")
             return SendResult(success=False, error=repr(exc))
@@ -289,7 +299,7 @@ class FeishuChannel:
     async def fetch_message(self, message_id: str) -> dict[str, Any]:
         """Fetch one message as a plain dict (used to re-read a card before editing it)."""
         try:
-            resp = await self._client.im.v1.message.aget(GetMessageRequest.builder().message_id(message_id).build())
+            resp = await self._im.v1.message.aget(GetMessageRequest.builder().message_id(message_id).build())
         except Exception as exc:
             logger.warning(f"fetch_message {message_id} failed — {exc!r}")
             return {}
@@ -321,7 +331,7 @@ class FeishuChannel:
     ) -> str:
         """Download a message attachment to ``dest_dir`` and return the saved path."""
         req = GetMessageResourceRequest.builder().message_id(message_id).file_key(file_key).type(resource_type).build()
-        resp = await self._client.im.v1.message_resource.aget(req)
+        resp = await self._im.v1.message_resource.aget(req)
         if not resp.success():
             raise RuntimeError(f"resource {file_key} download rejected: code={resp.code} msg={resp.msg}")
         name = file_name or getattr(resp, "file_name", "") or file_key
