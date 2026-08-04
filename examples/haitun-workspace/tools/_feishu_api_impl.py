@@ -181,7 +181,9 @@ def _spec_refusal(
 async def _send_paged(
     build: Any,
     paginate: dict[str, Any],
-    invoke_kwargs: dict[str, Any],
+    user_key: str | None,
+    prefer: str,
+    identity: str,
 ) -> dict[str, Any]:
     """Follow ``page_token`` until Feishu says there is no more, concatenating items.
 
@@ -199,12 +201,13 @@ async def _send_paged(
     collected: list[Any] = []
     token = ""
     for page in range(1, paginate["max_pages"] + 1):
-        res = await _f._invoke(build(token), **invoke_kwargs)
+        res = await _f._invoke(build(token), user_key=user_key, prefer=prefer, identity=identity)
         if not res.get("ok"):
             if collected:
                 return {**res, "partial": True, key: collected, "count": len(collected), "pages": page - 1}
             return res
-        data = res.get("data") if isinstance(res.get("data"), dict) else {}
+        payload = res.get("data")
+        data: dict[str, Any] = payload if isinstance(payload, dict) else {}
         chunk = data.get(key)
         if isinstance(chunk, list):
             collected.extend(chunk)
@@ -320,11 +323,8 @@ async def call_api_impl(
     if rule is not None and rule.token and (prefer or "").strip().lower() != "user":
         strategy = "user" if rule.token == "user" else "tenant"
 
-    invoke_kwargs = {
-        "user_key": user_key or None,
-        "prefer": strategy,
-        "identity": (identity or "").strip(),
-    }
+    caller_key = user_key or None
+    acts_as = (identity or "").strip()
     paginate = rule.paginate if rule is not None else None
     if paginate and verb in ("GET", "POST"):
         # A fresh request per page: `_invoke` mutates what it is given (token_types
@@ -337,11 +337,11 @@ async def call_api_impl(
                 paged["page_token"] = token
             return _build_request(_METHODS[verb], path, body, paged, paths, strategy)
 
-        res = await _send_paged(build_page, paginate, invoke_kwargs)
+        res = await _send_paged(build_page, paginate, caller_key, strategy, acts_as)
         return _f._with_hint(res, _ALL_HINTS)
 
     request = _build_request(_METHODS[verb], path, body, query, paths, strategy)
-    res = await _f._invoke(request, **invoke_kwargs)
+    res = await _f._invoke(request, user_key=caller_key, prefer=strategy, identity=acts_as)
     res = _f._with_hint(res, _ALL_HINTS)
     if (note := _warning_for(path)) and not res.get("ok", True):
         res = {**res, "warning": note}
