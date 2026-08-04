@@ -312,6 +312,17 @@ uv run psi-agent --help          # CLI 帮助
 uv build                         # 构建
 ```
 
+## 多树协作与分支同步
+
+本仓常被同时 checkout 成多棵工作树并行施工（前端树 / workspace 树 / 参谋树）。约定如下：
+
+- **一棵树只改一个区**：前端树只碰 `src/psi_agent/gateway/spa-v2/`（及必要的 Gateway 壳 / spa v1）；workspace 树主要碰 `examples/haitun-workspace/`，以及必要的 Session / Gateway 服务端。越区改动优先换树，而不是在本树顺手改
+- **同 remote ≠ 同磁盘**：别人把分支合进 `main`，不会自动出现在你的工作树里；要用 `git fetch` 后显式合并
+- **接 `main` 时停在自己的 `feat/…` 上**：`git fetch origin` → 先 commit 或 stash 保护 WIP → `git merge origin/main`。冲突以各层 `AGENTS.md` 为准（保留三区 / AppData / ContextVar 约定后再叠自己的功能）
+- **禁止**擅自 `git reset --hard origin/main`——它会丢掉本树的本地提交，除非用户明确要求
+- **阅读顺序**：根 `AGENTS.md` → `session/AGENTS.md` → `gateway/AGENTS.md` → `examples/haitun-workspace/AGENTS.md` 或 `spa-v2/AGENTS.md`
+- **前端改动的验收**：除上面「开发命令」外，还要在 `src/psi_agent/gateway/spa-v2/` 下跑 `npm test` 与 `npm run build`，再经 Gateway 验收
+
 ## 改动后自检清单（Definition of Done）
 
 任何代码改动完成后、提交前，必须逐条核对以下四项：
