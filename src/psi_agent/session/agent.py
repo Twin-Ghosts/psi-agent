@@ -500,12 +500,15 @@ class SessionAgent:
                                 logger.info("AI requested tool calls, processing...")
                                 ordered_calls = [accumulated_tool_calls[i] for i in sorted(accumulated_tool_calls)]
 
-                                assistant_msg: dict[str, Any] = {"role": "assistant", "tool_calls": ordered_calls}
+                                assistant_msg: dict[str, Any] = {"role": "assistant"}
                                 if accumulated_content:
                                     assistant_msg["content"] = accumulated_content
+                                if ordered_calls:
+                                    assistant_msg["tool_calls"] = ordered_calls
                                 if accumulated_reasoning:
                                     assistant_msg["reasoning"] = accumulated_reasoning
-                                self._conversation.add(with_kind(assistant_msg, turn_response_kind))
+                                if accumulated_content or ordered_calls:
+                                    self._conversation.add(with_kind(assistant_msg, turn_response_kind))
 
                                 # pre-compute args + yield tool-call intent
                                 tool_args: list[tuple[int, dict[str, Any], str, dict[str, Any]]] = []

@@ -201,7 +201,7 @@ def messages_for_ai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _append_for_ai(out: list[dict[str, Any]], msg: dict[str, Any], role: str) -> None:
     """Append one valid wire message, skipping unusable legacy assistant rows."""
     projected = _project_for_ai(msg, role)
-    if role == "assistant" and projected.get("content") is None and not projected.get("tool_calls"):
+    if role == "assistant" and not projected.get("content") and not projected.get("tool_calls"):
         return
     out.append(projected)
 

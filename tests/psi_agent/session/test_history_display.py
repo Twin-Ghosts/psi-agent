@@ -53,6 +53,13 @@ def test_messages_for_ai_skips_reasoning_only_assistant_rows() -> None:
         [
             {"role": "user", "content": "confirm"},
             {"role": "assistant", "reasoning": "internal only", "kind": KIND_CHAT},
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning": "legacy internal only",
+                "tool_calls": [],
+                "kind": KIND_CHAT,
+            },
             {"role": "user", "content": "continue"},
         ]
     )
@@ -60,6 +67,26 @@ def test_messages_for_ai_skips_reasoning_only_assistant_rows() -> None:
     assert projected == [
         {"role": "user", "content": "confirm"},
         {"role": "user", "content": "continue"},
+    ]
+
+
+def test_messages_for_ai_keeps_assistant_rows_with_content_or_tool_calls() -> None:
+    tool_calls = [
+        {
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "lookup", "arguments": "{}"},
+        }
+    ]
+
+    assert messages_for_ai(
+        [
+            {"role": "assistant", "content": "answer", "reasoning": "internal"},
+            {"role": "assistant", "reasoning": "internal", "tool_calls": tool_calls},
+        ]
+    ) == [
+        {"role": "assistant", "content": "answer", "reasoning": "internal"},
+        {"role": "assistant", "reasoning": "internal", "tool_calls": tool_calls},
     ]
 
 

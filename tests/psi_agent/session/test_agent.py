@@ -691,14 +691,50 @@ async def test_agent_reasoning_only_stop_does_not_persist_invalid_assistant(
 
     mock_server = MockAIServer(tmp_path)
     ai_socket = await mock_server.start(handler)
+    history_path = tmp_path / "histories" / "reasoning-only.jsonl"
     try:
-        agent = SessionAgent(ai_client=AiClient(ai_socket), tool_registry=ToolRegistry())
+        agent = SessionAgent(
+            ai_client=AiClient(ai_socket),
+            tool_registry=ToolRegistry(),
+            conversation=Conversation(path=history_path),
+        )
         chunks = [chunk async for chunk in agent.run({"role": "user", "content": "confirm"})]
+        persisted = await Conversation._load(history_path)
 
         assert "".join(chunk.reasoning or "" for chunk in chunks) == "internal only"
         assert not any(
             message.get("role") == "assistant" and message.get("content") is None and not message.get("tool_calls")
-            for message in agent._conversation.messages
+            for message in persisted
+        )
+    finally:
+        await mock_server.cleanup()
+
+
+@pytest.mark.anyio
+async def test_agent_empty_tool_calls_does_not_persist_reasoning_only_assistant(tmp_path: Path) -> None:
+    async def handler(request: web.Request) -> web.StreamResponse:
+        resp = web.StreamResponse(status=200, reason="OK", headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        await resp.write(_sse_chunk(reasoning="internal only", finish="tool_calls").encode())
+        await resp.write(b"data: [DONE]\n\n")
+        return resp
+
+    mock_server = MockAIServer(tmp_path)
+    ai_socket = await mock_server.start(handler)
+    history_path = tmp_path / "histories" / "empty-tool-calls.jsonl"
+    try:
+        agent = SessionAgent(
+            ai_client=AiClient(ai_socket),
+            tool_registry=ToolRegistry(),
+            conversation=Conversation(path=history_path),
+            max_tool_rounds=1,
+        )
+        _ = [chunk async for chunk in agent.run({"role": "user", "content": "confirm"})]
+        persisted = await Conversation._load(history_path)
+
+        assert not any(
+            message.get("role") == "assistant" and not message.get("content") and not message.get("tool_calls")
+            for message in persisted
         )
     finally:
         await mock_server.cleanup()
