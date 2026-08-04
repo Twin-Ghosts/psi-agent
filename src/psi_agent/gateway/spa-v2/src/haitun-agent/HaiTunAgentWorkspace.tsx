@@ -103,7 +103,7 @@ import {
 
 const OVERVIEW_WELCOME: ChatMessage = {
   role: "agent",
-  text: "工作区已连接 Gateway。新建任务或从侧栏打开历史 Session，即可与 Agent 真实对话。",
+  text: "工作区已连接 Gateway。新建任务/聊天或从侧栏打开历史 Session，即可与 Agent 真实对话。",
 };
 
 import {
@@ -994,7 +994,7 @@ export default function HaiTunAgentWorkspace({
         overview: [
           ...(current.overview ?? []),
           { role: "user", text: userVisible },
-          { role: "agent", text: "请先新建任务或打开历史任务；总览卡片不直接调用模型。" },
+          { role: "agent", text: "请先新建任务/聊天或打开历史任务；总览卡片不直接调用模型。" },
         ],
       }));
       setChatDrafts((current) => ({ ...current, overview: "" }));
@@ -1507,26 +1507,15 @@ export default function HaiTunAgentWorkspace({
           <div className="chat-context-row">
             <div>
               {expanded && interactive && contextPanelCollapsed && (
-                <>
-                  <button
-                    type="button"
-                    className="context-panel-toggle context-panel-toggle-in-chat"
-                    onClick={() => setContextPanelCollapsed(false)}
-                    aria-label="展开任务上下文栏"
-                    aria-expanded={false}
-                  >
-                    <PanelLeftOpen size={15} />
-                  </button>
-                  <button
-                    type="button"
-                    className="context-panel-new-task context-panel-new-task-in-chat"
-                    onClick={() => openNewTask()}
-                    aria-label="新建任务"
-                  >
-                    <Plus size={15} />
-                    <span>新建任务</span>
-                  </button>
-                </>
+                <button
+                  type="button"
+                  className="context-panel-toggle context-panel-toggle-in-chat"
+                  onClick={() => setContextPanelCollapsed(false)}
+                  aria-label="展开任务上下文栏"
+                  aria-expanded={false}
+                >
+                  <PanelLeftOpen size={15} />
+                </button>
               )}
               <AgentMark /><span>{expanded ? "任务工作区" : "关于"} <strong>{unitCard.title}</strong>{!expanded && " 的对话"}</span>
             </div>
@@ -1534,7 +1523,7 @@ export default function HaiTunAgentWorkspace({
               {expanded && (
                 <>
                   <button type="button" className="chat-new-task" onClick={() => openNewTask()}>
-                    <Plus size={13} /> 新建任务
+                    <Plus size={13} /> 新建任务/聊天
                   </button>
                   <button type="button" className="chat-collapse" onClick={collapseChat}>
                     <ChevronDown size={13} /> 收起
@@ -1748,7 +1737,7 @@ export default function HaiTunAgentWorkspace({
         </button>
 
         <button type="button" className="new-task-button" onClick={() => openNewTask()}>
-          <Plus size={18} /> 新建任务 <span>⌘ / Ctrl N</span>
+          <Plus size={18} /> 新建任务/聊天 <span>⌘ / Ctrl N</span>
         </button>
 
         <div className={`global-search ${searchOpen ? "open" : ""}`}>
@@ -1897,7 +1886,7 @@ export default function HaiTunAgentWorkspace({
           {!chatExpanded && (
             <div className="stage-actions">
               <button type="button" className="topbar-create-button" onClick={() => openNewTask()}>
-                <Plus size={15} /> 新建任务
+                <Plus size={15} /> 新建任务/聊天
               </button>
             </div>
           )}

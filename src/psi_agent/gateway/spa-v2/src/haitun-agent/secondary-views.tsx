@@ -72,7 +72,7 @@ export function NewTaskWorkspace({
   };
 
   return (
-    <section className="new-task-workspace" aria-label="新建任务对话">
+    <section className="new-task-workspace" aria-label="新建任务/聊天对话">
       <div className="new-task-ambient one" />
       <div className="new-task-ambient two" />
 
@@ -83,7 +83,7 @@ export function NewTaskWorkspace({
         </div>
 
         <div className="new-task-greeting">
-          <span className="eyebrow">新建任务</span>
+          <span className="eyebrow">新建任务/聊天</span>
           <h1>有什么可以帮您？</h1>
           <p>描述希望得到的结果、截止时间，以及手头已有的材料。发送后会进入任务分屏继续对话。</p>
         </div>

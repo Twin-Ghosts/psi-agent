@@ -81,7 +81,7 @@ export default function WorkspaceGate({
           {isAgent ? (
             <>
               Agent 包是能力根目录（<code>tools/</code>、<code>schedules/</code>、<code>systems/</code>）。
-              可与用户工作区不同；切换后<strong>新建任务</strong>会挂上此包，已有任务仍用创建时绑定的包。
+              可与用户工作区不同；切换后<strong>新建任务/聊天</strong>会挂上此包，已有任务仍用创建时绑定的包。
             </>
           ) : (
             <>

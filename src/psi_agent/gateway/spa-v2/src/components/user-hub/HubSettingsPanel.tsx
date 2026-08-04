@@ -88,7 +88,7 @@ export default function HubSettingsPanel({
         ) : null}
         {onChangeAgent ? (
           <p className="hub-settings-foot">
-            Agent 包含 tools / schedules / systems。切换后仅影响<strong>新建任务</strong>；
+            Agent 包含 tools / schedules / systems。切换后仅影响<strong>新建任务/聊天</strong>；
             已有任务仍使用创建时绑定的包。
           </p>
         ) : null}
