@@ -1,17 +1,18 @@
 """Feishu/Lark contact (通讯录) tools — read the org chart and administer it.
 
-Read side: get a department's roster, resolve a person's contact details by id,
-search the whole org by name (``feishu_contact_search``), find someone by phone or
-email (``feishu_contact_find``), and walk the org chart
-(``feishu_department_tree`` / ``feishu_department_get``).
+What is left here are the reads that do more than forward one request: a
+department's roster (``feishu_department_members``), someone by phone or email
+(``feishu_contact_find``), the org chart (``feishu_department_tree`` /
+``feishu_department_get``), and a user group's members
+(``feishu_user_group_members``).
 
-Write side (``feishu_user_manage``, ``feishu_department_manage``,
-``feishu_user_group``, ``feishu_user_group_members``): create/modify users and
-departments, mark people as resigned, and manage user groups. These change the
-organization for everyone, so the irreversible ones (resign a user, delete a
-department or user group) require an explicit ``confirm`` phrase.
+Everything else in this domain — searching the org by name, creating/modifying
+users and departments, marking people as resigned, and managing user groups — is
+now an endpoint table rather than a tool: call ``feishu_api`` and read the
+``feishu-contact`` skill first. The irreversible ones (resign a user, delete a
+department or user group) are gated there by an explicit ``confirm`` phrase.
 
-The write endpoints only accept the app's own tenant token and need the
+Those write endpoints only accept the app's own tenant token and need the
 ``contact:contact`` scope (``contact:group`` for user groups) — authorizing as a
 user does not help. Their most common failure is not a bad parameter but the app's
 **通讯录权限范围** (set in the developer console) not covering the target.
@@ -68,9 +69,9 @@ async def feishu_contact_find(
     """Find users by phone number or email — exact match, returns their open_id and name.
 
     Use this when you have someone's contact details but not their id: a phone number
-    from a form, an email from a ticket. ``feishu_contact_search`` matches *names* and
-    needs the user to have authorized; this matches phone/email exactly and works with
-    the bot's own token.
+    from a form, an email from a ticket. Searching by *name* (``GET
+    /open-apis/search/v1/user`` via ``feishu_api``) needs the user to have authorized;
+    this matches phone/email exactly and works with the bot's own token.
 
     Returns ``users[]`` with ``{user_id, matched_by, matched_value, name, job_title,
     department_ids, is_resigned, is_activated}``, plus ``not_found[]`` listing which
@@ -113,9 +114,10 @@ async def feishu_department_tree(
     only people whose *primary* department is this one — both are returned because
     "how many people are in this department" has two legitimate answers.
 
-    Use this to get the ``department_id`` that ``feishu_department_members``,
-    ``feishu_user_manage`` and ``feishu_department_manage`` need. For one department's
-    full detail plus its path from the root, use ``feishu_department_get``.
+    Use this to get the ``department_id`` that ``feishu_department_members`` and the
+    user/department write endpoints (``feishu_api``, see the ``feishu-contact`` skill)
+    need. For one department's full detail plus its path from the root, use
+    ``feishu_department_get``.
 
     Depth is walked one level at a time and capped by ``max_depth``, so an org too
     large to fetch at once comes back truncated (with ``truncated: true``) rather than
@@ -199,7 +201,7 @@ async def feishu_user_group_members(
     (``contact:group:readonly`` to list).
 
     Args:
-        group_id: The user group id, from ``feishu_user_group(action='list')``.
+        group_id: The user group id, from ``GET /open-apis/contact/v3/group/simplelist``.
         action: list (default) | add | remove.
         user_ids: Comma-separated member ids for add/remove, in the form given by member_id_type.
         member_id_type: Id form of user_ids — open_id (default), union_id, or user_id.

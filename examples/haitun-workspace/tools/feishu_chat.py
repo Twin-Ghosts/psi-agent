@@ -154,7 +154,8 @@ async def feishu_chat_announcement_clear(chat_id: str, user_key: str = "") -> st
 async def feishu_chat_upload_avatar(image_path: str, user_key: str = "") -> str:
     """Upload a local picture as a **group avatar** and return its ``image_key``.
 
-    Needed because ``feishu_chat_update(avatar=…)`` takes an ``image_key``, and a group
+    Needed because the group-update endpoint (``PUT /open-apis/im/v1/chats/:chat_id``,
+    see the ``feishu-chat`` skill) takes an ``image_key`` for ``avatar``, and a group
     avatar must be uploaded with ``image_type="avatar"``. A key from
     ``feishu_message_upload_image`` (message type) uploads fine and is then rejected by
     the group update with 232021, which reads as a bad avatar rather than a wrong upload.

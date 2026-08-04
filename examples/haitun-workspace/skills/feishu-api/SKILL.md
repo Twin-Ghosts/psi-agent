@@ -27,18 +27,21 @@ category: integration
 | OAuth 授权 | `feishu_auth_*` | 管着 UAT 存储与回调接收 |
 | 发/编辑消息、卡片 | `feishu_message_send` / `_edit` / `_edit_card` | `<at>` 升级 post、卡片 update_multi 等组包细节 |
 | 读/写群公告 | `feishu_chat_announcement` / `_set` / `_clear` | 公告是 **docx 文档**（不是 im/v1），根 block_id 就是 chat_id，每次写都要按 `revision_id` 乐观锁重读 |
-| 改群设置 / 禁言 | `feishu_chat_update` / `feishu_chat_mute` | 加人权限与群名片权限**必须成对**；禁言根本不在群设置那个 body 里（写了会被静默忽略） |
-| 解散群 / 转让群主 | `feishu_chat_dismiss` / `feishu_chat_transfer_owner` | 解散**不可逆且不保留群记录**，工具要求显式 `confirm="解散群"` |
-| 群菜单 / 群标签页 | `feishu_chat_menu_*` / `feishu_chat_tab*` | 菜单是三层嵌套包装对象、带子菜单的一级菜单不能有链接；标签页 11 种类型只有 2 种能建 |
 | 搜索消息 | `feishu_message_search` | 只吃 user token，且**只返回 message_id**，必须回查才有正文 |
-| 建/改用户、办离职 | `feishu_user_manage` | 离职**不可逆**且无上级时日历/问卷被直接删除，工具要求 `confirm="离职用户"`；改用户没传的字段不能变成清空 |
-| 建/改/删/移动部门 | `feishu_department_manage` | 删部门**不可逆**且要求部门先清空（有人 43011 / 有子部门 43012，只能最深层往上删），工具要求 `confirm="删除部门"` |
-| 建/改/删用户组 | `feishu_user_group` | 删组会让引用它的文档权限/审批流失去主体，要求 `confirm="删除用户组"`；建组硬要求通讯录范围=全部成员 |
 | 增删用户组成员 | `feishu_user_group_members` | 飞书**一次只收一个成员**，工具循环并逐人回报成败；三个 member_* 参数不一致就 41072 |
 | 按手机号/邮箱查人 | `feishu_contact_find` | 是 **POST** 不是 GET；企业邮箱一律查不到；离职的人默认**静默漏掉** |
 | 部门树 / 部门详情 | `feishu_department_tree` / `feishu_department_get` | 递归+分页+去重，且 43010「部门过大」必须暴露出来而不是静默少一层 |
 
 判断方法：先用 `tool_search` 找一下有没有 `feishu_` 开头的对应工具；有就用它。
+
+有些域已经**从工具改成了接口表**：这些端点仍然走 `feishu_api`，但要先读对应的 skill，
+因为不可逆操作的 `confirm` 闸门和静默失败的约束都写在那份 rules 里，发请求前会硬拦：
+
+| 域 | 读哪个 skill | 里面有什么闸门 |
+|---|---|---|
+| 群管理（建群/拉人/踢人/群设置/禁言/转让群主/解散群/群菜单/群标签页） | `feishu-chat` | 解散群要 `confirm="解散群"`；禁言不在群设置那个 body 里 |
+| 通讯录（查人/搜人/建改用户/部门增删改/用户组） | `feishu-contact` | 离职要 `confirm="离职用户"`、删部门 `confirm="删除部门"`、删用户组 `confirm="删除用户组"` |
+| 消息（撤回/表情回应/置顶/转发/消息列表） | `feishu-message` | 撤回时限、置顶权限、合并转发必须同源 |
 
 ## 参数怎么填
 
@@ -108,7 +111,8 @@ scope 是 `contact:functional_role`（只读用 `contact:functional_role:readonl
 
 #### 用户组查询
 
-用户组的增删改和成员增删用 `feishu_user_group` / `feishu_user_group_members`。
+用户组的增删改按 `feishu-contact` 里的接口表走（删组有 `confirm` 闸门），
+成员增删用 `feishu_user_group_members`（飞书一次只收一个成员，工具循环并逐人回报）。
 补充两个只读端点：详情 `GET /open-apis/contact/v3/group/:group_id`、
 列表 `GET /open-apis/contact/v3/group/simplelist`（`query: type` 1 普通 2 动态）——
 注意路径是**单数 `group`**，没有 `/groups`。
@@ -130,7 +134,7 @@ scope 是 `contact:functional_role`（只读用 `contact:functional_role:readonl
 | 对方成员详情 | `GET .../collaboration_tenants/:tenant_key/collaboration_users/:user_id` |
 
 `1970011` = page_size 越界，`1970012` = page_token 非法。
-若用户说的「外部联系人」其实是外部群里的人，那是 `feishu_chat_list_members`，不是这套。
+若用户说的「外部联系人」其实是外部群里的人，那是 `feishu-chat` 里的群成员列表接口，不是这套。
 
 #### 通讯录写操作为什么老是失败
 
@@ -205,15 +209,13 @@ scope 是 `contact:functional_role`（只读用 `contact:functional_role:readonl
 | 节点详情 | `GET /open-apis/wiki/v2/spaces/get_node` — query: `token`（wiki node_token） |
 
 wiki 节点的 `obj_token` 才是文档 id，读内容要用它而不是 `node_token`。
-建群拉人用 `feishu_chat_create`；建 wiki 文档用 `feishu_wiki_create_doc*`。
+建 wiki 文档用 `feishu_wiki_create_doc*`。
 
-**群的运营几乎都有专用工具了，别手搓**：群列表 `feishu_chat_list`、群公告
-`feishu_chat_announcement`/`_set`/`_clear`、群设置 `feishu_chat_update`、禁言
-`feishu_chat_mute`、转让群主 `feishu_chat_transfer_owner`、解散群
-`feishu_chat_dismiss`、群菜单 `feishu_chat_menu_*`、群标签页 `feishu_chat_tab*`。
-这些端点各自都有一个「照着文档写也会错」的地方（公告是 docx 文档且按 revision 乐观锁、
-禁言不在群设置那个 body 里、加人权限和群名片权限必须成对、解散不可逆），
-所以护栏在工具里，不在这张表里。
+**群的运营看 `feishu-chat` 那份接口表**（建群拉人、群列表、群设置、禁言、转让群主、
+解散群、群菜单、群标签页都在里面）。这些端点各自都有一个「照着文档写也会错」的地方，
+所以护栏在那份 rules 里 —— 禁言不在群设置那个 body 里、加人权限和群名片权限必须成对、
+解散群要 `confirm="解散群"`。群公告是唯一还留着工具的（`feishu_chat_announcement`/`_set`/
+`_clear`），因为公告是 docx 文档且要按 revision 乐观锁。
 
 ### 培训
 

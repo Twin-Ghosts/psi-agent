@@ -13,7 +13,7 @@ category: productivity
 - `feishu_approval_list_instances(approval_code, start_time, end_time)` — 列本期假勤实例
 - `feishu_approval_get(instance_id)` — 读一条申请（申请人/假别/起止/天数/表单/task_list）
 - `feishu_approval_decide(approve, approval_code, instance_code, approver_user_id, task_id, comment)` — 代真实审批人放行/驳回
-- `feishu_department_members(...)` / `feishu_chat_find*` — 解析人和群
+- `feishu_department_members(...)` — 解析人；找群用 `feishu_api` 调 `GET /open-apis/im/v1/chats/search`（见 `feishu-chat` skill）
 - `feishu_bitable_*` — 写审核台账（留痕）
 - `feishu_doc_create` / `feishu_doc_append_content` — 生成看板文档
 - `feishu_message_send` / `feishu_topic_start` — 推送看板

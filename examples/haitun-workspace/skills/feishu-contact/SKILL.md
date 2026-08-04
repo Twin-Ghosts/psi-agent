@@ -266,7 +266,7 @@ feishu_api(
 | 关联组织详情 | `GET /open-apis/trust_party/v1/collaboration_tenants/:tenant_key` |
 | 对方可见部门/成员 | `GET /open-apis/trust_party/v1/collaboration_tenants/:tenant_key/visible_organization` |
 
-若用户说的「外部联系人」其实是外部群里的人，那是 `feishu_chat_list_members`，不是这套。
+若用户说的「外部联系人」其实是外部群里的人，那是群成员列表（`GET /open-apis/im/v1/chats/:chat_id/members`，见 `feishu-chat` skill），不是这套。
 
 ```rules
 - endpoint: GET /open-apis/trust_party/v1/collaboration_tenants

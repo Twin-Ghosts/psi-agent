@@ -1,6 +1,6 @@
 ---
 name: feishu-blocker-routing
-description: "卡点找人 — 员工在飞书私聊 HaiTun 说自己工作上卡在某个点（某事推不动、缺信息/权限、依赖别人），HaiTun 判断这个点属于谁的工作范围、该去找谁帮忙，并附上那个人的联系方式（电话/邮箱），让协作更顺畅。Use when someone DMs the bot saying they're blocked/stuck on something and asks who to turn to. Reads a 职责归属 (ownership) 多维表格 mapping 业务领域/职责 → 负责人 open_id via feishu_bitable_*, matches the blocker to the owning area, resolves that owner's contact details with feishu_user_get, and replies to the employee with 谁负责 + 找谁 + 联系方式. Needs bitable:app scope + the app as a collaborator on the ownership base, contact scopes for phone/email, and the app authorized on the 通讯录权限范围."
+description: "卡点找人 — 员工在飞书私聊 HaiTun 说自己工作上卡在某个点（某事推不动、缺信息/权限、依赖别人），HaiTun 判断这个点属于谁的工作范围、该去找谁帮忙，并附上那个人的联系方式（电话/邮箱），让协作更顺畅。Use when someone DMs the bot saying they're blocked/stuck on something and asks who to turn to. Reads a 职责归属 (ownership) 多维表格 mapping 业务领域/职责 → 负责人 open_id via feishu_bitable_*, matches the blocker to the owning area, resolves that owner's contact details with feishu_api (GET contact/v3/users/batch, see the feishu-contact skill), and replies to the employee with 谁负责 + 找谁 + 联系方式. Needs bitable:app scope + the app as a collaborator on the ownership base, contact scopes for phone/email, and the app authorized on the 通讯录权限范围."
 category: productivity
 ---
 
@@ -13,7 +13,7 @@ HaiTun 先判断这个卡点属于**谁的工作范围**，再告诉员工**该�
 用到的现成工具：
 - `feishu_bitable_list_tables(app_token)` / `feishu_bitable_list_records(app_token, table_id, ...)`
   — 读**职责归属台账**（业务领域/职责 → 负责人 open_id）
-- `feishu_user_get(user_ids, ...)` — 用负责人 open_id 取其**联系方式**（电话/邮箱/职位/部门）
+- `feishu_api` 调 `GET /open-apis/contact/v3/users/batch` — 用负责人 open_id 取其**联系方式**（电话/邮箱/职位/部门）；先读 `feishu-contact` skill
 - `feishu_department_members(...)` / `feishu_chat_find_member(...)` — 需要时按姓名反查 open_id
 - `feishu_message_send(receive_id, text, ...)` — 需要时把结论回给员工（私聊里直接回也行）
 
@@ -44,7 +44,7 @@ HaiTun 先判断这个卡点属于**谁的工作范围**，再告诉员工**该�
    - 命中多行：把候选一并列出让员工挑，或按最贴切的一条并说明理由。
    - 一行都没命中：**如实说"台账里没查到明确归属"**，给出兜底建议（问直属上级／找该员工
      所在部门，用 `feishu_department_members` 看部门同事或 leader），**不硬安一个负责人**。
-3. **取联系方式**：拿负责人 `open_id` 调 `feishu_user_get(user_ids=<open_id>)`，
+3. **取联系方式**：拿负责人 `open_id` 调 `feishu_api(endpoint="GET /open-apis/contact/v3/users/batch", query={"user_ids": [<open_id>]})`（细节见 `feishu-contact` skill），
    取 `name` / `mobile` / `email`（或 `enterprise_email`）/ `job_title`。
    - 台账里存的是姓名不是 open_id：先 `feishu_department_members(recursive=True)` 或
      `feishu_chat_find_member` 按姓名反查 open_id，再取详情。同名多人要跟员工核对是哪位。

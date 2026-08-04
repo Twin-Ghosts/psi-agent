@@ -2292,7 +2292,7 @@ _CHAT_ADMIN_ERROR_HINTS = {
     232044: "达到企业管理员配置的成员上限, 需管理员放开。",
     232076: "群主不能被移出群; 先转让群主再移出。",
     232090: "群类型不支持该操作 (仅普通群 group / 话题群 topic)。",
-    99992351: "open_id 必须是 ou_ 前缀; 用 feishu_chat_find_member / feishu_contact_search 解析。",
+    99992351: "open_id 必须是 ou_ 前缀; 用 feishu_chat_find_member 或 GET /open-apis/search/v1/user 解析。",
 }
 # Feishu returns every group setting as a bare enum string. Naming them once here
 # keeps the tool's answer readable ("只有群主能加人") instead of making the model
@@ -2400,24 +2400,6 @@ async def get_chat_impl(chat_id: str, user_id_type: str = "open_id", user_key: s
         # has no owner or no settings.
         "partial": not owner_id and not data.get("chat_mode"),
     }
-
-
-_CHAT_MEMBER_ID_TYPES = ("open_id", "union_id", "user_id", "app_id")
-
-
-def _clean_member_ids(user_ids: list[str] | None, member_id_type: str, verb: str) -> tuple[list[str], dict | None]:
-    """Validate a member id list for add/remove; returns (ids, error)."""
-    if member_id_type not in _CHAT_MEMBER_ID_TYPES:
-        return [], _error(f"member_id_type must be one of {', '.join(_CHAT_MEMBER_ID_TYPES)}, got {member_id_type!r}.")
-    ids = list(dict.fromkeys(u.strip() for u in (user_ids or []) if u and u.strip()))
-    if not ids:
-        return [], _error(f"user_ids is required — give at least one id to {verb}.")
-    if len(ids) > 50:
-        return [], _error(
-            f"Feishu takes at most 50 ids per call ({len(ids)} given); split the list and call again. "
-            "机器人一次最多 5 个。",
-        )
-    return ids, None
 
 
 # ── 群公告 (chat announcement) — read and write the pinned notice board ──────────
@@ -2727,132 +2709,8 @@ _CHAT_UPDATE_ERROR_HINTS = {
     232020: "群名称不合法 (公开群至少 2 个字符)。",
     232021: "群头像 image_key 无效; 必须用 image_type='avatar' 上传 (feishu_chat_upload_avatar)。",
 }
-# Who-can-do-what enums, keyed by the words a user actually says.
-_CHAT_WHO_VALUES = {
-    "all_members": "all_members",
-    "only_owner": "only_owner",
-    "not_anyone": "not_anyone",
-    "所有群成员": "all_members",
-    "所有人": "all_members",
-    "仅群主和管理员": "only_owner",
-    "仅群主": "only_owner",
-    "群主和管理员": "only_owner",
-    "任何人都不可": "not_anyone",
-    "禁止": "not_anyone",
-}
-# The update body's own fields, split by the value vocabulary each one takes, so an
-# unknown value is refused with the accepted list instead of being sent off to Feishu.
-_CHAT_WHO_FIELDS = (
-    "add_member_permission",
-    "at_all_permission",
-    "edit_permission",
-    "join_message_visibility",
-    "leave_message_visibility",
-    "urgent_setting",
-    "video_conference_setting",
-    "hide_member_count_setting",
-)
-_CHAT_APPROVAL_VALUES = {
-    "approval_required": "approval_required",
-    "no_approval_required": "no_approval_required",
-    "需审批": "approval_required",
-    "需要审批": "approval_required",
-    "开": "approval_required",
-    "无需审批": "no_approval_required",
-    "不需要审批": "no_approval_required",
-    "关": "no_approval_required",
-}
-_CHAT_TYPE_VALUES = {"private": "private", "public": "public", "私有": "private", "公开": "public"}
 
 
-def _normalize_chat_who(field: str, value: str) -> tuple[str, str]:
-    """Map a who-can-do-this value onto Feishu's enum; returns (enum, error)."""
-    mapped = _CHAT_WHO_VALUES.get(value.strip())
-    if not mapped:
-        return "", (
-            f"{field} 的取值 {value!r} 无效; 只能是 all_members (所有群成员) / only_owner (仅群主和管理员)"
-            " / not_anyone (任何人都不可)。"
-        )
-    return mapped, ""
-
-
-def _chat_update_body(
-    name: str,
-    description: str,
-    avatar: str,
-    add_member_permission: str,
-    at_all_permission: str,
-    edit_permission: str,
-    membership_approval: str,
-    chat_type: str,
-) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """The PUT body for a settings change; returns (body, error).
-
-    Only fields the caller actually named are included — Feishu treats an omitted field
-    as "leave it alone", so building the body from non-empty arguments is what keeps a
-    rename from also resetting permissions.
-    """
-    body: dict[str, Any] = {}
-    if name.strip():
-        body["name"] = name.strip()
-    if description.strip():
-        body["description"] = description.strip()
-    if avatar.strip():
-        body["avatar"] = avatar.strip()
-    for field, raw in (
-        ("add_member_permission", add_member_permission),
-        ("at_all_permission", at_all_permission),
-        ("edit_permission", edit_permission),
-    ):
-        if not raw.strip():
-            continue
-        mapped, err = _normalize_chat_who(field, raw)
-        if err:
-            return {}, _error(err)
-        body[field] = mapped
-    if membership_approval.strip():
-        mapped_approval = _CHAT_APPROVAL_VALUES.get(membership_approval.strip())
-        if not mapped_approval:
-            return {}, _error(
-                f"membership_approval 的取值 {membership_approval!r} 无效; "
-                "只能是 approval_required (入群需审批) 或 no_approval_required (无需审批)。"
-            )
-        body["membership_approval"] = mapped_approval
-    if chat_type.strip():
-        mapped_type = _CHAT_TYPE_VALUES.get(chat_type.strip())
-        if not mapped_type:
-            return {}, _error(f"chat_type 的取值 {chat_type!r} 无效; 只能是 private (私有群) 或 public (公开群)。")
-        body["chat_type"] = mapped_type
-    # Feishu refuses only_owner + allowed, and accepting one half alone leaves the pair
-    # contradictory — so the partner field is derived rather than left to the caller.
-    if "add_member_permission" in body:
-        body["share_card_permission"] = "allowed" if body["add_member_permission"] == "all_members" else "not_allowed"
-    return body, None
-
-
-_DISMISS_CONFIRM = "解散群"
-
-
-# ── 全员禁言 (chat moderation) ───────────────────────────────────────────────────
-# A separate endpoint from every other group setting, which is the trap: the field named
-# ``moderation_permission`` that ``feishu_chat_get`` *reads* cannot be written through the
-# chat-update body. Writing it needs PUT .../moderation with ``moderation_setting``, plus
-# — for the "只让某几个人能说话" case — the added/removed lists, which Feishu requires to
-# be disjoint.
-_MODERATION_VALUES = {
-    "all_members": "all_members",
-    "only_owner": "only_owner",
-    "moderator_list": "moderator_list",
-    "所有群成员": "all_members",
-    "所有人可发言": "all_members",
-    "解除禁言": "all_members",
-    "取消禁言": "all_members",
-    "全员禁言": "only_owner",
-    "仅群主和管理员": "only_owner",
-    "仅群主": "only_owner",
-    "指定人员": "moderator_list",
-    "指定成员可发言": "moderator_list",
-}
 _MODERATION_ERROR_HINTS = {
     232060: "该群已被封禁, 无法修改发言权限。",
     232092: "群里正在开会, 此时改不了发言权限; 会议结束后重试。",
@@ -2878,115 +2736,6 @@ _MENU_ERROR_HINTS = {
     232056: "菜单图标 image_key 不是本机器人上传的; 用 feishu_message_upload_image 重新上传。",
     232090: "群类型不支持群菜单 (仅普通群 group)。",
 }
-_MENU_MAX_TOP = 3
-_MENU_MAX_CHILDREN = 5
-_MENU_NAME_MAX = 120
-
-
-def _menu_item(name: str, url: str, image_key: str) -> tuple[dict[str, Any], str]:
-    """One ``chat_menu_item``; returns (item, error).
-
-    A menu with no URL is a container (``action_type="NONE"``); with one it redirects.
-    ``common_url`` alone covers every platform, which is what a caller means by "点开
-    打开这个链接" — the per-platform overrides exist for apps that need them and are not
-    worth the schema here.
-    """
-    label = name.strip()
-    if not label:
-        return {}, "菜单名称不能为空。"
-    if len(label) > _MENU_NAME_MAX:
-        return {}, f"菜单名称 {label!r} 超过 {_MENU_NAME_MAX} 字。"
-    item: dict[str, Any] = {"name": label}
-    link = url.strip()
-    if link:
-        if not link.startswith(("http://", "https://")):
-            return {}, f"菜单 {label!r} 的 url 必须以 http:// 或 https:// 开头, 收到 {link!r}。"
-        item["action_type"] = "REDIRECT_LINK"
-        item["redirect_link"] = {"common_url": link}
-    else:
-        item["action_type"] = "NONE"
-    if image_key.strip():
-        item["image_key"] = image_key.strip()
-    return item, ""
-
-
-def _menu_tree_body(menus: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """Feishu's nested ``menu_tree`` from a flat ``[{name, url, image_key, children}]``."""
-    if not menus:
-        return {}, _error("menus is required — 至少给一个菜单, 形如 [{'name': '帮助', 'url': 'https://...'}]。")
-    if len(menus) > _MENU_MAX_TOP:
-        return {}, _error(f"一个群最多 {_MENU_MAX_TOP} 个一级菜单, 收到 {len(menus)} 个。")
-    top_levels: list[dict[str, Any]] = []
-    for position, raw in enumerate(menus):
-        if not isinstance(raw, dict):
-            return {}, _error(f"menus[{position}] 不是对象; 形如 {{'name': '帮助', 'url': 'https://...'}}。")
-        children_raw = raw.get("children") or []
-        if not isinstance(children_raw, list):
-            return {}, _error(f"menus[{position}].children 必须是列表。")
-        if len(children_raw) > _MENU_MAX_CHILDREN:
-            return {}, _error(f"menus[{position}] 最多 {_MENU_MAX_CHILDREN} 个二级菜单, 收到 {len(children_raw)} 个。")
-        # A parent with children may not redirect or carry an icon — Feishu's rule.
-        if children_raw and (str(raw.get("url", "")).strip() or str(raw.get("image_key", "")).strip()):
-            return {}, _error(
-                f"menus[{position}] 带了 children, 这种一级菜单只能是分组: 不能再给 url 或 image_key "
-                "(点它只会展开子菜单)。"
-            )
-        item, err = _menu_item(str(raw.get("name", "")), str(raw.get("url", "")), str(raw.get("image_key", "")))
-        if err:
-            return {}, _error(f"menus[{position}]: {err}")
-        children: list[dict[str, Any]] = []
-        for child_position, child_raw in enumerate(children_raw):
-            if not isinstance(child_raw, dict):
-                return {}, _error(f"menus[{position}].children[{child_position}] 不是对象。")
-            child_item, child_err = _menu_item(
-                str(child_raw.get("name", "")), str(child_raw.get("url", "")), str(child_raw.get("image_key", ""))
-            )
-            if child_err:
-                return {}, _error(f"menus[{position}].children[{child_position}]: {child_err}")
-            children.append({"chat_menu_item": child_item})
-        entry: dict[str, Any] = {"chat_menu_item": item}
-        if children:
-            entry["children"] = children
-        top_levels.append(entry)
-    return {"menu_tree": {"chat_menu_top_levels": top_levels}}, None
-
-
-def _menu_summary(data: Any) -> list[dict[str, Any]]:
-    """Flatten Feishu's ``menu_tree`` reply into ``[{id, name, url, children}]``.
-
-    The ids matter: deleting or reordering menus keys off ``chat_menu_top_level_id``,
-    and it is only ever returned here.
-    """
-    tree = data.get("menu_tree") if isinstance(data, dict) else None
-    top_levels = tree.get("chat_menu_top_levels") if isinstance(tree, dict) else None
-    out: list[dict[str, Any]] = []
-    for raw in top_levels or []:
-        if not isinstance(raw, dict):
-            continue
-        item = raw.get("chat_menu_item") if isinstance(raw.get("chat_menu_item"), dict) else {}
-        link = item.get("redirect_link") if isinstance(item.get("redirect_link"), dict) else {}
-        children: list[dict[str, Any]] = []
-        for child in raw.get("children") or []:
-            if not isinstance(child, dict):
-                continue
-            child_item = child.get("chat_menu_item") if isinstance(child.get("chat_menu_item"), dict) else {}
-            child_link = child_item.get("redirect_link") if isinstance(child_item.get("redirect_link"), dict) else {}
-            children.append(
-                {
-                    "id": child.get("chat_menu_second_level_id", ""),
-                    "name": child_item.get("name", ""),
-                    "url": child_link.get("common_url", "") if isinstance(child_link, dict) else "",
-                }
-            )
-        entry: dict[str, Any] = {
-            "id": raw.get("chat_menu_top_level_id", ""),
-            "name": item.get("name", ""),
-            "url": link.get("common_url", "") if isinstance(link, dict) else "",
-        }
-        if children:
-            entry["children"] = children
-        out.append(entry)
-    return out
 
 
 # ── 群标签页 (chat tabs) — the pinned tabs across the top of a group ─────────────
@@ -3003,27 +2752,6 @@ _TAB_ERROR_HINTS = {
     232051: "缺少该文档的权限; 先把文档共享给机器人 (或传本人 user_key)。",
     232055: "机器人没有管理群标签页的权限 (该群限定群主/管理员才能改)。",
 }
-_TAB_CREATABLE_TYPES = ("doc", "url")
-_TAB_NAME_MAX = 60
-
-
-def _tab_summary(data: Any) -> list[dict[str, Any]]:
-    """Feishu's ``chat_tabs`` reply as ``[{tab_id, name, type, content}]``."""
-    tabs = data.get("chat_tabs") if isinstance(data, dict) else None
-    out: list[dict[str, Any]] = []
-    for raw in tabs or []:
-        if not isinstance(raw, dict):
-            continue
-        content = raw.get("tab_content") if isinstance(raw.get("tab_content"), dict) else {}
-        out.append(
-            {
-                "tab_id": raw.get("tab_id", ""),
-                "name": raw.get("tab_name", ""),
-                "type": raw.get("tab_type", ""),
-                "content": content.get("url") or content.get("doc") or "",
-            }
-        )
-    return out
 
 
 async def upload_chat_avatar_impl(image_path: str, user_key: str = "") -> dict[str, Any]:
@@ -3050,23 +2778,6 @@ async def upload_chat_avatar_impl(image_path: str, user_key: str = "") -> dict[s
         return _with_hint(res, _UPLOAD_ERROR_HINTS)
     rdata = res["data"] if isinstance(res["data"], dict) else {}
     return {"ok": True, "image_key": rdata.get("image_key", ""), "file_name": name, "size": len(data)}
-
-
-# ── 会话列表 (chat list) — every group the caller is in ──────────────────────────
-#
-# The complement to ``find_chat_impl``: search answers "which group is called 产品评审",
-# this answers "what groups are there at all" — needed when the user says 「我在哪些群」or
-# when a sweep has to cover every group without a name to search by.
-#
-# Two things separate it from a bare feishu_api call. ``sort_type="ByActiveTimeDesc"`` is
-# the one a person means by 「最近活跃的群」, but Feishu warns that paging through it can
-# *skip groups*, since activity order shifts underfoot; so paging is only done under the
-# stable creation-time order, and the active-time ordering is applied locally to a single
-# page. And ``prefer`` decides *whose* list this is: the bot's groups (tenant) or the
-# caller's own (user token) — the same endpoint, two entirely different answers, which is
-# the mistake worth making impossible.
-_CHAT_STATUS_LABELS = {"normal": "正常", "dissolved": "已解散", "dissolved_save": "已解散(保留记录)"}
-_CHAT_LIST_PAGE_MAX = 100
 
 
 # ── 消息搜索 (message search) — find messages by keyword across chats ────────────
@@ -9928,7 +9639,7 @@ _CONTACT_ADMIN_ERROR_HINTS = {
     41208: "角色数量已达租户上限 500。",
     41209: "单个角色成员数已达上限 1000。",
     41410: "主部门的 department_order 必须是最大的那个。",
-    42002: "group_id 非法; 用 feishu_user_group(action='list') 重新取。",
+    42002: "group_id 非法; 用 GET /open-apis/contact/v3/group/simplelist 重新取。",
     42005: "该成员已在这个用户组里 (无需重复添加)。",
     42006: "该用户已离职, 不能加入用户组。",
     42009: "该用户组不在应用的通讯录权限范围内。",
@@ -9956,7 +9667,7 @@ _CONTACT_ADMIN_ERROR_HINTS = {
 
 # ── Contact — 按手机号/邮箱定位用户 (users/batch_get_id) ────────────────────────
 #
-# 补上「只有一串手机号/邮箱, 要拿 open_id」这个缺口: feishu_contact_search 只能按
+# 补上「只有一串手机号/邮箱, 要拿 open_id」这个缺口: 按名字全局搜 (search/v1/user) 只能按
 # *姓名* 搜且只吃 user token, 这个按联系方式精确命中且用 tenant token。
 #
 # 四个照着文档写也会踩的地方, 所以做成 Python 工具而不是留给 feishu_api:
@@ -10321,115 +10032,6 @@ async def department_get_impl(
     return result
 
 
-# ── Contact — 用户写操作 (创建 / 修改 / 离职) ───────────────────────────────────
-#
-# 三件事都只吃 tenant token (scope contact:contact), 所以 prefer="tenant": 通讯录条目
-# 没有「归谁」的问题, 走 prefer="user" 会问一个答不上来的归属问题。
-#
-# 离职 (DELETE) 是这批里唯一不可逆的动作, 且飞书的默认行为有隐藏后果: 不传转交人时
-# 文档/日历/问卷等资源默认转交给直属上级, 而**没有上级时日历和问卷是直接删掉的**。
-# 所以离职要求显式 confirm, 同 feishu_chat_dismiss 的护栏 —— 让「把张三清一下」这种
-# 模糊指令不足以让人离职。
-_RESIGN_CONFIRM = "离职用户"
-_EMPLOYEE_TYPES = {1: "正式", 2: "实习", 3: "外包", 4: "劳务", 5: "顾问"}
-
-
-def _user_summary(raw: Any) -> dict[str, Any]:
-    """建/改用户后飞书回的 user 对象, 收成和 feishu_user_get 一致的形状。"""
-    it = raw if isinstance(raw, dict) else {}
-    status = it.get("status", {}) if isinstance(it.get("status"), dict) else {}
-    return {
-        "open_id": it.get("open_id", ""),
-        "user_id": it.get("user_id", ""),
-        "union_id": it.get("union_id", ""),
-        "name": it.get("name", ""),
-        "mobile": it.get("mobile", ""),
-        "email": it.get("email", ""),
-        "enterprise_email": it.get("enterprise_email", ""),
-        "job_title": it.get("job_title", ""),
-        "employee_type": it.get("employee_type", 0),
-        "employee_no": it.get("employee_no", ""),
-        "department_ids": it.get("department_ids", []),
-        "leader_user_id": it.get("leader_user_id", ""),
-        "is_resigned": bool(status.get("is_resigned")),
-        "is_activated": bool(status.get("is_activated")),
-    }
-
-
-def _optional_user_fields(
-    name: str,
-    mobile: str,
-    email: str,
-    department_ids: str,
-    employee_type: int,
-    leader_user_id: str,
-    job_title: str,
-    employee_no: str,
-    en_name: str,
-    nickname: str,
-    gender: int,
-    city: str,
-    work_station: str,
-    enterprise_email: str,
-) -> dict[str, Any]:
-    """只把真正给了值的字段放进 body —— PATCH 的语义是「没传的不改」,
-    所以塞一个空字符串会把原值**清掉**, 那是最容易犯的破坏性错误。"""
-    body: dict[str, Any] = {}
-    for key, value in (
-        ("name", name),
-        ("mobile", mobile),
-        ("email", email),
-        ("leader_user_id", leader_user_id),
-        ("job_title", job_title),
-        ("employee_no", employee_no),
-        ("en_name", en_name),
-        ("nickname", nickname),
-        ("city", city),
-        ("work_station", work_station),
-        ("enterprise_email", enterprise_email),
-    ):
-        if value and value.strip():
-            body[key] = value.strip()
-    depts = _split_contacts(department_ids)
-    if depts:
-        body["department_ids"] = depts
-    if employee_type:
-        body["employee_type"] = employee_type
-    if gender:
-        body["gender"] = gender
-    return body
-
-
-# ── Contact — 部门写操作 (创建 / 修改 / 删除) ───────────────────────────────────
-#
-# 删部门要求显式 confirm, 同离职。飞书这边还有个前置条件值得提前说清: 部门必须**空**
-# 才能删 —— 有人报 43011, 有子部门报 43012。所以删一棵子树只能从最深一层往上删, 这跟
-# 文档块删除那个「必须从大序号往小删」是同一类顺序陷阱。
-#
-# 改部门有两个静默破坏点, 都在 hint 和文档里点出来:
-#  - leaders / department_hrbps 传**空数组**是「清空」而不是「不改」;
-#  - leader_user_id 与主负责人 (leaderType=1) 联动, 改一个另一个跟着变。
-# 这里的做法是: 没传就完全不放进 body, 于是「不改」永远不会被误解成「清空」。
-_DEPARTMENT_DELETE_CONFIRM = "删除部门"
-
-
-# ── Contact — 用户组 (group) ────────────────────────────────────────────────────
-#
-# 用户组是「一批人」的命名集合, 可以被云文档权限、审批流等直接引用, 所以它和群聊
-# (chat) 完全不是一回事 —— 用户组不能发消息, 群聊不能当权限主体。
-#
-# 端点分布得很不规整, 这也是做成 Python 工具的理由:
-#   建组   POST   /contact/v3/group          (不是 /groups, 没有复数)
-#   列表   GET    /contact/v3/group/simplelist
-#   详情   GET    /contact/v3/group/:group_id
-#   改/删  PATCH/DELETE /contact/v3/group/:group_id
-#   成员   POST   /contact/v3/group/:group_id/member/add | remove
-#   成员表 GET    /contact/v3/group/:group_id/member/simplelist
-# 另外建组要求应用通讯录范围 = 全部成员 (否则 42010), 而它只在建组这一个动作上要求。
-_GROUP_DELETE_CONFIRM = "删除用户组"
-_GROUP_TYPES = {1: "普通用户组", 2: "动态用户组"}
-
-
 def _build_group_member_request(group_id: str, action: str, body: dict[str, Any]) -> BaseRequest:
     req = BaseRequest()
     req.http_method = HttpMethod.POST
@@ -10456,20 +10058,6 @@ def _build_group_member_list_request(
     return req
 
 
-def _group_record(it: Any) -> dict[str, Any]:
-    raw = it if isinstance(it, dict) else {}
-    gtype = raw.get("type", 1)
-    return {
-        "group_id": raw.get("id", "") or raw.get("group_id", ""),
-        "name": raw.get("name", ""),
-        "description": raw.get("description", ""),
-        "type": gtype,
-        "type_text": _GROUP_TYPES.get(gtype, str(gtype)),
-        "member_user_count": raw.get("member_user_count", 0),
-        "member_department_count": raw.get("member_department_count", 0),
-    }
-
-
 async def user_group_members_impl(
     group_id: str,
     action: str = "list",
@@ -10486,7 +10074,7 @@ async def user_group_members_impl(
     """
     gid = (group_id or "").strip()
     if not gid:
-        return _error("group_id 是必填的; 用 feishu_user_group(action='list') 取。")
+        return _error("group_id 是必填的; 用 GET /open-apis/contact/v3/group/simplelist 取。")
     act = (action or "").strip().lower()
     if act not in {"list", "add", "remove"}:
         return _error(f"action 只能是 list, add, remove (当前 '{action}')。")

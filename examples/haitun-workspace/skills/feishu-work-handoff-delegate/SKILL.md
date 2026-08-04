@@ -1,6 +1,6 @@
 ---
 name: feishu-work-handoff-delegate
-description: "工作同步 + 交接代答 — 飞书成员私聊 HaiTun 同步自己负责的工作（当前进展 / 下一步 / 交接原则），HaiTun 记进一张团队可见的『工作交接台账』多维表格；之后别人来找这个人对接、而本人不在时，HaiTun 在其交接原则的框架内代答『当前进展 + 下一步该做什么』。Use in two cases: (1) a member DMs the bot to sync their own work status/next-steps/handoff principles — record it into a Feishu bitable under their own sender_open_id; (2) someone asks about another person's work or says they're taking over — read that person's rows from the bitable and, strictly within the recorded 交接原则, tell them the current progress and next step. Anything outside the principles: say it's not authorized, give the owner's contact via feishu_user_get, optionally notify the owner with feishu_message_send. Uses feishu_bitable_* (read/write the ledger), feishu_chat_find_member / feishu_department_members (resolve names to open_id), feishu_user_get (contacts), feishu_message_send (relay/notify). Needs bitable:app scope + the app as a collaborator on the ledger base, and contact scopes for phone/email."
+description: "工作同步 + 交接代答 — 飞书成员私聊 HaiTun 同步自己负责的工作（当前进展 / 下一步 / 交接原则），HaiTun 记进一张团队可见的『工作交接台账』多维表格；之后别人来找这个人对接、而本人不在时，HaiTun 在其交接原则的框架内代答『当前进展 + 下一步该做什么』。Use in two cases: (1) a member DMs the bot to sync their own work status/next-steps/handoff principles — record it into a Feishu bitable under their own sender_open_id; (2) someone asks about another person's work or says they're taking over — read that person's rows from the bitable and, strictly within the recorded 交接原则, tell them the current progress and next step. Anything outside the principles: say it's not authorized, give the owner's contact via feishu_api (GET contact/v3/users/batch), optionally notify the owner with feishu_message_send. Uses feishu_bitable_* (read/write the ledger), feishu_chat_find_member / feishu_department_members (resolve names to open_id), feishu_api for contacts (see the feishu-contact skill), feishu_message_send (relay/notify). Needs bitable:app scope + the app as a collaborator on the ledger base, and contact scopes for phone/email."
 category: productivity
 ---
 
@@ -22,7 +22,7 @@ category: productivity
   / `feishu_bitable_create_record(app_token, table_id, fields_json)` — 读写工作交接台账
 - `feishu_bitable_list_fields` / `feishu_bitable_delete_fields` / `feishu_bitable_clear_table`
   — 建表后清默认空行/占位列
-- `feishu_user_get(user_ids, ...)` — 用 open_id 取负责人联系方式（电话/邮箱/职位）
+- `feishu_api` 调 `GET /open-apis/contact/v3/users/batch` — 用 open_id 取负责人联系方式（电话/邮箱/职位）；先读 `feishu-contact` skill
 - `feishu_chat_find_member(...)` / `feishu_department_members(...)` — 按姓名反查 open_id
 - `feishu_message_send(receive_id, text, on_behalf_of=...)` — 通知本人有人来交接，或代人带话署名
 - `feishu_wiki_get_node(node_token)` — wiki 链接换 `app_token`
@@ -108,7 +108,7 @@ category: productivity
 
 1. **如实说未授权**：明确讲「这块超出 {负责人} 给我的交接原则，我不能替他定，需要他本人确认」，
    **绝不越权承诺、不替本人拍板、不编原则来硬答**。
-2. **给联系方式兜底**：拿负责人 `open_id` 调 `feishu_user_get(user_ids=<open_id>)` 取
+2. **给联系方式兜底**：拿负责人 `open_id` 调 `feishu_api(endpoint="GET /open-apis/contact/v3/users/batch", query={"user_ids": [<open_id>]})` 取
    `name` / `mobile` / `email` / `job_title` 给来问的人。读不到就说「电话/邮箱没读到
    （可能权限没开），可在飞书里直接 @他」并给其飞书姓名，**不编号码**。
 3. **可选：通知本人有人来交接**：`feishu_message_send(receive_id=<负责人 open_id>,

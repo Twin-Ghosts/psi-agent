@@ -55,7 +55,7 @@ description: "把分散在飞书群聊、话题线程、文档、知识库、评
 | 消息图片或附件 | `feishu_image_get`；云盘附件用 `feishu_file_download` |
 | 电子表格 | `feishu_sheet_tabs` → `feishu_sheet_read` |
 | 多维表格 | `feishu_bitable_list_tables` → `feishu_bitable_list_records` |
-| 人员与群消歧 | `feishu_chat_find_member`、`feishu_chat_list_members`、`feishu_user_get` |
+| 人员与群消歧 | `feishu_chat_find_member`；群成员列表与查人走 `feishu_api`（`GET /open-apis/im/v1/chats/:chat_id/members`、`GET /open-apis/contact/v3/users/batch`，见 `feishu-chat` / `feishu-contact` skill） |
 | 用户直接提供的文件 | 读取 `[RECV:]` 路径；PDF/扫描件遵循 `ocr-and-documents` |
 
 直接链接优先于全库搜索。tenant 权限能读时优先使用；只有返回 `need_auth=true` 或明确权限不足时才走 `feishu_auth_*` 用户授权流程。
