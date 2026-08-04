@@ -420,6 +420,121 @@ def test_no_paginate_sends_exactly_one_request(monkeypatch: pytest.MonkeyPatch, 
     assert len(rec.requests) == 1, "paging must be opt-in per endpoint"
 
 
+# ------------------------------------------- a rule reached by prefix cannot refuse
+#
+# Feishu hangs unrelated operations under a collection URI, so the parent's payload
+# constraints must not reach the child. Left inheriting, ``POST /im/v1/chats``
+# (requires ``name``) refuses ``POST /im/v1/chats/:chat_id/managers/add_managers``,
+# which takes no ``name`` — the endpoint becomes unreachable through either route.
+
+
+_NESTED_SKILL = """
+```rules
+- endpoint: POST /open-apis/demo/chats
+  token: tenant
+  required: [name]
+  confirm: MAKE_CHAT
+  fields:
+    page_size: {max: 50, default: 20}
+```
+"""
+
+
+def _nested(tmp_path: Path) -> Path:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(_NESTED_SKILL, encoding="utf-8")
+    return tmp_path
+
+
+def test_prefix_matched_rule_drops_required(tmp_path: Path) -> None:
+    rule = _spec.rules_for(_nested(tmp_path), "POST", "/open-apis/demo/chats/ocX/managers")
+    assert rule is not None, "the subtree rule should still be found"
+    assert rule.required == [], "a child endpoint must not inherit the parent's required fields"
+    assert _spec.validate(rule, {}, {}, {}) == []
+
+
+def test_prefix_matched_rule_drops_confirm(tmp_path: Path) -> None:
+    rule = _spec.rules_for(_nested(tmp_path), "POST", "/open-apis/demo/chats/ocX/managers")
+    assert rule is not None
+    assert not rule.confirm, "a confirm token guards one irreversible call, not a whole subtree"
+
+
+def test_prefix_matched_rule_drops_hard_prefer_tool(tmp_path: Path) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "```rules\n- endpoint: POST /open-apis/demo/messages\n  prefer_tool: demo_send\n  hard: true\n```\n",
+        encoding="utf-8",
+    )
+    rule = _spec.rules_for(tmp_path, "POST", "/open-apis/demo/messages/omX/urgent_app")
+    assert rule is not None
+    assert not rule.prefer_hard, "refusing a child names a tool that cannot do the child's job"
+    assert not rule.prefer_tool
+
+
+def test_prefix_matched_rule_injects_no_defaults(tmp_path: Path) -> None:
+    rule = _spec.rules_for(_nested(tmp_path), "POST", "/open-apis/demo/chats/ocX/managers")
+    assert _spec.defaults_for(rule)["query"] == {}, "a default would add a field the child never declared"
+
+
+def test_prefix_matched_rule_keeps_token_and_field_checks(tmp_path: Path) -> None:
+    """Advice still travels: the subtree's token strategy and value checks are useful."""
+    rule = _spec.rules_for(_nested(tmp_path), "POST", "/open-apis/demo/chats/ocX/managers")
+    assert rule is not None
+    assert rule.token == "tenant"
+    assert _spec.validate(rule, {}, {"page_size": 500}, {}) != [], "value checks only fire on fields actually sent"
+
+
+def test_exact_match_still_enforces_everything(tmp_path: Path) -> None:
+    """The downgrade must not leak upward and weaken the endpoint that owns the rule."""
+    rule = _spec.rules_for(_nested(tmp_path), "POST", "/open-apis/demo/chats")
+    assert rule is not None
+    assert rule.required == ["name"]
+    assert rule.confirm == "MAKE_CHAT"
+    assert _spec.defaults_for(rule)["query"] == {"page_size": 20}
+
+
+def test_nested_endpoint_with_its_own_rule_is_enforced(tmp_path: Path) -> None:
+    """The escape hatch: an endpoint that needs enforcement declares its own row."""
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "```rules\n"
+        "- endpoint: POST /open-apis/demo/chats\n  required: [name]\n"
+        "- endpoint: POST /open-apis/demo/chats/:chat_id/members\n  required: [id_list]\n"
+        "```\n",
+        encoding="utf-8",
+    )
+    rule = _spec.rules_for(tmp_path, "POST", "/open-apis/demo/chats/ocX/members")
+    assert rule is not None
+    assert rule.required == ["id_list"], "the specific rule wins and keeps its teeth"
+    assert _spec.validate(rule, {}, {}, {}) == ["缺少必填字段 id_list"]
+
+
+@pytest.mark.parametrize(
+    ("method", "uri", "what"),
+    [
+        ("POST", "/open-apis/im/v1/messages/om_x/urgent_app", "加急(应用内)"),
+        ("POST", "/open-apis/im/v1/messages/om_x/urgent_sms", "加急(短信)"),
+        ("POST", "/open-apis/im/v1/messages/om_x/push_follow_up", "follow-up"),
+        ("GET", "/open-apis/im/v1/messages/om_x", "读单条消息"),
+        ("POST", "/open-apis/im/v1/chats/oc_x/managers/add_managers", "加群管理员"),
+        ("DELETE", "/open-apis/im/v1/chats/oc_x/managers/delete_managers", "删群管理员"),
+        ("POST", "/open-apis/bitable/v1/apps/app_x/tables/tbl_x/views", "建视图"),
+        ("POST", "/open-apis/contact/v3/users/ou_x/resurrect", "恢复离职用户"),
+    ],
+)
+def test_shipped_skills_strand_no_real_endpoint(method: str, uri: str, what: str) -> None:
+    """Real Feishu endpoints we did not table must stay callable through the generic tool."""
+    rule = _spec.rules_for(SKILLS_DIR, method, uri)
+    if rule is None:
+        return
+    assert not rule.prefer_hard, f"{what} 被 {rule.endpoint} 拦下, 指向的工具做不了这件事"
+    assert not rule.confirm, f"{what} 继承了 {rule.endpoint} 的 confirm, 那个令牌是给别的调用的"
+    assert _spec.validate(rule, {}, {}, {}) == [], f"{what} 继承了 {rule.endpoint} 的必填字段"
+
+
 # ------------------------------------------------- the real contact skill on disk
 
 

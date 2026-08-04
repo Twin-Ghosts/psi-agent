@@ -51,10 +51,22 @@ downgrade no amount of documentation makes up for. So the token moves into the r
 and the request is refused until ``confirm`` matches. Resigning a user has no undo
 beyond ``/resurrect``, and deleting a group silently strips the permission subject
 from every document and approval that referenced it.
+
+A rule matched by *prefix* rather than exactly is downgraded to advice before it is
+returned, because prefix matching and refusal compose badly. Feishu hangs unrelated
+operations under a collection URI: ``POST /im/v1/messages`` sends a message, while
+``POST /im/v1/messages/:message_id/urgent_app`` marks an existing one urgent, and
+``POST /im/v1/chats`` requires ``name`` where ``POST /im/v1/chats/:chat_id/members``
+has no such field. Left to inherit, the parent's ``required``/``confirm``/``hard``
+would make every such child unreachable — refused for a field it does not take, or
+told to echo a confirm token belonging to a different irreversible call. So a rule
+enforces only its own endpoint, and lends the subtree nothing but its token strategy
+and pitfalls. See :meth:`Rule.as_advice`.
 """
 
 from __future__ import annotations
 
+import copy
 import functools
 import pathlib
 import re
@@ -118,6 +130,9 @@ class Rule:
 
         Comparing whole segments — rather than raw string prefixes — is what keeps
         ``/x/batch`` from also claiming ``/x/batch_v2``.
+
+        A prefix match is not the same claim as an exact one, though — see
+        :meth:`governs_exactly` and :meth:`as_advice`.
         """
         if self.method and self.method != method:
             return False
@@ -127,6 +142,41 @@ class Rule:
         if len(parts) < len(self._segments):
             return False
         return all(mine.startswith(":") or mine == theirs for mine, theirs in zip(self._segments, parts, strict=False))
+
+    def governs_exactly(self, uri: str) -> bool:
+        """Whether ``uri`` is this rule's own endpoint rather than one nested under it."""
+        return len([p for p in uri.split("/") if p]) == len(self._segments)
+
+    def as_advice(self) -> Rule:
+        """This rule with everything that can *block* a call stripped out.
+
+        What a rule inherited by prefix may still say, and what it may not, differ in
+        kind. ``token`` and ``pitfalls`` describe the whole subtree — bitable writes
+        want a user token wherever they appear. But ``required``, ``confirm``,
+        ``hard`` and field ``default``\\ s describe one operation's payload, and Feishu
+        hangs unrelated operations under a collection URI: ``POST /im/v1/chats``
+        creates a group and requires ``name``, while ``POST /im/v1/chats/:id/members``
+        adds people to one and has no ``name`` at all. Inheriting the payload half
+        makes the child unreachable — refused for a missing field it does not take, or
+        told to echo a confirm token meant for a different, irreversible call.
+
+        So an inherited rule keeps its advice and drops its authority. An endpoint that
+        needs enforcement gets its own row, which wins on specificity anyway.
+        """
+        quiet = copy.copy(self)
+        quiet.required = []
+        quiet.confirm = ""
+        quiet.prefer_hard = False
+        quiet.prefer_tool = ""
+        quiet.why = ""
+        # ``fields`` stays: its checks only fire on a field the caller actually sent, so
+        # they cannot strand a child. Its ``default``\\s must go — those would inject a
+        # body field the child endpoint never declared.
+        quiet.fields = {
+            name: {k: v for k, v in spec.items() if k != "default"} if isinstance(spec, dict) else spec
+            for name, spec in self.fields.items()
+        }
+        return quiet
 
     @property
     def specificity(self) -> int:
@@ -226,10 +276,15 @@ def _cached(skills_dir: str) -> tuple[Rule, ...]:
 
 
 def rules_for(skills_dir: str | pathlib.Path, method: str, uri: str) -> Rule | None:
-    """The most specific rule governing ``method uri``, or None."""
+    """The most specific rule governing ``method uri``, or None.
+
+    A rule reached by prefix comes back as advice only (:meth:`Rule.as_advice`), so an
+    endpoint without its own row can still pick up the subtree's token strategy but can
+    never be refused by a constraint written for its parent.
+    """
     for rule in _cached(str(skills_dir)):
         if rule.matches((method or "").upper(), uri or ""):
-            return rule
+            return rule if rule.governs_exactly(uri or "") else rule.as_advice()
     return None
 
 
