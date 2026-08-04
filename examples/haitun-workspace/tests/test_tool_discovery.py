@@ -1736,7 +1736,11 @@ async def test_assignment_send_card_delivers_each_recipient_on_one_shared_record
         "ou_assigner",
         "ou_second",
     ]
-    assert {recipient["delivery_open_id"] for recipient in fake_client.delivery["recipients"]} == {
+    delivery = fake_client.delivery
+    assert isinstance(delivery, dict)
+    recipients = delivery.get("recipients")
+    assert isinstance(recipients, list)
+    assert {recipient["delivery_open_id"] for recipient in recipients if isinstance(recipient, dict)} == {
         "ou_first",
         "ou_second",
     }
@@ -3281,7 +3285,7 @@ class _QueueMemoryClient:
             return {"ok": True, "result": self.delivery}
         target = payload.get("target")
         recipient_open_id = payload.get("recipient_open_id")
-        recipient = None
+        recipient: dict[str, Any] | None = None
         if target == "recipient":
             recipient = next(
                 (item for item in self.delivery["recipients"] if recipient_open_id in item.get("open_ids", [])),
@@ -3299,7 +3303,11 @@ class _QueueMemoryClient:
                 }
                 self.delivery["recipients"].append(recipient)
         if action == "claim_send":
-            status = self.delivery["progress_status"] if target == "progress" else recipient["send_status"]
+            if target == "progress":
+                status = self.delivery["progress_status"]
+            else:
+                assert recipient is not None
+                status = recipient["send_status"]
             if status != "pending":
                 return {
                     "ok": True,
@@ -3315,6 +3323,7 @@ class _QueueMemoryClient:
             if target == "progress":
                 self.delivery["progress_status"] = "claimed"
             else:
+                assert recipient is not None
                 recipient["send_status"] = "claimed"
                 recipient["delivery_open_id"] = recipient_open_id
             self.delivery["revision"] += 1
@@ -3334,6 +3343,7 @@ class _QueueMemoryClient:
                 if status == "sent":
                     self.delivery["assigner_progress_message_id"] = payload.get("message_id")
             else:
+                assert recipient is not None
                 recipient["send_status"] = status
                 if status == "sent":
                     recipient["message_id"] = payload.get("message_id")

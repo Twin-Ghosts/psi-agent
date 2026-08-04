@@ -783,7 +783,7 @@ def _dict_value(value: Any) -> dict[str, Any]:
 
 
 def _feedback_projection(payload: dict[str, Any]) -> dict[str, Any]:
-    projection = {
+    projection: dict[str, Any] = {
         field: value for field in _PROJECTION_TEXT_FIELDS if (value := _required_text(payload.get(field))) is not None
     }
     attempts = _string_items(payload.get("attempts"))

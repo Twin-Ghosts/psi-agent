@@ -164,7 +164,9 @@ async def test_assignment_delivery_event_isolates_one_user_emit_failure(
 
     class FakeContext:
         async def emit(self, envelope: dict[str, object]) -> None:
-            open_id = envelope["routing"]["open_id"]
+            routing = envelope.get("routing")
+            assert isinstance(routing, dict)
+            open_id = routing.get("open_id")
             assert isinstance(open_id, str)
             emitted.append(open_id)
             if open_id == "ou_a":
