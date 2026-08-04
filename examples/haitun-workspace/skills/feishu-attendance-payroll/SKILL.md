@@ -18,11 +18,13 @@ Uses existing tools:
 
 To explain *why* a day is Normal/Late/Early/Lack — the punch time segments, the
 flexible window, and the late/early thresholds behind the result — read the
-admin-console config (all read-only):
-- `feishu_attendance_groups()` / `feishu_attendance_group_config(group_id)` — the
-  考勤组: punch method, 外勤/PC 打卡, 缺卡规则, bound shift ids, 排班特殊日期
-- `feishu_attendance_shifts()` / `feishu_attendance_shift_config(shift_id)` — the
-  班次: 打卡时间段 (`punch_time_rule`), 弹性规则 (`flexible_rule`/`is_flexible`),
+admin-console config with `feishu_api` (all read-only; see the `feishu-attendance`
+skill for the endpoint table):
+- `GET /open-apis/attendance/v1/groups` → `GET /open-apis/attendance/v1/groups/:group_id`
+  — the 考勤组: punch method, 外勤/PC 打卡, 缺卡规则, bound shift ids (`punch_day_shift_ids`),
+  排班特殊日期
+- `GET /open-apis/attendance/v1/shifts` → `GET /open-apis/attendance/v1/shifts/:shift_id`
+  — the 班次: 打卡时间段 (`punch_time_rule`), 弹性规则 (`flexible_rule`/`is_flexible`),
   迟到/早退/缺卡 阈值
 
 ## Every run: get the rule from the user first

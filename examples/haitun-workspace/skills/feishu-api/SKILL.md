@@ -42,6 +42,10 @@ category: integration
 | 群管理（建群/拉人/踢人/群设置/禁言/转让群主/解散群/群菜单/群标签页） | `feishu-chat` | 解散群要 `confirm="解散群"`；禁言不在群设置那个 body 里 |
 | 通讯录（查人/搜人/建改用户/部门增删改/用户组） | `feishu-contact` | 离职要 `confirm="离职用户"`、删部门 `confirm="删除部门"`、删用户组 `confirm="删除用户组"` |
 | 消息（撤回/表情回应/置顶/转发/消息列表） | `feishu-message` | 撤回时限、置顶权限、合并转发必须同源 |
+| 多维表格（表/字段/记录） | `feishu-bitable` | 列名对不上会被静默丢弃，所以字段先校验再写 |
+| 审批（读定义/查待办/列实例/同意拒绝/订阅） | `feishu-approval` | 同意拒绝要凑齐身份四元组；两张数字状态表在那份技能里 |
+| 云盘与文档评论（列评论/列回复/删文件） | `feishu-drive` | 删文件的 `type` 只认九个值；上传和下载是专用工具 |
+| 考勤（考勤组配置/班次配置） | `feishu-attendance` | `page_size` 上限 50 会硬拦；打卡记录是专用工具 |
 
 ## 参数怎么填
 
@@ -148,15 +152,13 @@ scope 是 `contact:functional_role`（只读用 `contact:functional_role:readonl
 
 ### 考勤
 
-| 要什么 | method + uri |
-|---|---|
-| 打卡记录 | `POST /open-apis/attendance/v1/user_tasks/query` — body: `{"user_ids":[...],"check_date_from":20260801,"check_date_to":20260807}`，query: `{"employee_type":"employee_id"}` |
-| 考勤组列表 | `POST /open-apis/attendance/v1/groups/list` |
-| 考勤组配置 | `GET /open-apis/attendance/v1/groups/:group_id` |
-| 班次列表 | `POST /open-apis/attendance/v1/shifts/list` |
-| 班次配置 | `GET /open-apis/attendance/v1/shifts/:shift_id` |
+考勤组和班次的配置**看 `feishu-attendance` 那份接口表**，那里的规则会在发请求之前拦下
+超出上限的 `page_size` 和不认的 id 类型。打卡记录用专用工具 `feishu_attendance_query`
+（它把两层嵌套的打卡数组摊平成一人一天一行，并单独给出查不到的人）。
 
 日期是 **整数** `YYYYMMDD`，不是字符串。`user_ids` 要的是 employee_id 体系，跟 open_id 不同。
+以上都是只读，但除了 scope 之外**还要在考勤管理后台单独授一次数据权限范围**，否则回
+1220004 / 1220005 —— 那不是参数错，别改参数重试。
 
 ### 云文档搜索
 
