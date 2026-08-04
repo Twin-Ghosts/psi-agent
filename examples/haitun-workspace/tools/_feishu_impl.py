@@ -1199,33 +1199,6 @@ async def send_card_impl(
     }
 
 
-def _build_reply_message_request(message_id: str, text: str, reply_in_thread: bool) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/im/v1/messages/:message_id/reply"
-    req.paths["message_id"] = message_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {
-        "content": json.dumps({"text": text}, ensure_ascii=False),
-        "msg_type": "text",
-        "reply_in_thread": reply_in_thread,
-    }
-    return req
-
-
-async def reply_message_impl(message_id: str, text: str, reply_in_thread: bool) -> dict[str, Any]:
-    """Reply to a message. reply_in_thread=True forms/continues a native Feishu thread (topic)."""
-    res = await _invoke(_build_reply_message_request(message_id, text, reply_in_thread))
-    if not res["ok"]:
-        return res
-    data = res["data"] if isinstance(res["data"], dict) else {}
-    return {
-        "ok": True,
-        "message_id": data.get("message_id", ""),
-        "thread_id": data.get("thread_id", ""),
-    }
-
-
 # ── Recall (unsend) a message ─────────────────────────────────────────────────
 #
 # DELETE /open-apis/im/v1/messages/:message_id removes a message from everyone's
@@ -1246,43 +1219,6 @@ _RECALL_ERROR_HINTS = {
     230110: "该消息已被撤回或删除, 无需再撤回。",
     232009: "群组已解散, 无法撤回。",
 }
-
-
-def _build_recall_message_request(message_id: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.DELETE
-    req.uri = "/open-apis/im/v1/messages/:message_id"
-    req.paths["message_id"] = message_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
-
-
-async def recall_message_impl(message_id: str, user_key: str = "") -> dict[str, Any]:
-    """Recall (unsend) a message so it disappears for everyone in the chat.
-
-    ``message_id`` must be a message id (``om_...``) — a chat_id/open_id is the
-    common mix-up and is rejected up front rather than spending a request on
-    ``230001 invalid param``.
-
-    Feishu returns an empty ``data`` on success, so success is reported explicitly.
-    Failures keep the raw ``code``/``msg`` and gain a ``hint`` naming the actual
-    blocker (not the bot's own message, past the recall window, already recalled…),
-    because those are indistinguishable from a bare "Feishu API error 2300xx".
-    """
-    mid = message_id.strip()
-    if not mid:
-        return _error("message_id is required (the om_... id of the message to recall).")
-    if not mid.startswith("om_"):
-        return _error(
-            f"message_id must be a message id starting with 'om_', got {mid!r}. "
-            "chat_id (oc_...) / open_id (ou_...) 不是消息 id; "
-            "消息 id 来自 feishu_message_send 的返回、<feishu_context>, 或 feishu_message_list。",
-        )
-    res = await _invoke(_build_recall_message_request(mid), user_key=user_key, prefer="tenant")
-    if not res["ok"]:
-        hint = _RECALL_ERROR_HINTS.get(res.get("code"))
-        return {**res, "hint": hint} if hint else res
-    return {"ok": True, "message_id": mid, "recalled": True}
 
 
 # ── Edit a message that was already sent ──────────────────────────────────────
@@ -1343,7 +1279,8 @@ def _require_message_id(message_id: str, what: str) -> tuple[str, dict[str, Any]
         return "", _error(
             f"message_id must be a message id starting with 'om_', got {mid!r}. "
             "chat_id (oc_...) / open_id (ou_...) 不是消息 id; "
-            "消息 id 来自 feishu_message_send 的返回、<feishu_context>, 或 feishu_message_list。",
+            "消息 id 来自 feishu_message_send 的返回、<feishu_context>, "
+            "或 feishu_api 调 GET /open-apis/im/v1/messages 列消息 (见 feishu-message 技能)。",
         )
     return mid, None
 
@@ -1371,7 +1308,7 @@ async def edit_message_impl(message_id: str, text: str, user_key: str = "") -> d
     if not text.strip():
         return _error(
             "text is required: editing replaces the whole message content, and Feishu has no empty message. "
-            "要让消息消失请用 feishu_message_recall。"
+            "要让消息消失请撤回 (feishu_api 调 DELETE /open-apis/im/v1/messages/:message_id)。"
         )
     stripped, at_open_ids = _extract_and_strip_at_tags(text)
     if at_open_ids:
@@ -1579,16 +1516,6 @@ def _normalize_emoji_type(emoji_type: str) -> str:
     return _EMOJI_CANONICAL.get(raw.lower(), raw)
 
 
-def _build_add_reaction_request(message_id: str, emoji_type: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/im/v1/messages/:message_id/reactions"
-    req.paths["message_id"] = message_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"reaction_type": {"emoji_type": emoji_type}}
-    return req
-
-
 def _build_remove_reaction_request(message_id: str, reaction_id: str) -> BaseRequest:
     req = BaseRequest()
     req.http_method = HttpMethod.DELETE
@@ -1626,30 +1553,6 @@ def _reaction_record(item: Any) -> dict[str, Any]:
         "operator_type": (operator or {}).get("operator_type", "") if isinstance(operator, dict) else "",
         "action_time": item.get("action_time", ""),
     }
-
-
-async def add_reaction_impl(message_id: str, emoji_type: str, user_key: str = "") -> dict[str, Any]:
-    """React to a message with an emoji — an acknowledgement that adds no message.
-
-    ``emoji_type`` accepts a Feishu key (``THUMBSUP``), a Chinese word (``赞``,
-    ``收到``) or the emoji itself (``👍``); all three are normalized to the key
-    Feishu expects, whose casing is irregular enough that a literal guess usually
-    fails with 231001.
-
-    Returns the ``reaction_id``. Keep it if you want to remove exactly this reaction
-    later, though ``remove_reaction_impl`` can also find it from the emoji.
-    """
-    mid, bad = _require_message_id(message_id, "react to")
-    if bad is not None:
-        return bad
-    emoji = _normalize_emoji_type(emoji_type)
-    if not emoji:
-        return _error("emoji_type is required (e.g. THUMBSUP / OK / DONE / OnIt, or 赞 / 收到 / 完成).")
-    res = await _invoke(_build_add_reaction_request(mid, emoji), user_key=user_key, prefer="tenant")
-    if not res["ok"]:
-        return _with_hint(res, _REACTION_ERROR_HINTS)
-    data = res["data"] if isinstance(res["data"], dict) else {}
-    return {"ok": True, "message_id": mid, **_reaction_record(data), "emoji_type": emoji}
 
 
 async def list_reactions_impl(
@@ -2115,26 +2018,6 @@ def _build_list_messages_request(
         req.add_query("page_token", page_token)
     req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
     return req
-
-
-async def list_messages_impl(
-    container_id: str,
-    container_id_type: str,
-    sort_type: str,
-    page_size: int,
-    page_token: str,
-) -> dict[str, Any]:
-    """List messages in a chat or thread. Use container_id_type='thread' + a thread_id to read a topic's replies."""
-    res = await _invoke(_build_list_messages_request(container_id, container_id_type, sort_type, page_size, page_token))
-    if not res["ok"]:
-        return res
-    data = res["data"] if isinstance(res["data"], dict) else {}
-    return {
-        "ok": True,
-        "items": data.get("items", []),
-        "has_more": bool(data.get("has_more")),
-        "page_token": data.get("page_token", ""),
-    }
 
 
 def _extract_post_text(node: Any) -> str:
@@ -7040,7 +6923,7 @@ async def download_file_impl(source: str, save_path: str, is_url: bool = False, 
 # chat message* are fetched via im/v1/messages/:message_id/resources/:file_key,
 # keyed by the message they belong to. The channel auto-downloads resources on the
 # message that is triggering the agent right now, but an image discovered later in
-# history (via feishu_message_list / feishu_thread_read) can only be pulled with
+# history (via the im/v1/messages list endpoint or feishu_thread_read) can only be pulled with
 # this endpoint. The file_key is the ``image_key``/``file_key`` inside the
 # message's content JSON; ``type`` is "image" for an image message, "file" for a
 # file/audio/video/media attachment.
@@ -9279,130 +9162,6 @@ _PIN_ERROR_HINTS = {
 }
 
 
-def _build_pin_request(message_id: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/im/v1/pins"
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"message_id": message_id}
-    return req
-
-
-def _build_unpin_request(message_id: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.DELETE
-    req.uri = "/open-apis/im/v1/pins/:message_id"
-    req.paths["message_id"] = message_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
-
-
-def _build_list_pins_request(
-    chat_id: str, start_time: str, end_time: str, page_size: int, page_token: str
-) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/im/v1/pins"
-    req.add_query("chat_id", chat_id)
-    if start_time:
-        req.add_query("start_time", start_time)
-    if end_time:
-        req.add_query("end_time", end_time)
-    req.add_query("page_size", max(1, min(page_size, 50)))
-    if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
-
-
-def _pin_record(item: Any) -> dict[str, Any]:
-    """One pin as {message_id, chat_id, operator_id, operator_id_type, create_time}."""
-    if not isinstance(item, dict):
-        return {}
-    return {
-        "message_id": item.get("message_id", ""),
-        "chat_id": item.get("chat_id", ""),
-        "operator_id": item.get("operator_id", ""),
-        "operator_id_type": item.get("operator_id_type", ""),
-        "create_time": item.get("create_time", ""),
-    }
-
-
-async def pin_message_impl(message_id: str, user_key: str = "") -> dict[str, Any]:
-    """Pin a message to the top of its chat.
-
-    Idempotent by Feishu's own design: pinning an already-pinned message returns
-    that existing pin, so a repeat call is reported as ok rather than as an error.
-    """
-    mid, bad = _require_message_id(message_id, "pin")
-    if bad is not None:
-        return bad
-    res = await _invoke(_build_pin_request(mid), user_key=user_key, prefer="tenant")
-    if not res["ok"]:
-        return _with_hint(res, _PIN_ERROR_HINTS)
-    data = res["data"] if isinstance(res["data"], dict) else {}
-    pin = data.get("pin") if isinstance(data.get("pin"), dict) else {}
-    return {"ok": True, "pinned": True, **{**_pin_record(pin), "message_id": mid}}
-
-
-async def unpin_message_impl(message_id: str, user_key: str = "") -> dict[str, Any]:
-    """Remove a message's pin (取消置顶).
-
-    Feishu also returns success when the message was never pinned, so this cannot
-    confirm that a pin actually existed — only that none does now.
-    """
-    mid, bad = _require_message_id(message_id, "unpin")
-    if bad is not None:
-        return bad
-    res = await _invoke(_build_unpin_request(mid), user_key=user_key, prefer="tenant")
-    if not res["ok"]:
-        return _with_hint(res, _PIN_ERROR_HINTS)
-    return {"ok": True, "message_id": mid, "pinned": False}
-
-
-async def list_pins_impl(
-    chat_id: str,
-    start_time: str = "",
-    end_time: str = "",
-    page_size: int = 50,
-    page_token: str = "",
-    user_key: str = "",
-) -> dict[str, Any]:
-    """List a group's pinned messages, newest pin first.
-
-    Only the pin records are returned (message_id + who pinned it + when); the
-    pinned messages' own content is not included, so read it with
-    ``feishu_message_list`` or the message id if the text is needed.
-    """
-    cid = chat_id.strip()
-    if not cid:
-        return _error("chat_id is required (the oc_... id of the group whose pins you want).")
-    if not cid.startswith("oc_"):
-        return _error(
-            f"chat_id must be a group id starting with 'oc_', got {cid!r}. "
-            "群 id 来自群名搜索或 <feishu_context>; Pin 列表只支持按群查询。",
-        )
-    res = await _invoke(
-        _build_list_pins_request(cid, start_time.strip(), end_time.strip(), page_size, page_token),
-        user_key=user_key,
-        prefer="tenant",
-    )
-    if not res["ok"]:
-        return _with_hint(res, _PIN_ERROR_HINTS)
-    data = res["data"] if isinstance(res["data"], dict) else {}
-    raw_items = data.get("items")
-    items: list[Any] = raw_items if isinstance(raw_items, list) else []
-    pins = [_pin_record(it) for it in items]
-    return {
-        "ok": True,
-        "chat_id": cid,
-        "pins": pins,
-        "count": len(pins),
-        "has_more": bool(data.get("has_more")),
-        "page_token": data.get("page_token", "") or "",
-    }
-
-
 # ── Forward a message to another chat (转发 / 合并转发) ────────────────────────
 #
 # POST /open-apis/im/v1/messages/:message_id/forward moves one message to another
@@ -9447,157 +9206,6 @@ _FORWARD_ERROR_HINTS = {
     230110: "原消息已被删除, 无法转发。",
     232009: "群组已解散, 无法转发。",
 }
-
-
-def _infer_forward_target_type(receive_id: str, given: str) -> str:
-    """Like ``_infer_receive_id_type``, but a ``omt_`` target is a thread.
-
-    Forwarding is the only path that accepts ``thread_id``, and the prefix is
-    unambiguous — inferring it here means "转发到这个话题里" works without the
-    caller also spelling out the type.
-    """
-    rid = receive_id.strip()
-    if rid.startswith("omt_"):
-        return "thread_id"
-    return _infer_receive_id_type(rid, given)
-
-
-def _build_forward_request(message_id: str, receive_id: str, receive_id_type: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/im/v1/messages/:message_id/forward"
-    req.paths["message_id"] = message_id
-    req.add_query("receive_id_type", receive_id_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"receive_id": receive_id}
-    return req
-
-
-def _build_merge_forward_request(message_ids: list[str], receive_id: str, receive_id_type: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/im/v1/messages/merge_forward"
-    req.add_query("receive_id_type", receive_id_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"receive_id": receive_id, "message_id_list": message_ids}
-    return req
-
-
-def _require_receive_id(receive_id: str) -> tuple[str, dict[str, Any] | None]:
-    """Normalize a forward target id, or say why it can't be one."""
-    rid = receive_id.strip()
-    if not rid:
-        return "", _error(
-            "receive_id is required — the target chat_id (oc_...), open_id (ou_...), "
-            "union_id (on_...), email, or thread_id (omt_...) to forward to."
-        )
-    if rid.startswith("om_"):
-        return "", _error(
-            f"receive_id must be a *target* (chat/user/thread), got a message id {rid!r}. "
-            "转发的目标是会话或人: 群用 chat_id (oc_...), 私聊用 open_id (ou_...), 话题用 thread_id (omt_...)。",
-        )
-    return rid, None
-
-
-def _parse_message_ids(message_ids_json: str) -> tuple[list[str] | None, str | None]:
-    """Parse a JSON array (or comma-separated list) of ``om_...`` ids; return (ids, error)."""
-    raw = message_ids_json.strip()
-    if not raw:
-        return None, 'message_ids_json is required — a JSON array of om_... message ids, e.g. ["om_a", "om_b"].'
-    try:
-        parsed = json.loads(raw)
-    except ValueError:
-        # A bare comma-separated list is the likely hand-written form; accept it
-        # rather than failing on the quoting.
-        parsed = [part.strip() for part in raw.split(",") if part.strip()]
-    if isinstance(parsed, str):
-        parsed = [parsed]
-    if not isinstance(parsed, list) or not parsed:
-        return None, 'message_ids_json must be a non-empty JSON array of message ids, e.g. ["om_a", "om_b"].'
-    ids = [str(x).strip() for x in parsed]
-    bad = [x for x in ids if not x.startswith("om_")]
-    if bad:
-        return None, (
-            f"these are not message ids: {bad}. 合并转发只接受 om_... 开头的消息 id "
-            "(来自 feishu_message_list / feishu_message_send 的返回)。"
-        )
-    if len(ids) > 100:
-        return None, f"合并转发一次最多 100 条消息, 收到 {len(ids)} 条。"
-    return ids, None
-
-
-async def forward_message_impl(
-    message_id: str,
-    receive_id: str,
-    receive_id_type: str = "chat_id",
-    user_key: str = "",
-) -> dict[str, Any]:
-    """Forward one message to another chat, user or thread, keeping its attribution.
-
-    The target's type is inferred from its prefix (``oc_``/``ou_``/``on_``/``omt_``/
-    an email), so the default ``receive_id_type`` does not have to be corrected for
-    a DM or a thread — only a bare user_id needs it stated.
-    """
-    mid, bad = _require_message_id(message_id, "forward")
-    if bad is not None:
-        return bad
-    rid, bad_target = _require_receive_id(receive_id)
-    if bad_target is not None:
-        return bad_target
-    rid_type = _infer_forward_target_type(rid, receive_id_type)
-    res = await _invoke(_build_forward_request(mid, rid, rid_type), user_key=user_key, prefer="tenant")
-    if not res["ok"]:
-        return _with_hint(res, _FORWARD_ERROR_HINTS)
-    data = res["data"] if isinstance(res["data"], dict) else {}
-    return {
-        "ok": True,
-        "forwarded": True,
-        "source_message_id": mid,
-        "message_id": data.get("message_id", ""),
-        "chat_id": data.get("chat_id", ""),
-        "thread_id": data.get("thread_id", ""),
-        "receive_id": rid,
-        "receive_id_type": rid_type,
-    }
-
-
-async def merge_forward_messages_impl(
-    message_ids_json: str,
-    receive_id: str,
-    receive_id_type: str = "chat_id",
-    user_key: str = "",
-) -> dict[str, Any]:
-    """Forward several messages as one 合并转发 bundle.
-
-    All the ids must come from the *same* conversation (Feishu answers 230069
-    otherwise). Ids it refuses individually come back in ``invalid_message_ids``
-    instead of being lost, so a partial bundle can be explained.
-    """
-    ids, err = _parse_message_ids(message_ids_json)
-    if err is not None:
-        return _error(err)
-    rid, bad_target = _require_receive_id(receive_id)
-    if bad_target is not None:
-        return bad_target
-    rid_type = _infer_forward_target_type(rid, receive_id_type)
-    res = await _invoke(_build_merge_forward_request(ids or [], rid, rid_type), user_key=user_key, prefer="tenant")
-    if not res["ok"]:
-        return _with_hint(res, _FORWARD_ERROR_HINTS)
-    data = res["data"] if isinstance(res["data"], dict) else {}
-    raw_message = data.get("message")
-    message: dict[str, Any] = raw_message if isinstance(raw_message, dict) else data
-    invalid = data.get("invalid_message_id_list")
-    return {
-        "ok": True,
-        "forwarded": True,
-        "source_message_ids": ids,
-        "forwarded_count": len(ids or []),
-        "message_id": message.get("message_id", ""),
-        "chat_id": message.get("chat_id", ""),
-        "receive_id": rid,
-        "receive_id_type": rid_type,
-        "invalid_message_ids": invalid if isinstance(invalid, list) else [],
-    }
 
 
 # ── 通讯录管理 (contact admin) — 共用错误码 hint ────────────────────────────────

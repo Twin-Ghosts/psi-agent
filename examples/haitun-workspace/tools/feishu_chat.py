@@ -18,7 +18,8 @@ What stays here is what a table cannot express:
 - ``feishu_chat_upload_avatar`` — multipart upload; a JSON body cannot carry a file
   handle, and a group avatar needs ``image_type="avatar"``.
 
-Pair with ``feishu_message`` (send / reply-in-thread / list / search messages).
+Pair with ``feishu_message`` (send / search messages) and, for reply / list /
+表情回应 / 置顶 / 转发, ``feishu_api`` plus the ``feishu-message`` skill's endpoint table.
 """
 
 from __future__ import annotations

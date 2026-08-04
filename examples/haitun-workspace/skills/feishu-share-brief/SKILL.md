@@ -46,8 +46,8 @@ description: "把分散在飞书群聊、话题线程、文档、知识库、评
 
 | 来源 | 工具路径 |
 |---|---|
-| 当前群或指定群 | `feishu_message_list`，用 `chat_id` 分页读取 |
-| 话题线程 | `feishu_thread_read`；需要原始结构时用 `feishu_message_list(container_id_type="thread")` |
+| 当前群或指定群 | `feishu_api` 调 `GET /open-apis/im/v1/messages`，用 `container_id` 传 `chat_id` 分页读取（见 `feishu-message` 技能） |
+| 话题线程 | `feishu_thread_read`；需要原始结构时同上换 `container_id_type="thread"` |
 | 飞书 docx/doc/sheet 链接 | 从链接解析类型和 token → `feishu_doc_read` |
 | 飞书 wiki 链接 | `feishu_wiki_get_node` → 按 `obj_type` 读取 |
 | 不知道文档位置 | `feishu_docs_search` → 核对候选标题/所有者 → 读取正文 |
