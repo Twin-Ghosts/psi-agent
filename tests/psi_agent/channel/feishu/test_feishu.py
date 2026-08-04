@@ -13,6 +13,7 @@ from lark_channel import PolicyConfig
 from psi_agent.channel._core import ChannelCore
 from psi_agent.channel._types import FileChunk, TextChunk
 from psi_agent.channel.feishu import ChannelFeishu, client
+from psi_agent.channel.feishu._card_action import _consumed_card_content
 from psi_agent.channel.feishu.client import (
     _EMOJI_FAILED,
     _EMOJI_PROCESSING,
@@ -357,6 +358,46 @@ def test_log_reject_swallows_and_reads_fields():
     # Should not raise on a well-formed event nor on a broken one.
     client._log_reject(SimpleNamespace(message_id="om_1", reason="policy_no_mention"))
     client._log_reject(object())
+
+
+def test_consumed_card_preserves_card_2_body_when_replacing_clicked_button():
+    card = {
+        "schema": "2.0",
+        "header": {"title": {"tag": "plain_text", "content": "新的工作安排"}},
+        "body": {
+            "elements": [
+                {"tag": "markdown", "content": "**安排者原始内容**"},
+                {"tag": "div", "text": {"tag": "plain_text", "content": "任务原文不能消失"}},
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "确认接收"},
+                    "behaviors": [
+                        {"type": "open_url", "default_url": "https://example.invalid/task"},
+                        {
+                            "type": "callback",
+                            "value": {
+                                "action": "confirm_assignment_receipt",
+                                "assignment_id": "wa-1",
+                            },
+                        },
+                    ],
+                },
+            ]
+        },
+    }
+
+    consumed = _consumed_card_content(
+        card,
+        {"action": "confirm_assignment_receipt", "assignment_id": "wa-1"},
+    )
+
+    assert consumed is not None
+    rendered = json.dumps(consumed, ensure_ascii=False)
+    assert "新的工作安排" in rendered
+    assert "任务原文不能消失" in rendered
+    assert "已选择: 确认接收" in rendered
+    assert "confirm_assignment_receipt" not in rendered
+    assert '"tag": "note"' not in rendered
 
 
 @pytest.mark.anyio

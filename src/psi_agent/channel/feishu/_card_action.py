@@ -13,7 +13,7 @@ from psi_agent.channel._types import InputChunk, TextChunk
 
 from ._card_store import CardSnapshot, pop_card_snapshot
 
-_INTERACTIVE_CARD_TAGS = {"action", "form"}
+_INTERACTIVE_CARD_TAGS = {"action", "button", "form"}
 _REMOVED_CARD_ELEMENT = object()
 
 type ResolveCore = Callable[[str | None], Awaitable[ChannelCore]]
@@ -42,10 +42,24 @@ def _normalize_card_action_value(value: Any) -> Any:
         return value
 
 
+def _contains_card_action_value(value: Any, action_value: Any) -> bool:
+    if isinstance(value, dict):
+        if "value" in value and _normalize_card_action_value(value["value"]) == action_value:
+            return True
+        return any(_contains_card_action_value(child, action_value) for child in value.values())
+    if isinstance(value, list):
+        return any(_contains_card_action_value(child, action_value) for child in value)
+    return False
+
+
 def _find_card_action_label(value: Any, action_value: Any) -> str | None:
     normalized_action_value = _normalize_card_action_value(action_value)
     if isinstance(value, dict):
-        if "value" in value and _normalize_card_action_value(value["value"]) == normalized_action_value:
+        direct_match = "value" in value and _normalize_card_action_value(value["value"]) == normalized_action_value
+        behavior_match = value.get("tag") == "button" and _contains_card_action_value(
+            value.get("behaviors"), normalized_action_value
+        )
+        if direct_match or behavior_match:
             text = value.get("text")
             if isinstance(text, str):
                 label = text or None
@@ -71,24 +85,13 @@ def _find_card_action_label(value: Any, action_value: Any) -> str | None:
 def _remove_card_interactions(
     value: Any,
     action_value: Any,
-    selected_label: str,
+    selected_element: dict[str, Any],
     selected_replaced: bool = False,
 ) -> tuple[Any, bool]:
     if isinstance(value, dict):
         if value.get("tag") in _INTERACTIVE_CARD_TAGS:
             if not selected_replaced and _find_card_action_label(value, action_value):
-                return (
-                    {
-                        "tag": "note",
-                        "elements": [
-                            {
-                                "tag": "plain_text",
-                                "content": f"已选择: {selected_label}",
-                            }
-                        ],
-                    },
-                    True,
-                )
+                return selected_element, True
             return _REMOVED_CARD_ELEMENT, selected_replaced
 
         result: dict[str, Any] = {}
@@ -96,7 +99,7 @@ def _remove_card_interactions(
             cleaned, selected_replaced = _remove_card_interactions(
                 child,
                 action_value,
-                selected_label,
+                selected_element,
                 selected_replaced,
             )
             if cleaned is not _REMOVED_CARD_ELEMENT:
@@ -109,7 +112,7 @@ def _remove_card_interactions(
             cleaned, selected_replaced = _remove_card_interactions(
                 child,
                 action_value,
-                selected_label,
+                selected_element,
                 selected_replaced,
             )
             if cleaned is not _REMOVED_CARD_ELEMENT:
@@ -125,7 +128,22 @@ def _consumed_card_content(card: Any, action_value: Any) -> dict[str, Any] | Non
     selected_label = _find_card_action_label(card, action_value)
     if not selected_label:
         return None
-    consumed, selected_replaced = _remove_card_interactions(card, action_value, selected_label)
+    if card.get("schema") == "2.0":
+        selected_element: dict[str, Any] = {
+            "tag": "markdown",
+            "content": f"已选择: {selected_label}",
+        }
+    else:
+        selected_element = {
+            "tag": "note",
+            "elements": [
+                {
+                    "tag": "plain_text",
+                    "content": f"已选择: {selected_label}",
+                }
+            ],
+        }
+    consumed, selected_replaced = _remove_card_interactions(card, action_value, selected_element)
     return consumed if selected_replaced and isinstance(consumed, dict) else None
 
 
