@@ -55,7 +55,10 @@ _UPLOAD_ENDPOINTS = {
 # would strand legitimate calls.
 _PREFER_DEDICATED = (
     ("/open-apis/sheets/", "飞书表格写入: 裸 `!A1` 区间会静默丢数据, 建议用 feishu_sheet_write / _append"),
-    ("/open-apis/bitable/", "多维表格: 列名对不上会被静默丢弃, 建议用 feishu_bitable_* 工具"),
+    (
+        "/open-apis/bitable/",
+        "多维表格: 列名对不上会被静默丢弃, 写行建议用 feishu_bitable_create_records / _update_records (它们先核对列名)",
+    ),
     ("/open-apis/authen/", "OAuth 流程: 用 feishu_auth_* 工具, 它们管着 UAT 存储与回调接收"),
 )
 
@@ -252,10 +255,13 @@ def _build_request(
     req = BaseRequest()
     req.http_method = http_method
     req.uri = uri
-    if prefer == "user":
-        req.token_types = {AccessTokenType.USER}
-    else:
-        req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    # Both token types are declared as *candidates* regardless of strategy, because
+    # ``prefer`` is what selects one — ``_invoke`` reads it and routes to the tenant or
+    # the user send. Narrowing to USER here instead would make the request unsendable as
+    # tenant (the SDK raises before any network call), and ``_invoke_write`` sends as
+    # tenant on purpose in two cases: nobody is logged in, so there is no identity to
+    # attribute to, and the user explicitly answered "the bot should own this".
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
     for key, value in paths.items():
         req.paths[key] = str(value)
     for key, value in _query_pairs(query).items():

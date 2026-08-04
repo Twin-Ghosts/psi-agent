@@ -75,7 +75,7 @@ def test_frontmatter_name_matches_dir_and_has_description(skill: str) -> None:
 def test_skills_only_reference_real_tools() -> None:
     real = _public_tool_names()
     # sanity: the collector actually found the toolset
-    assert "feishu_bitable_create_record" in real
+    assert "feishu_bitable_create_records" in real
     assert "wiki_write" in real
 
     referenced: set[str] = set()

@@ -14,7 +14,7 @@ pay rules and no fixed columns.
 Uses existing tools:
 - `feishu_department_members(department_id, ..., recursive)` — get the people
 - `feishu_attendance_query(user_ids, date_from, date_to, ...)` — get their clock-in results
-- an output tool of the user's choice (`powerpoint`/excel skill, or `feishu_bitable_create_record`)
+- an output tool of the user's choice (`powerpoint`/excel skill, or `feishu_api` POST /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records)
 
 To explain *why* a day is Normal/Late/Early/Lack — the punch time segments, the
 flexible window, and the late/early thresholds behind the result — read the

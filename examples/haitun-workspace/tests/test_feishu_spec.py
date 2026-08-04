@@ -314,8 +314,15 @@ def test_explicit_value_beats_default(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert rec.request.queries == [("user_id_type", "user_id")]
 
 
-def test_rule_token_user_forces_user_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """``/search/v1/user`` only accepts a user token; the table should know that."""
+def test_rule_token_user_reaches_invoke_as_strategy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """``token: user`` picks the *send path*, not the declared candidates.
+
+    ``_invoke`` reads ``prefer`` to decide whose token to attach; the request keeps both
+    candidates so the tenant path stays sendable (``_invoke_write`` deliberately sends as
+    tenant when nobody is logged in, or when the caller answered ``identity=bot``).
+    Narrowing to USER here would make those two sends raise inside the SDK before any
+    network call — see ``lark_channel/core/token/auth.py``.
+    """
     skill = tmp_path / "feishu-demo"
     skill.mkdir()
     (skill / "SKILL.md").write_text(
@@ -323,7 +330,8 @@ def test_rule_token_user_forces_user_token(monkeypatch: pytest.MonkeyPatch, tmp_
     )
     rec = _Recorder()
     _call(monkeypatch, rec, skills=tmp_path, method="GET", uri="/open-apis/demo/search")
-    assert rec.request.token_types == {AccessTokenType.USER}
+    assert rec.kwargs[0]["prefer"] == "user"
+    assert rec.request.token_types == {AccessTokenType.TENANT, AccessTokenType.USER}
 
 
 def test_caller_prefer_user_is_not_overridden(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -334,7 +342,7 @@ def test_caller_prefer_user_is_not_overridden(monkeypatch: pytest.MonkeyPatch, t
     )
     rec = _Recorder()
     _call(monkeypatch, rec, skills=tmp_path, method="GET", uri="/open-apis/demo/x", prefer="user")
-    assert rec.request.token_types == {AccessTokenType.USER}
+    assert rec.kwargs[0]["prefer"] == "user", "an explicit caller prefer beats the table"
 
 
 # ------------------------------------------------------------------------ paging

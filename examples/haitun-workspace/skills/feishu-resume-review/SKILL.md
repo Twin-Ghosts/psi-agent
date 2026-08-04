@@ -32,7 +32,7 @@ agent_editable: true
 
 ## 列语义（有表时）
 
-先 `feishu_bitable_list_fields`，按列名语义填，不写死表结构：
+先 `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields，按列名语义填，不写死表结构：
 
 | 类型 | 例 | 做法 |
 |------|-----|------|
@@ -46,7 +46,7 @@ agent_editable: true
 2. **抽事实**：姓名/联系方式/教育/工作/项目/证书等；不确定标「简历未写明」。
 3. **评分 + 评价**：按下方量表打分，写综合评价（见输出模板）。
 4. **面试题**：按下方规则出 4–6 道贴合简历的题。
-5. **（可选）写表**：组装 `fields_json` → `feishu_bitable_create_record`（或已有同人行则 `update_record`）。
+5. **（可选）写表**：组装 `fields_json` → `feishu_api` POST /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records（或已有同人行则 `update_record`）。
 6. **交付**：对话里给出结构化结果；若写了文件用 `[SEND:]`。
 
 ## 评分规则（默认底座；用户规则优先 patch 进本节）

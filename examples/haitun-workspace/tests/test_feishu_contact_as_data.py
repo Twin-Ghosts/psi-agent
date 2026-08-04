@@ -52,10 +52,12 @@ class _CapturedInvoke:
 
     def __init__(self, pages: list[dict[str, Any]] | None = None) -> None:
         self.requests: list[BaseRequest] = []
+        self.kwargs: list[dict[str, Any]] = []
         self._pages = pages or [{"ok": True, "data": {}}]
 
-    async def __call__(self, request: BaseRequest, **_: Any) -> dict[str, Any]:
+    async def __call__(self, request: BaseRequest, **kwargs: Any) -> dict[str, Any]:
         self.requests.append(request)
+        self.kwargs.append(kwargs)
         return self._pages[min(len(self.requests) - 1, len(self._pages) - 1)]
 
     @property
@@ -131,14 +133,22 @@ def test_page_size_default_comes_from_the_table(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_search_user_gets_a_user_token_without_being_asked(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``/search/v1/user`` rejects a tenant token. The old tool knew; the table now does."""
+    """``/search/v1/user`` rejects a tenant token. The old tool knew; the table now does.
+
+    The table expresses that as the *strategy* (``token: user`` → ``prefer=user`` → the UAT
+    send path), not by narrowing the declared candidates: a request narrowed to USER cannot
+    be sent as tenant at all, and ``_invoke_write`` legitimately does that when no user is
+    logged in. For a genuinely user-only endpoint the tenant attempt gets Feishu's own
+    permission error, which names the missing scope.
+    """
     cap = _generic(
         monkeypatch,
         method="GET",
         uri="/open-apis/search/v1/user",
         query_json=json.dumps({"query": "罗霖"}),
     )
-    assert cap.request.token_types == {AccessTokenType.USER}
+    assert cap.kwargs[0]["prefer"] == "user"
+    assert cap.request.token_types == {AccessTokenType.TENANT, AccessTokenType.USER}
 
 
 def test_batch_get_id_body_passes_through(monkeypatch: pytest.MonkeyPatch) -> None:

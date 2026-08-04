@@ -235,8 +235,9 @@ async def feishu_doc_append_bitable(
     Pick this over ``feishu_doc_append_sheet`` when the content is *records* rather than
     a grid of cells — typed fields, multiple views, per-row collaboration (a 台账, an
     issue list, a signup form). Feishu creates the bitable with default fields; extend it
-    with ``feishu_bitable_create_field`` and fill it with ``feishu_bitable_create_record``,
-    using the ``app_token`` and ``table_id`` this returns.
+    and fill it through ``feishu_api`` (``POST .../tables/:table_id/fields`` then ``POST
+    .../tables/:table_id/records``, see the ``feishu-bitable`` skill), using the
+    ``app_token`` and ``table_id`` this returns.
 
     Args:
         document_id: The docx document_id (or a wiki node's ``obj_token``).

@@ -57,7 +57,7 @@ category: productivity
       保留原名，重名加后缀去重。
    c. 从 `form` 抽金额/类别/发票信息/日期/抬头，跑校验清单，记录每项 pass/fail + 原因。
    d. 判档：小事校验全过 → 放行 + 留痕；中事 → 记建议；大事 → 标"待确认" + 建议。
-3. **逐单台账**：`feishu_bitable_create_record`，列建议：
+3. **逐单台账**：`feishu_api` POST /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records，列建议：
    `申请人 / 金额 / 类别 / 发票号 / 校验结果(过/失败项) / 判定档位 / 处置 / 附件数 / 归档路径 / 时间`。
 4. **财务报告 + 分析单**：`feishu_doc_create` 建"报销财务报告-<周期>"，`feishu_doc_append_content` 写：
    - 概览：总单数、总金额、已自动通过数/金额、建议数、待确认(大事)数/金额；

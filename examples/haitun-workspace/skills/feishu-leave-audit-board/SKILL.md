@@ -47,9 +47,9 @@ category: productivity
      若返回 `ok=false`，如实记录飞书错误（多为权限/审批人不符），**不要谎报成功**，降级为"建议"。
    - 中事：不动手，记"建议通过/驳回 + 依据"。
    - 大事：不动手，标"待用户确认"，附建议。
-4. **留痕台账**（每条都写，小事更要写）：`feishu_bitable_create_record`，列建议：
+4. **留痕台账**（每条都写，小事更要写）：`feishu_api` POST /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records，列建议：
    `申请人 / 假别 / 起止 / 天数 / 判定档位 / 处置(已通过/已驳回/建议X/待确认) / 依据 / 时间`。
-   首次用表先 `feishu_bitable_list_tables` 找 table_id；需要清默认空行/列时用 `clear_table`/`delete_fields`。
+   首次用表先 `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables 找 table_id；需要清默认空行/列时用 `clear_table`/`delete_fields`。
 5. **看板文档**：`feishu_doc_create` 建"假勤审核看板-<周期>"，`feishu_doc_append_content` 写入：
    - 概览：总条数、已自动通过数、建议数、待确认(大事)数；
    - 按**人 / 假别 / 状态**聚合的小表；

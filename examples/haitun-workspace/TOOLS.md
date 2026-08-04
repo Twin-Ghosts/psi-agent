@@ -210,7 +210,8 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
 
   - **内嵌多维表格**：`feishu_doc_append_bitable(document_id, view_type, user_key, caption)`——
     内容是「一条条记录」（台账、问题列表、报名表：要字段类型、多视图、逐行协作）时用它，
-    返回 `app_token` / `table_id`，接着用 `feishu_bitable_create_field` / `_create_record` 建字段填数据。
+    返回 `app_token` / `table_id`，接着用 `feishu_api` 打 `POST /open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields`
+    建字段、`POST .../records` 填数据（多行用 `feishu_bitable_create_records`，它先核对列名）。
   - 流程图：`feishu_doc_append_flowchart(document_id, steps_json, title, user_key, caption)`——
     `steps_json` 是步骤数组 `["提交","审批","归档"]`。**飞书开放接口画不了真正的流程图块**
     （block_type 21 是空画布，API 填不进节点），所以用「单列表格 + ↓ 箭头」如实呈现，可编辑。
@@ -287,7 +288,7 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
     停止推送用 `feishu_approval_unsubscribe(approval_code)`。
 12. **卡点找人（判定归属 + 给联系方式）**：员工私聊说"工作上卡在某个点了"，按 [`feishu-blocker-routing`]
     技能给他指路。先读一张**职责归属多维表格**（业务领域/职责 → 负责人 open_id）
-    `feishu_bitable_list_records(app_token, table_id)` 把卡点匹配到负责人，再用
+    （`feishu_api` 打 `GET /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records`）把卡点匹配到负责人，再用
     `feishu_user_get(user_ids=<负责人 open_id>)` 取其**联系方式**（`mobile`/`email`/`enterprise_email`/
     `job_title`），回员工"①这归谁负责 ②去找谁 ③怎么联系"。台账里存的是姓名不是 open_id 时，
     最省事是 `feishu_contact_search(query=<姓名>)` **全局按名搜人**（不必先知道他在哪个群/部门，
@@ -385,12 +386,14 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
     只有纯机器人自建、没有具体发起人时才留空（此时机器人当群主）。`user_ids` 传的是 **open_id 不是姓名**——先用
     `feishu_chat_find_member`（从别的群）或 `feishu_department_members` 把姓名反查成 open_id（单次最多 50 人，
     超了先建再补拉）。返回里的 `invalid_user_ids` 是飞书没能加进来的人（多为不在通讯录权限范围内），如实反馈。
-17. **从零建一张多维表格（没有现成台账可写时）**：`feishu_bitable_create_record` 等工具都要一个**已存在**的
-    `app_token`；用户说"建个台账/跟踪表/登记表"而手里没有链接时，别让他先自己去飞书里建表，按三步自己建：
-    1. `feishu_bitable_create_app(name=<表名>, user_key=<sender_open_id>)` 建**表格本体**，返回 `app_token`、
-       `url`（把这个链接回给用户，他才点得进去）和 `default_table_id`（飞书自动建的那张空表，只有一个占位列）。
-       归属按上面「问归属」的结果走：归用户则表在他自己的云空间里；归机器人则表建在机器人云空间、
-       用户默认看不到（这种情况记得把 `url` 回给他，或用 `feishu_permission_add_member` 加他为协作者）。
+17. **从零建一张多维表格（没有现成台账可写时）**：写数据都要一个**已存在**的
+    `app_token`；用户说"建个台账/跟踪表/登记表"而手里没有链接时，别让他先自己去飞书里建表，按三步自己建。
+    多维表格的端点表在 **`feishu-bitable` 技能**里，读它再用 `feishu_api` 调；下面只说流程和坑。
+    1. `feishu_api` POST `/open-apis/bitable/v1/apps`（body `{"name":"<表名>"}`）建**表格本体**，返回
+       `app_token`、`url`（把这个链接回给用户，他才点得进去）和 `default_table_id`（飞书自动建的那张空表，
+       只有一个占位列）。归属按上面「问归属」的结果走：归用户则表在他自己的云空间里；归机器人则表建在
+       机器人云空间、用户默认看不到（这种情况记得把 `url` 回给他，或用 `feishu_permission_add_member`
+       加他为协作者）。
     2. `feishu_bitable_create_table(app_token, table_name, fields_json=...)` 建**真正要用的数据表连列一起**——
        `fields_json` 是 `[{"field_name":"合同编号","type":1},{"field_name":"金额","type":2},
        {"field_name":"状态","type":3,"property":{"options":[{"name":"生效","color":0}]}},
@@ -398,24 +401,25 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
        1 文本、2 数字、3 单选、4 多选、5 日期、7 复选框、11 人员、13 电话、15 超链接、17 附件、20 公式、
        22 地理位置、1001 创建时间、1005 自动编号（19 查找引用建不了）。**第一个字段是索引列**，只能是
        1/2/5/13/15/20/22，所以把文本类主键（编号/名称）放第一个，别拿"人员/单选"开头（飞书报 1254012）。
-       建完 `default_table_id` 那张空表用不上，`feishu_bitable_clear_table` / `feishu_bitable_delete_fields`
-       收拾干净或直接留着，别把数据写进它。
+       建完 `default_table_id` 那张空表用不上，`feishu_bitable_clear_table` 或 `feishu_api` DELETE
+       `.../tables/:table_id/fields/:field_id` 收拾干净或直接留着，别把数据写进它。
     3. 填数据：**多行一次写完**用 `feishu_bitable_create_records(app_token, table_id, records_json)`
        （`records_json` 是 `[{"姓名":"张三","状态":"在读"},{"姓名":"李四"}]`，单次 500 行、一张表上限
-       20000 行），别 for 循环单条调 `create_record`——那样慢还容易撞飞书限流。只写一行才用
-       `feishu_bitable_create_record`。列名必须和上一步一致。
-    **已有一张建好的标准台账时别从零重建**：`feishu_bitable_copy_app(app_token, name, without_content=True)`
-    直接复制一份（`without_content=True` 只复制结构不复制数据），这就是"模板"的用法。
-    事后要加列用 `feishu_bitable_create_field(app_token, table_id, field_name, field_type, property_json)`；
+       20000 行），别 for 循环单条调单行接口——那样慢还容易撞飞书限流。只写一行才用 `feishu_api` POST
+       `.../tables/:table_id/records`。列名必须和上一步一致。
+    **已有一张建好的标准台账时别从零重建**：`feishu_api` POST `/open-apis/bitable/v1/apps/:app_token/copy`
+    （body 带 `without_content: true`）直接复制一份（只复制结构不复制数据），这就是"模板"的用法。
+    事后要加列用 `feishu_api` POST `.../tables/:table_id/fields`；
     列**建错了别删了重建**（删列连数据一起丢），用 `feishu_bitable_update_field(app_token, table_id,
     field_id, field_name, field_type, property_json)` 改名/改类型/改选项。要一次加好几张空表用
-    `feishu_bitable_create_tables(app_token, table_names="合同,付款,发票")`；整张表连数据一起删用
-    `feishu_bitable_delete_tables`（**破坏性、API 撤不回，删前跟用户确认**；只清数据留结构用
-    `clear_table`；一张多维表格至少留一张表，删最后一张飞书报 1254034）。
-    要"同一张表不同人看到不同内容"用 `feishu_bitable_create_role` + `feishu_bitable_add_role_member`——这需要
-    表上**开了高级权限**，先 `feishu_bitable_get_app(app_token)` 看 `is_advanced`，没开用
-    `feishu_bitable_update_app(app_token, is_advanced="true")` 开（wiki 里的表和嵌在文档里的表开不了，
-    报 1254301）；`update_app` 也能给表格本体改名。
+    `feishu_api` POST `.../tables/batch_create`；整张表连数据一起删用 `feishu_api` POST
+    `.../tables/batch_delete`（**破坏性、API 撤不回**，所以端点表要求带 `confirm='DELETE_BITABLE_TABLES'`，
+    删前跟用户确认；只清数据留结构用 `feishu_bitable_clear_table`；一张多维表格至少留一张表，
+    删最后一张飞书报 1254034）。
+    要"同一张表不同人看到不同内容"用 `feishu_api` POST `.../roles` + POST `.../roles/:role_id/members`——这需要
+    表上**开了高级权限**，先 `feishu_api` GET `/open-apis/bitable/v1/apps/:app_token` 看 `is_advanced`，没开用
+    `feishu_api` PUT `/open-apis/bitable/v1/apps/:app_token`（body `{"is_advanced": true}`）开（wiki 里的表和
+    嵌在文档里的表开不了，报 1254301）；同一个 PUT 也能给表格本体改名。
     表名/列名一律**按用户说的建，缺信息就问**，别自己编一套字段糊上去。
 18. **撤回发错的消息**：用户说"把刚才那条撤回/撤销/删掉""发错了"时，用
     `feishu_message_recall(message_id=<om_...>, user_key=<sender_open_id>)`。`message_id` 只能是**消息 id**
@@ -426,17 +430,18 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
     这两类失败工具都会在结果里带一句 `hint` 说明卡在哪，**如实转告用户**，别反复重试或谎称已撤回。
     撤回是"让这条消息不该存在"；只是**内容写错**就别撤回重发，用下面第 20 条的编辑。
 19. **改多维表格里已有的格子（改状态/改错的值/补空格，不是新增一行）**：用户说"把张三那行状态改成
-    已完成""金额写错了改成 12000""把这几行都标记成已归档"时，**别用 `feishu_bitable_create_record`**
+    已完成""金额写错了改成 12000""把这几行都标记成已归档"时，**别新增一行**
     （那会多出一行重复数据），按三步改：
-    1. `feishu_bitable_list_fields(app_token, table_id)` 拿**真实列名**——飞书对不认识的列名**静默丢弃
+    1. `feishu_api` GET `.../tables/:table_id/fields` 拿**真实列名**——飞书对不认识的列名**静默丢弃
        还照样返回 code:0**，列名对不上就是"报成功但格子没变"（这是历史上真翻过的车）。
     2. `feishu_bitable_search_records(app_token, table_id, filter_json=...)` 按条件定位到那行，拿 `record_id`：
        `filter_json` 是 `{"conjunction":"and","conditions":[{"field_name":"姓名","operator":"is",
        "value":["张三"]}]}`，`conjunction` 是 `and`/`or`，`value` **一律是字符串数组**，可用的 operator 有
        `is`/`isNot`/`contains`/`doesNotContain`/`isEmpty`/`isNotEmpty`/`isGreater`/`isGreaterEqual`/
        `isLess`/`isLessEqual`（日期列不支持 isNot/contains/doesNotContain/isGreaterEqual/isLessEqual）。
-       这是官方推荐的拿 record_id 的方式，比 `list_records` 整表翻页靠谱；只想整表/整视图列出来才用
-       `list_records`。要看某一行现在的值用 `feishu_bitable_get_record(app_token, table_id, record_id)`。
+       这是官方推荐的拿 record_id 的方式，比整表翻页靠谱；只想整表/整视图列出来才用 `feishu_api` GET
+       `.../tables/:table_id/records`。要看某一行现在的值用 `feishu_api` GET
+       `.../tables/:table_id/records/:record_id`。
     3. 改一行用 `feishu_bitable_update_record(app_token, table_id, record_id, fields_json)`；一次改多行用
        `feishu_bitable_update_records(app_token, table_id, records_json)`，`records_json` 是
        `[{"record_id":"recA","fields":{"状态":"已完成"}},{"record_id":"recB","fields":{"金额":12000}}]`

@@ -11,9 +11,9 @@ summarize it on demand. Feedback is durable, structured, and visible to the team
 in Feishu — not lost in chat history.
 
 Uses the generic `feishu_bitable_*` tools:
-- `feishu_bitable_list_tables(app_token)` — find the `table_id`
-- `feishu_bitable_list_records(app_token, table_id, ...)` — read feedback back
-- `feishu_bitable_create_record(app_token, table_id, fields_json)` — record one feedback
+- `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables — find the `table_id`
+- `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records — read feedback back
+- `feishu_api` POST /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records — record one feedback
 
 ## Prerequisites
 
@@ -43,9 +43,9 @@ If the user hasn't made a table yet, suggest these columns (they can adapt):
 这些不是写记录产生的，若不清理会和你的数据并存。用专门的工具自动清掉，不必手动进飞书界面：
 
 - **删空行**：`feishu_bitable_clear_table(app_token, table_id)` 清掉表里所有行（写数据前先清一次），
-  或 `feishu_bitable_delete_records(app_token, table_id, record_ids)` 按 id 删指定行。
-- **删空列**：先 `feishu_bitable_list_fields(app_token, table_id)` 拿到各列的 `field_id`（含
-  `is_primary` 标记），再 `feishu_bitable_delete_fields(app_token, table_id, field_ids)` 删掉不需要的
+  或 `feishu_api` POST /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/batch_delete 按 id 删指定行。
+- **删空列**：先 `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields 拿到各列的 `field_id`（含
+  `is_primary` 标记），再 `feishu_api` DELETE /open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields/:field_id 删掉不需要的
   占位列。**主键列（is_primary=true）删不掉**（飞书报 1254046），保留它即可。
 
 建议流程：建表 → `clear_table` 清默认空行 → `list_fields` 看列 → `delete_fields` 删多余占位列
@@ -55,12 +55,12 @@ If the user hasn't made a table yet, suggest these columns (they can adapt):
 
 When a mentor gives feedback in conversation:
 
-1. Resolve `app_token` (once) and `table_id` (via `feishu_bitable_list_tables`).
+1. Resolve `app_token` (once) and `table_id` (via `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables).
 2. Build `fields_json` matching the table's real column names, e.g.:
    ```json
    {"新人":"张三","Mentor":"李四","日期":"2026-07-14","反馈内容":"本周主动承担了两个模块，沟通清晰；下一步多写测试。","评分":4,"标签":"主动性"}
    ```
-3. Call `feishu_bitable_create_record(app_token, table_id, fields_json)`.
+3. Call `feishu_api` POST /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records.
 4. Confirm with the returned `record_id`. If it returns `ok=false`, surface the
    Feishu error (often a permission or column-name mismatch) — don't claim success.
 
@@ -72,7 +72,7 @@ columns often accept a string like `"2026-07-14"` but some bases want a timestam
 
 When asked to review someone's feedback:
 
-1. `feishu_bitable_list_records(app_token, table_id, page_size=500)`; page through
+1. `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records with `page_size=500`; page through
    `has_more`/`page_token` until you have them all.
 2. Filter/group by the 新人 column (either post-filter in your reasoning, or pass a
    `filter` expression / `field_names`).

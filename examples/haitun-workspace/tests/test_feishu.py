@@ -2551,40 +2551,6 @@ def test_search_auth_tools_async_with_docstrings() -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_bitable_tables(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"items": [{"table_id": "tbl1", "name": "反馈表"}], "has_more": False})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_bitable_tables_impl("appX", 100, "")
-    req = cap.request
-    assert req.http_method.name == "GET"
-    assert req.uri == "/open-apis/bitable/v1/apps/:app_token/tables"
-    assert req.paths["app_token"] == "appX"
-    assert result["tables"] == [{"table_id": "tbl1", "name": "反馈表"}]
-
-
-@pytest.mark.asyncio
-async def test_list_bitable_records(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "items": [{"record_id": "rec1", "fields": {"新人": "张三"}}],
-            "has_more": True,
-            "page_token": "pt2",
-            "total": 5,
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_bitable_records_impl("appX", "tbl1", 100, "", "", '["日期 DESC"]', "")
-    req = cap.request
-    q = _qdict(req)
-    assert req.uri == "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records"
-    assert req.paths["table_id"] == "tbl1"
-    assert q.get("sort") == '["日期 DESC"]'
-    assert result["records"][0] == {"record_id": "rec1", "fields": {"新人": "张三"}}
-    assert result["has_more"] is True
-    assert result["total"] == 5
-
-
-@pytest.mark.asyncio
 async def test_search_bitable_records(monkeypatch: pytest.MonkeyPatch) -> None:
     cap = _CapturedInvoke(
         {"items": [{"record_id": "rec1", "fields": {"状态": "进行中"}}], "has_more": False, "total": 1}
@@ -2652,38 +2618,6 @@ async def test_search_bitable_records_page_size_bounds() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_bitable_record(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "record": {
-                "record_id": "rec1",
-                "fields": {"状态": "进行中"},
-                "record_url": "https://x.feishu.cn/base/appX?table=tbl1&record=rec1",
-                "created_time": 1691049973000,
-            }
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.get_bitable_record_impl("appX", "tbl1", "rec1", automatic_fields=True)
-    req = cap.request
-    q = _qdict(req)
-    assert req.http_method.name == "GET"
-    assert req.uri == "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/:record_id"
-    assert req.paths["record_id"] == "rec1"
-    assert q.get("automatic_fields") == "true"
-    assert result["fields"] == {"状态": "进行中"}
-    assert result["url"].endswith("record=rec1")
-    assert result["created_time"] == 1691049973000
-
-
-@pytest.mark.asyncio
-async def test_get_bitable_record_requires_ids() -> None:
-    assert (await _impl.get_bitable_record_impl("", "tbl1", "rec1"))["ok"] is False
-    assert (await _impl.get_bitable_record_impl("appX", "", "rec1"))["ok"] is False
-    assert (await _impl.get_bitable_record_impl("appX", "tbl1", ""))["ok"] is False
-
-
-@pytest.mark.asyncio
 async def test_create_bitable_records_batch(monkeypatch: pytest.MonkeyPatch) -> None:
     paged = _PagedInvoke(
         [
@@ -2744,31 +2678,6 @@ async def test_create_bitable_records_bad_input() -> None:
     assert (await _impl.create_bitable_records_impl("appX", "tbl1", '["a"]'))["ok"] is False
     assert (await _impl.create_bitable_records_impl("appX", "tbl1", "[{}]"))["ok"] is False
     assert (await _impl.create_bitable_records_impl("", "tbl1", '[{"a":1}]'))["ok"] is False
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_record(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"record": {"record_id": "recNew", "fields": {"新人": "张三"}}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_bitable_record_impl("appX", "tbl1", '{"新人":"张三","评分":4}')
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri == "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records"
-    assert req.body["fields"] == {"新人": "张三", "评分": 4}
-    assert result["record_id"] == "recNew"
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_record_bad_json() -> None:
-    result = await _impl.create_bitable_record_impl("appX", "tbl1", "not json")
-    assert result["ok"] is False
-    assert "JSON" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_record_non_object() -> None:
-    result = await _impl.create_bitable_record_impl("appX", "tbl1", '["a","b"]')
-    assert result["ok"] is False
 
 
 @pytest.mark.asyncio
@@ -2919,25 +2828,6 @@ async def test_update_bitable_records_survives_unreadable_fields(monkeypatch: py
 
 
 @pytest.mark.asyncio
-async def test_delete_bitable_records(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.delete_bitable_records_impl("appX", "tbl1", "recA, recB")
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri.endswith("/records/batch_delete")
-    assert req.paths["table_id"] == "tbl1"
-    assert req.body["records"] == ["recA", "recB"]
-    assert result["deleted"] == 2
-
-
-@pytest.mark.asyncio
-async def test_delete_bitable_records_empty() -> None:
-    result = await _impl.delete_bitable_records_impl("appX", "tbl1", " , ")
-    assert result["ok"] is False
-
-
-@pytest.mark.asyncio
 async def test_clear_bitable_table(monkeypatch: pytest.MonkeyPatch) -> None:
     paged = _PagedInvoke(
         [
@@ -2981,62 +2871,6 @@ async def test_list_bitable_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result["fields"][0] == {"field_id": "fld1", "name": "标题", "type": "文本", "is_primary": True}
     assert result["fields"][1]["is_primary"] is False
     assert result["count"] == 2
-
-
-@pytest.mark.asyncio
-async def test_delete_bitable_fields(monkeypatch: pytest.MonkeyPatch) -> None:
-    paged = _PagedInvoke([{}, {}])
-    monkeypatch.setattr(_impl, "_invoke", paged)
-    result = await _impl.delete_bitable_fields_impl("appX", "tbl1", "fldA, fldB")
-    assert result["deleted"] == ["fldA", "fldB"]
-    assert result["count"] == 2
-    last = paged.requests[-1]
-    assert last.http_method.name == "DELETE"
-    assert last.uri.endswith("/fields/:field_id")
-    assert last.paths["field_id"] == "fldB"
-
-
-@pytest.mark.asyncio
-async def test_delete_bitable_fields_empty() -> None:
-    result = await _impl.delete_bitable_fields_impl("appX", "tbl1", "")
-    assert result["ok"] is False
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_app_builds_post(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "app": {
-                "app_token": "bascnNew",
-                "name": "合同台账",
-                "folder_token": "fldA",
-                "default_table_id": "tblDefault",
-                "time_zone": "Asia/Shanghai",
-                "url": "https://feishu.cn/base/bascnNew",
-            }
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_bitable_app_impl("合同台账", "fldA", "Asia/Shanghai", "ou_1")
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri == "/open-apis/bitable/v1/apps"
-    assert req.body == {"name": "合同台账", "folder_token": "fldA", "time_zone": "Asia/Shanghai"}
-    assert cap.prefer == "user"
-    assert cap.user_key == "ou_1"
-    assert result["app_token"] == "bascnNew"
-    assert result["default_table_id"] == "tblDefault"
-    assert result["url"] == "https://feishu.cn/base/bascnNew"
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_app_omits_blank_optionals(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"app": {"app_token": "bascnX"}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_bitable_app_impl("台账")
-    assert cap.request.body == {"name": "台账"}
-    # No url in the response: derive one from the app_token so the user gets a link.
-    assert result["url"] == "https://feishu.cn/base/bascnX"
 
 
 @pytest.mark.asyncio
@@ -3104,58 +2938,6 @@ async def test_create_bitable_table_view_name_needs_fields() -> None:
     result = await _impl.create_bitable_table_impl("appX", "表", "", "视图")
     assert result["ok"] is False
     assert "fields_json" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_field_builds_post(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"field": {"field_id": "fldNew", "field_name": "状态", "type": 3, "is_primary": False}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_bitable_field_impl(
-        "appX", "tbl1", "状态", 3, '{"options":[{"name":"生效","color":0}]}', "SingleSelect", "ou_1"
-    )
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri == "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields"
-    assert req.paths["table_id"] == "tbl1"
-    assert req.body["field_name"] == "状态"
-    assert req.body["type"] == 3
-    assert req.body["property"] == {"options": [{"name": "生效", "color": 0}]}
-    assert req.body["ui_type"] == "SingleSelect"
-    assert cap.prefer == "user"
-    assert result["field_id"] == "fldNew"
-    assert result["type"] == "单选"  # decoded via _BITABLE_FIELD_TYPES
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_field_minimal(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"field": {"field_id": "fldT", "field_name": "备注", "type": 1}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_bitable_field_impl("appX", "tbl1", "备注")
-    assert cap.request.body == {"field_name": "备注", "type": 1}
-    assert result["type"] == "文本"
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_field_validates_args() -> None:
-    assert (await _impl.create_bitable_field_impl("", "tbl1", "a"))["ok"] is False
-    assert (await _impl.create_bitable_field_impl("appX", "", "a"))["ok"] is False
-    assert (await _impl.create_bitable_field_impl("appX", "tbl1", " "))["ok"] is False
-    assert (await _impl.create_bitable_field_impl("appX", "tbl1", "a", 19))["ok"] is False
-    bad_prop = await _impl.create_bitable_field_impl("appX", "tbl1", "a", 3, "{not json")
-    assert bad_prop["ok"] is False
-    assert "JSON" in bad_prop["message"]
-    non_object = await _impl.create_bitable_field_impl("appX", "tbl1", "a", 3, '["x"]')
-    assert non_object["ok"] is False
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_field_allows_person_type(monkeypatch: pytest.MonkeyPatch) -> None:
-    # 11 is rejected only as a table's first (index) column, not as an added field.
-    cap = _CapturedInvoke({"field": {"field_id": "fldP", "field_name": "负责人", "type": 11}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_bitable_field_impl("appX", "tbl1", "负责人", 11)
-    assert result["ok"] is True
-    assert result["type"] == "人员"
 
 
 @pytest.mark.asyncio
@@ -3233,180 +3015,17 @@ async def test_update_bitable_field_requires_ids() -> None:
     assert (await _impl.update_bitable_field_impl("appX", "tbl1", "", "x", 1))["ok"] is False
 
 
-@pytest.mark.asyncio
-async def test_create_bitable_tables(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"table_ids": ["tblA", "tblB"]})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_bitable_tables_impl("appX", "合同, 付款")
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri.endswith("/tables/batch_create")
-    assert req.body["tables"] == [{"name": "合同"}, {"name": "付款"}]
-    assert result["tables"] == [{"table_id": "tblA", "name": "合同"}, {"table_id": "tblB", "name": "付款"}]
-    assert result["count"] == 2
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_tables_validates_names() -> None:
-    assert (await _impl.create_bitable_tables_impl("appX", " , "))["ok"] is False
-    assert (await _impl.create_bitable_tables_impl("appX", "合同/付款"))["ok"] is False
-    assert (await _impl.create_bitable_tables_impl("appX", ",".join(f"t{i}" for i in range(51))))["ok"] is False
-    assert (await _impl.create_bitable_tables_impl("", "合同"))["ok"] is False
-
-
-@pytest.mark.asyncio
-async def test_delete_bitable_tables(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.delete_bitable_tables_impl("appX", "tblA, tblB")
-    req = cap.request
-    assert req.uri.endswith("/tables/batch_delete")
-    assert req.body["table_ids"] == ["tblA", "tblB"]
-    assert result["deleted"] == ["tblA", "tblB"]
-
-
-@pytest.mark.asyncio
-async def test_delete_bitable_tables_last_table_hint(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _refuse(request: Any, **kwargs: Any) -> dict[str, Any]:
-        return {"ok": False, "code": "1254034", "message": "The last table cannot be deleted"}
-
-    monkeypatch.setattr(_impl, "_invoke", _refuse)
-    result = await _impl.delete_bitable_tables_impl("appX", "tblA")
-    assert result["ok"] is False
-    assert "last one" in result["hint"]
-
-
-@pytest.mark.asyncio
-async def test_delete_bitable_tables_validates() -> None:
-    assert (await _impl.delete_bitable_tables_impl("appX", " , "))["ok"] is False
-    assert (await _impl.delete_bitable_tables_impl("appX", ",".join(f"tbl{i}" for i in range(51))))["ok"] is False
-
-
-@pytest.mark.asyncio
-async def test_get_bitable_app(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "app": {
-                "app_token": "appX",
-                "name": "合同台账",
-                "is_advanced": True,
-                "time_zone": "Asia/Shanghai",
-                "revision": 7,
-            }
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.get_bitable_app_impl("appX")
-    req = cap.request
-    assert req.http_method.name == "GET"
-    assert req.uri == "/open-apis/bitable/v1/apps/:app_token"
-    assert result["name"] == "合同台账"
-    assert result["is_advanced"] is True
-    assert result["revision"] == 7
-    assert result["url"].endswith("/base/appX")
-
-
-@pytest.mark.asyncio
-async def test_update_bitable_app(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"app": {"app_token": "appX", "name": "新名字", "is_advanced": True}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.update_bitable_app_impl("appX", "新名字", "true")
-    req = cap.request
-    assert req.http_method.name == "PUT"
-    assert req.body == {"name": "新名字", "is_advanced": True}
-    assert result["changed"] == ["is_advanced", "name"]
-    assert result["is_advanced"] is True
-
-
-@pytest.mark.asyncio
-async def test_update_bitable_app_validates() -> None:
-    assert (await _impl.update_bitable_app_impl("appX"))["ok"] is False  # nothing to change
-    assert (await _impl.update_bitable_app_impl("appX", "a/b"))["ok"] is False  # illegal char
-    assert (await _impl.update_bitable_app_impl("appX", "x" * 101))["ok"] is False  # too long
-    assert (await _impl.update_bitable_app_impl("appX", is_advanced="yes"))["ok"] is False
-    assert (await _impl.update_bitable_app_impl("", "新名字"))["ok"] is False
-
-
-@pytest.mark.asyncio
-async def test_update_bitable_app_advanced_hint(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _refuse(request: Any, **kwargs: Any) -> dict[str, Any]:
-        return {"ok": False, "code": "1254301", "message": "advanced permission unsupported"}
-
-    monkeypatch.setattr(_impl, "_invoke", _refuse)
-    result = await _impl.update_bitable_app_impl("appX", is_advanced="true")
-    assert result["ok"] is False
-    assert "wiki" in result["hint"]
-
-
-@pytest.mark.asyncio
-async def test_copy_bitable_app(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {"app": {"app_token": "appNew", "name": "台账副本", "folder_token": "fldA", "url": "https://x/base/appNew"}}
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.copy_bitable_app_impl("appX", "台账副本", "fldA", True, "Asia/Shanghai")
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri == "/open-apis/bitable/v1/apps/:app_token/copy"
-    assert req.body == {
-        "name": "台账副本",
-        "folder_token": "fldA",
-        "without_content": True,
-        "time_zone": "Asia/Shanghai",
-    }
-    assert result["app_token"] == "appNew"
-    assert result["without_content"] is True
-
-
-@pytest.mark.asyncio
-async def test_copy_bitable_app_omits_blanks(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"app": {"app_token": "appNew"}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.copy_bitable_app_impl("appX")
-    assert cap.request.body == {}
-    assert result["url"].endswith("/base/appNew")
-
-
-@pytest.mark.asyncio
-async def test_copy_bitable_app_in_progress_hint(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _refuse(request: Any, **kwargs: Any) -> dict[str, Any]:
-        return {"ok": False, "code": "1254036", "message": "copying"}
-
-    monkeypatch.setattr(_impl, "_invoke", _refuse)
-    result = await _impl.copy_bitable_app_impl("appX")
-    assert result["ok"] is False
-    assert "retry" in result["hint"]
-
-
-@pytest.mark.asyncio
-async def test_copy_bitable_app_requires_token() -> None:
-    assert (await _impl.copy_bitable_app_impl(""))["ok"] is False
-
-
 def test_bitable_tools_async_with_docstrings() -> None:
+    """The tools that stayed behind after the endpoint table took over the rest."""
     mod = importlib.import_module("feishu_bitable")
     for name in (
-        "feishu_bitable_list_tables",
-        "feishu_bitable_list_records",
         "feishu_bitable_search_records",
-        "feishu_bitable_get_record",
-        "feishu_bitable_create_record",
         "feishu_bitable_create_records",
         "feishu_bitable_update_record",
         "feishu_bitable_update_records",
-        "feishu_bitable_delete_records",
         "feishu_bitable_clear_table",
-        "feishu_bitable_list_fields",
-        "feishu_bitable_delete_fields",
         "feishu_bitable_update_field",
-        "feishu_bitable_create_app",
-        "feishu_bitable_get_app",
-        "feishu_bitable_update_app",
-        "feishu_bitable_copy_app",
         "feishu_bitable_create_table",
-        "feishu_bitable_create_tables",
-        "feishu_bitable_delete_tables",
-        "feishu_bitable_create_field",
     ):
         fn = getattr(mod, name)
         assert inspect.iscoroutinefunction(fn), name
@@ -5669,67 +5288,6 @@ def test_permission_tools_are_async_with_docstrings() -> None:
         assert (inspect.getdoc(fn) or "").strip(), f"{name} needs a docstring"
 
 
-# ── Bitable role impl tests (一份资料按角色显示不同内容) ────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_role_builds_post(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"role": {"role_id": "r1", "role_name": "读者"}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_bitable_role_impl("app1", "读者", '[{"table_id": "tbl1", "table_perm": 1}]')
-    assert result["ok"] is True
-    assert result["role_id"] == "r1"
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.paths["app_token"] == "app1"
-    assert req.body["role_name"] == "读者"
-    assert req.body["table_roles"][0]["table_id"] == "tbl1"
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_role_rejects_bad_json() -> None:
-    result = await _impl.create_bitable_role_impl("app1", "读者", "{not json")
-    assert result["ok"] is False
-    assert "not valid JSON" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_role_requires_array() -> None:
-    result = await _impl.create_bitable_role_impl("app1", "读者", '{"table_id": "tbl1"}')
-    assert result["ok"] is False
-    assert "JSON array" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_list_bitable_roles_normalizes(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"items": [{"role_id": "r1", "role_name": "读者", "table_roles": []}], "has_more": False})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_bitable_roles_impl("app1")
-    assert result["ok"] is True
-    assert result["roles"][0]["role_id"] == "r1"
-
-
-@pytest.mark.asyncio
-async def test_add_bitable_role_member_builds_post(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.add_bitable_role_member_impl("app1", "r1", "u1")
-    assert result["ok"] is True
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.paths["role_id"] == "r1"
-    assert req.body["member_id"] == "u1"
-    assert _qdict(req).get("member_id_type") == "open_id"
-
-
-def test_bitable_role_tools_are_async_with_docstrings() -> None:
-    mod = importlib.import_module("feishu_bitable")
-    for name in ("feishu_bitable_create_role", "feishu_bitable_list_roles", "feishu_bitable_add_role_member"):
-        fn = getattr(mod, name)
-        assert inspect.iscoroutinefunction(fn), name
-        assert (inspect.getdoc(fn) or "").strip(), f"{name} needs a docstring"
-
-
 # ── eLearning impl tests (查每人学习记录) ──────────────────────────────────────
 
 
@@ -6367,7 +5925,7 @@ def test_write_tools_expose_identity(tmp_path: Any) -> None:
     expected = {
         "feishu_doc": ["feishu_doc_create", "feishu_doc_append_content", "feishu_doc_append_table"],
         "feishu_wiki": ["feishu_wiki_create_doc", "feishu_wiki_create_doc_with_content"],
-        "feishu_bitable": ["feishu_bitable_create_app", "feishu_bitable_create_table"],
+        "feishu_bitable": ["feishu_bitable_create_table", "feishu_bitable_create_records"],
         "feishu_sheet": ["feishu_sheet_write", "feishu_sheet_append", "feishu_sheet_format"],
         "feishu_task": ["feishu_task_create"],
         "feishu_drive": ["feishu_drive_delete_file", "feishu_drive_upload"],
@@ -6387,7 +5945,7 @@ def test_read_tools_do_not_take_identity() -> None:
         ("feishu_doc", "feishu_doc_read"),
         ("feishu_sheet", "feishu_sheet_read"),
         ("feishu_wiki", "feishu_wiki_list_spaces"),
-        ("feishu_bitable", "feishu_bitable_list_records"),
+        ("feishu_bitable", "feishu_bitable_search_records"),
     ]:
         mod = importlib.import_module(mod_name)
         assert "identity" not in inspect.signature(getattr(mod, tool)).parameters, tool

@@ -101,7 +101,7 @@ async def test_post_sends_body_and_lowercase_method_is_accepted(monkeypatch: pyt
 
 
 @pytest.mark.asyncio
-async def test_prefer_user_narrows_token_types(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_prefer_user_selects_the_user_send_path(monkeypatch: pytest.MonkeyPatch) -> None:
     cap = _CapturedInvoke()
     monkeypatch.setattr(_impl, "_invoke", cap)
 
@@ -114,9 +114,11 @@ async def test_prefer_user_narrows_token_types(monkeypatch: pytest.MonkeyPatch) 
         user_key="ou_sender",
     )
 
-    # Endpoints that only accept a UAT must not advertise TENANT, or the SDK will try
-    # the bot token first and the call fails for a reason the caller can't see.
-    assert cap.request.token_types == {AccessTokenType.USER}
+    # ``prefer`` is what routes to the UAT send; the request advertises both candidates so
+    # the same request stays sendable as tenant. Each send path sets only its own token, and
+    # the SDK's verify() picks the type whose token is actually present — it does not try the
+    # bot token first.
+    assert cap.request.token_types == {AccessTokenType.TENANT, AccessTokenType.USER}
     assert cap.kwargs[0]["prefer"] == "user"
     assert cap.kwargs[0]["identity"] == "user"
 

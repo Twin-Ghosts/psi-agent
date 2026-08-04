@@ -54,7 +54,7 @@ description: "把分散在飞书群聊、话题线程、文档、知识库、评
 | 文档评论与回复 | `feishu_drive_list_comments` / `feishu_drive_list_comment_replies` |
 | 消息图片或附件 | `feishu_image_get`；云盘附件用 `feishu_file_download` |
 | 电子表格 | `feishu_sheet_tabs` → `feishu_sheet_read` |
-| 多维表格 | `feishu_bitable_list_tables` → `feishu_bitable_list_records` |
+| 多维表格 | `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables → `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records |
 | 人员与群消歧 | `feishu_chat_find_member`；群成员列表与查人走 `feishu_api`（`GET /open-apis/im/v1/chats/:chat_id/members`、`GET /open-apis/contact/v3/users/batch`，见 `feishu-chat` / `feishu-contact` skill） |
 | 用户直接提供的文件 | 读取 `[RECV:]` 路径；PDF/扫描件遵循 `ocr-and-documents` |
 

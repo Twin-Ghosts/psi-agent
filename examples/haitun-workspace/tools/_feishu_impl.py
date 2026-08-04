@@ -4589,37 +4589,6 @@ def _parse_resp_body(resp: Any) -> dict[str, Any]:
 # resolve via feishu_wiki_get_node — obj_token is the app_token when obj_type=bitable).
 
 
-def _build_list_tables_request(app_token: str, page_size: int, page_token: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables"
-    req.paths["app_token"] = app_token
-    req.add_query("page_size", page_size)
-    if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
-
-
-async def list_bitable_tables_impl(app_token: str, page_size: int = 100, page_token: str = "") -> dict[str, Any]:
-    """List the data tables in a bitable app. Returns [{table_id, name}]."""
-    res = await _invoke(_build_list_tables_request(app_token, page_size, page_token))
-    if not res["ok"]:
-        return res
-    data = res["data"] if isinstance(res["data"], dict) else {}
-    tables = [
-        {"table_id": t.get("table_id", ""), "name": t.get("name", "")}
-        for t in (data.get("items", []) if isinstance(data.get("items"), list) else [])
-    ]
-    return {
-        "ok": True,
-        "tables": tables,
-        "count": len(tables),
-        "has_more": bool(data.get("has_more")),
-        "page_token": data.get("page_token", ""),
-    }
-
-
 def _build_list_records_request(
     app_token: str, table_id: str, page_size: int, page_token: str, filter_: str, sort: str, field_names: str
 ) -> BaseRequest:
@@ -4639,36 +4608,6 @@ def _build_list_records_request(
         req.add_query("field_names", field_names)
     req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
     return req
-
-
-async def list_bitable_records_impl(
-    app_token: str,
-    table_id: str,
-    page_size: int = 100,
-    page_token: str = "",
-    filter_: str = "",
-    sort: str = "",
-    field_names: str = "",
-) -> dict[str, Any]:
-    """List records in a bitable table. Returns [{record_id, fields}] + pagination."""
-    res = await _invoke(
-        _build_list_records_request(app_token, table_id, page_size, page_token, filter_, sort, field_names)
-    )
-    if not res["ok"]:
-        return res
-    data = res["data"] if isinstance(res["data"], dict) else {}
-    records = [
-        {"record_id": r.get("record_id", ""), "fields": r.get("fields", {})}
-        for r in (data.get("items", []) if isinstance(data.get("items"), list) else [])
-    ]
-    return {
-        "ok": True,
-        "records": records,
-        "count": len(records),
-        "has_more": bool(data.get("has_more")),
-        "page_token": data.get("page_token", ""),
-        "total": data.get("total", 0),
-    }
 
 
 # ── Bitable reads — conditional search and single-record fetch ────────────────
@@ -4766,7 +4705,7 @@ async def search_bitable_records_impl(
     if not app_token.strip():
         return _error("No app_token provided (the segment in a feishu.cn/base/<app_token> URL).")
     if not table_id.strip():
-        return _error("No table_id provided (get it from feishu_bitable_list_tables).")
+        return _error("No table_id provided (get it from feishu_api GET /open-apis/bitable/v1/apps/:app_token/tables).")
     if page_size < 1 or page_size > 500:
         return _error(f"page_size must be between 1 and 500 (got {page_size}).")
     body: dict[str, Any] = {}
@@ -4823,85 +4762,6 @@ async def search_bitable_records_impl(
     }
 
 
-def _build_get_record_request(app_token: str, table_id: str, record_id: str, automatic_fields: bool) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/:record_id"
-    req.paths["app_token"] = app_token
-    req.paths["table_id"] = table_id
-    req.paths["record_id"] = record_id
-    req.add_query("with_shared_url", "true")
-    if automatic_fields:
-        req.add_query("automatic_fields", "true")
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
-
-
-async def get_bitable_record_impl(
-    app_token: str,
-    table_id: str,
-    record_id: str,
-    automatic_fields: bool = False,
-    user_key: str = "",
-) -> dict[str, Any]:
-    """Read one record by id. Returns its fields, url and (optionally) who created/changed it."""
-    if not app_token.strip():
-        return _error("No app_token provided (the segment in a feishu.cn/base/<app_token> URL).")
-    if not table_id.strip():
-        return _error("No table_id provided (get it from feishu_bitable_list_tables).")
-    if not record_id.strip():
-        return _error("No record_id provided (get it from feishu_bitable_search_records).")
-    res = await _invoke(
-        _build_get_record_request(app_token.strip(), table_id.strip(), record_id.strip(), automatic_fields),
-        user_key=user_key,
-    )
-    if not res["ok"]:
-        return res
-    data = res["data"] if isinstance(res["data"], dict) else {}
-    record = data.get("record", {}) if isinstance(data.get("record"), dict) else {}
-    result: dict[str, Any] = {
-        "ok": True,
-        "record_id": record.get("record_id", "") or record_id.strip(),
-        "fields": record.get("fields", {}),
-        "url": record.get("record_url", ""),
-    }
-    for key in ("created_by", "created_time", "last_modified_by", "last_modified_time"):
-        if record.get(key):
-            result[key] = record[key]
-    return result
-
-
-def _build_create_record_request(app_token: str, table_id: str, fields: dict[str, Any]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records"
-    req.paths["app_token"] = app_token
-    req.paths["table_id"] = table_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"fields": fields}
-    return req
-
-
-async def create_bitable_record_impl(
-    app_token: str, table_id: str, fields_json: str, user_key: str = "", identity: str = ""
-) -> dict[str, Any]:
-    """Create one record in a bitable table. fields_json is a JSON object of {column: value}."""
-    try:
-        fields = json.loads(fields_json)
-    except ValueError as exc:
-        return _error(f"fields_json is not valid JSON: {exc}")
-    if not isinstance(fields, dict):
-        return _error("fields_json must be a JSON object mapping column names to values.")
-    res = await _invoke(
-        _build_create_record_request(app_token, table_id, fields), user_key=user_key, prefer="user", identity=identity
-    )
-    if not res["ok"]:
-        return res
-    data = res["data"] if isinstance(res["data"], dict) else {}
-    record = data.get("record", {}) if isinstance(data.get("record"), dict) else {}
-    return {"ok": True, "record_id": record.get("record_id", ""), "fields": record.get("fields", {})}
-
-
 def _build_batch_create_records_request(app_token: str, table_id: str, records: list[dict[str, Any]]) -> BaseRequest:
     req = BaseRequest()
     req.http_method = HttpMethod.POST
@@ -4925,7 +4785,7 @@ async def create_bitable_records_impl(
     if not app_token.strip():
         return _error("No app_token provided (the segment in a feishu.cn/base/<app_token> URL).")
     if not table_id.strip():
-        return _error("No table_id provided (get it from feishu_bitable_list_tables).")
+        return _error("No table_id provided (get it from feishu_api GET /open-apis/bitable/v1/apps/:app_token/tables).")
     try:
         rows = json.loads(records_json)
     except ValueError as exc:
@@ -5070,9 +4930,9 @@ async def update_bitable_record_impl(
     if not app_token.strip():
         return _error("No app_token provided (the segment in a feishu.cn/base/<app_token> URL).")
     if not table_id.strip():
-        return _error("No table_id provided (get it from feishu_bitable_list_tables).")
+        return _error("No table_id provided (get it from feishu_api GET /open-apis/bitable/v1/apps/:app_token/tables).")
     if not record_id.strip():
-        return _error("No record_id provided (get it from feishu_bitable_list_records).")
+        return _error("No record_id provided (get it from feishu_bitable_search_records).")
     try:
         parsed = json.loads(fields_json)
     except ValueError as exc:
@@ -5125,7 +4985,7 @@ async def update_bitable_records_impl(
     if not app_token.strip():
         return _error("No app_token provided (the segment in a feishu.cn/base/<app_token> URL).")
     if not table_id.strip():
-        return _error("No table_id provided (get it from feishu_bitable_list_tables).")
+        return _error("No table_id provided (get it from feishu_api GET /open-apis/bitable/v1/apps/:app_token/tables).")
     try:
         parsed = json.loads(records_json)
     except ValueError as exc:
@@ -5191,28 +5051,6 @@ def _build_batch_delete_records_request(app_token: str, table_id: str, record_id
     req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
     req.body = {"records": record_ids}
     return req
-
-
-async def delete_bitable_records_impl(
-    app_token: str, table_id: str, record_ids: str, user_key: str = "", identity: str = ""
-) -> dict[str, Any]:
-    """Delete records (rows) by id. record_ids is comma-separated; batches of 500."""
-    ids = [r.strip() for r in record_ids.split(",") if r.strip()]
-    if not ids:
-        return _error("No record_ids provided (comma-separated record ids).")
-    deleted = 0
-    for i in range(0, len(ids), 500):
-        batch = ids[i : i + 500]
-        res = await _invoke(
-            _build_batch_delete_records_request(app_token, table_id, batch),
-            user_key=user_key,
-            prefer="user",
-            identity=identity,
-        )
-        if not res["ok"]:
-            return {**res, "deleted": deleted}
-        deleted += len(batch)
-    return {"ok": True, "deleted": deleted, "record_ids": ids}
 
 
 async def clear_bitable_table_impl(
@@ -5317,35 +5155,6 @@ async def list_bitable_fields_impl(app_token: str, table_id: str) -> dict[str, A
     return {"ok": True, "fields": fields, "count": len(fields)}
 
 
-def _build_delete_field_request(app_token: str, table_id: str, field_id: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.DELETE
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields/:field_id"
-    req.paths["app_token"] = app_token
-    req.paths["table_id"] = table_id
-    req.paths["field_id"] = field_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
-
-
-async def delete_bitable_fields_impl(
-    app_token: str, table_id: str, field_ids: str, user_key: str = "", identity: str = ""
-) -> dict[str, Any]:
-    """Delete fields (columns) by id. field_ids is comma-separated. Primary field cannot be deleted."""
-    ids = [f.strip() for f in field_ids.split(",") if f.strip()]
-    if not ids:
-        return _error("No field_ids provided (comma-separated field ids from feishu_bitable_list_fields).")
-    deleted: list[str] = []
-    for fid in ids:
-        res = await _invoke(
-            _build_delete_field_request(app_token, table_id, fid), user_key=user_key, prefer="user", identity=identity
-        )
-        if not res["ok"]:
-            return {**res, "deleted": deleted, "failed_field_id": fid}
-        deleted.append(fid)
-    return {"ok": True, "deleted": deleted, "count": len(deleted)}
-
-
 # ── Bitable creation — new base, new data table, new field ────────────────────
 #
 # The tools above all need an app_token that already exists, i.e. a base somebody
@@ -5363,48 +5172,6 @@ async def delete_bitable_fields_impl(
 
 _INDEX_FIELD_TYPES = {1, 2, 5, 13, 15, 20, 22}
 _UNCREATABLE_FIELD_TYPE = 19
-
-
-def _build_create_bitable_app_request(name: str, folder_token: str, time_zone: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/bitable/v1/apps"
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    body: dict[str, Any] = {}
-    if name:
-        body["name"] = name
-    if folder_token:
-        body["folder_token"] = folder_token
-    if time_zone:
-        body["time_zone"] = time_zone
-    req.body = body
-    return req
-
-
-async def create_bitable_app_impl(
-    name: str, folder_token: str = "", time_zone: str = "", user_key: str = "", identity: str = ""
-) -> dict[str, Any]:
-    """Create a new bitable (多维表格). Returns its app_token, url and default_table_id."""
-    res = await _invoke(
-        _build_create_bitable_app_request(name.strip(), folder_token.strip(), time_zone.strip()),
-        user_key=user_key,
-        prefer="user",
-        identity=identity,
-    )
-    if not res["ok"]:
-        return res
-    data = res["data"] if isinstance(res["data"], dict) else {}
-    app = data.get("app", {}) if isinstance(data.get("app"), dict) else {}
-    app_token = app.get("app_token", "")
-    return {
-        "ok": True,
-        "app_token": app_token,
-        "name": app.get("name", name),
-        "folder_token": app.get("folder_token", ""),
-        "default_table_id": app.get("default_table_id", ""),
-        "time_zone": app.get("time_zone", ""),
-        "url": app.get("url") or (f"{_DOC_BASE_URL}/base/{app_token}" if app_token else ""),
-    }
 
 
 def _validate_bitable_fields(fields: Any, *, as_table_fields: bool) -> str | None:
@@ -5484,302 +5251,12 @@ async def create_bitable_table_impl(
     }
 
 
-def _build_batch_create_tables_request(app_token: str, names: list[str]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/batch_create"
-    req.paths["app_token"] = app_token
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"tables": [{"name": n} for n in names]}
-    return req
-
-
-async def create_bitable_tables_impl(
-    app_token: str, table_names: str, user_key: str = "", identity: str = ""
-) -> dict[str, Any]:
-    """Create several empty data tables at once (names only — no columns). Max 50 per call."""
-    if not app_token.strip():
-        return _error("No app_token provided (the segment in a feishu.cn/base/<app_token> URL).")
-    names = [n.strip() for n in table_names.split(",") if n.strip()]
-    if not names:
-        return _error("No table_names provided (comma-separated table names).")
-    if len(names) > 50:
-        return _error(f"{len(names)} table names given; Feishu creates at most 50 per call.")
-    bad = [n for n in names if any(c in n for c in "/\\?*:[]")]
-    if bad:
-        return _error(f"These table names contain characters Feishu rejects (/ \\ ? * : [ ]): {', '.join(bad)}.")
-    res = await _invoke(
-        _build_batch_create_tables_request(app_token.strip(), names),
-        user_key=user_key,
-        prefer="user",
-        identity=identity,
-    )
-    if not res["ok"]:
-        return res
-    data = res["data"] if isinstance(res["data"], dict) else {}
-    ids = data.get("table_ids", [])
-    ids = ids if isinstance(ids, list) else []
-    return {
-        "ok": True,
-        "tables": [{"table_id": tid, "name": name} for tid, name in zip(ids, names, strict=False)],
-        "count": len(ids),
-        "note": "these tables have only a placeholder column — add columns with feishu_bitable_create_field",
-    }
-
-
-def _build_batch_delete_tables_request(app_token: str, table_ids: list[str]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/batch_delete"
-    req.paths["app_token"] = app_token
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"table_ids": table_ids}
-    return req
-
-
-async def delete_bitable_tables_impl(
-    app_token: str, table_ids: str, user_key: str = "", identity: str = ""
-) -> dict[str, Any]:
-    """Delete whole data tables (with all their data) by id. Max 50 per call; last table can't go."""
-    if not app_token.strip():
-        return _error("No app_token provided (the segment in a feishu.cn/base/<app_token> URL).")
-    ids = [t.strip() for t in table_ids.split(",") if t.strip()]
-    if not ids:
-        return _error("No table_ids provided (comma-separated table ids from feishu_bitable_list_tables).")
-    if len(ids) > 50:
-        return _error(f"{len(ids)} table ids given; Feishu deletes at most 50 per call.")
-    res = await _invoke(
-        _build_batch_delete_tables_request(app_token.strip(), ids),
-        user_key=user_key,
-        prefer="user",
-        identity=identity,
-    )
-    if not res["ok"]:
-        if str(res.get("code")) == "1254034":
-            return {
-                **res,
-                "hint": "a bitable must keep at least one data table — Feishu refuses to delete the last one.",
-            }
-        return res
-    return {"ok": True, "deleted": ids, "count": len(ids)}
-
-
 # ── Bitable base metadata — read, rename / toggle advanced perms, copy ─────────
 #
 # App-level rather than table-level: the metadata call is also how you check
 # `is_advanced` before trying to create a role (advanced permission must be on),
 # and `copy` turns an existing base into a template — a standard ledger built once
 # and duplicated per project instead of rebuilt column by column.
-
-
-def _build_get_bitable_app_request(app_token: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/bitable/v1/apps/:app_token"
-    req.paths["app_token"] = app_token
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
-
-
-async def get_bitable_app_impl(app_token: str, user_key: str = "") -> dict[str, Any]:
-    """Read a base's metadata: name, whether advanced permission is on, time zone, revision."""
-    if not app_token.strip():
-        return _error("No app_token provided (the segment in a feishu.cn/base/<app_token> URL).")
-    res = await _invoke(_build_get_bitable_app_request(app_token.strip()), user_key=user_key)
-    if not res["ok"]:
-        return res
-    data = res["data"] if isinstance(res["data"], dict) else {}
-    app = data.get("app", {}) if isinstance(data.get("app"), dict) else {}
-    token = app.get("app_token", "") or app_token.strip()
-    return {
-        "ok": True,
-        "app_token": token,
-        "name": app.get("name", ""),
-        "is_advanced": bool(app.get("is_advanced")),
-        "time_zone": app.get("time_zone", ""),
-        "revision": app.get("revision", 0),
-        "url": f"{_DOC_BASE_URL}/base/{token}",
-    }
-
-
-def _build_update_bitable_app_request(app_token: str, body: dict[str, Any]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.PUT
-    req.uri = "/open-apis/bitable/v1/apps/:app_token"
-    req.paths["app_token"] = app_token
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = body
-    return req
-
-
-async def update_bitable_app_impl(
-    app_token: str,
-    name: str = "",
-    is_advanced: str = "",
-    user_key: str = "",
-    identity: str = "",
-) -> dict[str, Any]:
-    """Rename a base and/or switch advanced permission on or off. Omitted settings stay put."""
-    if not app_token.strip():
-        return _error("No app_token provided (the segment in a feishu.cn/base/<app_token> URL).")
-    body: dict[str, Any] = {}
-    if name.strip():
-        if len(name.strip()) > 100:
-            return _error(f"name is {len(name.strip())} chars; Feishu allows at most 100.")
-        if any(c in name for c in "?/\\*:[]"):
-            return _error("name cannot contain ? / \\ * : [ ] (Feishu answers 1254031).")
-        body["name"] = name.strip()
-    advanced = is_advanced.strip().lower()
-    if advanced:
-        if advanced not in {"true", "false"}:
-            return _error('is_advanced must be "true" or "false" (leave it empty to keep the current setting).')
-        body["is_advanced"] = advanced == "true"
-    if not body:
-        return _error("Nothing to change — pass name and/or is_advanced.")
-    res = await _invoke(
-        _build_update_bitable_app_request(app_token.strip(), body),
-        user_key=user_key,
-        prefer="user",
-        identity=identity,
-    )
-    if not res["ok"]:
-        if str(res.get("code")) == "1254301":
-            return {
-                **res,
-                "hint": "advanced permission cannot be enabled on a base that lives in a wiki or is "
-                "embedded in a doc/sheet.",
-            }
-        return res
-    data = res["data"] if isinstance(res["data"], dict) else {}
-    app = data.get("app", {}) if isinstance(data.get("app"), dict) else {}
-    result: dict[str, Any] = {
-        "ok": True,
-        "app_token": app.get("app_token", "") or app_token.strip(),
-        "name": app.get("name", body.get("name", "")),
-        "changed": sorted(body),
-    }
-    if "is_advanced" in app or "is_advanced" in body:
-        result["is_advanced"] = bool(app.get("is_advanced", body.get("is_advanced")))
-    return result
-
-
-def _build_copy_bitable_app_request(
-    app_token: str, name: str, folder_token: str, without_content: bool, time_zone: str
-) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/copy"
-    req.paths["app_token"] = app_token
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    body: dict[str, Any] = {}
-    if name:
-        body["name"] = name
-    if folder_token:
-        body["folder_token"] = folder_token
-    if without_content:
-        body["without_content"] = True
-    if time_zone:
-        body["time_zone"] = time_zone
-    req.body = body
-    return req
-
-
-async def copy_bitable_app_impl(
-    app_token: str,
-    name: str = "",
-    folder_token: str = "",
-    without_content: bool = False,
-    time_zone: str = "",
-    user_key: str = "",
-    identity: str = "",
-) -> dict[str, Any]:
-    """Duplicate a whole base — the template move. without_content copies structure only."""
-    if not app_token.strip():
-        return _error("No app_token provided (the segment in a feishu.cn/base/<app_token> URL).")
-    res = await _invoke(
-        _build_copy_bitable_app_request(
-            app_token.strip(), name.strip(), folder_token.strip(), without_content, time_zone.strip()
-        ),
-        user_key=user_key,
-        prefer="user",
-        identity=identity,
-    )
-    if not res["ok"]:
-        if str(res.get("code")) == "1254036":
-            return {**res, "hint": "this base is already being copied — wait a moment and retry."}
-        return res
-    data = res["data"] if isinstance(res["data"], dict) else {}
-    app = data.get("app", {}) if isinstance(data.get("app"), dict) else {}
-    new_token = app.get("app_token", "")
-    return {
-        "ok": True,
-        "app_token": new_token,
-        "name": app.get("name", name.strip()),
-        "folder_token": app.get("folder_token", ""),
-        "time_zone": app.get("time_zone", ""),
-        "url": app.get("url") or (f"{_DOC_BASE_URL}/base/{new_token}" if new_token else ""),
-        "without_content": without_content,
-    }
-
-
-def _build_create_field_request(app_token: str, table_id: str, field: dict[str, Any]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields"
-    req.paths["app_token"] = app_token
-    req.paths["table_id"] = table_id
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = field
-    return req
-
-
-async def create_bitable_field_impl(
-    app_token: str,
-    table_id: str,
-    field_name: str,
-    field_type: int = 1,
-    property_json: str = "",
-    ui_type: str = "",
-    user_key: str = "",
-    identity: str = "",
-) -> dict[str, Any]:
-    """Add one field (column) to an existing table. property_json holds type-specific settings."""
-    if not app_token.strip():
-        return _error("No app_token provided (the segment in a feishu.cn/base/<app_token> URL).")
-    if not table_id.strip():
-        return _error("No table_id provided (get it from feishu_bitable_list_tables).")
-    field: dict[str, Any] = {"field_name": field_name.strip(), "type": field_type}
-    problem = _validate_bitable_fields([field], as_table_fields=False)
-    if problem:
-        return _error(problem.replace("fields_json[0].", "").replace("fields_json[0]", "field"))
-    if property_json.strip():
-        try:
-            prop = json.loads(property_json)
-        except ValueError as exc:
-            return _error(f"property_json is not valid JSON: {exc}")
-        if not isinstance(prop, dict):
-            return _error('property_json must be a JSON object, e.g. \'{"options":[{"name":"高","color":0}]}\'.')
-        field["property"] = prop
-    if ui_type.strip():
-        field["ui_type"] = ui_type.strip()
-    res = await _invoke(
-        _build_create_field_request(app_token.strip(), table_id.strip(), field),
-        user_key=user_key,
-        prefer="user",
-        identity=identity,
-    )
-    if not res["ok"]:
-        return res
-    data = res["data"] if isinstance(res["data"], dict) else {}
-    created = data.get("field", {}) if isinstance(data.get("field"), dict) else {}
-    ftype = created.get("type", field_type)
-    return {
-        "ok": True,
-        "field_id": created.get("field_id", ""),
-        "name": created.get("field_name", field["field_name"]),
-        "type": _BITABLE_FIELD_TYPES.get(ftype, ftype),
-        "is_primary": bool(created.get("is_primary")),
-    }
 
 
 def _build_update_field_request(app_token: str, table_id: str, field_id: str, field: dict[str, Any]) -> BaseRequest:
@@ -5809,9 +5286,11 @@ async def update_bitable_field_impl(
     if not app_token.strip():
         return _error("No app_token provided (the segment in a feishu.cn/base/<app_token> URL).")
     if not table_id.strip():
-        return _error("No table_id provided (get it from feishu_bitable_list_tables).")
+        return _error("No table_id provided (get it from feishu_api GET /open-apis/bitable/v1/apps/:app_token/tables).")
     if not field_id.strip():
-        return _error("No field_id provided (get it from feishu_bitable_list_fields).")
+        return _error(
+            "No field_id provided (get it from feishu_api GET .../bitable/v1/apps/:app_token/tables/:table_id/fields)."
+        )
     # Feishu's update is a FULL replace of the field definition and demands both
     # field_name and type, so anything the caller left out is read back from the
     # table rather than silently reset to a default.
@@ -7966,9 +7445,9 @@ async def append_doc_bitable_impl(
     """Append an embedded 多维表格 (bitable, block_type 18) to a docx body.
 
     Returns the new bitable's ``app_token`` and ``table_id`` — split out of the block's
-    ``"<appToken>_<tableId>"`` token — so the existing ``feishu_bitable_*`` tools can add
-    fields and records to it. Feishu creates the bitable itself; it starts with default
-    fields, which ``feishu_bitable_create_field`` can extend.
+    ``"<appToken>_<tableId>"`` token — so the caller can add fields and records to it.
+    Feishu creates the bitable itself; it starts with default fields, which
+    ``feishu_api POST /open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields`` can extend.
     """
     if not document_id.strip():
         return _error("document_id is required.")
@@ -8163,111 +7642,6 @@ async def delete_permission_member_impl(
     if not res["ok"]:
         return res
     return {"ok": True, "token": token.strip(), "member_id": member_id.strip()}
-
-
-# ── Bitable advanced permission — one base, different roles see different rows/fields ──
-# A custom role (自定义角色) controls per-table read/edit, optional per-record visibility
-# rules, and per-field permissions. Assign people to a role so everyone opens the same
-# base but each role sees different rows/fields. Requires advanced permission on the base.
-def _build_create_bitable_role_request(app_token: str, body: dict[str, Any]) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/roles"
-    req.paths["app_token"] = app_token
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = body
-    return req
-
-
-async def create_bitable_role_impl(
-    app_token: str, role_name: str, table_roles_json: str, user_key: str = "", identity: str = ""
-) -> dict[str, Any]:
-    """Create a custom role on a bitable. table_roles_json is a JSON list of per-table perms."""
-    if not app_token.strip() or not role_name.strip():
-        return _error("app_token and role_name are required.")
-    try:
-        table_roles = json.loads(table_roles_json)
-    except ValueError as exc:
-        return _error(f"table_roles_json is not valid JSON: {exc}")
-    if not isinstance(table_roles, list):
-        return _error("table_roles_json must be a JSON array of per-table permission objects.")
-    body = {"role_name": role_name.strip(), "table_roles": table_roles}
-    res = await _invoke(
-        _build_create_bitable_role_request(app_token.strip(), body), user_key=user_key, prefer="user", identity=identity
-    )
-    if not res["ok"]:
-        return res
-    data = res["data"] if isinstance(res["data"], dict) else {}
-    role = data.get("role", {}) if isinstance(data.get("role"), dict) else {}
-    return {"ok": True, "role_id": role.get("role_id", ""), "role_name": role.get("role_name", "")}
-
-
-def _build_list_bitable_roles_request(app_token: str, page_size: int, page_token: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/roles"
-    req.paths["app_token"] = app_token
-    req.add_query("page_size", page_size)
-    if page_token:
-        req.add_query("page_token", page_token)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
-
-
-async def list_bitable_roles_impl(
-    app_token: str, page_size: int = 100, page_token: str = "", user_key: str = ""
-) -> dict[str, Any]:
-    """List the custom roles defined on a bitable (each with its role_id and table perms)."""
-    if not app_token.strip():
-        return _error("app_token is required.")
-    res = await _invoke(_build_list_bitable_roles_request(app_token.strip(), page_size, page_token), user_key=user_key)
-    if not res["ok"]:
-        return res
-    data = res["data"] if isinstance(res["data"], dict) else {}
-    items = data.get("items", []) if isinstance(data.get("items"), list) else []
-    roles = [
-        {"role_id": r.get("role_id", ""), "role_name": r.get("role_name", ""), "table_roles": r.get("table_roles", [])}
-        for r in items
-        if isinstance(r, dict)
-    ]
-    return {
-        "ok": True,
-        "roles": roles,
-        "has_more": data.get("has_more", False),
-        "page_token": data.get("page_token", ""),
-    }
-
-
-def _build_add_bitable_role_member_request(
-    app_token: str, role_id: str, member_id: str, member_id_type: str
-) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.POST
-    req.uri = "/open-apis/bitable/v1/apps/:app_token/roles/:role_id/members"
-    req.paths["app_token"] = app_token
-    req.paths["role_id"] = role_id
-    req.add_query("member_id_type", member_id_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    req.body = {"member_id": member_id}
-    return req
-
-
-async def add_bitable_role_member_impl(
-    app_token: str,
-    role_id: str,
-    member_id: str,
-    member_id_type: str = "open_id",
-    user_key: str = "",
-    identity: str = "",
-) -> dict[str, Any]:
-    """Assign a user to a bitable custom role (that person then sees the role's rows/fields)."""
-    if not app_token.strip() or not role_id.strip() or not member_id.strip():
-        return _error("app_token, role_id and member_id are required.")
-    req = _build_add_bitable_role_member_request(app_token.strip(), role_id.strip(), member_id.strip(), member_id_type)
-    res = await _invoke(req, user_key=user_key, prefer="user", identity=identity)
-    if not res["ok"]:
-        return res
-    return {"ok": True, "role_id": role_id.strip(), "member_id": member_id.strip()}
 
 
 # ── eLearning (在线学习) — query each person's course-registration / learning records ──

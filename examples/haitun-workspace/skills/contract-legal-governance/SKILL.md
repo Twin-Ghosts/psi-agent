@@ -66,7 +66,7 @@ category: productivity
 ## 每次动作必须留痕（小事也要）
 
 海豚每做一个动作，必须：
-1. 在合同台账（`feishu_bitable_create_record`）里写一行或更新对应行（事项 / 关键字段 / 判定档位 / 处置 / 依据 / 时间）。
+1. 在合同台账（`feishu_api` POST /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records）里写一行或更新对应行（事项 / 关键字段 / 判定档位 / 处置 / 依据 / 时间）。
 2. 用一句话说明为什么判为该档、依据哪条口径或哪条出处。
 3. 涉及审批放行的，以**真实审批人的 user_id** 通过 `feishu_approval_decide` 执行；
    代员工发起合同审批用 `feishu_approval_create` 且申请人记在本人 open_id 名下（见 [`contract-review-sop`]）。
