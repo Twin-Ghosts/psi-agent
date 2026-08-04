@@ -507,16 +507,35 @@ export default function HaiTunAgentWorkspace({
     activeChatInputRef.current?.blur();
   }, []);
 
-  const goTo = useCallback((index: number, animate = true) => {
+  const goTo = useCallback((
+    index: number,
+    options: boolean | { animate?: boolean; keepFocus?: boolean } = true,
+  ) => {
+    // Legacy: goTo(i) / goTo(i, false) still work; prefer options object.
+    const opts = typeof options === "boolean" ? { animate: options } : options;
+    const animate = opts.animate ?? true;
+    const keepFocus = opts.keepFocus ?? false;
     const next = Math.max(0, Math.min(index, cards.length - 1));
+    const stayInFocus = keepFocus && chatExpanded;
     const fromExpanded = chatExpanded;
-    collapseChat();
+    if (!stayInFocus) collapseChat();
     if (next === currentIndex) {
       setDragX(0);
       return;
     }
     if (transitionTimer.current) window.clearTimeout(transitionTimer.current);
-    if (animate && !prefersReducedMotion()) {
+    if (softEnterTimer.current) window.clearTimeout(softEnterTimer.current);
+
+    if (stayInFocus) {
+      // Focus chat: switch session without collapsing; light fade (same as sidebar select).
+      setCardTransition(null);
+      if (animate && !prefersReducedMotion()) {
+        setFocusSoftEnter(true);
+        softEnterTimer.current = window.setTimeout(() => setFocusSoftEnter(false), 320);
+      } else {
+        setFocusSoftEnter(false);
+      }
+    } else if (animate && !prefersReducedMotion()) {
       setCardTransition({
         from: currentIndex,
         direction: next > currentIndex ? "next" : "previous",
@@ -1163,10 +1182,10 @@ export default function HaiTunAgentWorkspace({
     const suppressOpen = suppressCardOpenRef.current;
     if (dx < -58) {
       mobileHaptic(8);
-      goTo(currentIndex + 1);
+      goTo(currentIndex + 1, { keepFocus: chatExpanded });
     } else if (dx > 58) {
       mobileHaptic(8);
-      goTo(currentIndex - 1);
+      goTo(currentIndex - 1, { keepFocus: chatExpanded });
     } else {
       setDragX(0);
       dragXRef.current = 0;
@@ -1385,8 +1404,14 @@ export default function HaiTunAgentWorkspace({
         }
         return;
       }
-      if (event.key === "ArrowLeft") goTo(currentIndex - 1);
-      if (event.key === "ArrowRight") goTo(currentIndex + 1);
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        goTo(currentIndex - 1, { keepFocus: chatExpanded });
+      }
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        goTo(currentIndex + 1, { keepFocus: chatExpanded });
+      }
       if (event.key === "Escape") setSidebarOpen(false);
     };
     window.addEventListener("keydown", onKeyDown);
@@ -1894,9 +1919,16 @@ export default function HaiTunAgentWorkspace({
 
         {mainView === "workspace" && (
           <section className={`card-stage ${chatExpanded ? "chat-focus-stage" : ""}`} aria-label="任务卡片">
-            {!chatExpanded && (
-              <button type="button" className="card-arrow previous" onClick={() => goTo(currentIndex - 1)} disabled={currentIndex === 0} aria-label="上一张卡片"><ArrowLeft size={20} /></button>
-            )}
+            <button
+              type="button"
+              className={`card-arrow previous${chatExpanded ? " card-arrow-focus" : ""}`}
+              onClick={() => goTo(currentIndex - 1, { keepFocus: chatExpanded })}
+              disabled={currentIndex === 0}
+              aria-label={chatExpanded ? "上一个会话" : "上一张卡片"}
+              title={chatExpanded ? "上一个会话（←）" : "上一张卡片（←）"}
+            >
+              <ArrowLeft size={20} />
+            </button>
 
             <div className="task-unit-frame">
               {cardTransition && (
@@ -1913,9 +1945,16 @@ export default function HaiTunAgentWorkspace({
               </div>
             </div>
 
-            {!chatExpanded && (
-              <button type="button" className="card-arrow next" onClick={() => goTo(currentIndex + 1)} disabled={currentIndex === cards.length - 1} aria-label="下一张卡片"><ArrowRight size={20} /></button>
-            )}
+            <button
+              type="button"
+              className={`card-arrow next${chatExpanded ? " card-arrow-focus" : ""}`}
+              onClick={() => goTo(currentIndex + 1, { keepFocus: chatExpanded })}
+              disabled={currentIndex === cards.length - 1}
+              aria-label={chatExpanded ? "下一个会话" : "下一张卡片"}
+              title={chatExpanded ? "下一个会话（→）" : "下一张卡片（→）"}
+            >
+              <ArrowRight size={20} />
+            </button>
           </section>
         )}
 

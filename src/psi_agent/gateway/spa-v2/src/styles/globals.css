@@ -3812,6 +3812,7 @@ button.metric-cell:disabled {
   }
 
   .card-arrow { display: none; }
+  .main-stage.chat-focus-mode .card-arrow.card-arrow-focus { display: grid; }
 
   .focus-column {
     height: 100%;
@@ -4271,6 +4272,7 @@ button.metric-cell:disabled {
   display: none;
 }
 .main-stage.chat-focus-mode .card-stage.chat-focus-stage {
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
   height: auto;
@@ -4281,6 +4283,30 @@ button.metric-cell:disabled {
 }
 .main-stage.chat-focus-mode .task-unit-frame {
   height: 100%;
+}
+.main-stage.chat-focus-mode .card-arrow.card-arrow-focus {
+  position: absolute;
+  z-index: 8;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 36px;
+  height: 36px;
+  opacity: 0.72;
+}
+.main-stage.chat-focus-mode .card-arrow.card-arrow-focus.previous { left: 10px; }
+.main-stage.chat-focus-mode .card-arrow.card-arrow-focus.next { right: 10px; left: auto; }
+.main-stage.chat-focus-mode .card-arrow.card-arrow-focus:hover:not(:disabled) {
+  opacity: 1;
+  transform: translateY(-50%);
+}
+.main-stage.chat-focus-mode .card-arrow.card-arrow-focus.previous:hover:not(:disabled) {
+  transform: translateY(-50%) translateX(-2px);
+}
+.main-stage.chat-focus-mode .card-arrow.card-arrow-focus.next:hover:not(:disabled) {
+  transform: translateY(-50%) translateX(2px);
+}
+.main-stage.chat-focus-mode .card-arrow.card-arrow-focus:disabled {
+  opacity: 0.2;
 }
 
 .card-stage.chat-focus-stage { grid-template-columns: minmax(0, 1fr); gap: 0; }
