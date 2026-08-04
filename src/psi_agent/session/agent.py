@@ -583,11 +583,11 @@ class SessionAgent:
                             f"reasoning={len(accumulated_reasoning)} chars"
                         )
                         assistant_msg: dict[str, Any] = {"role": "assistant"}
-                        if accumulated_content or accumulated_reasoning:
-                            if accumulated_content:
-                                assistant_msg["content"] = accumulated_content
-                            if accumulated_reasoning:
-                                assistant_msg["reasoning"] = accumulated_reasoning
+                        if accumulated_content:
+                            assistant_msg["content"] = accumulated_content
+                        if accumulated_reasoning:
+                            assistant_msg["reasoning"] = accumulated_reasoning
+                        if accumulated_content:
                             self._conversation.add(with_kind(assistant_msg, turn_response_kind))
                         await self._conversation.commit()
                         await self._system_prompt.run_after_turn(hook_message, assistant_msg)
@@ -607,10 +607,9 @@ class SessionAgent:
                             f"Unexpected finish_reason={finish_reason!r}, "
                             f"saving {len(accumulated_content)} chars of content and stopping"
                         )
-                        if accumulated_content or accumulated_reasoning:
+                        if accumulated_content:
                             assistant_msg: dict[str, Any] = {"role": "assistant"}
-                            if accumulated_content:
-                                assistant_msg["content"] = accumulated_content
+                            assistant_msg["content"] = accumulated_content
                             if accumulated_reasoning:
                                 assistant_msg["reasoning"] = accumulated_reasoning
                             self._conversation.add(with_kind(assistant_msg, turn_response_kind))

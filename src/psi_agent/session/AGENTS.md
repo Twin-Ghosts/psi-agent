@@ -369,6 +369,7 @@ Session 支持将对话历史持久化到 AppData `histories/{session_id}.jsonl`
   - `finish_reason="tool_calls"` — 所有 tool 结果追加后立即 `commit()`（子回合）
   - unexpected `finish_reason` — 累积 content 追加后 `commit()`
   - 达到 `max_tool_rounds` — 追加 `[Max tool rounds reached]` assistant 消息后 `commit()`
+- 只有 reasoning、没有 `content` / `tool_calls` 的最终 assistant 不写入 history；reasoning 仍可流式输出并传给 after-turn hook。读取旧 JSONL 时，`messages_for_ai()` 同样过滤这类不符合 OpenAI wire contract 的遗留行，避免上游返回 `Invalid assistant message`
 - `Conversation.save()` 使用 tempfile + `os.replace()` 实现原子写入；`commit()` 封装 save + 清除快照
 - **部分保存**的场景：`finish_reason="error"`、AI 连接断开、channel 断开、schedule runner 异常——user message 已通过早期 `commit()` 落盘，AI 响应部分通过 `rollback()` 回滚，不写入磁盘
 - 首次使用时自动创建 AppData `histories/` 目录 + `.gitignore`（忽略全部文件）

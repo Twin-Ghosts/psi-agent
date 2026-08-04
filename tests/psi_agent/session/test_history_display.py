@@ -48,6 +48,21 @@ def test_messages_for_ai_rewrites_legacy_schedule_roles() -> None:
     assert not is_displayable_chat_message({"role": "user_schedule", "content": "heartbeat"})
 
 
+def test_messages_for_ai_skips_reasoning_only_assistant_rows() -> None:
+    projected = messages_for_ai(
+        [
+            {"role": "user", "content": "confirm"},
+            {"role": "assistant", "reasoning": "internal only", "kind": KIND_CHAT},
+            {"role": "user", "content": "continue"},
+        ]
+    )
+
+    assert projected == [
+        {"role": "user", "content": "confirm"},
+        {"role": "user", "content": "continue"},
+    ]
+
+
 def test_is_displayable_filters_by_kind_whitelist() -> None:
     assert is_displayable_chat_message({"role": "user", "content": "hi", "kind": KIND_CHAT})
     assert is_displayable_chat_message({"role": "assistant", "content": "hey"})  # omit → chat

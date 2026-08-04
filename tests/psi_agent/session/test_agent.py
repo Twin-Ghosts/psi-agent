@@ -674,6 +674,36 @@ async def test_agent_empty_content_stop(tmp_path: Path) -> None:
         await runner.cleanup()
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("finish_reason", ["stop", "length"])
+async def test_agent_reasoning_only_stop_does_not_persist_invalid_assistant(
+    tmp_path: Path,
+    finish_reason: str,
+) -> None:
+    """A zero-content final turn must not leave an invalid assistant row."""
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        resp = web.StreamResponse(status=200, reason="OK", headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        await resp.write(_sse_chunk(reasoning="internal only", finish=finish_reason).encode())
+        await resp.write(b"data: [DONE]\n\n")
+        return resp
+
+    mock_server = MockAIServer(tmp_path)
+    ai_socket = await mock_server.start(handler)
+    try:
+        agent = SessionAgent(ai_client=AiClient(ai_socket), tool_registry=ToolRegistry())
+        chunks = [chunk async for chunk in agent.run({"role": "user", "content": "confirm"})]
+
+        assert "".join(chunk.reasoning or "" for chunk in chunks) == "internal only"
+        assert not any(
+            message.get("role") == "assistant" and message.get("content") is None and not message.get("tool_calls")
+            for message in agent._conversation.messages
+        )
+    finally:
+        await mock_server.cleanup()
+
+
 # --- History persistence tests ---
 
 

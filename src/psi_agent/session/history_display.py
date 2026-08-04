@@ -138,6 +138,8 @@ def messages_for_ai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     - Strips display-only keys (``kind``, ``chat_type``, ``turn_context``) and
       fixes legacy roles.
+    - Skips legacy assistant rows that have neither ``content`` nor
+      ``tool_calls``; they are invalid OpenAI wire messages.
     - Folds ``turn_context`` into the message's ``content`` (see
       ``_fold_turn_context``) — the volatile block is stored out-of-band so
       that it lands at the request tail without ever rewriting a stored row.
@@ -182,7 +184,7 @@ def messages_for_ai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 role = wire_role(msg.get("role"))
                 if role is None:
                     continue
-                result.append(_project_for_ai(msg, role))
+                _append_for_ai(result, msg, role)
             return result
 
     out: list[dict[str, Any]] = []
@@ -192,8 +194,16 @@ def messages_for_ai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         role = wire_role(msg.get("role"))
         if role is None:
             continue
-        out.append(_project_for_ai(msg, role))
+        _append_for_ai(out, msg, role)
     return out
+
+
+def _append_for_ai(out: list[dict[str, Any]], msg: dict[str, Any], role: str) -> None:
+    """Append one valid wire message, skipping unusable legacy assistant rows."""
+    projected = _project_for_ai(msg, role)
+    if role == "assistant" and projected.get("content") is None and not projected.get("tool_calls"):
+        return
+    out.append(projected)
 
 
 def _project_for_ai(msg: dict[str, Any], role: str) -> dict[str, Any]:
