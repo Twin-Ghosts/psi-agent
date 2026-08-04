@@ -165,27 +165,6 @@ async def test_add_comment_builds_create_request(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.asyncio
-async def test_list_comments_passes_pagination(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"items": [], "has_more": False})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    await _impl.list_comments_impl("tok", "docx", 25, "pt1")
-    q = _qdict(cap.request)
-    assert q.get("page_size") == "25"  # add_query coerces to str
-    assert q.get("page_token") == "pt1"
-    assert q.get("is_whole") == "true"
-
-
-@pytest.mark.asyncio
-async def test_reply_replies_list_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"items": []})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    await _impl.list_comment_replies_impl("tok", "docx", "cid", 50, "")
-    req = cap.request
-    assert req.paths["comment_id"] == "cid"
-    assert "replies" in req.uri
-
-
-@pytest.mark.asyncio
 async def test_reply_comment_plain(monkeypatch: pytest.MonkeyPatch) -> None:
     cap = _CapturedInvoke({"reply_id": "r1"})
     monkeypatch.setattr(_impl, "_invoke", cap)
@@ -211,9 +190,9 @@ def test_drive_tools_are_async_with_docstrings() -> None:
     mod = importlib.import_module("feishu_drive")
     for name in (
         "feishu_drive_add_comment",
-        "feishu_drive_list_comments",
-        "feishu_drive_list_comment_replies",
         "feishu_drive_reply_comment",
+        "feishu_file_download",
+        "feishu_drive_upload",
     ):
         fn = getattr(mod, name)
         assert inspect.iscoroutinefunction(fn), name
@@ -3958,99 +3937,6 @@ def test_image_get_tool_async_with_docstring() -> None:
     assert (inspect.getdoc(fn) or "").strip()
 
 
-@pytest.mark.asyncio
-async def test_delete_file_builds_delete_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"task_id": ""})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.delete_file_impl("doccnX", "docx")
-    assert result["ok"] is True
-    assert result["file_token"] == "doccnX"
-    assert result["type"] == "docx"
-    req = cap.request
-    assert req.http_method.name == "DELETE"
-    assert req.uri == "/open-apis/drive/v1/files/:file_token"
-    assert req.paths["file_token"] == "doccnX"
-    assert _impl.AccessTokenType.USER in req.token_types
-    # empty user_key -> tenant path (no user_key forwarded)
-    assert cap.user_key in (None, "")
-
-
-@pytest.mark.asyncio
-async def test_delete_file_requires_token() -> None:
-    result = await _impl.delete_file_impl("  ", "docx")
-    assert result["ok"] is False
-    assert "file_token" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_delete_file_rejects_bad_type() -> None:
-    result = await _impl.delete_file_impl("doccnX", "video")
-    assert result["ok"] is False
-    assert "file_type" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_delete_file_folder_returns_task_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"task_id": "tsk_123"})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.delete_file_impl("fldrX", "folder")
-    assert result["ok"] is True
-    assert result["task_id"] == "tsk_123"
-
-
-@pytest.mark.asyncio
-async def test_delete_file_user_key_routes_through_uat(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _CapturingUatClient({"code": 0, "data": {}})
-    monkeypatch.setattr(_impl, "_get_uat_client", lambda: client)
-
-    async def _uat(user_key: str = "") -> Any:
-        return _FakeUAT()
-
-    monkeypatch.setattr(_impl, "_get_valid_uat", _uat)
-    monkeypatch.setattr(_impl, "missing_capabilities", lambda key, needed: [])
-    result = await _impl.delete_file_impl("doccnX", "docx", "ou_a", "user")
-    assert result["ok"] is True
-    assert client.option.user_access_token == "uat_tok"
-    assert client.request.http_method.name == "DELETE"
-
-
-@pytest.mark.asyncio
-async def test_delete_file_as_user_without_token_prompts_auth(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Acting as the user with no usable token asks them to authorize."""
-    monkeypatch.setattr(_impl, "_get_uat_client", lambda: object())
-
-    async def _no_uat(user_key: str = "") -> Any:
-        return None
-
-    monkeypatch.setattr(_impl, "_get_valid_uat", _no_uat)
-    monkeypatch.setattr(_impl, "missing_capabilities", lambda key, needed: [])
-    result = await _impl.delete_file_impl("doccnX", "docx", "ou_a", "user")
-    assert result["ok"] is False
-    assert result.get("need_auth") is True
-
-
-@pytest.mark.asyncio
-async def test_delete_file_as_bot_uses_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
-    """identity='bot': the bot deletes it with its own permissions, no auth prompt."""
-
-    class _TenantClient:
-        async def arequest(self, request: Any, option: Any = None) -> Any:
-            raw = _FakeRaw(json.dumps({"code": 0, "data": {"task_id": "tsk_1"}}).encode())
-            return type("R", (), {"raw": raw, "code": 0, "msg": ""})()
-
-    monkeypatch.setattr(_impl, "_get_client", lambda: _TenantClient())
-    result = await _impl.delete_file_impl("doccnX", "docx", "ou_a", "bot")
-    assert result["ok"] is True
-    assert result.get("need_auth") is not True
-
-
-def test_delete_file_tool_async_with_docstring() -> None:
-    mod = importlib.import_module("feishu_drive")
-    fn = mod.feishu_drive_delete_file
-    assert inspect.iscoroutinefunction(fn)
-    assert (inspect.getdoc(fn) or "").strip()
-
-
 # ── Create documents: docx + wiki nodes + list spaces + append content ────────
 
 
@@ -5773,7 +5659,7 @@ def test_write_tools_expose_identity(tmp_path: Any) -> None:
         "feishu_bitable": ["feishu_bitable_create_table", "feishu_bitable_create_records"],
         "feishu_sheet": ["feishu_sheet_write", "feishu_sheet_append", "feishu_sheet_format"],
         "feishu_task": ["feishu_task_create"],
-        "feishu_drive": ["feishu_drive_delete_file", "feishu_drive_upload"],
+        "feishu_drive": ["feishu_drive_upload"],
         "feishu_permission": ["feishu_permission_add_member"],
     }
     for mod_name, tools in expected.items():

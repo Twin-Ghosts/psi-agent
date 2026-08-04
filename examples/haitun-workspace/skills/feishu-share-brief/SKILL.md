@@ -51,7 +51,7 @@ description: "把分散在飞书群聊、话题线程、文档、知识库、评
 | 飞书 docx/doc/sheet 链接 | 从链接解析类型和 token → `feishu_doc_read` |
 | 飞书 wiki 链接 | `feishu_wiki_get_node` → 按 `obj_type` 读取 |
 | 不知道文档位置 | `feishu_docs_search` → 核对候选标题/所有者 → 读取正文 |
-| 文档评论与回复 | `feishu_drive_list_comments` / `feishu_drive_list_comment_replies` |
+| 文档评论与回复 | `feishu_api` 调 `GET /open-apis/drive/v1/files/:file_token/comments`，再按 `comment_id` 调 `GET /open-apis/drive/v1/files/:file_token/comments/:comment_id/replies`（见 `feishu-drive` 技能） |
 | 消息图片或附件 | `feishu_image_get`；云盘附件用 `feishu_file_download` |
 | 电子表格 | `feishu_sheet_tabs` → `feishu_sheet_read` |
 | 多维表格 | `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables → `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records |

@@ -531,30 +531,6 @@ async def add_comment_impl(
     return await _invoke(req, user_key=user_key, prefer="user", identity=identity)
 
 
-async def list_comments_impl(file_token: str, file_type: str, page_size: int, page_token: str) -> dict[str, Any]:
-    req = _comment.build_comment_list_request(
-        file_token=file_token,
-        file_type=file_type,
-        page_size=page_size,
-        page_token=page_token or None,
-        is_whole="true",
-    )
-    return await _invoke(req)
-
-
-async def list_comment_replies_impl(
-    file_token: str, file_type: str, comment_id: str, page_size: int, page_token: str
-) -> dict[str, Any]:
-    req = _comment.build_comment_reply_list_request(
-        file_token=file_token,
-        file_type=file_type,
-        comment_id=comment_id,
-        page_size=page_size,
-        page_token=page_token or None,
-    )
-    return await _invoke(req)
-
-
 def _build_reply_create_request(
     *, file_token: str, file_type: str, comment_id: str, content: str, at_user_id: str
 ) -> BaseRequest:
@@ -6308,49 +6284,6 @@ async def get_message_image_impl(
     return {"ok": True, "path": str(path), "bytes": len(data)}
 
 
-# ── Delete a cloud file / document (to trash) ─────────────────────────────────
-#
-# DELETE /drive/v1/files/:file_token?type=... moves the file to the recycle bin
-# (recoverable). Works with tenant OR user token; deleting inside a user-owned
-# wiki needs the user's UAT (pass user_key). To delete a *wiki* doc: resolve the
-# node with get_wiki_node_impl → obj_token/obj_type, then delete that.
-
-_DELETABLE_FILE_TYPES = {"file", "docx", "doc", "sheet", "bitable", "mindnote", "slides", "folder", "shortcut"}
-
-
-def _build_delete_file_request(file_token: str, file_type: str) -> BaseRequest:
-    req = BaseRequest()
-    req.http_method = HttpMethod.DELETE
-    req.uri = "/open-apis/drive/v1/files/:file_token"
-    req.paths["file_token"] = file_token
-    req.add_query("type", file_type)
-    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
-    return req
-
-
-async def delete_file_impl(file_token: str, file_type: str, user_key: str = "", identity: str = "") -> dict[str, Any]:
-    """Delete a cloud file/document (moves it to the recycle bin — recoverable).
-
-    Pass ``user_key`` to delete as that user (required when the file/wiki is owned by
-    the user and the bot isn't a collaborator); empty uses the bot's tenant token.
-    """
-    token = file_token.strip()
-    if not token:
-        return _error("file_token is required.")
-    ftype = file_type.strip()
-    if ftype not in _DELETABLE_FILE_TYPES:
-        return _error(f"file_type must be one of {sorted(_DELETABLE_FILE_TYPES)}, got {ftype!r}.")
-    res = await _invoke(_build_delete_file_request(token, ftype), user_key=user_key, prefer="user", identity=identity)
-    if not res["ok"]:
-        return res
-    data = res["data"] if isinstance(res["data"], dict) else {}
-    out: dict[str, Any] = {"ok": True, "file_token": token, "type": ftype}
-    # Folder deletion is async and returns a task_id — surface it for status polling.
-    if data.get("task_id"):
-        out["task_id"] = data["task_id"]
-    return out
-
-
 # ── Create documents: standalone docx + wiki (knowledge base) nodes ───────────
 #
 # Read tools above only *fetch* content; these create new documents. A wiki doc
@@ -8088,7 +8021,10 @@ async def delete_doc_blocks_impl(
         return _error("block_ids_json contained no usable block_id.")
     parent = parent_block_id.strip() or doc
     if doc in wanted:
-        return _error("refusing to delete the document's root block — delete the file with feishu_drive_delete_file.")
+        return _error(
+            "refusing to delete the document's root block — delete the file with feishu_api "
+            "DELETE /open-apis/drive/v1/files/:file_token."
+        )
     listed = await _invoke(
         _build_block_children_list_request(doc, parent),
         user_key=user_key,

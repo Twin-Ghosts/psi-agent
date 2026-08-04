@@ -1,8 +1,22 @@
-"""Feishu/Lark drive comment tools — read and post comments on cloud documents.
+"""Feishu/Lark drive tools — post comments, download files, upload files.
 
-Whole-document comments on a Feishu file (docx/doc/sheet/bitable). Use these to
-review a doc's discussion, leave feedback, or reply in an existing thread.
-Pair with ``feishu_doc_read`` (which reads the document body).
+What is left here is what the ``feishu-drive`` skill's endpoint table cannot express.
+Reading comments and deleting a file are plain requests and moved into that table; these
+four are not requests-with-arguments:
+
+- The two comment *writes* carry a nested body — a comment's text sits inside
+  ``reply_list.replies[].content.elements[]``, and a reply's @-mention is a ``person``
+  element that must come *before* the text run. Validation looks fields up by top-level
+  key and cannot index into an array, so a tabled version would leave the comment text
+  unchecked, and Feishu answers ``code: 0`` for a malformed ``elements`` — the comment
+  lands empty and the call reports success.
+- ``feishu_file_download`` produces a *file on disk*. It never goes through ``_invoke``:
+  it reads bytes off the raw response and writes them, falling back from the bot's token
+  to the user's authorization for files the bot cannot see.
+- ``feishu_drive_upload`` needs a real file handle in the body, which a JSON argument
+  cannot carry.
+
+Pair the comment tools with ``feishu_doc_read`` (which reads the document body).
 """
 
 from __future__ import annotations
@@ -23,6 +37,9 @@ async def feishu_drive_add_comment(
 ) -> str:
     """Add a top-level (whole-document) comment on a Feishu/Lark document or file.
 
+    To *read* comments instead, use ``feishu_api`` with
+    ``GET /open-apis/drive/v1/files/:file_token/comments``.
+
     Args:
         file_token: The file's token (from its URL).
         file_type: File type — one of docx, doc, sheet, bitable, file.
@@ -35,33 +52,6 @@ async def feishu_drive_add_comment(
             nothing and returns ``need_identity_choice`` so you can ask them.
     """
     return _f.dumps_result(await _f.add_comment_impl(file_token, file_type, content, user_key, identity))
-
-
-async def feishu_drive_list_comments(file_token: str, file_type: str, page_size: int = 50, page_token: str = "") -> str:
-    """List whole-document comments on a Feishu/Lark file.
-
-    Args:
-        file_token: The file's token (from its URL).
-        file_type: File type — one of docx, doc, sheet, bitable, file.
-        page_size: Max comments to return (default 50).
-        page_token: Pagination cursor from a previous call's has_more result (optional).
-    """
-    return _f.dumps_result(await _f.list_comments_impl(file_token, file_type, page_size, page_token))
-
-
-async def feishu_drive_list_comment_replies(
-    file_token: str, file_type: str, comment_id: str, page_size: int = 50, page_token: str = ""
-) -> str:
-    """List replies on a specific Feishu comment thread (whole-doc or local-selection).
-
-    Args:
-        file_token: The file's token (from its URL).
-        file_type: File type — one of docx, doc, sheet, bitable, file.
-        comment_id: The comment thread's ID (from feishu_drive_list_comments).
-        page_size: Max replies to return (default 50).
-        page_token: Pagination cursor from a previous call's has_more result (optional).
-    """
-    return _f.dumps_result(await _f.list_comment_replies_impl(file_token, file_type, comment_id, page_size, page_token))
 
 
 async def feishu_drive_reply_comment(
@@ -78,7 +68,8 @@ async def feishu_drive_reply_comment(
     Args:
         file_token: The file's token (from its URL).
         file_type: File type — one of docx, doc, sheet, bitable, file.
-        comment_id: The comment thread's ID to reply under.
+        comment_id: The comment thread's ID to reply under (get it from ``feishu_api``
+            ``GET /open-apis/drive/v1/files/:file_token/comments``).
         content: The reply text.
         at_user_id: open_id/user_id to @-mention at the start of the reply (optional).
         user_key: The sender's open_id (from ``<feishu_context>``).
@@ -113,32 +104,6 @@ async def feishu_file_download(source: str, save_path: str, is_url: bool = False
             the bot's tenant token. Ignored for direct-URL downloads.
     """
     return _f.dumps_result(await _f.download_file_impl(source, save_path, is_url, user_key))
-
-
-async def feishu_drive_delete_file(file_token: str, file_type: str, user_key: str = "", identity: str = "") -> str:
-    """Delete a Feishu/Lark cloud file or document (moves it to the recycle bin).
-
-    The delete is recoverable (goes to trash, not permanent). The caller must be the
-    file's owner, or hold edit/full-access on its parent folder — so for a file the
-    user owns, pass their ``user_key`` to delete as that user.
-
-    To delete a document that lives inside a wiki knowledge base: first resolve it
-    with ``feishu_wiki_get_node(token)`` to get ``obj_token`` + ``obj_type``, then
-    call this with ``file_token=obj_token`` and ``file_type=obj_type`` (Feishu has no
-    standalone "delete wiki node" API — deleting the underlying doc removes it).
-
-    Args:
-        file_token: The file/document token (from its URL), or a wiki node's obj_token.
-        file_type: One of file, docx, doc, sheet, bitable, mindnote, slides, folder,
-            shortcut. Deleting a folder is async and returns a task_id.
-        user_key: The sender's open_id (from ``<feishu_context>``). Deleting a user-owned
-            file/wiki generally needs that user's identity.
-        identity: Who owns the result: ``"user"`` (this person — needs their
-            authorization) or ``"bot"`` (the bot). Omit to use the choice remembered
-            for this ``user_key``; if they have never been asked, the tool does
-            nothing and returns ``need_identity_choice`` so you can ask them.
-    """
-    return _f.dumps_result(await _f.delete_file_impl(file_token, file_type, user_key, identity))
 
 
 async def feishu_drive_upload(

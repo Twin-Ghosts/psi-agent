@@ -258,10 +258,10 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
   `values_json` 是「行的数组」如 `'[["姓名","分数"],["张三",95],["合计","=SUM(B2:B2)"]]'`——**单元格值以 `=` 开头即写成公式**。
   写表格是写操作：带 `user_key=<sender_open_id>`，归属按上面「问归属」的结果走（`identity`
   留空即沿用记住的选择）。
-- **删除文档/文件**：`feishu_drive_delete_file(file_token, file_type, user_key)`——删除进
-  **回收站可恢复**。file_type 是 docx/doc/sheet/bitable/mindnote/slides/file/folder/shortcut。
+- **删除文档/文件**：走 `feishu-drive` 技能的接口表——`DELETE /open-apis/drive/v1/files/:file_token`
+  带 `type`，删除进**回收站可恢复**。type 是 docx/doc/sheet/bitable/mindnote/slides/file/folder/shortcut。
   删**知识库(wiki)里的文档**：飞书没有独立删 wiki 节点的接口——先 `feishu_wiki_get_node`
-  取 `obj_token`+`obj_type`，再 `feishu_drive_delete_file(file_token=obj_token, file_type=obj_type, user_key=...)`。
+  取 `obj_token`+`obj_type`，再拿 `obj_token` 当 `file_token`、`obj_type` 当 `type` 删。
   删除不可轻率，动手前先跟用户确认清楚删的是哪一个。
 - **访问/浏览知识库**：`feishu_wiki_list_spaces` / `feishu_wiki_list_nodes` / `feishu_wiki_get_node`
   已做「tenant 先试，返回空且带了 user_key 时自动改用户身份重试」。带上 `user_key=<sender_open_id>`：
