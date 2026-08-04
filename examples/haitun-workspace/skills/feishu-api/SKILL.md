@@ -46,6 +46,8 @@ category: integration
 | 审批（读定义/查待办/列实例/同意拒绝/订阅） | `feishu-approval` | 同意拒绝要凑齐身份四元组；两张数字状态表在那份技能里 |
 | 云盘与文档评论（列评论/列回复/删文件） | `feishu-drive` | 删文件的 `type` 只认九个值；上传和下载是专用工具 |
 | 考勤（考勤组配置/班次配置） | `feishu-attendance` | `page_size` 上限 50 会硬拦；打卡记录是专用工具 |
+| 云文档协作者权限（加人/列人/移人） | `feishu-permission` | 三个不同的东西都叫 `type`；`member_type` 是 `openid` 不是 `open_id` |
+| 任务与培训（建改任务/完成/列任务/课程报名） | `feishu-task` | 空 `update_fields` 会被硬拦（飞书返回成功但一个字段都不改） |
 
 ## 参数怎么填
 
@@ -190,15 +192,10 @@ scope 是 `contact:functional_role`（只读用 `contact:functional_role:readonl
 
 ### 任务 (Task v2)
 
-| 要什么 | method + uri |
-|---|---|
-| 建任务 | `POST /open-apis/task/v2/tasks` — body: `{"summary":"...","due":{"timestamp":"..."},"members":[{"id":"ou_...","role":"assignee"}]}` |
-| 查任务 | `GET /open-apis/task/v2/tasks/:task_guid` |
-| 列任务 | `GET /open-apis/task/v2/tasks` — query: `page_size`, `completed` |
-| 改任务 | `PATCH /open-apis/task/v2/tasks/:task_guid` — body: `{"task":{...},"update_fields":["summary"]}` |
-| 完成任务 | `PATCH` 同上，`update_fields:["completed_at"]`，`completed_at` 为毫秒字符串 |
-
-改任务**必须**带 `update_fields`，不带则什么都不会变。
+任务的建/改/完成/列表**看 `feishu-task` 那份接口表**。挪过去是因为这个域的失败方式是
+静默的：`PATCH` 靠 `update_fields` 决定改什么，空数组时飞书返回成功却一个字段都不改，
+那份 rules 会在发请求之前拦下来。时间戳是**毫秒字符串**（写成秒会落到 1970 年），
+成员对象里的 `type` 填 `open_id` 会报 1470400 —— 这些也都在那份技能里。
 
 ### 群 / 知识库
 
@@ -221,9 +218,8 @@ wiki 节点的 `obj_token` 才是文档 id，读内容要用它而不是 `node_t
 
 ### 培训
 
-| 要什么 | method + uri |
-|---|---|
-| 课程报名记录 | `GET /open-apis/elearning/v2/course_registrations` — query: `page_size`, `user_id_type` |
+课程报名记录跟着任务一起搬走了，**看 `feishu-task` 那份接口表**。`user_ids` 是
+**重复同名 key** 的查询参数，逗号拼成一个串会得到一页空结果而不是报错。
 
 ## 分页
 

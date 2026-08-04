@@ -118,7 +118,8 @@ async def feishu_drive_upload(
     """Upload a local file (e.g. a learning video or a signed-proof image) to Feishu Drive.
 
     Handles files up to 20MB in one request and returns the new ``file_token`` (which you
-    can then share via ``feishu_permission_add_member`` or reference as learning evidence).
+    can then share by adding a permission member — see the ``feishu-permission`` skill —
+    or reference as learning evidence).
     Larger files need Feishu's chunked upload flow, which this tool does not implement — it
     returns an error telling you the size.
 

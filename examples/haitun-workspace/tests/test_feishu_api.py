@@ -128,9 +128,12 @@ async def test_bool_and_list_query_values(monkeypatch: pytest.MonkeyPatch) -> No
     cap = _CapturedInvoke()
     monkeypatch.setattr(_impl, "_invoke", cap)
 
+    # Deliberately an endpoint no rule governs: this test is about stringification, and a
+    # rule would add its own defaults and paging to the comparison. It used to point at
+    # ``/task/v2/tasks``, which was ungoverned only until that domain moved into a table.
     await _api.call_api_impl(
         method="GET",
-        uri="/open-apis/task/v2/tasks",
+        uri="/open-apis/optical_char_recognition/v1/image/basic_recognize",
         query_json='{"completed":false,"ids":["a","b"],"skip":null}',
     )
 

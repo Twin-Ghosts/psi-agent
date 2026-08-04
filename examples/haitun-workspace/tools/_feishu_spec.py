@@ -23,10 +23,16 @@ Rule fields, all optional except ``endpoint``:
     why           shown with prefer_tool, explains what hand-building gets wrong
     required      body/query field names that must be present
     fields        per-field: pattern / forbid / max / min / choices / default /
-                  requires / max_items / in / on_fail
+                  requires / max_items / min_items / in / on_fail
     pitfalls      free text surfaced on failure — never enforced, only explained
     paginate      true, or a mapping — follow ``page_token`` until ``has_more`` is false
     confirm       a token the caller must echo before an irreversible call goes out
+
+A field name in ``required``/``fields`` may be qualified with its bucket —
+``query.type`` / ``body.type`` — for the endpoints that send two *different* fields
+under one name. The drive permission endpoints do exactly that (file type in the
+query, member kind in the body), and since ``fields`` is keyed by name, the plain
+spelling can only describe one of them while the other goes unchecked.
 
 ``paginate`` is what lets a table row replace a hand-written tool. Feishu's paging
 protocol is uniform (``page_token`` out, ``has_more`` + ``page_token`` back), so
@@ -293,16 +299,72 @@ def reset_cache() -> None:
     _cached.cache_clear()
 
 
-def _present(name: str, body: dict[str, Any], query: dict[str, Any], paths: dict[str, Any]) -> tuple[bool, Any]:
-    """Look a field up across all three argument buckets.
+#: The three buckets a field can be pinned to, for ``in:`` and for ``bucket.name`` keys.
+_BUCKETS = ("body", "query", "paths")
+
+
+def _split_field(key: str, spec: Any = None) -> tuple[str, str]:
+    """A field key as ``(bucket, name)``, where an empty bucket means "look everywhere".
+
+    Two spellings pin a field down, because two different problems need it. ``in: query``
+    says where a uniquely-named field rides. A ``body.type`` *key* goes further: it lets
+    one rule constrain two same-named fields separately, which the drive permission
+    endpoints require — they send a file type in the query and a member kind in the body,
+    both called ``type``, and ``fields`` is keyed by name so one entry cannot describe
+    both. Without the qualified spelling the body's ``type`` is undeclarable and its
+    ``choices`` silently unenforced.
+    """
+    head, _, rest = key.partition(".")
+    if rest and head in _BUCKETS:
+        return head, rest
+    where = spec.get("in", "") if isinstance(spec, dict) else ""
+    where = str(where).strip()
+    return (where if where in _BUCKETS else ""), key
+
+
+def _present(
+    name: str,
+    body: dict[str, Any],
+    query: dict[str, Any],
+    paths: dict[str, Any],
+    where: str = "",
+) -> tuple[bool, Any]:
+    """Look a field up across all three argument buckets, or in just one.
 
     A rule names a field once; whether it rides in the body, the query string, or a
-    path placeholder is the endpoint's business, not the rule author's.
+    path placeholder is usually the endpoint's business, not the rule author's. ``where``
+    is for the endpoints where that is false — see :func:`_split_field`.
     """
-    for bucket in (body, query, paths):
+    buckets = {"body": (body,), "query": (query,), "paths": (paths,)}.get(where, (body, query, paths))
+    for bucket in buckets:
         if name in bucket:
             return True, bucket[name]
     return False, None
+
+
+def _among(value: Any, choices: Any) -> bool:
+    """Is ``value`` one of ``choices``, compared the way the wire will see it?
+
+    Query values are stringified on the way out (``False`` becomes ``"false"``), but
+    validation runs *before* that — it has to, or a refusal would come too late to stop
+    the request. So a rule spelling a boolean flag ``["true", "false"]``, which is what
+    Feishu actually accepts, would refuse a caller who passed a real JSON ``false``.
+    Comparing the stringified form too keeps both spellings working without weakening
+    anything: a value outside the list is still refused.
+    """
+    if value in choices:
+        return True
+    as_sent = _as_query_text(value)
+    return any(as_sent == _as_query_text(choice) for choice in choices)
+
+
+def _as_query_text(value: Any) -> str:
+    """One value as it will appear in the query string."""
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    return str(value)
 
 
 def _check_field(name: str, spec: Any, value: Any) -> str | None:
@@ -322,7 +384,7 @@ def _check_field(name: str, spec: Any, value: Any) -> str | None:
     # pattern without enumerating every legal string.
     if (forbid := spec.get("forbid")) and isinstance(value, str) and re.search(str(forbid), value):
         return spec.get("on_fail") or f"{name}={value!r} 含有不允许的内容 ({forbid})"
-    if (choices := spec.get("choices")) and value not in choices:
+    if (choices := spec.get("choices")) and not _among(value, choices):
         return spec.get("on_fail") or f"{name}={value!r} 不在允许取值 {list(choices)} 内"
     for bound, cmp, label in (("max", lambda a, b: a > b, "上限"), ("min", lambda a, b: a < b, "下限")):
         limit = spec.get(bound)
@@ -337,6 +399,16 @@ def _check_field(name: str, spec: Any, value: Any) -> str | None:
         try:
             if len(value) > int(length):
                 return spec.get("on_fail") or f"{name} 有 {len(value)} 项, 超出上限 {length}"
+        except TypeError, ValueError:
+            pass
+    # ``min``/``max`` above coerce with float() and give up on a list, so an *empty
+    # array* slips past both. That is not a hypothetical: Feishu's task PATCH reads
+    # ``update_fields`` to decide what to change, and an empty one means "change
+    # nothing" — answered with code 0. A cap has a floor to match.
+    if (least := spec.get("min_items")) is not None and isinstance(value, (list, tuple)):
+        try:
+            if len(value) < int(least):
+                return spec.get("on_fail") or f"{name} 只有 {len(value)} 项, 少于下限 {least}"
         except TypeError, ValueError:
             pass
     return None
@@ -357,18 +429,20 @@ def validate(
     if rule is None:
         return []
     problems: list[str] = []
-    for name in rule.required:
-        found, _ = _present(name, body, query, paths)
-        if not found:
+    for key in rule.required:
+        where, name = _split_field(key, rule.fields.get(key))
+        if not _present(name, body, query, paths, where)[0]:
             problems.append(f"缺少必填字段 {name}")
-    for name, spec in rule.fields.items():
-        found, value = _present(name, body, query, paths)
+    for key, spec in rule.fields.items():
+        where, name = _split_field(key, spec)
+        found, value = _present(name, body, query, paths, where)
         if not found:
             continue
         if isinstance(spec, dict) and (need := spec.get("requires")):
             for other in need if isinstance(need, list) else [need]:
-                if not _present(str(other), body, query, paths)[0]:
-                    problems.append(f"给了 {name} 就必须同时给 {other}")
+                other_where, other_name = _split_field(str(other), rule.fields.get(str(other)))
+                if not _present(other_name, body, query, paths, other_where)[0]:
+                    problems.append(f"给了 {name} 就必须同时给 {other_name}")
         if (violation := _check_field(name, spec, value)) is not None:
             problems.append(violation)
     return problems
@@ -383,8 +457,8 @@ def defaults_for(rule: Rule | None) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {"query": {}, "body": {}}
     if rule is None:
         return out
-    for name, spec in rule.fields.items():
+    for key, spec in rule.fields.items():
         if isinstance(spec, dict) and "default" in spec:
-            bucket = str(spec.get("in", "query")).strip()
+            bucket, name = _split_field(key, spec)
             out.setdefault(bucket if bucket in out else "query", {})[name] = spec["default"]
     return out

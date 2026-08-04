@@ -392,7 +392,7 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
     1. `feishu_api` POST `/open-apis/bitable/v1/apps`（body `{"name":"<表名>"}`）建**表格本体**，返回
        `app_token`、`url`（把这个链接回给用户，他才点得进去）和 `default_table_id`（飞书自动建的那张空表，
        只有一个占位列）。归属按上面「问归属」的结果走：归用户则表在他自己的云空间里；归机器人则表建在
-       机器人云空间、用户默认看不到（这种情况记得把 `url` 回给他，或用 `feishu_permission_add_member`
+       机器人云空间、用户默认看不到（这种情况记得把 `url` 回给他，或按 `feishu-permission` 技能
        加他为协作者）。
     2. `feishu_bitable_create_table(app_token, table_name, fields_json=...)` 建**真正要用的数据表连列一起**——
        `fields_json` 是 `[{"field_name":"合同编号","type":1},{"field_name":"金额","type":2},

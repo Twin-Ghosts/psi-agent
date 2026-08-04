@@ -3022,7 +3022,7 @@ def test_attendance_tool_async_with_docstring() -> None:
 # ── Attendance admin config — groups (考勤组) & shifts (班次), read-only ────────
 
 
-# ── Tasks — create/assign, list, update, complete ─────────────────────────────
+# ── Tasks — the create path that assignment_accept still needs ────────────────
 
 
 @pytest.mark.asyncio
@@ -3081,107 +3081,6 @@ def test_due_to_ms_parsing() -> None:
     assert _impl._due_to_ms("not a date") is None
     assert _impl._due_to_ms("2026-07-15").isdigit()
     assert _impl._due_to_ms("2026-07-15 18:00").isdigit()
-
-
-@pytest.mark.asyncio
-async def test_list_tasks_query(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "items": [{"guid": "g1", "summary": "s1", "status": "todo", "due": {"timestamp": "123"}, "url": "u"}],
-            "has_more": False,
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_tasks_impl("false", 50, "")
-    q = _qdict(cap.request)
-    assert cap.request.http_method.name == "GET"
-    assert q.get("type") == "my_tasks"
-    assert q.get("completed") == "false"
-    assert result["tasks"][0] == {"guid": "g1", "summary": "s1", "status": "todo", "due": "123", "url": "u"}
-
-
-@pytest.mark.asyncio
-async def test_complete_task_patch(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    await _impl.complete_task_impl("g1", True)
-    req = cap.request
-    assert req.http_method.name == "PATCH"
-    assert req.paths["task_guid"] == "g1"
-    assert req.body["update_fields"] == ["completed_at"]
-    assert req.body["task"]["completed_at"] != "0"
-    # reopen
-    cap2 = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap2)
-    await _impl.complete_task_impl("g1", False)
-    assert cap2.request.body["task"]["completed_at"] == "0"
-
-
-@pytest.mark.asyncio
-async def test_update_task_only_provided_fields(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.update_task_impl("g1", "新标题", "", "")
-    assert cap.request.body["update_fields"] == ["summary"]  # description/due omitted -> not cleared
-    assert cap.request.body["task"] == {"summary": "新标题"}
-    assert result["updated"] == ["summary"]
-
-
-@pytest.mark.asyncio
-async def test_update_task_nothing_to_update() -> None:
-    result = await _impl.update_task_impl("g1", "", "", "")
-    assert result["ok"] is False
-
-
-@pytest.mark.asyncio
-async def test_get_task_detail(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "task": {
-                "guid": "g1",
-                "summary": "写周报",
-                "status": "done",
-                "completed_at": "1752490200000",
-                "members": [{"id": "ou_a", "name": "王炜博", "role": "assignee"}],
-                "assignee_related": [{"id": "ou_a", "completed_at": "1752490200000"}],
-                "url": "http://t/g1",
-            }
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.get_task_impl("g1")
-    req = cap.request
-    assert req.http_method.name == "GET"
-    assert req.uri == "/open-apis/task/v2/tasks/:task_guid"
-    assert req.paths["task_guid"] == "g1"
-    assert result["status"] == "done"
-    assert result["completed"] is True
-    assert result["completed_at"]  # formatted, non-empty
-    assert result["members"][0]["name"] == "王炜博"
-    assert result["assignee_completion"][0]["id"] == "ou_a"
-
-
-@pytest.mark.asyncio
-async def test_get_task_incomplete(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"task": {"guid": "g1", "summary": "s", "status": "todo", "members": []}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.get_task_impl("g1")
-    assert result["completed"] is False
-    assert result["completed_at"] == ""
-
-
-def test_task_tools_async_with_docstrings() -> None:
-    mod = importlib.import_module("feishu_task")
-    for name in (
-        "feishu_task_create",
-        "feishu_task_get",
-        "feishu_task_list",
-        "feishu_task_update",
-        "feishu_task_complete",
-    ):
-        fn = getattr(mod, name)
-        assert inspect.iscoroutinefunction(fn), name
-        assert (inspect.getdoc(fn) or "").strip(), f"{name} needs a docstring"
 
 
 # ── Calendar — create event ───────────────────────────────────────────────────
@@ -4865,107 +4764,6 @@ async def test_wiki_create_doc_tool_returns_json(monkeypatch: pytest.MonkeyPatch
     assert parsed["obj_token"] == "d1"
 
 
-# ── Drive permission impl tests (公开 / 差异化访问) ─────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_add_permission_member_builds_post(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"member": {"member_id": "od_dept"}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.add_permission_member_impl(
-        "tok", "docx", "od_dept", perm="view", member_type="opendepartmentid", member_kind="department"
-    )
-    assert result["ok"] is True
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri.endswith("/permissions/:token/members")
-    assert req.paths["token"] == "tok"
-    assert _qdict(req).get("type") == "docx"
-    assert req.body["member_id"] == "od_dept"
-    assert req.body["perm"] == "view"
-    assert req.body["type"] == "department"
-
-
-@pytest.mark.asyncio
-async def test_add_permission_member_rejects_bad_perm() -> None:
-    result = await _impl.add_permission_member_impl("tok", "docx", "u1", perm="admin")
-    assert result["ok"] is False
-    assert "perm must be" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_add_permission_member_rejects_bad_member_type() -> None:
-    result = await _impl.add_permission_member_impl("tok", "docx", "u1", member_type="badtype")
-    assert result["ok"] is False
-    assert "member_type must be" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_list_permission_members_normalizes(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"items": [{"member_id": "u1", "member_type": "openid", "perm": "view", "type": "user"}]})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_permission_members_impl("tok", "docx")
-    assert result["ok"] is True
-    assert result["member_total"] == 1
-    assert result["members"][0]["member_id"] == "u1"
-    assert cap.request.http_method.name == "GET"
-
-
-@pytest.mark.asyncio
-async def test_delete_permission_member_builds_delete(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.delete_permission_member_impl("tok", "docx", "u1")
-    assert result["ok"] is True
-    req = cap.request
-    assert req.http_method.name == "DELETE"
-    assert req.paths["member_id"] == "u1"
-    assert _qdict(req).get("member_type") == "openid"
-
-
-def test_permission_tools_are_async_with_docstrings() -> None:
-    mod = importlib.import_module("feishu_permission")
-    for name in ("feishu_permission_add_member", "feishu_permission_list_members", "feishu_permission_remove_member"):
-        fn = getattr(mod, name)
-        assert inspect.iscoroutinefunction(fn), name
-        assert (inspect.getdoc(fn) or "").strip(), f"{name} needs a docstring"
-
-
-# ── eLearning impl tests (查每人学习记录) ──────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_list_course_registrations_builds_query(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"items": [{"user_id": "u1", "status": "completed"}], "has_more": False})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_course_registrations_impl(user_ids="u1,u2", page_size=50)
-    assert result["ok"] is True
-    assert result["registrations"][0]["status"] == "completed"
-    req = cap.request
-    assert req.http_method.name == "GET"
-    assert req.uri.endswith("/elearning/v2/course_registrations")
-    # user_ids repeated as multiple query params
-    user_id_vals = [v for (k, v) in req.queries if k == "user_ids"]
-    assert user_id_vals == ["u1", "u2"]
-    assert _qdict(req).get("page_size") == "50"
-
-
-@pytest.mark.asyncio
-async def test_list_course_registrations_no_filter(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"items": [], "has_more": False})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_course_registrations_impl()
-    assert result["ok"] is True
-    assert [v for (k, v) in cap.request.queries if k == "user_ids"] == []
-
-
-def test_elearning_tool_is_async_with_docstring() -> None:
-    mod = importlib.import_module("feishu_elearning")
-    fn = mod.feishu_elearning_list_registrations
-    assert inspect.iscoroutinefunction(fn)
-    assert (inspect.getdoc(fn) or "").strip()
-
-
 # ── Drive media upload impl tests (视频证据上传) ──────────────────────────────
 
 
@@ -5518,9 +5316,7 @@ def test_write_tools_expose_identity(tmp_path: Any) -> None:
         "feishu_wiki": ["feishu_wiki_create_doc", "feishu_wiki_create_doc_with_content"],
         "feishu_bitable": ["feishu_bitable_create_table", "feishu_bitable_create_records"],
         "feishu_sheet": ["feishu_sheet_write", "feishu_sheet_append", "feishu_sheet_format"],
-        "feishu_task": ["feishu_task_create"],
         "feishu_drive": ["feishu_drive_upload"],
-        "feishu_permission": ["feishu_permission_add_member"],
     }
     for mod_name, tools in expected.items():
         mod = importlib.import_module(mod_name)
