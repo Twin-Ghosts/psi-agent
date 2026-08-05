@@ -647,3 +647,55 @@ def test_recompute_overview_heals_a_corrupted_row() -> None:
     assert fields["进度"] == "2/2"
     assert fields["逾期项数"] == 0
     assert fields["状态"] == "已出新手村"
+
+
+def test_plan_module_cards_makes_the_dev_module_a_role_card() -> None:
+    r = _load("_rookie_sop_runtime")
+    cfg = _load("_rookie_sop_config")
+    p = _load("_rookie_sop_progress")
+    items = cfg.load_sop(_CFG)
+    rows = [
+        {
+            "记录键": f"ou_x:{i.item_id}",
+            "项": i.title,
+            "验收标准": i.acceptance,
+            "模块": i.module,
+            "状态": p.STATUS_TODO,
+            "入职日": date(2026, 8, 5),
+            "截止日": cfg.due_date(date(2026, 8, 5), i.window_days),
+        }
+        for i in items
+    ]
+
+    plans = r.plan_module_cards(items, rows, date(2026, 8, 5), date(2026, 8, 5), "")
+
+    by_module = {p_["module"]: p_ for p_ in plans}
+    # 开发环境先问角色, 不直接列 5 项
+    assert by_module["开发环境"]["is_role_card"] is True
+    assert by_module["开发环境"]["handlers"] == {
+        "rookie_role_dev": "rookie_sop_role_set",
+        "rookie_role_nondev": "rookie_sop_role_set",
+    }
+    # 其余模块直接给勾选行
+    assert by_module["环境准备"]["is_role_card"] is False
+    assert "rookie_tick_wifi" in by_module["环境准备"]["handlers"]
+
+
+def test_plan_module_cards_keeps_each_card_within_the_forty_row_cap() -> None:
+    r = _load("_rookie_sop_runtime")
+    cfg = _load("_rookie_sop_config")
+    items = cfg.load_sop(_CFG)
+    rows = [
+        {
+            "记录键": f"ou_x:{i.item_id}",
+            "项": i.title,
+            "模块": i.module,
+            "状态": "未完成",
+            "入职日": date(2026, 8, 5),
+            "截止日": date(2026, 8, 5),
+        }
+        for i in items
+    ]
+
+    for plan in r.plan_module_cards(items, rows, date(2026, 8, 5), date(2026, 8, 5), ""):
+        assert len(plan["handlers"]) <= 40
