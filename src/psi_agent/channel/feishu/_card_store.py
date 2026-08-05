@@ -1,4 +1,4 @@
-"""AppData-backed snapshots for single-use Feishu cards."""
+"""AppData-backed snapshots for Feishu cards, consumed per card or per action."""
 
 from __future__ import annotations
 
@@ -12,24 +12,31 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import anyio
+from loguru import logger
 
 from psi_agent._appdata import resolve_appdata_root
 
 _SNAPSHOT_VERSION = 2
 _MESSAGE_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
-# 多选卡的 per-action 墓碑名里嵌了 action_id, 所以它必须是个安全的文件名片段。
-# 不匹配的 action_id 不给它退化成宽松名字 (会撞车), 直接按 hash 落盘。
+# A multi-use card embeds the action id in its per-action tombstone name, so the id must be
+# a safe filename fragment. A non-matching id is hashed rather than loosened — a relaxed
+# name could collide with another action's tombstone and silently retire the wrong row.
 _ACTION_ID_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 
-# 多选卡回写是「读快照-改一行-写回」, 三步之间都有 await。同一张卡上两行同时被勾,
-# 交错成「A 读 → B 读 → A 写 → B 写」时 B 会拿勾选前的快照覆盖掉 A 的完成状态。
-# per-action 墓碑挡不住这个 —— 两行各自成立本来就是对的, 冲突在共享的那份快照上。
-# 按 message_id 分锁 (而不是一把全局锁): 不同卡的回写本就互不相干, 没必要互等。
+# Rewriting a multi-use snapshot is read-modify-write with an await between every step. Two
+# rows ticked at once can interleave as "A reads, B reads, A writes, B writes", leaving B to
+# overwrite A's completion with the pre-tick card. Per-action tombstones do not help here —
+# both rows are legitimately claimed; the conflict is on the shared snapshot. Keyed per
+# message_id rather than one global lock: rewrites of different cards never interact.
 _REWRITE_LOCKS: dict[str, anyio.Lock] = {}
 _REWRITE_WAITERS: dict[str, int] = {}
-# 被墓碑拒掉的次数, 按 message_id 累计。手快连点和跨进程重复投递在日志里长得一样,
-# 计数能把两者分开: 前者集中在少数几行, 后者会均匀铺开。
+# Tombstone rejections per card. Impatient double-clicks and cross-process redelivery look
+# identical in the log; the count separates them (the former clusters on a few rows). Bounded
+# rather than cleared with the lock table: the count has to survive sequential clicks to mean
+# anything, but a long-lived process must not keep one entry per card ever sent. Insertion
+# order makes the oldest card the one to evict.
 _REJECTED_CLAIMS: dict[str, int] = {}
+_MAX_TRACKED_REJECTIONS = 4096
 
 
 @contextlib.asynccontextmanager
@@ -37,15 +44,19 @@ async def _rewrite_lock(message_id: str) -> AsyncIterator[None]:
     """Serialize read-modify-write on one card's snapshot within this process."""
     lock = _REWRITE_LOCKS.setdefault(message_id, anyio.Lock())
     _REWRITE_WAITERS[message_id] = _REWRITE_WAITERS.get(message_id, 0) + 1
+    logger.debug(f"acquiring card snapshot lock message={message_id} waiters={_REWRITE_WAITERS[message_id]}")
     try:
         async with lock:
+            logger.debug(f"acquired card snapshot lock message={message_id}")
             yield
     finally:
         remaining = _REWRITE_WAITERS[message_id] - 1
+        logger.debug(f"released card snapshot lock message={message_id} waiters_left={remaining}")
         if remaining:
             _REWRITE_WAITERS[message_id] = remaining
         else:
-            # 最后一个等待者负责清表, 否则长期运行会按卡数无界增长。
+            # The last waiter clears the tables, else a long-lived process grows one entry
+            # per card forever.
             del _REWRITE_WAITERS[message_id]
             _REWRITE_LOCKS.pop(message_id, None)
 
@@ -67,7 +78,8 @@ class CardSnapshotClaim:
 
     status: Literal["claimed", "already_consumed", "not_found", "invalid"]
     snapshot: CardSnapshot | None = None
-    # 只在被墓碑拒掉时填, 用来把「手快连点」和「跨进程重复投递」分开。
+    # Filled only when a tombstone rejected the claim, to separate an impatient double-click
+    # from cross-process redelivery.
     rejected_action_id: str | None = None
     rejected_count: int = 0
 
@@ -82,6 +94,15 @@ def _action_slug(action_id: str) -> str:
     if _ACTION_ID_RE.fullmatch(action_id):
         return action_id
     return "h" + hashlib.sha256(action_id.encode("utf-8")).hexdigest()[:32]
+
+
+def _record_rejection(message_id: str) -> int:
+    """Count one tombstone rejection for this card, evicting the oldest card when full."""
+    count = _REJECTED_CLAIMS.pop(message_id, 0) + 1
+    _REJECTED_CLAIMS[message_id] = count
+    while len(_REJECTED_CLAIMS) > _MAX_TRACKED_REJECTIONS:
+        _REJECTED_CLAIMS.pop(next(iter(_REJECTED_CLAIMS)))
+    return count
 
 
 async def _snapshot_path(message_id: str, appdata: str) -> anyio.Path:
@@ -213,7 +234,7 @@ async def card_claim_guard(message_id: str) -> AsyncIterator[None]:
         yield
 
 
-async def rejected_claim_count(message_id: str) -> int:
+def rejected_claim_count(message_id: str) -> int:
     """How many claims this card has had rejected by a tombstone (diagnostics only)."""
     return _REJECTED_CLAIMS.get(message_id, 0)
 
@@ -278,17 +299,17 @@ async def pop_card_snapshot(
         if peeked is not None and peeked.multi_use:
             action_tombstone = path.parent / f"{message_id}.{_action_slug(action_id)}.consumed"
             try:
-                # touch(exist_ok=False) 是这里唯一的并发闸: 同时点两条会各自建自己的
-                # 墓碑而互不影响, 重复点同一条则必然撞上 FileExistsError。
-                # CPython 的 touch(exist_ok=False) 就是 O_CREAT|O_EXCL|O_WRONLY, 与手写
-                # os.open 等价; exist_ok=True 才会走非原子的 utime 那条路。
+                # touch(exist_ok=False) is the only concurrency gate here: two rows ticked at
+                # once each create their own tombstone and do not interact, while a repeat
+                # click on one row necessarily hits FileExistsError. In CPython that call is
+                # exactly O_CREAT|O_EXCL|O_WRONLY, equivalent to a hand-written os.open;
+                # only exist_ok=True takes the non-atomic utime path.
                 await action_tombstone.touch(mode=0o600, exist_ok=False)
             except FileExistsError:
-                _REJECTED_CLAIMS[message_id] = _REJECTED_CLAIMS.get(message_id, 0) + 1
                 return CardSnapshotClaim(
                     status="already_consumed",
                     rejected_action_id=action_id,
-                    rejected_count=_REJECTED_CLAIMS[message_id],
+                    rejected_count=_record_rejection(message_id),
                 )
             await _write_consumed_marker(action_tombstone, "consumed")
             return CardSnapshotClaim(status="claimed", snapshot=peeked)

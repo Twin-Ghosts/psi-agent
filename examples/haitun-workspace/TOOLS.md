@@ -370,15 +370,24 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
     都必须是无首尾空白的 canonical 字符串并精确匹配。配置了映射但 action 未命中时，
     `dispatch.matched=false` 且 `handler=null`；不得臆造或执行未匹配 handler。未配置映射的旧卡片才把
     `value.action` / `action_id` 本身作为兼容 handler；snapshot 缺失/损坏时一律 fail closed。首个回调会留下
-    持久 `.consumed` tombstone，因此不同 Channel 进程或重启后的重复点击也会被忽略。自定义 AppData 时 Channel
+    持久 `.consumed` tombstone，因此不同 Channel 进程或重启后的重复点击也会被忽略（`multi_use=True` 时墓碑
+    降为 per-action `{message_id}.{action}.consumed`，逐行各拒一次）。自定义 AppData 时 Channel
     和 Gateway/workspace tool 必须解析到同一根，推荐统一设置 `PSI_APPDATA`，否则回调拿不到业务上下文并安全失败。
     收到回调后把它视为用户提交的操作，但执行审批、写数据等有后果的动作前仍须复核操作者权限与当前业务状态；
     原卡片更新后的“已选择”提示已经完成点击确认，因此回调 agent 不得先生成“你点击了…”“我来处理/通知…”等过程文本；
     应先按匹配的 `dispatch.handler` 完成必要工具调用。handler 成功且无额外必要信息时以**零 assistant 文本**结束，
     不得输出 `NO_REPLY` 或成功确认。只有警告、部分失败、权限问题、未匹配 handler、必须执行的后续步骤等信息才回复，
     且不得把失败说成成功。
-    每张卡片只接受**第一个**有效按钮/表单操作：首次回调后 Channel 会保留原卡片标题和正文，把交互区替换为
-    “已选择: <选项>”只读提示，同一 `message_id` 的后续操作直接忽略；需要用户再次选择时必须发送一张新卡片。底层操作仍须保持
+    **默认**每张卡片只接受**第一个**有效按钮/表单操作：首次回调后 Channel 会保留原卡片标题和正文，把交互区替换为
+    “已选择: <选项>”只读提示，同一 `message_id` 的后续操作直接忽略；需要用户再次选择时必须发送一张新卡片。
+    **要一张卡承载多条各自独立勾选的待办时传 `multi_use=True`**：一次性的粒度从整张卡降到单个 `value.action`，
+    勾一行只结那一行（渲染成 `● ~~文字~~` 并原地更新卡片）、其余行按钮保留，重复点同一行仍恰好被拒一次
+    （跨进程、跨重启有效）。此时每行的 `action` **必须唯一且规范**（无首尾空白），撞名会让两行互相顶掉，
+    没有可用 action id 的行会退回整卡去重、退化成普通单次卡。连点会被 Channel 合并成一个回合，
+    你会收到 `<feishu_card_action_batch count="N">` 包住 N 条 `<feishu_card_action>`：**每条都要逐个处理
+    （漏一条就丢一次动作），但只回一条消息**。同意/驳回一类「第二个答案必须不可能」的卡片一律留 `False`。
+    标准「今日待办清单」直接用 `feishu_todo_card_send`（见 `feishu-todo-card` skill），不必自己拼多选卡。
+    底层操作仍须保持
     **idempotent**，以防飞书重投、卡片更新失败或多实例并发。工具返回 `ok=true` 后卡片已直接对用户可见；若卡片
     已承载全部必要信息，本轮以**零 assistant 文本**结束，不要输出 `NO_REPLY`、确认“卡片已发送”，也不要重复卡片
     内容或按钮名称。只有仍有卡片未承载的必要信息时才继续回复，例如风险提示、部分失败或必须执行的后续步骤；

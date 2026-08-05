@@ -60,7 +60,8 @@ class CardActionBatcher:
                 await run(batch)
         finally:
             self._running.discard(key)
-            # 只有 run() 抛异常才会残留; 丢掉比留给"下一个点击者"重放更安全。
+            # Only a raising run() leaves anything behind; dropping it is safer than replaying
+            # it for whoever clicks next.
             self._pending.pop(key, None)
 
 
@@ -190,7 +191,8 @@ def _consumed_card_content(card: Any, action_value: Any, *, multi_use: bool = Fa
     if not selected_label:
         return None
     if multi_use:
-        # 已完成项: 实心 + 删除线, 且不再是交互元素。未完成项原样保留按钮。
+        # A done row: filled marker, struck through, and no longer interactive. Rows still
+        # open keep their buttons untouched.
         selected_element: dict[str, Any] = {
             "tag": "markdown",
             "content": f"● ~~{selected_label}~~",
@@ -349,8 +351,9 @@ async def handle_card_action(
         except Exception as e:
             logger.warning(f"failed to read card mode {message_id}, treating as single-use — {e!r}")
             multi_use = False
-        # 多选卡把去重粒度从 message_id 降到 (message_id, action_id): 同一张卡上的
-        # 不同 todo 各自独立, 但没有 action_id 就无从区分, 只能退回整卡去重。
+        # A multi-use card drops the dedup grain from message_id to (message_id, action_id):
+        # each todo on one card stands alone. Without an action id there is nothing to tell
+        # them apart, so such a callback falls back to whole-card dedup.
         seen_key = f"{message_id}:{action_id}" if multi_use and action_id else message_id
         if not mark_seen(seen_key):
             logger.info(f"card action ignored for already-consumed key={seen_key}")
@@ -361,8 +364,9 @@ async def handle_card_action(
         original_card = None
         replacement = None
         try:
-            # 读-改-写必须在同一个临界区里: 只锁 rewrite 挡不住两次勾选各自读到
-            # 未勾过的原卡, 第二次会把第一次的完成状态覆盖回未完成。
+            # Read-modify-write has to sit in one critical section: locking only the rewrite
+            # would still let two ticks each read the pristine card, and the second would
+            # overwrite the first row's completion back to open.
             async with card_claim_guard(message_id):
                 claim = await pop_card_snapshot(
                     message_id,
@@ -384,8 +388,8 @@ async def handle_card_action(
                     if replacement is None:
                         logger.warning(f"failed to consume card snapshot {message_id}, trying Feishu payload")
                     elif snapshot.multi_use and not await rewrite_card_snapshot(message_id, replacement, appdata):
-                        # 必须回写: 下一次点击要从"已勾过的那张"渲染, 否则会把上一条的
-                        # 完成状态覆盖回未完成。
+                        # The write-back is mandatory: the next click must render from the
+                        # already-ticked card, or it undoes the previous row's completion.
                         logger.warning(f"failed to persist ticked card {message_id}, next tick may render stale rows")
         except Exception as e:
             logger.warning(f"failed to load card snapshot {message_id}, trying Feishu payload — {e!r}")
@@ -467,7 +471,7 @@ async def handle_card_action(
             )
 
         if batcher is None or not multi_use:
-            # 单次卡一张卡只可能点一次, 没有可合并的第二次点击。
+            # A single-use card can only be clicked once, so there is no second click to merge.
             await _run([context])
         else:
             await batcher.submit(f"{message_id}:{operator_open_id}", context, _run)

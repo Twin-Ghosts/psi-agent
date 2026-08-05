@@ -160,6 +160,7 @@ service tools:
 | `trigger_manage` | CRUD on **agent** `triggers/<name>/TRIGGER.md`。`event` 名应对齐 agent ``channel_events/`` 已接通能力；Session 不再用 catalog 硬拒。`fire=tool` 命中后直调工具。见 `skills/feishu-event-remind`；事件定义见 ``channel_events/README.md``。 |
 | `channel_event_check` | 自查 agent `channel_events/` 的事件（只读、无副作用）。`action=list` 看加载了哪些事件名；`action=shape` + `platform_event=` 用真实 lark SDK 模型给出字段所在层级（`im.message.receive_v1` 的 `chat_id` 在 `event['message']['chat_id']`）；`action=probe` + `event=` 拿样例事件试跑该事件自己的 `map.py`，返回空时打印 mapper 实际拿到的结构与可读路径。**改完 `map.py` 必须先 probe 再上线** —— mapper 返回 `[]` 在日志里与「去重跳过」无法区分。 |
 | `handbook_onboarding_send_welcome` / `handbook_onboarding_process_submit` | 入职管理制度确认闭环：欢迎卡（链接+表单）→ 校验 → 通过双侧通知 / 失败重发新卡。配置 `config/handbook_onboarding.yaml`；触发器 `handbook-onboarding-welcome` 挂 `feishu.hr.user_created`。卡片回调 skill：`feishu-handbook-onboarding`。 |
+| `feishu_todo_card_send` / `feishu_todo_card_tick` | 一张卡列多条待办、**逐条勾选**（普通卡片点一次就整张退休，故用不了）。`feishu_todo_card_send` 组卡：每行一个形状勾选框（`circle` ○● / `square` □■ / `diamond` ◇◆ / `triangle` △▲ / `star` ☆★ / `check` ☐☑）、标题链到该行的飞书任务（applink，因为 `task/v2` 返回体里**没有** web URL）、可选 `detail` 第二行、进度行，单卡上限 40 条，`done` 行渲染成删除线且不给按钮。底层用 `send_card_impl(multi_use=True)`，逐行 at-most-once（详见 `channel/AGENTS.md`「`multi_use` 卡」）；每行 `action` 必须唯一规范，工具自动生成 `todo_tick_<行号>`。`feishu_todo_card_tick` 是它的回调 handler：`PATCH /open-apis/task/v2/tasks/:task_guid` 写 `completed_at`（**毫秒**字符串）**且必须带 `update_fields: ["completed_at"]`**——不带会返回成功但什么都不改。**必须先建飞书任务再发卡**（行链接指向任务）；行内无 `task_guid` 时返回 `task_updated: false` 并说明原因，这不是错误。机器人不是任务成员时会被拒，传点击者 `user_key` 以本人身份完成。连点会被合并成一个批（`<feishu_card_action_batch>`），**每条都要逐个调本工具、但只回一条消息**。技能：`feishu-todo-card`。 |
 | `memory_add` / `memory_search` / `memory_answer_context` / `memory_health` / `assignment_upsert` / `assignment_get` / `assignment_list` / `assignment_transition` | Per-Session routed Fusion Memory MCP tools. Authentication comes only from the trusted runtime Session and operator token map. Assignment tools carry generic work-arrangement facts and state transitions; they do not expose organization_id in tool arguments. |
 | `assignment_send_card` / `assignment_accept` | Work-assignment delivery pair. `assignment_send_card` fetches the authoritative Memory record and explicitly separates unmodified assigner input, Agent analysis, and references in one single-action Feishu card. `assignment_accept` trusts only the current Feishu Session identity, verifies that operator is a listed recipient, confirms receipt, then internally uses Memory's atomic publication claim so only one Gateway creates the bot-owned Feishu task. Finalization appends the task URL or failure without faking a business-state transition. Failed or unfinished claims require manual reconciliation and are never automatically retried because Feishu task creation has no client idempotency key. |
 | `assignment_feedback` | Shared feedback-thread adapter for blocking, non-blocking, and record-only task feedback. It derives the actor from the trusted Feishu Session or validated card callback, appends immutable replies in Memory, edits the assigner card in place, and sends the recipient confirmation projection when required. |
@@ -232,6 +233,7 @@ service tools:
 - `feishu-schedule-message` — Feishu timed reminders via **`schedule_manage` `fire=tool`**: Session **directly** calls `feishu_message_send(**tool_args)` at fire time (no LLM). Pass `tool_args` JSON with real `chat_id`/`open_id` from `<feishu_context>` (**not** Gateway `session_id`). Prefer `visibility=silent`. One-shot (`once_at`) **rejects** `fire=prompt` / content-embedded calls — create must include `fire`+`tool`+`tool_args` in one shot; Session `run_once` deletes TASK after fire.
 - `feishu-event-remind` — Feishu **触发器**（事件触发）via **`trigger_manage` `fire=tool`**: map NL → catalog `event`（如 `feishu.chat.member_added`）+ dual-write `raw_event`（如 `im.chat.member.user.added_v1`）；Session 先规范匹配再 raw 回退。禁止手写 `TRIGGER.md`；未接通事件勿 invent catalog 名。用户说法「触发器 / 触发事件」均指本能力，勿再称「定事」。
 - `feishu-handbook-onboarding` — 入职管理制度确认闭环：`feishu.hr.user_created` → `handbook_onboarding_send_welcome` 发卡；`<feishu_card_action>` → `handbook_onboarding_process_submit` 校验（通过双侧通知 / 失败重发新卡）。配置 `config/handbook_onboarding.yaml`。
+- `feishu-todo-card` — 发一张「今日 TODO」卡：一张卡多条待办、**逐条勾选**，勾一条只结那一条、其余仍可勾、卡片原地更新。讲清工具选择（一条答案用 `feishu_message_send_card`，多条待办用 `feishu_todo_card_send`，自拼多选卡用 `feishu_message_send_card(multi_use=True)`）、**建任务在前**的流程、逐行幂等边界与两层防重放、批量回调怎么处理（逐条调 tick、只回一条）、为什么不用飞书原生 `checker`、以及机器人非任务成员时传 `user_key`。`knowledge-base`；驱动现有 `feishu_todo_card_*` 工具，无额外依赖。
 - **Feishu tool credentials on Gateway（踩坑）**：`feishu_message_send` 等 workspace 工具跑在 **Session / Gateway 进程**里，读的是该进程的 `PSI_FEISHU_APP_ID` / `PSI_FEISHU_APP_SECRET`。只给 Feishu **channel** 进程设环境变量不够——定时触发时会报 `Feishu app not configured`，飞书收不到推送。启动 Gateway 时也要带上同一组凭证。
 - **Feishu interactive-card callback contract**：发送给其他人的卡片必须同时传
   `business_context_json`（业务类型、稳定业务 ID、发起人、当前状态等收件方 agent 独立处理所需事实）和
@@ -245,7 +247,7 @@ service tools:
   `dispatch.matched=false` 和 `handler=null`；点击者 agent 不得臆造或执行未匹配 handler。只有未配置映射的
   v1/v2 snapshot 才回退到把 `action.value.action` / `action_id` 本身作为 handler；snapshot 缺失或损坏时
   必须 fail closed，不能假定它是旧卡片。首个回调留下持久 `.consumed` tombstone，后续进程/重启后的重复点击
-  直接忽略。原卡片的只读“已选择”已经确认点击，回调 agent 不得再生成“你点击了…”或“我来处理/通知…”等过程文本；
+  直接忽略（传 `multi_use=True` 时墓碑降为 per-action `{message_id}.{action}.consumed`，逐行各拒一次）。原卡片的只读“已选择”已经确认点击，回调 agent 不得再生成“你点击了…”或“我来处理/通知…”等过程文本；
   应先按匹配 handler 完成必要工具调用。成功且无额外必要信息时以零 assistant 文本结束，不得输出 `NO_REPLY`
   或成功确认；只有警告、部分失败、权限问题、未匹配 handler 或必要后续步骤才回复，且不得把失败说成成功。
   Feishu Channel 会防御性吞掉卡片回调中整段独立的 `NO_REPLY`，其他文本保持不变。自定义 AppData 时 Channel 和
@@ -253,8 +255,12 @@ service tools:
   按钮组/表单优先用旧版卡片；
   Card 2.0 不支持旧版 `action` 标签。按钮 `value` 必须包含明确动作名和稳定业务 ID（如 `request_id`），
   且不同按钮使用不同值；选择器/日期输入放进 `form` 后提交，让结果进入 `form_value`，不要依赖 SDK 1.2.0
-  无法完整区分选项变化的 `standalone` 回调。每张卡片按 `message_id` 只接受首个有效操作，随后保留原卡片
-  标题和正文，并把交互区替换为“已选择: <选项>”只读提示；再次收集输入必须发新卡片。有后果的操作执行前
+  无法完整区分选项变化的 `standalone` 回调。**默认**每张卡片按 `message_id` 只接受首个有效操作，随后保留原卡片
+  标题和正文，并把交互区替换为“已选择: <选项>”只读提示；再次收集输入必须发新卡片。**唯一例外是显式传
+  `multi_use=True`**：消费粒度降到单个 `value.action`，勾一行只结那一行（渲染成 `● ~~文字~~` 并原地更新卡片）、
+  其余行按钮保留，重复点同一行仍恰好被拒一次；每行 `action` 必须唯一且规范，没有可用 action id 的行退回整卡去重。
+  同意/驳回一类「第二个答案必须不可能」的卡片一律留 `False`。逐条待办场景优先用 `feishu_todo_card_send`
+  （见 `feishu-todo-card` skill），别自己拼。有后果的操作执行前
   重新校验权限和当前状态，底层写操作保持 **idempotent**，以覆盖飞书重投、卡片更新失败和多实例并发。
   工具成功后卡片已经对用户可见：若卡片已承载全部必要信息，本轮以零 assistant 文本结束，不得输出
   `NO_REPLY`、发送确认或重复卡片内容/按钮；若仍有卡片未承载的必要信息（风险、部分失败、必要后续步骤），

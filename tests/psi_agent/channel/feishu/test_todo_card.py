@@ -8,6 +8,7 @@ import anyio
 import anyio.lowlevel
 import pytest
 
+from psi_agent.channel.feishu import _card_store
 from psi_agent.channel.feishu._card_action import (
     CardActionBatcher,
     _batched_card_context,
@@ -307,4 +308,19 @@ async def test_rejected_claims_are_counted_for_diagnostics(tmp_path) -> None:
     assert second.status == "already_consumed"
     assert second.rejected_action_id == "todo_tick_0"
     assert second.rejected_count >= 1
-    assert await rejected_claim_count("om_count") >= 1
+    assert rejected_claim_count("om_count") >= 1
+
+
+def test_rejection_counts_stay_bounded(monkeypatch) -> None:
+    """诊断计数不能变成内存泄漏: 每张卡一个条目, 长跑进程会无界增长。"""
+    monkeypatch.setattr(_card_store, "_REJECTED_CLAIMS", {})
+    monkeypatch.setattr(_card_store, "_MAX_TRACKED_REJECTIONS", 4)
+    for index in range(20):
+        _card_store._record_rejection(f"om_{index}")
+
+    assert len(_card_store._REJECTED_CLAIMS) == 4
+    # 淘汰的是最老的卡, 最近几张仍可查。
+    assert rejected_claim_count("om_19") == 1
+    assert rejected_claim_count("om_0") == 0
+    # 同一张卡重复被拒仍然累加, 不会因为限长而丢掉计数。
+    assert _card_store._record_rejection("om_19") == 2
