@@ -69,11 +69,16 @@ async def feishu_api(
             stays the bot. Leave empty unless the endpoint creates owned content.
         user_key: The caller's open_id from ``<feishu_context>``. Required whenever a
             user token may be needed — without it there is no token to fall back to.
-        confirm: Echo the token an irreversible endpoint asks for. Leave empty; if the
-            endpoint is guarded, the first call comes back with ``need_confirmation``
-            and the exact token — tell the user what is about to happen, then repeat
-            the call with it. Guarded today: resigning a user, deleting a department,
-            deleting a user group.
+        confirm: The 6-digit code the **user** was sent for an irreversible endpoint.
+            Leave empty on the first call: if the endpoint is guarded, nothing is sent
+            to Feishu — instead the person identified by *user_key* gets the code as a
+            private message and the result comes back ``need_confirmation``. Tell them
+            plainly what is about to happen, then repeat the call with the digits they
+            give you. You cannot derive the code yourself, and no code means the user
+            has not approved it — don't work around that. Each code covers one target
+            only, expires in 15 minutes, and works once. Guarded today: 解散群,
+            resigning a user, deleting a department, deleting a user group, deleting
+            Bitable tables.
     """
     return _api.dumps_result(
         await _api.call_api_impl(

@@ -46,17 +46,21 @@ items and what page size they ask for. Both are declarable:
 
 ``confirm`` is the other capability a table row has to carry, and for a sharper
 reason. The dedicated tools guarded their irreversible calls — resigning a user,
-deleting a department, deleting a user group — behind a literal token the caller had
-to echo back. That is a *gate*, not a warning: it forces a round trip in which the
-model has to tell the user what is about to happen. Deleting such a tool in favour of
-a table row would quietly remove the gate and leave only prose behind, which is a
-downgrade no amount of documentation makes up for. So the token moves into the rule:
+deleting a department, deleting a user group — behind a gate the caller had to clear.
+Deleting such a tool in favour of a table row would quietly remove the gate and leave
+only prose behind, which is a downgrade no amount of documentation makes up for. So
+the gate moves into the rule:
 
     confirm: DELETE_DEPT
 
-and the request is refused until ``confirm`` matches. Resigning a user has no undo
-beyond ``/resurrect``, and deleting a group silently strips the permission subject
-from every document and approval that referenced it.
+The value names the operation ("what is being confirmed"); it is **not** a password
+the model may echo. Enforcement lives in ``_feishu_api_impl._confirm_refusal``, which
+sends a one-time 6-digit code to the *user* and requires it back — a constant written
+in this file would be readable by the model that is asking to use it, and a gate whose
+key is printed next to the lock stops nobody. Resigning a user has no undo beyond
+``/resurrect``, deleting a group silently strips the permission subject from every
+document and approval that referenced it, and a dissolved chat takes all of its
+messages and files with it.
 
 A rule matched by *prefix* rather than exactly is downgraded to advice before it is
 returned, because prefix matching and refusal compose badly. Feishu hangs unrelated

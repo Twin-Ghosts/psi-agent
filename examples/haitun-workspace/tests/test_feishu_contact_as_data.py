@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -84,6 +85,24 @@ def _generic(
     monkeypatch.setattr(_impl, "_invoke", cap)
     anyio.run(lambda: _api.call_api_impl(**kwargs))
     return cap
+
+
+def _confirm_codes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Capture the private messages the confirmation gate sends to the user."""
+    sent: list[str] = []
+
+    async def _send(receive_id: str, text: str, receive_id_type: str, on_behalf_of: str = "") -> dict[str, Any]:
+        sent.append(text)
+        return {"ok": True, "message_id": "om_1"}
+
+    monkeypatch.setattr(_impl, "send_message_impl", _send)
+    return sent
+
+
+def _code_from(message: str) -> str:
+    match = re.search(r"确认码: (\d{6})", message)
+    assert match, f"no 6-digit code in the message: {message!r}"
+    return match.group(1)
 
 
 # ----------------------------------------------------------------- read endpoints
@@ -238,24 +257,34 @@ def test_irreversible_delete_surfaces_its_warning() -> None:
 )
 def test_irreversible_delete_is_gated(monkeypatch: pytest.MonkeyPatch, uri: str, token: str) -> None:
     """Feishu accepts these on the first try and there is no undo, so the gate is the
-    only thing that forces the model to say out loud what it is about to do."""
+    only thing that forces a real human decision.
+
+    The code goes to the user out of band and is deliberately absent from the result:
+    a token quoted back to the caller would be one the caller can quote onward.
+    """
     cap = _CapturedInvoke()
     monkeypatch.setattr(_impl, "_invoke", cap)
-    res = anyio.run(lambda: _api.call_api_impl(method="DELETE", uri=uri))
+    sent = _confirm_codes(monkeypatch)
+    res = anyio.run(lambda: _api.call_api_impl(method="DELETE", uri=uri, user_key="ou_boss"))
     assert res["ok"] is False
     assert res["need_confirmation"] is True
-    assert res["confirm_token"] == token
     assert cap.requests == [], "an unconfirmed irreversible call must send nothing"
+    assert len(sent) == 1
+    assert _code_from(sent[0]) not in json.dumps(res, ensure_ascii=False)
 
 
 def test_confirmed_delete_goes_through(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _generic(
-        monkeypatch,
-        method="DELETE",
-        uri="/open-apis/contact/v3/departments/:department_id",
-        paths_json=json.dumps({"department_id": "od-x"}),
-        confirm="删除部门",
-    )
+    sent = _confirm_codes(monkeypatch)
+    args = {
+        "method": "DELETE",
+        "uri": "/open-apis/contact/v3/departments/:department_id",
+        "paths_json": json.dumps({"department_id": "od-x"}),
+        "user_key": "ou_boss",
+    }
+    with monkeypatch.context() as patch:
+        patch.setattr(_impl, "_invoke", _CapturedInvoke())
+        anyio.run(lambda: _api.call_api_impl(**args))
+    cap = _generic(monkeypatch, confirm=_code_from(sent[0]), **args)
     assert cap.request.http_method == HttpMethod.DELETE
     assert cap.request.paths == {"department_id": "od-x"}
 
@@ -263,15 +292,36 @@ def test_confirmed_delete_goes_through(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_wrong_confirm_token_still_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
     cap = _CapturedInvoke()
     monkeypatch.setattr(_impl, "_invoke", cap)
+    _confirm_codes(monkeypatch)
     res = anyio.run(
         lambda: _api.call_api_impl(
             method="DELETE",
             uri="/open-apis/contact/v3/departments/:department_id",
             paths_json=json.dumps({"department_id": "od-x"}),
             confirm="yes",
+            user_key="ou_boss",
         )
     )
     assert res["ok"] is False
+    assert cap.requests == []
+
+
+def test_the_documented_phrase_is_not_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``confirm: 删除部门`` is written in the skill file the model reads."""
+    cap = _CapturedInvoke()
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    _confirm_codes(monkeypatch)
+    res = anyio.run(
+        lambda: _api.call_api_impl(
+            method="DELETE",
+            uri="/open-apis/contact/v3/departments/:department_id",
+            paths_json=json.dumps({"department_id": "od-x"}),
+            confirm="删除部门",
+            user_key="ou_boss",
+        )
+    )
+    assert res["ok"] is False
+    assert res["need_confirmation"] is True
     assert cap.requests == []
 
 

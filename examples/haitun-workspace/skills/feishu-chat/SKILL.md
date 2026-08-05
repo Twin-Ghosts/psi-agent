@@ -49,10 +49,19 @@ description: 飞书群（chat）接口表 —— 建群/拉人/踢人、群设�
 | 改群名/头像/权限 | PUT | `/open-apis/im/v1/chats/:chat_id` | 只传要改的字段 |
 | 转让群主 | PUT | `/open-apis/im/v1/chats/:chat_id` | `owner_id` |
 | 禁言设置 | PUT | `/open-apis/im/v1/chats/:chat_id/moderation` | `moderation_setting` |
-| 解散群 | DELETE | `/open-apis/im/v1/chats/:chat_id` | 不可逆 |
+| 解散群 | DELETE | `/open-apis/im/v1/chats/:chat_id` | 不可逆，须本人确认码 + `user_key` |
 
 改群设置只传要改的字段，别整份覆盖 —— 否则改个群名会顺手把「谁可以加人」重置了。
 `share_card_permission` 必须和 `add_member_permission` 一致，飞书拒绝不一致的组合。
+
+**解散群必须先向本人确认，绝不能自己决定。** 飞书不保留已解散群的会话记录，群里的消息和文件
+全部消失，任何工具都恢复不了。调用时把 `<feishu_context>` 里的 `sender_open_id` 作为 `user_key`
+传进去：第一次调用**不会**解散，而是给本人私聊发一个 6 位确认码并返回 `need_confirmation`。
+把「要解散哪个群、群里有多少人、后果是什么」讲清楚，等本人把确认码告诉你，再带
+`confirm=<那6位数字>` 调一次。确认码只对**这一个** `chat_id` 有效、15 分钟过期、只能用一次，
+你自己编不出来 —— 用户没给码就说明这事没被批准，别绕。
+
+只想让群停用而不销毁内容，用移出成员或归档，别用解散。
 
 **禁言是另一个接口**，这是最容易踩的一处：`谁可以发言` 这个值读得到，但在
 `PUT /chats/:chat_id` 里改它会被**静默忽略** —— 必须走 `/moderation`。
@@ -176,6 +185,7 @@ description: 飞书群（chat）接口表 —— 建群/拉人/踢人、群设�
   confirm: 解散群
   pitfalls:
     - 飞书不保留会话记录，群里的消息和文件全部消失，任何工具都恢复不了。
+    - 必须先向本人确认: 传 user_key 后本人会私聊收到 6 位确认码, 带 confirm=<码> 才会执行。
     - 只想停用可以改用移出成员或归档。232009 表示群已经解散过了。
 
 - endpoint: GET /open-apis/im/v1/chats/:chat_id/menu_tree

@@ -24,11 +24,14 @@ TOOLS_DIR = Path(__file__).resolve().parent
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
+import _feishu_confirm as _confirm
 import _feishu_impl as _f
 import _feishu_spec as _spec
 import _runtime_paths as _paths
 from lark_channel.core.enum import AccessTokenType, HttpMethod
 from lark_channel.core.model import BaseRequest
+
+from psi_agent.session.runtime_context import get_session_id
 
 dumps_result = _f.dumps_result
 
@@ -144,23 +147,12 @@ def _spec_refusal(
     result is indistinguishable from success to the caller, so the only useful place
     to stop is before the request goes out.
 
-    The ``confirm`` gate is here for a different reason than the field checks. Those
-    catch calls Feishu would reject anyway; this one catches calls Feishu would
-    cheerfully *accept*. Resigning a user or deleting a department succeeds on the
-    first try and cannot be undone, so the token exists to force a round trip in which
-    the model has to say out loud what it is about to do.
+    The ``confirm`` gate is *not* here — it needs the network (it sends the user a
+    code) and so lives in :func:`_confirm_refusal`. Everything in this function is
+    pure, which is what lets it run before any request is built.
     """
     if rule is None:
         return None
-    if rule.confirm and (confirm or "").strip() != rule.confirm:
-        return _f.error_result(
-            f"这一步不可逆, 没有执行。确认要做就带 confirm='{rule.confirm}' 再调一次 —— 先跟用户说清楚将要发生什么。",
-            code="need_confirmation",
-            need_confirmation=True,
-            endpoint=rule.endpoint,
-            confirm_token=rule.confirm,
-            pitfalls=rule.pitfalls or None,
-        )
     if rule.prefer_tool and rule.prefer_hard:
         why = f" — {rule.why}" if rule.why else ""
         return _f.error_result(
@@ -318,6 +310,10 @@ async def call_api_impl(
     rule = _spec.rules_for(_skills_dir(), verb, path)
     if refusal := _spec_refusal(rule, body, query, paths, confirm):
         return refusal
+    # Kept after the pure checks and before anything is sent: a call that is malformed
+    # anyway should be corrected without spending a confirmation code on it.
+    if refusal := await _confirm_refusal(rule, verb, path, paths, confirm, user_key):
+        return refusal
     for name, value in _spec.defaults_for(rule)["query"].items():
         query.setdefault(name, value)
     for name, value in _spec.defaults_for(rule)["body"].items():
@@ -357,3 +353,82 @@ async def call_api_impl(
 def _placeholders(uri: str) -> list[str]:
     """``:name`` segments the SDK will substitute from ``request.paths``."""
     return [seg[1:] for seg in uri.split("/") if seg.startswith(":") and len(seg) > 1]
+
+
+async def _confirm_refusal(
+    rule: _spec.Rule | None,
+    verb: str,
+    path: str,
+    paths: dict[str, Any],
+    confirm: str,
+    user_key: str,
+) -> dict[str, Any] | None:
+    """Hold an irreversible call until the *user* supplies a code sent out of band.
+
+    Why not just compare ``confirm`` to the rule's token, as this used to: the token
+    is a constant in the skill file the model has already read. Being told "echo
+    解散群" is not an obstacle to something that knows the word — the refusal and the
+    retry both fit in one turn, with the user never consulted. Feishu keeps no history
+    for a dissolved group, so that turn destroys every message and file in it with no
+    way back.
+
+    So the secret becomes one only the person has: a 6-digit code sent to them as a
+    private message and deliberately **not** returned here. A model that cannot see
+    the code cannot proceed without asking, which is the entire property being bought.
+
+    Scope binds the code to session + method + uri + path params, so approving one
+    group's dismissal approves exactly that group. Without ``user_key`` there is
+    nobody to ask, and the call is refused rather than waved through.
+    """
+    if rule is None or not rule.confirm:
+        return None
+    scope = _confirm.scope_key(get_session_id(), verb, path, paths)
+    supplied = (confirm or "").strip()
+    if supplied and await _confirm.redeem(scope, supplied):
+        return None
+
+    target = (user_key or "").strip()
+    pitfalls = rule.pitfalls or None
+    if not target:
+        return _f.error_result(
+            "这一步不可逆, 没有执行。需要本人用验证码确认, 但缺 user_key —— "
+            "把 <feishu_context> 里的 sender_open_id 作为 user_key 传进来, 我会把验证码私聊发给他。",
+            code="need_confirmation",
+            need_confirmation=True,
+            endpoint=rule.endpoint,
+            pitfalls=pitfalls,
+        )
+
+    code = await _confirm.issue(scope, rule.endpoint, "")
+    what = f"{rule.confirm} ({rule.endpoint})"
+    detail = "".join(f"\n- {note}" for note in (rule.pitfalls or []))
+    sent = await _f.send_message_impl(
+        target,
+        f"【不可逆操作确认】即将执行: {what}\n"
+        f"目标: {json.dumps(paths, ensure_ascii=False) if paths else '(无)'}"
+        f"{detail}\n\n"
+        f"确认码: {code}\n"
+        f"确认执行请把这 6 位数字回给我; {_confirm.ttl_minutes()} 分钟内有效, 只能用一次。"
+        f"不想做就别回它 —— 不回就不会执行。",
+        "open_id",
+    )
+    if not sent.get("ok"):
+        why = sent.get("error") or sent.get("message") or "发送失败"
+        return _f.error_result(
+            f"这一步不可逆, 没有执行 —— 而且确认码没能发给用户: {why}。"
+            "请直接在对话里向本人确认后重试 (确认码只能由本人提供)。",
+            code="need_confirmation",
+            need_confirmation=True,
+            endpoint=rule.endpoint,
+            pitfalls=pitfalls,
+        )
+    hint = "确认码不对或已过期, 已重新发送一条。" if supplied else "已把确认码私聊发给本人。"
+    return _f.error_result(
+        f"这一步不可逆, 没有执行。{hint}请让本人把收到的 6 位确认码告诉你, "
+        "然后带 confirm=<那6位数字> 再调一次 —— 现在先告诉他将要发生什么, 不要自己编码。",
+        code="need_confirmation",
+        need_confirmation=True,
+        endpoint=rule.endpoint,
+        confirm_sent_to=target,
+        pitfalls=pitfalls,
+    )

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,11 @@ BITABLE_SKILL = SKILLS_DIR / "feishu-bitable" / "SKILL.md"
 #: the deleted impls did. The token *strategy* (``prefer``) is a separate axis, carried by
 #: the rules' ``token:`` field and checked in its own test below.
 WAS_TOKENS = {"TENANT", "USER"}
+
+# Marks a CALLS entry whose endpoint is confirmation-gated: ``_call`` clears the gate
+# by fetching the code the user would have been sent, instead of a literal token (the
+# gate no longer accepts one — see ``_feishu_confirm``).
+_AUTO_CONFIRM = "<user-code>"
 
 
 # The wire contract of the 17 tools this skill replaced, captured mechanically by running
@@ -224,7 +230,7 @@ CALLS: dict[str, dict[str, Any]] = {
         "uri": "/open-apis/bitable/v1/apps/:app_token/tables/batch_delete",
         "paths": {"app_token": "appA"},
         "body": {"table_ids": ["tblA", "tblB"]},
-        "confirm": "DELETE_BITABLE_TABLES",
+        "confirm": _AUTO_CONFIRM,
     },
     "list_fields": {
         "method": "GET",
@@ -353,19 +359,43 @@ def _generic(
 
 
 def _call(monkeypatch: pytest.MonkeyPatch, label: str, **overrides: Any) -> tuple[_CapturedInvoke, dict[str, Any]]:
-    """Invoke one ``CALLS`` entry through the generic path."""
+    """Invoke one ``CALLS`` entry through the generic path.
+
+    Guarded endpoints need a code the *user* was sent (see ``_feishu_confirm``), so for
+    those the confirmation is cleared first — these tests are about the request that
+    goes on the wire, and the gate itself is tested separately below.
+    """
     spec = {**CALLS[label], **overrides}
     pages = [{"ok": True, "data": {"items": [], "has_more": False}}] if label in PAGED else None
-    return _generic(
-        monkeypatch,
-        pages=pages,
-        method=spec["method"],
-        uri=spec["uri"],
-        paths_json=json.dumps(spec.get("paths", {})),
-        body_json=json.dumps(spec.get("body", {}), ensure_ascii=False),
-        query_json=json.dumps(spec.get("query", {})),
-        confirm=spec.get("confirm", ""),
-    )
+    kwargs = {
+        "method": spec["method"],
+        "uri": spec["uri"],
+        "paths_json": json.dumps(spec.get("paths", {})),
+        "body_json": json.dumps(spec.get("body", {}), ensure_ascii=False),
+        "query_json": json.dumps(spec.get("query", {})),
+        "confirm": spec.get("confirm", ""),
+    }
+    if spec.get("confirm") == _AUTO_CONFIRM:
+        kwargs["user_key"] = "ou_boss"
+        kwargs["confirm"] = _obtain_code(monkeypatch, kwargs)
+    return _generic(monkeypatch, pages=pages, **kwargs)
+
+
+def _obtain_code(monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, Any]) -> str:
+    """Run the refusal once and read the code out of the message sent to the user."""
+    sent: list[str] = []
+
+    async def _send(receive_id: str, text: str, receive_id_type: str, on_behalf_of: str = "") -> dict[str, Any]:
+        sent.append(text)
+        return {"ok": True, "message_id": "om_1"}
+
+    with monkeypatch.context() as patch:
+        patch.setattr(_impl, "send_message_impl", _send)
+        patch.setattr(_impl, "_invoke", _CapturedInvoke())
+        anyio.run(lambda: _api.call_api_impl(**{**kwargs, "confirm": ""}))
+    match = re.search(r"确认码: (\d{6})", sent[0] if sent else "")
+    assert match, f"the gate did not send a code: {sent!r}"
+    return match.group(1)
 
 
 def _rules() -> list[Any]:
@@ -560,7 +590,16 @@ def test_batch_delete_tables_still_needs_confirmation(monkeypatch: pytest.Monkey
     cap, out = _call(monkeypatch, "delete_tables", confirm="")
     assert out["ok"] is False
     assert out["code"] == "need_confirmation"
-    assert "DELETE_BITABLE_TABLES" in out["message"], "must quote the token the caller has to pass"
+    assert cap.requests == []
+
+
+def test_batch_delete_tables_confirmation_is_not_self_serviceable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rule's ``confirm`` value is a label, not a password the model may echo."""
+    cap, out = _call(monkeypatch, "delete_tables", confirm="DELETE_BITABLE_TABLES")
+    assert out["ok"] is False
+    assert out["code"] == "need_confirmation"
     assert cap.requests == []
 
 

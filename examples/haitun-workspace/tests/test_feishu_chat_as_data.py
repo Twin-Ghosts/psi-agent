@@ -7,14 +7,19 @@ the request through the generic ``feishu_api`` path driven by
 
 Chat is the domain where URI overlap bites: ``DELETE /chats/:chat_id`` (解散群, gated by
 ``confirm``) is a prefix of ``DELETE /chats/:chat_id/members`` (踢人, not gated). If
-specificity ordering fails, either removing a member demands the dismissal phrase, or —
+specificity ordering fails, either removing a member demands the dismissal dance, or —
 far worse — dismissing a group stops asking for it. Both directions are tested.
+
+The dismissal gate itself is tested for the property that actually protects the group:
+the confirmation code is sent to the *user* and never appears in the tool result, so a
+model cannot satisfy the gate from what it can read.
 """
 
 from __future__ import annotations
 
 import importlib
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -372,8 +377,139 @@ def test_tab_delete_matches_dedicated_builder(monkeypatch: pytest.MonkeyPatch) -
 DISMISS = "解散群"
 
 
+def _codes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Capture every DM the gate sends. AppData is already isolated by conftest."""
+    sent: list[str] = []
+
+    async def _send(receive_id: str, text: str, receive_id_type: str, on_behalf_of: str = "") -> dict[str, Any]:
+        sent.append(text)
+        return {"ok": True, "message_id": "om_1"}
+
+    monkeypatch.setattr(_impl, "send_message_impl", _send)
+    return sent
+
+
+def _code_from(message: str) -> str:
+    match = re.search(r"确认码: (\d{6})", message)
+    assert match, f"no 6-digit code in the message: {message!r}"
+    return match.group(1)
+
+
 def test_dismiss_is_gated_and_sends_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """解散群 without the phrase must not reach Feishu at all."""
+    """解散群 must not reach Feishu until the *user* supplies the code."""
+    sent = _codes(monkeypatch)
+    cap, out = _generic(
+        monkeypatch,
+        method="DELETE",
+        uri="/open-apis/im/v1/chats/:chat_id",
+        paths_json=json.dumps({"chat_id": "oc_1"}),
+        user_key="ou_boss",
+    )
+    assert cap.requests == []
+    assert out["ok"] is False
+    assert out.get("need_confirmation") is True
+    assert len(sent) == 1, "the user must be told, out of band, what is about to happen"
+    assert "oc_1" in sent[0]
+
+
+def test_the_confirm_code_is_never_returned_to_the_caller(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole point: a code the model can read is a code the model can echo.
+
+    The old gate handed back ``confirm_token: 解散群`` — a constant already written in
+    the skill file the model reads to find the endpoint. It could satisfy the gate in
+    the same turn without ever asking a human. Nothing in the result may carry the code.
+    """
+    sent = _codes(monkeypatch)
+    _, out = _generic(
+        monkeypatch,
+        method="DELETE",
+        uri="/open-apis/im/v1/chats/:chat_id",
+        paths_json=json.dumps({"chat_id": "oc_1"}),
+        user_key="ou_boss",
+    )
+    code = _code_from(sent[0])
+    assert code not in json.dumps(out, ensure_ascii=False)
+
+
+def test_echoing_the_skill_file_phrase_does_not_dismiss(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The literal 解散群 is documentation, not a key — it must no longer work."""
+    _codes(monkeypatch)
+    cap, out = _generic(
+        monkeypatch,
+        method="DELETE",
+        uri="/open-apis/im/v1/chats/:chat_id",
+        paths_json=json.dumps({"chat_id": "oc_1"}),
+        user_key="ou_boss",
+        confirm=DISMISS,
+    )
+    assert cap.requests == []
+    assert out.get("need_confirmation") is True
+
+
+def test_dismiss_proceeds_with_the_code_the_user_was_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent = _codes(monkeypatch)
+    _generic(
+        monkeypatch,
+        method="DELETE",
+        uri="/open-apis/im/v1/chats/:chat_id",
+        paths_json=json.dumps({"chat_id": "oc_1"}),
+        user_key="ou_boss",
+    )
+    cap, _ = _generic(
+        monkeypatch,
+        method="DELETE",
+        uri="/open-apis/im/v1/chats/:chat_id",
+        paths_json=json.dumps({"chat_id": "oc_1"}),
+        user_key="ou_boss",
+        confirm=_code_from(sent[0]),
+    )
+    assert _sent(cap.request) == _was("dismiss")
+
+
+def test_a_code_is_single_use(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent = _codes(monkeypatch)
+    args = {
+        "method": "DELETE",
+        "uri": "/open-apis/im/v1/chats/:chat_id",
+        "paths_json": json.dumps({"chat_id": "oc_1"}),
+        "user_key": "ou_boss",
+    }
+    _generic(monkeypatch, **args)
+    code = _code_from(sent[0])
+    _generic(monkeypatch, confirm=code, **args)
+    cap, out = _generic(monkeypatch, confirm=code, **args)
+    assert cap.requests == [], "a replayed code must not dismiss a second group"
+    assert out.get("need_confirmation") is True
+
+
+def test_a_code_does_not_authorize_a_different_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The endpoint string is identical for every group; only chat_id differs.
+
+    A code obtained for a scratch group must not dissolve the company-wide one.
+    """
+    sent = _codes(monkeypatch)
+    _generic(
+        monkeypatch,
+        method="DELETE",
+        uri="/open-apis/im/v1/chats/:chat_id",
+        paths_json=json.dumps({"chat_id": "oc_scratch"}),
+        user_key="ou_boss",
+    )
+    cap, out = _generic(
+        monkeypatch,
+        method="DELETE",
+        uri="/open-apis/im/v1/chats/:chat_id",
+        paths_json=json.dumps({"chat_id": "oc_everyone"}),
+        user_key="ou_boss",
+        confirm=_code_from(sent[0]),
+    )
+    assert cap.requests == []
+    assert out.get("need_confirmation") is True
+
+
+def test_dismiss_without_user_key_is_refused_not_waved_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No identity to ask means no approval is obtainable — fail closed."""
+    sent = _codes(monkeypatch)
     cap, out = _generic(
         monkeypatch,
         method="DELETE",
@@ -381,20 +517,8 @@ def test_dismiss_is_gated_and_sends_nothing(monkeypatch: pytest.MonkeyPatch) -> 
         paths_json=json.dumps({"chat_id": "oc_1"}),
     )
     assert cap.requests == []
-    assert out["ok"] is False
     assert out.get("need_confirmation") is True
-    assert out.get("confirm_token") == DISMISS
-
-
-def test_dismiss_proceeds_with_the_phrase(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap, _ = _generic(
-        monkeypatch,
-        method="DELETE",
-        uri="/open-apis/im/v1/chats/:chat_id",
-        paths_json=json.dumps({"chat_id": "oc_1"}),
-        confirm=DISMISS,
-    )
-    assert _sent(cap.request) == _was("dismiss")
+    assert sent == []
 
 
 def test_removing_a_member_is_not_treated_as_dismissing_the_group(
@@ -402,9 +526,9 @@ def test_removing_a_member_is_not_treated_as_dismissing_the_group(
 ) -> None:
     """``DELETE /chats/:chat_id`` is a prefix of the members path.
 
-    If the dismissal rule won on prefix alone, every 踢人 call would demand 解散群 —
-    and a model told to say that phrase to remove one person is being trained to
-    dismiss groups.
+    If the dismissal rule won on prefix alone, every 踢人 call would demand the
+    confirmation dance — and a model told to get a code to remove one person is being
+    trained to dismiss groups.
     """
     body = {"id_list": ["ou_a"]}
     cap, out = _generic(
