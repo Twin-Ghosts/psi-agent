@@ -2070,7 +2070,7 @@ button.metric-cell:disabled {
   cursor: pointer;
 }
 
-.quick-actions button:hover { color: #167f76; border-color: #bcded6; }
+.quick-actions button:hover:not(.chat-new-task) { color: #167f76; border-color: #bcded6; }
 
 .latest-message {
   height: 36px;
@@ -4117,7 +4117,12 @@ button.metric-cell:disabled {
 .task-step.done .step-marker { border-color: #6fc49d; background: var(--success); }
 .wide-progress { background: #e7eef7; }
 .context-chat form .send-button { color: #fff; background: var(--brand-500); }
-.quick-actions button:hover { color: var(--brand-600); border-color: var(--brand-200); background: var(--brand-50); }
+/* Exclude primary create — brand-50 hover washes the blue pill to near-white. */
+.quick-actions button:hover:not(.chat-new-task) {
+  color: var(--brand-600);
+  border-color: var(--brand-200);
+  background: var(--brand-50);
+}
 .latest-message .user { color: var(--brand-700); }
 
 .artifact-drawer { background: #f6f9fd; }
