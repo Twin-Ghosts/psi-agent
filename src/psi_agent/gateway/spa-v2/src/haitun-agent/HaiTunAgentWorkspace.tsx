@@ -1571,6 +1571,34 @@ export default function HaiTunAgentWorkspace({
             setChatExpanded(true);
           }}
         >
+          {expanded && interactive && (
+            <>
+              <button
+                type="button"
+                className="card-arrow previous chat-pane-arrow"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  goTo(index - 1);
+                }}
+                disabled={index === 0}
+                aria-label="上一任务"
+              >
+                <ArrowLeft size={20} />
+              </button>
+              <button
+                type="button"
+                className="card-arrow next chat-pane-arrow"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  goTo(index + 1);
+                }}
+                disabled={index === cards.length - 1}
+                aria-label="下一任务"
+              >
+                <ArrowRight size={20} />
+              </button>
+            </>
+          )}
           <div className="chat-context-row">
             <div>
               {expanded && interactive && contextPanelCollapsed && (
@@ -2075,7 +2103,9 @@ export default function HaiTunAgentWorkspace({
 
         {mainView === "workspace" && cards.length > 0 && (
           <section className={`card-stage ${chatExpanded ? "chat-focus-stage" : ""}`} aria-label="任务卡片">
-            <button type="button" className="card-arrow previous" onClick={() => goTo(currentIndex - 1)} disabled={currentIndex === 0} aria-label="上一张卡片"><ArrowLeft size={20} /></button>
+            {!chatExpanded && (
+              <button type="button" className="card-arrow previous" onClick={() => goTo(currentIndex - 1)} disabled={currentIndex === 0} aria-label="上一张卡片"><ArrowLeft size={20} /></button>
+            )}
 
             <div className="task-unit-frame">
               {cardTransition && (
@@ -2092,7 +2122,9 @@ export default function HaiTunAgentWorkspace({
               </div>
             </div>
 
-            <button type="button" className="card-arrow next" onClick={() => goTo(currentIndex + 1)} disabled={currentIndex === cards.length - 1} aria-label="下一张卡片"><ArrowRight size={20} /></button>
+            {!chatExpanded && (
+              <button type="button" className="card-arrow next" onClick={() => goTo(currentIndex + 1)} disabled={currentIndex === cards.length - 1} aria-label="下一张卡片"><ArrowRight size={20} /></button>
+            )}
           </section>
         )}
 
