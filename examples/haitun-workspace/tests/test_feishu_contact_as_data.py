@@ -78,6 +78,7 @@ def _real_skills(monkeypatch: pytest.MonkeyPatch) -> Any:
 
 def _generic(
     monkeypatch: pytest.MonkeyPatch,
+    *,
     pages: list[dict[str, Any]] | None = None,
     **kwargs: Any,
 ) -> _CapturedInvoke:
@@ -275,7 +276,7 @@ def test_irreversible_delete_is_gated(monkeypatch: pytest.MonkeyPatch, uri: str,
 
 def test_confirmed_delete_goes_through(monkeypatch: pytest.MonkeyPatch) -> None:
     sent = _confirm_codes(monkeypatch)
-    args = {
+    args: dict[str, Any] = {
         "method": "DELETE",
         "uri": "/open-apis/contact/v3/departments/:department_id",
         "paths_json": json.dumps({"department_id": "od-x"}),

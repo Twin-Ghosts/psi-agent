@@ -349,6 +349,7 @@ def _real_skills(monkeypatch: pytest.MonkeyPatch) -> Any:
 
 def _generic(
     monkeypatch: pytest.MonkeyPatch,
+    *,
     pages: list[dict[str, Any]] | None = None,
     **kwargs: Any,
 ) -> tuple[_CapturedInvoke, dict[str, Any]]:

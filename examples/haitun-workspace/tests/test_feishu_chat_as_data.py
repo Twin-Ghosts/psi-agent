@@ -81,6 +81,7 @@ def _real_skills(monkeypatch: pytest.MonkeyPatch) -> Any:
 
 def _generic(
     monkeypatch: pytest.MonkeyPatch,
+    *,
     pages: list[dict[str, Any]] | None = None,
     **kwargs: Any,
 ) -> tuple[_CapturedInvoke, dict[str, Any]]:
@@ -468,7 +469,7 @@ def test_dismiss_proceeds_with_the_code_the_user_was_sent(monkeypatch: pytest.Mo
 
 def test_a_code_is_single_use(monkeypatch: pytest.MonkeyPatch) -> None:
     sent = _codes(monkeypatch)
-    args = {
+    args: dict[str, Any] = {
         "method": "DELETE",
         "uri": "/open-apis/im/v1/chats/:chat_id",
         "paths_json": json.dumps({"chat_id": "oc_1"}),
