@@ -44,6 +44,11 @@ import {
   signalLabel,
   type TaskSignalKind,
 } from "./taskSignals";
+import {
+  SHOW_OVERVIEW_AND_TEMPLATES,
+  cardIndexForTask,
+  taskAtCardIndex,
+} from "./uiSurface";
 
 import {
   INITIAL_TEMPLATES,
@@ -216,10 +221,15 @@ export default function HaiTunAgentWorkspace({
   const segmentDetailCacheRef = useRef<Record<string, TodoSegmentDetail>>({});
   const workspaceNorm = normalizeWorkspacePath(workspace);
 
-  const cards = useMemo(() => [{ id: "overview", title: OVERVIEW_LABEL }, ...tasks.map((task) => ({ id: task.id, title: task.shortTitle }))], [tasks]);
-  const currentTask = currentIndex === 0 ? null : tasks[currentIndex - 1];
+  const cards = useMemo(() => {
+    const taskCards = tasks.map((task) => ({ id: task.id, title: task.shortTitle }));
+    return SHOW_OVERVIEW_AND_TEMPLATES
+      ? [{ id: "overview", title: OVERVIEW_LABEL }, ...taskCards]
+      : taskCards;
+  }, [tasks]);
+  const currentTask = taskAtCardIndex(tasks, currentIndex);
   const currentCard = cards[currentIndex] ?? cards[0];
-  const currentChatDraft = chatDrafts[currentCard.id] ?? "";
+  const currentChatDraft = currentCard ? (chatDrafts[currentCard.id] ?? "") : "";
   const pendingTasks = filterTasksBySignal(tasks, "pending");
   const deliveryTasks = filterTasksBySignal(tasks, "deliveries");
   const workingTasks = filterTasksBySignal(tasks, "working");
@@ -227,7 +237,7 @@ export default function HaiTunAgentWorkspace({
   const taskSearchResults = normalizedSearch
     ? tasks.filter((task) => `${task.title}${task.shortTitle}${task.category}${task.summary}${task.statusLabel}${task.deliverables.join(" ")}`.toLocaleLowerCase("zh-CN").includes(normalizedSearch)).slice(0, 4)
     : [];
-  const templateSearchResults = normalizedSearch
+  const templateSearchResults = SHOW_OVERVIEW_AND_TEMPLATES && normalizedSearch
     ? templates.filter((template) => `${template.title}${template.category}${template.description}${template.starterPrompt}${template.deliverables.join(" ")}`.toLocaleLowerCase("zh-CN").includes(normalizedSearch)).slice(0, 4)
     : [];
 
@@ -551,7 +561,7 @@ export default function HaiTunAgentWorkspace({
   const selectTask = (task: Task) => {
     const index = tasks.findIndex((item) => item.id === task.id);
     if (index < 0) return;
-    const next = index + 1;
+    const next = cardIndexForTask(index);
     setMainView("workspace");
     setSidebarOpen(false);
     setSearchOpen(false);
@@ -611,8 +621,19 @@ export default function HaiTunAgentWorkspace({
     setMainView("workspace");
     setSidebarPanel(null);
     setSidebarOpen(false);
+    if (!SHOW_OVERVIEW_AND_TEMPLATES) {
+      // No overview card — land on first task when any exist.
+      if (tasks.length > 0) goTo(0);
+      return;
+    }
     goTo(0);
-  }, [goTo]);
+  }, [goTo, tasks.length]);
+
+  // Keep card index in range after hide-overview or task deletes.
+  useEffect(() => {
+    if (cards.length === 0) return;
+    if (currentIndex >= cards.length) setCurrentIndex(cards.length - 1);
+  }, [cards.length, currentIndex]);
 
   const deleteTask = useCallback(async (task: Task) => {
     const ok = window.confirm(`确认删除任务「${task.title}」？\n删除后 Session 与对话历史将无法恢复。`);
@@ -656,10 +677,13 @@ export default function HaiTunAgentWorkspace({
     if (artifactTask?.id === task.id) closeArtifact();
 
     const deletedIndex = tasks.findIndex((item) => item.id === task.id);
-    if (deletedIndex >= 0 && currentIndex === deletedIndex + 1) {
-      goHome();
-    } else if (deletedIndex >= 0 && currentIndex > deletedIndex + 1) {
-      setCurrentIndex((i) => Math.max(0, i - 1));
+    if (deletedIndex >= 0) {
+      const deletedCard = cardIndexForTask(deletedIndex);
+      if (currentIndex === deletedCard) {
+        goHome();
+      } else if (currentIndex > deletedCard) {
+        setCurrentIndex((i) => Math.max(0, i - 1));
+      }
     }
 
     showToast(`已删除任务「${task.shortTitle}」`);
@@ -677,6 +701,7 @@ export default function HaiTunAgentWorkspace({
   }, [collapseChat]);
 
   const openTemplates = useCallback(() => {
+    if (!SHOW_OVERVIEW_AND_TEMPLATES) return;
     collapseChat();
     setTemplateSearchSeed("");
     setMainView("templates");
@@ -1276,7 +1301,7 @@ export default function HaiTunAgentWorkspace({
 
     if (cardId === "overview") {
       // Overview has no Session — create a task and jump into its dialog.
-      const nextIndex = tasks.length + 1;
+      const nextIndex = cardIndexForTask(tasks.length);
       try {
         await createTask(clean, "自由任务");
         setMainView("workspace");
@@ -1298,7 +1323,9 @@ export default function HaiTunAgentWorkspace({
   const viewCreatedTask = (task: Task) => {
     // Prefer task id; fall back to "just appended" index (same as overview quick-create).
     const index = tasks.findIndex((item) => item.id === task.id);
-    const nextIndex = index >= 0 ? index + 1 : tasks.length + 1;
+    const nextIndex = index >= 0
+      ? cardIndexForTask(index)
+      : cardIndexForTask(tasks.length);
     setMainView("workspace");
     setSidebarOpen(false);
     setSearchOpen(false);
@@ -1310,6 +1337,10 @@ export default function HaiTunAgentWorkspace({
   };
 
   const useTemplate = (template: TaskTemplate) => {
+    if (!SHOW_OVERVIEW_AND_TEMPLATES) {
+      openNewTask(template.starterPrompt, template.category, "workspace");
+      return;
+    }
     openNewTask(template.starterPrompt, template.category, "templates");
   };
 
@@ -1422,7 +1453,7 @@ export default function HaiTunAgentWorkspace({
     : sidebarPanel === "working" ? workingTasks
     : tasks;
   const renderCardAt = (index: number, openChat?: () => void) => {
-    const task = index === 0 ? null : tasks[index - 1];
+    const task = taskAtCardIndex(tasks, index);
     return task
       ? <TaskCard task={task} onOpenArtifact={openArtifact} onDelete={deleteTask} onOpenChat={openChat} />
       : <OverviewCard tasks={tasks} onOpenChat={openChat} onOpenSignal={(kind) => openSignal(kind, { toggle: true })} />;
@@ -1430,7 +1461,8 @@ export default function HaiTunAgentWorkspace({
 
   const renderTaskUnit = (index: number, interactive: boolean, visualExpanded = false) => {
     const unitCard = cards[index] ?? cards[0];
-    const unitTask = index === 0 ? null : tasks[index - 1];
+    if (!unitCard) return null;
+    const unitTask = taskAtCardIndex(tasks, index);
     const focusTask = focusChecklistTask(unitTask);
     const unitMessages = messages[unitCard.id] ?? [];
     const unitDraft = chatDrafts[unitCard.id] ?? "";
@@ -1810,7 +1842,7 @@ export default function HaiTunAgentWorkspace({
           </div>
         </div>
 
-        <button type="button" className="brand-block" onClick={goHome} aria-label={`返回 HaiTun Agent ${OVERVIEW_LABEL}`}>
+        <button type="button" className="brand-block" onClick={goHome} aria-label="返回 HaiTun Agent">
           <BrandLogo />
           <div><strong>HaiTun</strong><span>Agent</span></div>
         </button>
@@ -1827,8 +1859,8 @@ export default function HaiTunAgentWorkspace({
               value={globalSearch}
               onFocus={() => setSearchOpen(true)}
               onChange={(event) => { setGlobalSearch(event.target.value); setSearchOpen(true); }}
-              placeholder="搜索任务或模板"
-              aria-label="全局搜索任务或模板"
+              placeholder={SHOW_OVERVIEW_AND_TEMPLATES ? "搜索任务或模板" : "搜索任务"}
+              aria-label={SHOW_OVERVIEW_AND_TEMPLATES ? "全局搜索任务或模板" : "全局搜索任务"}
             />
             <kbd>⌘ K</kbd>
           </label>
@@ -1845,8 +1877,8 @@ export default function HaiTunAgentWorkspace({
                   <History size={14} /><span><strong>{task.shortTitle}</strong><em>{task.category} · {task.statusLabel}</em></span><ChevronRight size={13} />
                 </button>
               ))}
-              {templateSearchResults.length > 0 && <span className="search-group-title">任务模板</span>}
-              {templateSearchResults.map((template) => (
+              {SHOW_OVERVIEW_AND_TEMPLATES && templateSearchResults.length > 0 && <span className="search-group-title">任务模板</span>}
+              {SHOW_OVERVIEW_AND_TEMPLATES && templateSearchResults.map((template) => (
                 <button type="button" key={template.id} onClick={() => {
                   setTemplateSearchSeed(template.title);
                   setMainView("templates");
@@ -1857,16 +1889,20 @@ export default function HaiTunAgentWorkspace({
                   <SquareStack size={14} /><span><strong>{template.title}</strong><em>{template.category} · 进入模板库查看</em></span><ChevronRight size={13} />
                 </button>
               ))}
-              {!taskSearchResults.length && !templateSearchResults.length && <div className="search-empty">没有找到匹配的任务或模板</div>}
+              {!taskSearchResults.length && !(SHOW_OVERVIEW_AND_TEMPLATES && templateSearchResults.length) && (
+                <div className="search-empty">{SHOW_OVERVIEW_AND_TEMPLATES ? "没有找到匹配的任务或模板" : "没有找到匹配的任务"}</div>
+              )}
             </div>
           )}
         </div>
 
         <nav className="primary-nav" aria-label="主导航">
-          <button type="button" className={mainView === "workspace" && currentIndex === 0 && !sidebarPanel ? "active" : ""} onClick={goHome}>
-            <Grid2X2 size={18} /> {OVERVIEW_LABEL} <ChevronRight size={15} />
-          </button>
-          <button type="button" className={mainView === "workspace" && (sidebarPanel === "history" || sidebarPanel === "pending" || sidebarPanel === "deliveries" || sidebarPanel === "working") ? "active" : ""} onClick={() => { setMainView("workspace"); setSidebarPanel((current) => current === "history" ? null : "history"); }}>
+          {SHOW_OVERVIEW_AND_TEMPLATES && (
+            <button type="button" className={mainView === "workspace" && currentIndex === 0 && !sidebarPanel ? "active" : ""} onClick={goHome}>
+              <Grid2X2 size={18} /> {OVERVIEW_LABEL} <ChevronRight size={15} />
+            </button>
+          )}
+          <button type="button" className={mainView === "workspace" && (sidebarPanel === "history" || sidebarPanel === "pending" || sidebarPanel === "deliveries" || sidebarPanel === "working" || (!SHOW_OVERVIEW_AND_TEMPLATES && !sidebarPanel)) ? "active" : ""} onClick={() => { setMainView("workspace"); setSidebarPanel((current) => current === "history" ? null : "history"); }}>
             <History size={18} /> 历史任务 {(sidebarPanel === "history" || sidebarPanel === "pending" || sidebarPanel === "deliveries" || sidebarPanel === "working") ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
           </button>
 
@@ -1905,9 +1941,11 @@ export default function HaiTunAgentWorkspace({
             </div>
           </div>
 
-          <button type="button" className={mainView === "templates" ? "active" : ""} onClick={openTemplates}>
-            <SquareStack size={18} /> 任务模板 <ChevronRight size={15} />
-          </button>
+          {SHOW_OVERVIEW_AND_TEMPLATES && (
+            <button type="button" className={mainView === "templates" ? "active" : ""} onClick={openTemplates}>
+              <SquareStack size={18} /> 任务模板 <ChevronRight size={15} />
+            </button>
+          )}
         </nav>
 
         <div className="sidebar-spacer" />
@@ -1957,8 +1995,26 @@ export default function HaiTunAgentWorkspace({
           <div className="stage-leading-actions">
             <button type="button" className="mobile-menu-button" onClick={() => setSidebarOpen(true)} aria-label="展开侧边栏" aria-controls="main-sidebar" aria-expanded={sidebarOpen}><Menu size={21} /></button>
             {mainView !== "workspace" && (
-              <button type="button" className="view-back-button" onClick={() => setMainView(mainView === "new-task" ? newTaskReturnView : "workspace")} aria-label="返回上一页">
-                <ArrowLeft size={17} /><span>{mainView === "new-task" && newTaskReturnView === "templates" ? "返回模板库" : `返回${OVERVIEW_LABEL}`}</span>
+              <button
+                type="button"
+                className="view-back-button"
+                onClick={() => {
+                  if (mainView === "new-task" && newTaskReturnView === "templates" && SHOW_OVERVIEW_AND_TEMPLATES) {
+                    setMainView("templates");
+                    return;
+                  }
+                  goHome();
+                }}
+                aria-label="返回上一页"
+              >
+                <ArrowLeft size={17} />
+                <span>
+                  {mainView === "new-task" && newTaskReturnView === "templates" && SHOW_OVERVIEW_AND_TEMPLATES
+                    ? "返回模板库"
+                    : SHOW_OVERVIEW_AND_TEMPLATES
+                      ? `返回${OVERVIEW_LABEL}`
+                      : "返回任务"}
+                </span>
               </button>
             )}
           </div>
@@ -1971,7 +2027,18 @@ export default function HaiTunAgentWorkspace({
           )}
         </header>
 
-        {mainView === "workspace" && (
+        {mainView === "workspace" && cards.length === 0 && (
+          <section className="workspace-empty" aria-label="暂无任务">
+            <AgentMark />
+            <h1>还没有任务</h1>
+            <p>新建任务/聊天后，会在这里进入分屏与 Agent 对话。</p>
+            <button type="button" className="topbar-create-button" onClick={() => openNewTask()}>
+              <Plus size={15} /> 新建任务/聊天
+            </button>
+          </section>
+        )}
+
+        {mainView === "workspace" && cards.length > 0 && (
           <section className={`card-stage ${chatExpanded ? "chat-focus-stage" : ""}`} aria-label="任务卡片">
             {!chatExpanded && (
               <button type="button" className="card-arrow previous" onClick={() => goTo(currentIndex - 1)} disabled={currentIndex === 0} aria-label="上一张卡片"><ArrowLeft size={20} /></button>
@@ -2009,10 +2076,12 @@ export default function HaiTunAgentWorkspace({
             onOpenTemplates={openTemplates}
             onCreate={createTask}
             onViewTask={viewCreatedTask}
+            showTemplatesEntry={SHOW_OVERVIEW_AND_TEMPLATES}
+            backLabel={SHOW_OVERVIEW_AND_TEMPLATES ? undefined : "返回任务"}
           />
         )}
 
-        {mainView === "templates" && (
+        {SHOW_OVERVIEW_AND_TEMPLATES && mainView === "templates" && (
           <TemplateLibrary key={templateSearchSeed || "all-templates"} templates={templates} initialSearch={templateSearchSeed} onBack={goHome} onUseTemplate={useTemplate} onCreateTemplate={createTemplate} />
         )}
       </main>

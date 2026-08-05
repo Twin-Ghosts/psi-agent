@@ -29,6 +29,8 @@ export function NewTaskWorkspace({
   onOpenTemplates,
   onCreate,
   onViewTask,
+  showTemplatesEntry = true,
+  backLabel,
 }: {
   draft: string;
   category: string;
@@ -39,6 +41,10 @@ export function NewTaskWorkspace({
   /** Same path as overview chat: text + File[] go into the first Session chat turn. */
   onCreate: (title: string, category: string, files?: File[]) => Task | Promise<Task>;
   onViewTask: (task: Task) => void;
+  /** When false, hide「从任务模板开始」(overview/templates temporarily off). */
+  showTemplatesEntry?: boolean;
+  /** Override back-button label (default: 返回任务总览). */
+  backLabel?: string;
 }) {
   const [typing, setTyping] = useState(false);
   const [attachments, setAttachments] = useState<File[]>([]);
@@ -196,8 +202,12 @@ export function NewTaskWorkspace({
         </div>
 
         <div className="new-task-secondary-actions">
-          <button type="button" onClick={onOpenTemplates} disabled={typing}><SquareStack size={15} /> 从任务模板开始</button>
-          <button type="button" onClick={onBack} disabled={typing}><ArrowLeft size={15} /> 返回{OVERVIEW_LABEL}</button>
+          {showTemplatesEntry ? (
+            <button type="button" onClick={onOpenTemplates} disabled={typing}><SquareStack size={15} /> 从任务模板开始</button>
+          ) : <span />}
+          <button type="button" onClick={onBack} disabled={typing}>
+            <ArrowLeft size={15} /> {backLabel ?? `返回${OVERVIEW_LABEL}`}
+          </button>
         </div>
       </div>
     </section>

@@ -11,6 +11,15 @@
 
 **并行开发**：改本目录时建议单独一棵 `git worktree` + 独立功能分支；勿与 workspace/后端施工共挂同一分支。约定见仓库根 `WORKTREE.md` 与 `AGENTS.md`（「本地并行开发」）。
 
+### 交互表面（赶工临时）
+
+**刻意为之 / 赶工临时**：`SHOW_OVERVIEW_AND_TEMPLATES = false`（`haitun-agent/uiSurface.ts`）时：
+
+- 侧栏隐藏「任务总览」「任务模板」入口；全局搜索不再搜模板
+- 卡片栈**不含** overview 伪卡，只滑真实 Session 任务；无任务时主区空态 + CTA「新建任务/聊天」
+- 新建页隐藏「从任务模板开始」；返回文案为「返回任务」
+- OverviewCard / TemplateLibrary / `INITIAL_TEMPLATES` **代码与数据保留**，改回 `true` 即恢复旧交互
+
 ## 少用全局变量
 
 遵循根 `AGENTS.md` 第 15 条：React/模块代码中避免模块级可变全局（如裸 `let`/`Map` 跨组件共享、挂到 `window` 的状态）。状态放进组件 props、context、或明确归属的模块 API；**仅赶工临时**可破例，并标注「赶工临时」。

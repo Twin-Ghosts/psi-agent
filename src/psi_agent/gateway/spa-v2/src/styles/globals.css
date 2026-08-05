@@ -912,6 +912,34 @@ textarea:focus-visible {
   overflow: hidden;
 }
 
+.workspace-empty {
+  max-width: 420px;
+  margin: 12vh auto 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+  color: #5a6b7a;
+}
+
+.workspace-empty h1 {
+  margin: 4px 0 0;
+  color: #1d2c3b;
+  font-size: 22px;
+  font-weight: 760;
+}
+
+.workspace-empty p {
+  margin: 0 0 8px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.workspace-empty .topbar-create-button {
+  margin-top: 4px;
+}
+
 .stage-topbar {
   height: 42px;
   display: flex;
