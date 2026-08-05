@@ -5,7 +5,7 @@
 ```
 channel/
 ├── _types.py          # FileChunk, TextChunk, ReasoningChunk, InputChunk, OutputChunk
-├── _errors.py         # ChannelError 基类（传输/协议/session 错误统一抛出）
+├── _errors.py         # ChannelError 基类（传输/协议/session/附件下载错误统一抛出）
 ├── _markers.py        # [RECV:]/[SEND:] 标记协议（纯函数 encode_input + 有状态扫描器 SendMarkerScanner）
 ├── _stream.py         # SSE 解析 iter_sse_events + interval 缓冲 StreamBuffer（与传输解耦）
 ├── _core.py           # ChannelCore — 连接管理 + post() 编排
@@ -26,7 +26,7 @@ channel/
     ├── _agent_events.py  # channel_events/feishu 接线：注册平台 processor、热重载 watcher、空/异常映射诊断
     ├── _card_action.py   # 交互卡片回调解析、单次/逐行消费、连点合并、上下文信封与确定性分发 (~490行)
     ├── _card_store.py    # AppData 卡片快照、整卡与 per-action tombstone、每卡回写锁 (~340行)
-    └── client.py         # Bot 生命周期、通用流式回复、文件收发、评论/审批事件与按用户路由 (~820行)
+    └── client.py         # Bot 生命周期、通用流式回复、文件收发、评论/审批事件与按用户路由 (~920行)
 ```
 
 ### ChannelCore
@@ -102,6 +102,8 @@ Channel 层是 psi-agent 的用户界面层，负责连接 Session socket 并通
 - **并发模型（刻意为之）**：lark SDK 在自己的后台线程/event loop 上派发消息回调；`_on_message` 通过 `anyio.from_thread.BlockingPortal.start_task_soon` 把处理协程桥接回主 anyio loop（取代 asyncio `run_coroutine_threadsafe`，遵守「一切异步用 anyio」原则）。`run_feishu` / `run_telegram` 把**启动调用**（telegram: initialize/start/start_polling；feishu: start_background）一并纳入 `try`，`finally` 用 `anyio.CancelScope(shield=True)` 保护——**启动中途失败与正常 cancel 两条路径都会执行关停**，不泄露 bot 连接。**（刻意为之）关停按步骤 best-effort：逐个 `try/except Exception` 吞掉清理异常并 WARNING**——partial-startup 下库会抛 "not running" 之类错误，吞掉以免遮蔽原始异常或中断后续 teardown；`except Exception` 不吞 `CancelledError`，勿把这层 swallow 当 bug "修掉"
 - **（刻意为之）`_handle_and_stream` 外层防御 try/except**：它是 `start_task_soon` 投递的任务，内部任何未捕获异常（包括错误通知 `channel.send` 失败）都会逃逸到 portal。外层 `except Exception` 兜底并记录 ERROR，确保单条消息处理崩溃不拖垮整个 bot；不吞 `CancelledError`，勿把这层 try 当 bug "修掉"
 - 所有消息（text/post/file/audio）均转化为 InputChunk：文本→TextChunk，文件→下载→FileChunk
+- **批量附件按源消息分组下载（`batched_sources`）**：飞书把「同时发多份文件」实现成**多条消息**，lark SDK 的 `merge_batch` 会把它们合并成一条虚拟消息——`id` 取**最后一条**、`resources` 是**全批拼接**、各原始消息留在 `batched_sources`。而附件下载要求 `message_id` 与 `file_key` **属于同一条原始消息**，因此 `_build_chunks` 必须遍历 `batched_sources`、用每条消息自己的 `message_id` 下载，**不能**读合并后的 `ctx.resources`（它既丢了归属、也会让同一附件被下载多次）。`batched_sources` 是 `Optional` 且**单条消息时根本不设**（`merge_batch` 在 `len(batch) == 1` 时直接返回原消息），故一律 `getattr(...) or [ctx]` 兜底——漏了这层兜底会让单附件这条主路径直接 `AttributeError`。`<audio key="..."/>` 同理逐条扫：原先从**合并后**的 `content_text` 扫 key 却配最后一条的 `message_id`，多条语音会以完全相同的方式失败。喂给 agent 的**文本**仍用合并后的整段（`ctx.content_text`），与逐条下载并不冲突
+- **（刻意为之）附件缺失 fail-closed，勿"修"回跳过续跑**：任一附件最终下载失败即抛 `AttachmentDownloadError`（`ChannelError` 子类）中断整批，并把**未接收的文件名**回给用户，**不**把残缺批次交给 agent。因为合并后的文本里带着**全部**文件名，而 FileChunk 只有成功的那几个——模型会照着文本里的文件名**编造出不存在的本地路径**（issue #614 实测：3 份 PDF 只下到 1 份，agent 为另外两份虚构了 `.psi-local/.../resume_files.md` 里的路径）。代价是「3 份坏 1 份」需整批重传，换掉「静默残缺 + 幻觉路径」。这与本文件「文件下载失败→跳过」的旧约定**相反**，是有意改的
 - `<audio key="..."/>` inline 标签通过 `message_resource.aget()` API 下载
 - 通过 `channel.stream()`  + `stream.append()` 实现卡片流式渲染
 - FileChunk 通过 `channel.send()` 发送文件；用户文件下载至 `Downloads/.psi/<date>/`

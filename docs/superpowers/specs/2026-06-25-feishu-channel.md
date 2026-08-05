@@ -27,6 +27,8 @@ Channel 层新增 Feishu（飞书）通道，通过 `lark-channel-sdk` 将飞书
 | `ctx.content_text` 中的 `<audio key="..."/>` inline 标签 | parse key → `channel.client.im.v1.message_resource.aget()` → `FileChunk(path)` |
 | `ctx.resources` 中每个 resource（image、file、video、sticker） | `channel.download_resource_to_file()` → `FileChunk(path)` |
 
+**批量消息**：多份文件是**多条**飞书消息，被 SDK 合并成一条虚拟消息后，上表两行都必须**逐条源消息**（`ctx.batched_sources`）遍历、各用自己的 `message_id` 下载，而非读合并后的 `ctx.resources` / `content_text`。见 §5.1。
+
 ---
 
 ## 4. ChannelFeishu
@@ -99,7 +101,9 @@ async def _handle_message(ctx: MessageContext) -> None:
 
 ### 5.1 文件下载
 
-`InboundMessage.resources` 包含 `ResourceDescriptor` 列表（`type`、`file_key`、`file_name`）。调用 `channel.download_resource_to_file(file_key, resource_type=r.type, dest_dir=...)` 下载。
+`InboundMessage.resources` 包含 `ResourceDescriptor` 列表（`type`、`file_key`、`file_name`）。调用 `channel.download_resource_to_file(file_key, resource_type=r.type, message_id=..., dest_dir=...)` 下载。
+
+**`message_id` 必须是该附件所属那条原始消息的 id**：`ResourceDescriptor` 本身不带来源 id，而合并消息的 `id` 只是最后一条，所以要从 `ctx.batched_sources` 的每个源消息带下来（单条消息时该字段为 `None`，兜底 `[ctx]`）。传错会让飞书返回非 0 code，只有最后一份能下成功。失败处理见 §7（fail-closed，非跳过）。
 
 ---
 
@@ -128,7 +132,7 @@ psi-agent channel feishu \
 | 场景 | 处理 |
 |------|------|
 | `core.post()` 异常 | `channel.send(chat_id, {"text": f"Error: {e}"})`，log exception |
-| 文件下载失败 | 跳过，`logger.error` |
+| 文件下载失败 | **整批 fail-closed**：抛 `AttachmentDownloadError` 并把未接收的文件名回给用户（`logger.error` 记每条失败）。**不再**跳过续跑——残缺批次会让模型照着合并文本里的文件名编造不存在的本地路径（issue #614）。详见 `channel/AGENTS.md`「附件缺失 fail-closed」 |
 | SDK 连接断开 | `FeishuChannel` 内置自动重连 |
 | 无 `app_id` 或 `app_secret` | `raise ValueError` |
 

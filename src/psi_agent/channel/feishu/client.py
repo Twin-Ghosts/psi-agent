@@ -27,6 +27,7 @@ from lark_channel.event.custom import CustomizedEventProcessor
 from loguru import logger
 
 from psi_agent.channel._core import ChannelCore
+from psi_agent.channel._errors import ChannelError
 from psi_agent.channel._types import FileChunk, InputChunk, ReasoningChunk, TextChunk
 from psi_agent.channel.feishu._agent_events import register_feishu_agent_events
 
@@ -238,7 +239,7 @@ def _comment_context_header(event: Any, ctx: Any) -> str:
     return "\n".join(lines)
 
 
-class AttachmentDownloadError(Exception):
+class AttachmentDownloadError(ChannelError):
     """部分附件下载失败 —— 整批 fail-closed, 不把残缺批次交给 agent。
 
     飞书把「同时发多份文件」实现成多条消息, lark_channel 的 merge_batch 会合并成
@@ -253,15 +254,6 @@ class AttachmentDownloadError(Exception):
         super().__init__("以下文件未接收: " + ", ".join(missing) + " —— 请重新发送")
 
 
-def _batch_sources(ctx: Any) -> list[Any]:
-    """把 ctx 摊成源消息列表。
-
-    单条消息时 merge_batch 直接返回原消息、不设 batched_sources (该字段是
-    Optional, 默认 None), 所以必须兜底成 [ctx]。
-    """
-    return list(getattr(ctx, "batched_sources", None) or [ctx])
-
-
 async def _build_chunks(channel: Any, ctx: Any) -> list[InputChunk]:
     chunks: list[InputChunk] = []
     downloads_dir = anyio.Path(platformdirs.user_downloads_dir()) / ".psi" / str(date.today())
@@ -272,7 +264,9 @@ async def _build_chunks(channel: Any, ctx: Any) -> list[InputChunk]:
     chunks.append(TextChunk(_context_header(ctx)))
     header_only = len(chunks)
 
-    sources = _batch_sources(ctx)
+    # 摊成源消息列表: 单条消息时 merge_batch 直接返回原消息、不设 batched_sources
+    # (该字段是 Optional, 默认 None), 所以必须兜底成 [ctx]。
+    sources = list(getattr(ctx, "batched_sources", None) or [ctx])
     missing: list[str] = []
 
     # 逐条源消息扫音频: audio key 只能配它自己那条消息的 message_id。
