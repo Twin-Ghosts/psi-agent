@@ -97,3 +97,113 @@ def test_applicable_items_filters_dev_only_unless_role_is_dev() -> None:
     assert [i.item_id for i in cfg.applicable_items(items, "nondev")] == ["wifi", "desk", "attendance"]
     # 角色未确认时也不计入分母
     assert [i.item_id for i in cfg.applicable_items(items, "")] == ["wifi", "desk", "attendance"]
+
+
+def _row(item_id: str, status: str, due: date, title: str = "", module: str = "环境准备") -> dict[str, Any]:
+    return {
+        "记录键": f"ou_x:{item_id}",
+        "姓名": "张三",
+        "open_id": "ou_x",
+        "模块": module,
+        "项": title or item_id,
+        "验收标准": "验收",
+        "状态": status,
+        "入职日": date(2026, 8, 5),
+        "截止日": due,
+    }
+
+
+def test_summarize_counts_done_and_excludes_na_from_denominator() -> None:
+    p = _load("_rookie_sop_progress")
+    rows = [
+        _row("wifi", p.STATUS_DONE, date(2026, 8, 5)),
+        _row("desk", p.STATUS_TODO, date(2026, 8, 5)),
+        _row("git_workflow", p.STATUS_NA, date(2026, 8, 11), module="开发环境"),
+    ]
+
+    got = p.summarize(rows, date(2026, 8, 5))
+
+    # 不适用的行既不进分子也不进分母
+    assert (got.done, got.total) == (1, 2)
+    assert got.percent == 50
+    assert got.all_done is False
+
+
+def test_summarize_splits_overdue_due_today_and_next_due() -> None:
+    p = _load("_rookie_sop_progress")
+    rows = [
+        _row("wifi", p.STATUS_TODO, date(2026, 8, 5)),         # 逾期
+        _row("desk", p.STATUS_TODO, date(2026, 8, 7)),         # 今天到期
+        _row("attendance", p.STATUS_TODO, date(2026, 8, 9)),   # 未来
+        _row("todo_update", p.STATUS_DONE, date(2026, 8, 6)),  # 已完成, 不算逾期
+    ]
+
+    got = p.summarize(rows, date(2026, 8, 7))
+
+    assert [r["项"] for r in got.overdue] == ["wifi"]
+    assert [r["项"] for r in got.due_today] == ["desk"]
+    assert got.next_due is not None and got.next_due["项"] == "attendance"
+
+
+def test_summarize_all_done_ignores_na_rows() -> None:
+    p = _load("_rookie_sop_progress")
+    rows = [
+        _row("wifi", p.STATUS_DONE, date(2026, 8, 5)),
+        _row("git_workflow", p.STATUS_NA, date(2026, 8, 11), module="开发环境"),
+    ]
+
+    got = p.summarize(rows, date(2026, 8, 6))
+
+    assert got.all_done is True
+    assert (got.done, got.total, got.percent) == (1, 1, 100)
+
+
+def test_summarize_empty_rows_does_not_divide_by_zero() -> None:
+    p = _load("_rookie_sop_progress")
+    got = p.summarize([], date(2026, 8, 5))
+
+    assert (got.done, got.total, got.percent) == (0, 0, 0)
+    # 没有任何适用项时不能报「全部完成」, 否则会误发出新手村卡
+    assert got.all_done is False
+
+
+def test_overview_fields_projects_a_one_row_summary() -> None:
+    p = _load("_rookie_sop_progress")
+    rows = [
+        _row("wifi", p.STATUS_DONE, date(2026, 8, 5)),
+        _row("desk", p.STATUS_TODO, date(2026, 8, 5)),
+        _row("attendance", p.STATUS_TODO, date(2026, 8, 7)),
+    ]
+
+    got = p.overview_fields(rows, date(2026, 8, 7), "张三", "ou_x", "dev")
+
+    assert got["open_id"] == "ou_x"
+    assert got["姓名"] == "张三"
+    assert got["角色"] == "研发"
+    assert got["进度"] == "1/3"
+    assert got["完成率"] == 33
+    assert got["逾期项数"] == 1
+    assert got["逾期项"] == "desk"
+    assert got["状态"] == "进行中"
+    assert got["入职第N天"] == 3
+
+
+def test_overview_fields_marks_graduated_when_all_done() -> None:
+    p = _load("_rookie_sop_progress")
+    rows = [_row("wifi", p.STATUS_DONE, date(2026, 8, 5))]
+
+    got = p.overview_fields(rows, date(2026, 8, 6), "张三", "ou_x", "nondev")
+
+    assert got["状态"] == "已出新手村"
+    assert got["角色"] == "非研发"
+    assert got["逾期项数"] == 0
+    assert got["逾期项"] == ""
+
+
+def test_overview_fields_role_unset_shows_pending() -> None:
+    p = _load("_rookie_sop_progress")
+    rows = [_row("wifi", p.STATUS_TODO, date(2026, 8, 5))]
+
+    got = p.overview_fields(rows, date(2026, 8, 5), "张三", "ou_x", "")
+
+    assert got["角色"] == "待确认"
