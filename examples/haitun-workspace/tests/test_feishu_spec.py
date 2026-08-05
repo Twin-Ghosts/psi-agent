@@ -197,6 +197,39 @@ def test_field_looked_up_across_body_query_and_paths() -> None:
     assert _spec.validate(rule, {}, {"pid": "x"}, {}) == []
 
 
+def test_a_pinned_field_in_the_wrong_bucket_is_reported() -> None:
+    """``in: query`` used to be checked but never enforced.
+
+    The lookup was scoped to the declared bucket, found nothing, and fell through as
+    if the field were absent — so a field passed in the body rode out in the body and
+    Feishu answered 99992402. The rule already knows where it belongs.
+    """
+    rule = _spec.parse_rules(
+        "```rules\n- endpoint: POST /open-apis/x\n  fields:\n    t: {in: query, choices: [a, b]}\n```"
+    )[0]
+    assert _spec.validate(rule, {}, {"t": "a"}, {}) == []
+    problems = _spec.validate(rule, {"t": "a"}, {}, {})
+    assert len(problems) == 1
+    assert "body" in problems[0] and "query" in problems[0]
+
+
+def test_a_pinned_field_simply_absent_is_not_called_misplaced() -> None:
+    """Not passing an optional field at all is fine — it is not in the wrong place."""
+    rule = _spec.parse_rules("```rules\n- endpoint: POST /open-apis/x\n  fields:\n    t: {in: query}\n```")[0]
+    assert _spec.validate(rule, {}, {}, {}) == []
+
+
+def test_a_required_pinned_field_says_where_it_belongs() -> None:
+    """Being told it is missing sends the caller hunting for the wrong mistake."""
+    rule = _spec.parse_rules(
+        "```rules\n- endpoint: POST /open-apis/x\n  required: [t]\n  fields:\n    t: {in: query}\n```"
+    )[0]
+    problems = _spec.validate(rule, {"t": "a"}, {}, {})
+    assert len(problems) == 1
+    assert "query" in problems[0]
+    assert "缺少" not in problems[0], "it is not missing, it is unreachable where it was put"
+
+
 def test_requires_pairs_fields() -> None:
     rule = _spec.parse_rules("```rules\n- endpoint: GET /open-apis/x\n  fields:\n    a: {requires: b}\n```")[0]
     assert _spec.validate(rule, {"a": 1}, {}, {}) != []

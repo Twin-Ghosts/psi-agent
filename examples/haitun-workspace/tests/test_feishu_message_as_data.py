@@ -376,6 +376,29 @@ def test_merge_forward_matches_dedicated_builder(monkeypatch: pytest.MonkeyPatch
     assert _sent(cap.request) == _was("merge_forward")
 
 
+def test_receive_id_type_in_the_body_is_refused_not_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Observed in production: a forward failed twice with 99992402 before succeeding.
+
+    ``receive_id_type`` rides in the query and ``receive_id`` in the body — the skill
+    says so, but saying so was all it did. Putting the type in the body produced a
+    request that looked complete, went out, and came back as Feishu's generic "field
+    validation failed", which reads like a platform problem rather than a misplaced
+    parameter. The table knows the bucket, so the refusal should name it.
+    """
+    cap, out = _generic(
+        monkeypatch,
+        method="POST",
+        uri="/open-apis/im/v1/messages/:message_id/forward",
+        paths_json=json.dumps({"message_id": "om_a"}),
+        body_json=json.dumps({"receive_id": "oc_b", "receive_id_type": "chat_id"}),
+    )
+    assert cap.requests == [], "a call Feishu would reject for field placement must not go out"
+    assert out["code"] == "spec_violation"
+    complaint = " ".join(out["violations"])
+    assert "receive_id_type" in complaint
+    assert "query" in complaint and "body" in complaint
+
+
 def test_every_tabled_endpoint_keeps_both_candidate_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
     """No token-strategy regression: all 10 builders declared TENANT+USER, as does this path."""
     cap, _ = _generic(
