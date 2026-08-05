@@ -217,6 +217,7 @@ export function FocusChatThread({
   typing,
   title,
   progressLog,
+  liveThinking = "",
   workspaceRoot = "",
   loadingHistory = false,
   onFeedback,
@@ -228,6 +229,12 @@ export function FocusChatThread({
   title: string;
   /** Growing Cursor-style process log (summary lines + 规划下一步 trailer). */
   progressLog?: ProgressLog | null;
+  /**
+   * Live thinking prose (tool markers stripped) while the turn is still running.
+   * Shown as temporary body under the process log until real ``content`` arrives
+   * or the turn ends (then collapsed into「已思考」).
+   */
+  liveThinking?: string;
   /** Session workspace — used to resolve relative SEND paths after refresh. */
   workspaceRoot?: string;
   /** Sidebar jump before GET /history resolves — avoid empty-prompt flash. */
@@ -270,7 +277,7 @@ export function FocusChatThread({
       node.scrollTop = node.scrollHeight;
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [messages, typing, progressLog]);
+  }, [messages, typing, progressLog, liveThinking]);
 
   const openPreview = async (file: ChatFile) => {
     if (!isPreviewable(file.name)) return;
@@ -362,15 +369,23 @@ export function FocusChatThread({
       {messages.map((message, index) => {
         const isLast = index === messages.length - 1;
         const isLiveAgent = typing && isLast && message.role === "agent";
-        // Cursor-style: hide interim prose during tools/planning; once content
-        // SSE arrives (trailer → 撰写回复…), stream 正文 live under the process log.
         const writing = progressLog?.current === TURN_PROGRESS.writing;
-        const hideAgentProse = isLiveAgent && !writing;
         const clean = stripTransferMarkers(message.text);
-        const displayText = hideAgentProse ? "" : preferResultBelowRule(clean);
-        const showFiles = !hideAgentProse && (message.files?.length ?? 0) > 0;
+        // Live: keep step-between NL (and streaming draft) visible under the process
+        // log even after trailer returns to「规划下一步…」. Settled: preferResultBelowRule.
+        const displayText = isLiveAgent ? clean : preferResultBelowRule(clean);
+        const showFiles = (message.files?.length ?? 0) > 0;
+        const thinkingPreview = isLiveAgent
+          ? stripToolMarkersFromReasoning(liveThinking)
+          : "";
+        // Temporary body = streamed content, else live thinking prose (Cursor interim).
+        const interimBody = displayText.trim()
+          ? displayText
+          : thinkingPreview;
+        const showLiveProgress = isLiveAgent && Boolean(progressLog);
+        const showProse = Boolean(interimBody.trim()) || showFiles;
 
-        if (hideAgentProse) {
+        if (isLiveAgent && !showProse) {
           return (
             <ChatBlock role="agent" key={`typing-${index}`}>
               {thinkingBubble}
@@ -378,11 +393,15 @@ export function FocusChatThread({
           );
         }
 
-        if (!displayText.trim() && !showFiles && !(isLiveAgent && writing)) return null;
+        if (!interimBody.trim() && !showFiles && !(isLiveAgent && writing)) return null;
 
         const html = message.role === "agent"
-          ? renderMd(displayText)
-          : htmlEscape(displayText).replace(/\n/g, "<br>");
+          ? (
+            isLiveAgent && !displayText.trim() && thinkingPreview
+              ? htmlEscape(interimBody).replace(/\n/g, "<br>")
+              : renderMd(interimBody)
+          )
+          : htmlEscape(interimBody).replace(/\n/g, "<br>");
 
         const failedLabel = message.failed
           ? (FAILED_REASON_LABEL[message.failedReason ?? "incomplete"] ?? FAILED_REASON_LABEL.incomplete)
@@ -430,9 +449,15 @@ export function FocusChatThread({
           </div>
         ) : null;
 
+        const bubbleClass = [
+          "focus-chat-bubble",
+          isLiveAgent && !writing ? "is-interim" : "",
+          isLiveAgent && !displayText.trim() && thinkingPreview ? "is-live-thinking" : "",
+        ].filter(Boolean).join(" ");
+
         return (
           <ChatBlock role={message.role} key={`${message.role}-${index}`}>
-            {isLiveAgent && writing ? thinkingBubble : null}
+            {showLiveProgress ? thinkingBubble : null}
             {message.role === "agent"
               && !isLiveAgent
               && (
@@ -464,9 +489,9 @@ export function FocusChatThread({
                   )}
                 </div>
               )}
-              {displayText.trim() ? (
+              {interimBody.trim() ? (
                 <div
-                  className="focus-chat-bubble"
+                  className={bubbleClass}
                   dangerouslySetInnerHTML={{ __html: html }}
                 />
               ) : null}
@@ -502,7 +527,7 @@ export function FocusChatThread({
                 >
                   <RefreshCw size={16} aria-hidden />
                 </button>
-                <CopyButton text={displayText || clean} className="focus-chat-action-btn" />
+                <CopyButton text={interimBody || clean} className="focus-chat-action-btn" />
               </div>
             )}
           </ChatBlock>

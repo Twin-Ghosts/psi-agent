@@ -171,6 +171,8 @@ export default function HaiTunAgentWorkspace({
   const [typingCard, setTypingCard] = useState<string | null>(null);
   /** Growing process lines (规划下一步 + sealed steps); cleared when turn ends. */
   const [turnProgressLog, setTurnProgressLog] = useState<ProgressLog | null>(null);
+  /** Live thinking prose shown as temporary body under the process log. */
+  const [liveThinking, setLiveThinking] = useState("");
   const [dragX, setDragX] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [cardTransition, setCardTransition] = useState<CardTransition | null>(null);
@@ -628,6 +630,8 @@ export default function HaiTunAgentWorkspace({
       abortRef.current?.abort();
       abortRef.current = null;
       setTypingCard(null);
+      setTurnProgressLog(null);
+      setLiveThinking("");
     }
 
     try {
@@ -798,6 +802,7 @@ export default function HaiTunAgentWorkspace({
 
     setTypingCard(cardId);
     setTurnProgressLog(progressLogStart());
+    setLiveThinking("");
     turnReasoningRef.current = "";
     turnToolsRef.current = [];
     setTodoSegmentSelection((current) => ({ ...current, [cardId]: "live" }));
@@ -854,6 +859,7 @@ export default function HaiTunAgentWorkspace({
           onReasoning: (delta, kind) => {
             if (!live()) return;
             if (delta) turnReasoningRef.current += delta;
+            setLiveThinking(turnReasoningRef.current);
             setTurnProgressLog((prev) => {
               const next = applyProgressEvent(prev ?? progressLogStart(), kind, delta);
               turnToolsRef.current = next.lines;
@@ -966,6 +972,7 @@ export default function HaiTunAgentWorkspace({
         }
         setTypingCard((current) => (current === cardId ? null : current));
         setTurnProgressLog(null);
+        setLiveThinking("");
         if (abortRef.current === controller) abortRef.current = null;
       }
       void (async () => {
@@ -1578,6 +1585,7 @@ export default function HaiTunAgentWorkspace({
               typing={typingCard === unitCard.id}
               title={unitCard.title}
               progressLog={typingCard === unitCard.id ? turnProgressLog : null}
+              liveThinking={typingCard === unitCard.id ? liveThinking : ""}
               workspaceRoot={workspace}
               loadingHistory={historyLoadingIds.has(unitCard.id)}
               onFeedback={(index, kind) => setMessageFeedback(unitCard.id, index, kind)}

@@ -4922,6 +4922,14 @@ button.metric-cell:disabled {
   min-height: 40px;
   padding: 10px 16px;
 }
+.focus-chat-bubble.is-interim {
+  opacity: 0.92;
+}
+.focus-chat-bubble.is-live-thinking {
+  color: var(--text-secondary, #4b5563);
+  font-size: 0.92em;
+  white-space: pre-wrap;
+}
 .focus-chat-progress-log {
   display: flex;
   flex-direction: column;
