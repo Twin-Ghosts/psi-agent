@@ -857,3 +857,40 @@ def test_rookie_sop_tick_ordinary_case_has_no_duplicates_field() -> None:
 
     assert out["ok"] is True
     assert "duplicates" not in out
+
+
+def _role_callback(role: str, *, open_id: str = "ou_x") -> str:
+    action = "rookie_role_dev" if role == "dev" else "rookie_role_nondev"
+    return json.dumps(
+        {
+            "action": {"value": {"action": action, "role": role}},
+            "source": {"operator_open_id": open_id},
+            "dispatch": {"handler": "rookie_sop_role_set", "matched": True},
+            "business_context": {
+                "type": "rookie_sop",
+                "open_id": open_id,
+                "name": "张三",
+                "module": "开发环境",
+                "app_token": "app1",
+                "detail_table_id": "tblDetail",
+                "overview_table_id": "tblOverview",
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
+def test_role_context_reads_dev_and_nondev() -> None:
+    rs = _load("rookie_sop_role_set")
+
+    assert rs._resolve_role(json.loads(_role_callback("dev")))["role"] == "dev"
+    assert rs._resolve_role(json.loads(_role_callback("nondev")))["role"] == "nondev"
+
+
+def test_role_context_rejects_wrong_handler() -> None:
+    rs = _load("rookie_sop_role_set")
+
+    payload = json.loads(_role_callback("dev"))
+    payload["dispatch"] = {"handler": "rookie_sop_tick", "matched": True}
+
+    assert rs._resolve_role(payload)["error"]

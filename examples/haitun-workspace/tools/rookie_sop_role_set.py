@@ -1,0 +1,195 @@
+"""新人在开发环境卡上自选角色: 非研发则整模块标不适用, 研发则展开 5 项。
+
+刻意为之: 选「研发」时发一张新卡而不是 edit 原卡 —— 原卡的角色按钮点完就被消费了,
+edit_card 不重新注册回调, 编辑出来的勾选按钮全是死的。
+"""
+
+from __future__ import annotations
+
+# ruff: noqa: E402, RUF001
+import json
+import sys
+from datetime import date
+from pathlib import Path
+from typing import Any
+
+TOOLS_DIR = Path(__file__).resolve().parent
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
+
+import _rookie_sop_card as _card
+import _rookie_sop_config as _cfg
+import _rookie_sop_progress as _p
+import _rookie_sop_runtime as _rt
+import _rookie_sop_store as _store
+from feishu_message import feishu_message_send_card
+
+_HANDLER = "rookie_sop_role_set"
+_DEV_MODULE = "开发环境"
+
+
+def _as_dict(raw: Any) -> dict[str, Any]:
+    return raw if isinstance(raw, dict) else {}
+
+
+def _resolve_role(payload: dict[str, Any]) -> dict[str, Any]:
+    dispatch = _as_dict(payload.get("dispatch"))
+    handler = str(dispatch.get("handler") or "").strip()
+    if handler and handler != _HANDLER:
+        return {"error": f"unexpected handler {handler!r}; expected {_HANDLER!r}"}
+    if handler == _HANDLER and dispatch.get("matched") is False:
+        return {"error": "dispatch.matched is false; do not invent a handler"}
+
+    action = _as_dict(payload.get("action"))
+    value = action.get("value")
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            value = {}
+    value = _as_dict(value)
+
+    action_name = str(value.get("action") or action.get("action_id") or "")
+    role = str(value.get("role") or "").strip()
+    if not role:
+        if action_name == _card.ACTION_ROLE_DEV:
+            role = "dev"
+        elif action_name == _card.ACTION_ROLE_NONDEV:
+            role = "nondev"
+    if role not in {"dev", "nondev"}:
+        return {"error": f"cannot resolve role from action {action_name!r}"}
+
+    business = _as_dict(payload.get("business_context"))
+    source = _as_dict(payload.get("source"))
+    return {
+        "error": "",
+        "role": role,
+        "open_id": str(business.get("open_id") or "").strip()
+        or str(source.get("operator_open_id") or source.get("open_id") or "").strip(),
+        "name": str(business.get("name") or "").strip(),
+        "app_token": str(business.get("app_token") or "").strip(),
+        "detail_table_id": str(business.get("detail_table_id") or "").strip(),
+        "overview_table_id": str(business.get("overview_table_id") or "").strip(),
+    }
+
+
+async def rookie_sop_role_set(card_action_json: str = "") -> str:
+    """Record the new hire's role from the 开发环境 card, then settle that module.
+
+    Call this for a ``<feishu_card_action>`` whose ``dispatch.handler`` is
+    ``rookie_sop_role_set``. Non-dev marks every 开发环境 row 不适用 (excluded from the
+    progress denominator, reminders and the HR digest) and sends one terminal card.
+    Dev sends a **new** card listing the five dev items — the original card's buttons were
+    consumed on click and cannot be revived by editing. Finish with zero assistant content
+    unless this tool reports an error; the sent card is the visible response.
+
+    Args:
+        card_action_json: Full ``<feishu_card_action>`` payload JSON string.
+    """
+    payload = _store._parse_result(card_action_json)
+    if not payload:
+        return json.dumps({"ok": False, "error": "card_action_json must be a JSON object"}, ensure_ascii=False)
+
+    ctx = _resolve_role(payload)
+    if ctx.get("error"):
+        return json.dumps({"ok": False, "error": ctx["error"]}, ensure_ascii=False)
+    if not ctx["open_id"]:
+        return json.dumps({"ok": False, "error": "cannot resolve open_id"}, ensure_ascii=False)
+
+    state = await _rt.load_state()
+    app_token = ctx["app_token"] or str(state.get("app_token") or "")
+    detail_table = ctx["detail_table_id"] or str(state.get("detail_table_id") or "")
+    overview_table = ctx["overview_table_id"] or str(state.get("overview_table_id") or "")
+    if not app_token or not detail_table:
+        return json.dumps({"ok": False, "error": "rookie SOP base is not initialised"}, ensure_ascii=False)
+
+    bitable = _rt.bitable_adapter()
+    today = date.today()
+    is_dev = ctx["role"] == "dev"
+    label = "研发" if is_dev else "非研发"
+
+    rows = await _store.fetch_detail(bitable, app_token, detail_table, ctx["open_id"])
+    dev_rows = [r for r in rows if str(r.get("模块") or "") == _DEV_MODULE]
+    label_update_error = ""
+    if dev_rows:
+        raw = await bitable.update_records(
+            app_token,
+            detail_table,
+            json.dumps(
+                [{"record_id": r["record_id"], "fields": {"适用角色": label}} for r in dev_rows],
+                ensure_ascii=False,
+            ),
+        )
+        updated = _store._parse_result(raw)
+        if updated.get("ok") is not True:
+            label_update_error = updated.get("message") or updated.get("error") or "适用角色 update failed"
+
+    na_marked = 0
+    if not is_dev:
+        na = await _store.mark_module_na(
+            bitable, app_token, detail_table, open_id=ctx["open_id"], module=_DEV_MODULE, today=today
+        )
+        if na.get("ok") is not True:
+            return json.dumps({"ok": False, "error": na.get("error") or "mark_module_na failed"}, ensure_ascii=False)
+        na_marked = na.get("marked") or 0
+
+    rows = await _store.fetch_detail(bitable, app_token, detail_table, ctx["open_id"])
+    cfg = await _store.load_config()
+    items = _cfg.load_sop(cfg)
+    window = next((i.window_days for i in items if i.module == _DEV_MODULE), 7)
+    onboard = next((r["入职日"] for r in rows if isinstance(r.get("入职日"), date)), today)
+    due_text = f"Day 1-{window} 截止（{_cfg.due_date(onboard, window)}）"
+
+    fresh_dev_rows = [
+        r for r in rows if str(r.get("模块") or "") == _DEV_MODULE and str(r.get("状态") or "") != _p.STATUS_NA
+    ]
+    card, handlers = _card.role_settled_card(is_dev, fresh_dev_rows, due_text, str(cfg.get("sop_doc_url") or ""))
+    business = {
+        "type": "rookie_sop",
+        "open_id": ctx["open_id"],
+        "name": ctx["name"] or ctx["open_id"],
+        "module": _DEV_MODULE,
+        "app_token": app_token,
+        "detail_table_id": detail_table,
+        "overview_table_id": overview_table,
+    }
+    await feishu_message_send_card(
+        ctx["open_id"],
+        json.dumps(card, ensure_ascii=False),
+        "open_id",
+        "",
+        json.dumps(business, ensure_ascii=False),
+        json.dumps(handlers, ensure_ascii=False),
+        True,
+    )
+
+    overview_updated = False
+    overview_skipped_reason = ""
+    if overview_table:
+        overview = await _store.recompute_overview(
+            bitable,
+            app_token,
+            overview_table,
+            open_id=ctx["open_id"],
+            name=ctx["name"] or ctx["open_id"],
+            role=ctx["role"],
+            rows=rows,
+            today=today,
+        )
+        overview_updated = bool(overview.get("ok"))
+    else:
+        overview_skipped_reason = "no overview_table_id available"
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "role": ctx["role"],
+        "dev_items": len(fresh_dev_rows),
+        "overview_updated": overview_updated,
+    }
+    if not is_dev:
+        result["na_marked"] = na_marked
+    if label_update_error:
+        result["label_update_error"] = label_update_error
+    if overview_skipped_reason:
+        result["overview_skipped_reason"] = overview_skipped_reason
+    return json.dumps(result, ensure_ascii=False)
