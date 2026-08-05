@@ -798,3 +798,62 @@ def test_resolve_context_rejects_a_wrong_handler() -> None:
     got = t._resolve_context(payload)
 
     assert got["error"]
+
+
+def _wire_fake_bitable(t: Any, fake: _FakeBitable) -> None:
+    """把 t 内部用到的 _rt.bitable_adapter / load_state 换成假的, 免得真去连飞书。"""
+
+    async def _fake_load_state() -> dict[str, Any]:
+        return {}
+
+    t._rt.bitable_adapter = lambda: fake
+    t._rt.load_state = _fake_load_state
+
+
+def test_rookie_sop_tick_surfaces_duplicates_instead_of_dropping_them() -> None:
+    """mark_done 命中重复行时, rookie_sop_tick 的响应要把 duplicates 报出来。"""
+    t = _load("rookie_sop_tick")
+    p = _load("_rookie_sop_progress")
+    fake = _FakeBitable(
+        [
+            # 1) mark_done 按「记录键」查 —— 命中两行, 模拟重试双写
+            [
+                _item("rec1", {"记录键": "ou_x:wifi", "状态": p.STATUS_TODO}),
+                _item("rec2", {"记录键": "ou_x:wifi", "状态": p.STATUS_TODO}),
+            ],
+            # 2) fetch_detail 按 open_id 查全部明细行
+            [_item("rec1", {"记录键": "ou_x:wifi", "模块": "环境准备", "状态": p.STATUS_TODO})],
+            # 3) recompute_overview 查总览里是否已有该人的行 —— 没有, 走创建
+            [],
+        ]
+    )
+    _wire_fake_bitable(t, fake)
+
+    out = json.loads(anyio.run(lambda: t.rookie_sop_tick(_callback("wifi", with_business=True))))
+
+    assert out["ok"] is True
+    assert out["duplicates"] == 1
+    # 只标第一行, 但把重复情况报出来而不是悄悄吞掉
+    assert fake.updates[0]["records"][0]["record_id"] == "rec1"
+
+
+def test_rookie_sop_tick_ordinary_case_has_no_duplicates_field() -> None:
+    """没有重复行的正常路径不该背上一个多余的 duplicates 字段。"""
+    t = _load("rookie_sop_tick")
+    p = _load("_rookie_sop_progress")
+    fake = _FakeBitable(
+        [
+            # 1) mark_done 按「记录键」查 —— 只命中一行
+            [_item("rec1", {"记录键": "ou_x:wifi", "状态": p.STATUS_TODO})],
+            # 2) fetch_detail 按 open_id 查全部明细行
+            [_item("rec1", {"记录键": "ou_x:wifi", "模块": "环境准备", "状态": p.STATUS_TODO})],
+            # 3) recompute_overview 查总览 —— 没有, 走创建
+            [],
+        ]
+    )
+    _wire_fake_bitable(t, fake)
+
+    out = json.loads(anyio.run(lambda: t.rookie_sop_tick(_callback("wifi", with_business=True))))
+
+    assert out["ok"] is True
+    assert "duplicates" not in out

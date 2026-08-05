@@ -113,7 +113,8 @@ async def rookie_sop_tick(card_action_json: str = "") -> str:
             role = "dev" if label == "研发" else "nondev"
             break
 
-    overview = {}
+    overview_updated = False
+    overview_skipped_reason = ""
     if overview_table:
         overview = await _store.recompute_overview(
             bitable,
@@ -125,13 +126,19 @@ async def rookie_sop_tick(card_action_json: str = "") -> str:
             rows=rows,
             today=today,
         )
+        overview_updated = bool(overview.get("ok"))
+    else:
+        overview_skipped_reason = "no overview_table_id available"
 
-    return json.dumps(
-        {
-            "ok": True,
-            "item_id": ctx["item_id"],
-            "already_done": bool(marked.get("already_done")),
-            "overview_updated": bool(overview.get("ok")),
-        },
-        ensure_ascii=False,
-    )
+    result: dict[str, Any] = {
+        "ok": True,
+        "item_id": ctx["item_id"],
+        "already_done": bool(marked.get("already_done")),
+        "overview_updated": overview_updated,
+    }
+    duplicates = marked.get("duplicates")
+    if isinstance(duplicates, int) and duplicates > 0:
+        result["duplicates"] = duplicates
+    if overview_skipped_reason:
+        result["overview_skipped_reason"] = overview_skipped_reason
+    return json.dumps(result, ensure_ascii=False)
