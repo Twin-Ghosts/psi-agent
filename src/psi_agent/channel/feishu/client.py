@@ -238,6 +238,30 @@ def _comment_context_header(event: Any, ctx: Any) -> str:
     return "\n".join(lines)
 
 
+class AttachmentDownloadError(Exception):
+    """部分附件下载失败 —— 整批 fail-closed, 不把残缺批次交给 agent。
+
+    飞书把「同时发多份文件」实现成多条消息, lark_channel 的 merge_batch 会合并成
+    一条虚拟消息 (id 取最后一条、resources 全批拼接)。附件下载要求 message_id 与
+    file_key 属于同一条原始消息, 所以下载必须按 batched_sources 分组。若仍有附件
+    失败, 残缺批次会让模型看到文件名却拿不到文件, 进而编造本地路径 —— 因此这里
+    直接抛错, 由调用方如实告诉用户哪些文件没收到。
+    """
+
+    def __init__(self, missing: list[str]) -> None:
+        self.missing = missing
+        super().__init__("以下文件未接收: " + ", ".join(missing) + " —— 请重新发送")
+
+
+def _batch_sources(ctx: Any) -> list[Any]:
+    """把 ctx 摊成源消息列表。
+
+    单条消息时 merge_batch 直接返回原消息、不设 batched_sources (该字段是
+    Optional, 默认 None), 所以必须兜底成 [ctx]。
+    """
+    return list(getattr(ctx, "batched_sources", None) or [ctx])
+
+
 async def _build_chunks(channel: Any, ctx: Any) -> list[InputChunk]:
     chunks: list[InputChunk] = []
     downloads_dir = anyio.Path(platformdirs.user_downloads_dir()) / ".psi" / str(date.today())
@@ -248,47 +272,62 @@ async def _build_chunks(channel: Any, ctx: Any) -> list[InputChunk]:
     chunks.append(TextChunk(_context_header(ctx)))
     header_only = len(chunks)
 
-    text = ctx.content_text or ""
-    for m in re.finditer(r'<audio\s+key="([^"]+)"', text):
-        audio_key = m.group(1)
-        logger.debug(f"audio key={audio_key}")
-        try:
-            req = (
-                GetMessageResourceRequest.builder().message_id(ctx.message_id).file_key(audio_key).type("file").build()
-            )
-            resp = await channel.client.im.v1.message_resource.aget(req)
-            suffix = anyio.Path(resp.file_name or "").suffix
-            path = str(anyio.Path(downloads) / f"{audio_key}{suffix}")
-            await anyio.Path(path).write_bytes(resp.file.read())
-            logger.debug(f"audio saved to {path}")
-            chunks.append(FileChunk(path))
-        except Exception as e:
-            logger.error(f"audio download failed — {e}")
+    sources = _batch_sources(ctx)
+    missing: list[str] = []
 
+    # 逐条源消息扫音频: audio key 只能配它自己那条消息的 message_id。
+    for src in sources:
+        src_id = src.message_id
+        for m in re.finditer(r'<audio\s+key="([^"]+)"', getattr(src, "content_text", "") or ""):
+            audio_key = m.group(1)
+            logger.debug(f"audio key={audio_key} message_id={src_id}")
+            try:
+                req = GetMessageResourceRequest.builder().message_id(src_id).file_key(audio_key).type("file").build()
+                resp = await channel.client.im.v1.message_resource.aget(req)
+                suffix = anyio.Path(resp.file_name or "").suffix
+                path = str(anyio.Path(downloads) / f"{audio_key}{suffix}")
+                await anyio.Path(path).write_bytes(resp.file.read())
+                logger.debug(f"audio saved to {path}")
+                chunks.append(FileChunk(path))
+            except Exception as e:
+                logger.error(f"audio download failed message_id={src_id} key={audio_key} — {e}")
+                missing.append(f"语音({audio_key})")
+
+    # 合并后的整段文本给 agent (含各条消息的渲染), 与逐条下载并不冲突。
+    text = ctx.content_text or ""
     if text:
         logger.debug(f"content_text ({len(text)} chars)")
         chunks.append(TextChunk(text))
 
-    for r in ctx.resources:
-        logger.debug(f"resource type={r.type} file_key={r.file_key} file_name={r.file_name}")
-        try:
-            if r.file_name:
-                stem = anyio.Path(r.file_name).stem
-                ext = anyio.Path(r.file_name).suffix
-                name = f"{stem}-{r.file_key}{ext}"
-            else:
-                name = None
-            saved = await channel.download_resource_to_file(
-                r.file_key,
-                resource_type=r.type,
-                message_id=ctx.message_id,
-                dest_dir=downloads,
-                file_name=name,
-            )
-            logger.debug(f"resource downloaded to {saved}")
-            chunks.append(FileChunk(str(saved)))
-        except Exception as e:
-            logger.error(f"resource download failed — {e}")
+    # 附件同理逐条下载 —— 不能读 ctx.resources, 那是全批拼接结果, 既丢了归属也会重复。
+    for src in sources:
+        src_id = src.message_id
+        for r in getattr(src, "resources", None) or []:
+            logger.debug(f"resource type={r.type} file_key={r.file_key} file_name={r.file_name} message_id={src_id}")
+            try:
+                if r.file_name:
+                    stem = anyio.Path(r.file_name).stem
+                    ext = anyio.Path(r.file_name).suffix
+                    name = f"{stem}-{r.file_key}{ext}"
+                else:
+                    name = None
+                saved = await channel.download_resource_to_file(
+                    r.file_key,
+                    resource_type=r.type,
+                    message_id=src_id,
+                    dest_dir=downloads,
+                    file_name=name,
+                )
+                logger.debug(f"resource downloaded to {saved}")
+                chunks.append(FileChunk(str(saved)))
+            except Exception as e:
+                logger.error(f"resource download failed message_id={src_id} file_key={r.file_key} — {e}")
+                missing.append(r.file_name or r.file_key)
+
+    if missing:
+        # fail-closed: 宁可整批重传, 也不给 agent 一个「文本提到 3 份、实际只有 1 份」的批次。
+        logger.error(f"attachment batch incomplete, {len(missing)} missing: {missing}")
+        raise AttachmentDownloadError(missing)
 
     if len(chunks) == header_only:
         # Only the metadata header, no real content (text/audio/resource) —
@@ -383,6 +422,12 @@ async def _handle_and_stream(
         try:
             try:
                 chunks = await _build_chunks(channel, ctx)
+            except AttachmentDownloadError as e:
+                # 附件缺失是用户可自行处理的情况 (重发即可), 所以点名文件、不套通用报错前缀。
+                logger.error(f"attachment download incomplete — {e}")
+                failed = True
+                await channel.send(ctx.chat_id, {"text": str(e)})
+                return
             except Exception as e:
                 logger.error(f"_build_chunks failed — {e}")
                 failed = True

@@ -473,6 +473,131 @@ async def test_build_chunks_with_resource(monkeypatch, tmp_path):
     channel.download_resource_to_file.assert_awaited_once()
 
 
+def _file_source(msg_id: str, file_key: str, file_name: str) -> SimpleNamespace:
+    """一条只带单个文件附件的源消息 (飞书多文件其实是多条消息)。"""
+    return SimpleNamespace(
+        message_id=msg_id,
+        content_text="",
+        resources=[SimpleNamespace(type="file", file_key=file_key, file_name=file_name)],
+        raw_content_type="file",
+    )
+
+
+def _batched_ctx(sources: list[SimpleNamespace]) -> SimpleNamespace:
+    """模拟 lark_channel merge_batch: id 取最后一条, resources 是全批拼接。"""
+    last = sources[-1]
+    return SimpleNamespace(
+        message_id=last.message_id,
+        content_text="",
+        resources=[r for s in sources for r in s.resources],
+        raw_content_type="file",
+        batched_sources=list(sources),
+    )
+
+
+@pytest.mark.anyio
+async def test_build_chunks_batched_downloads_with_own_message_id(monkeypatch, tmp_path):
+    """三条文件消息被合并后, 每个附件必须用它自己那条消息的 message_id 下载。
+
+    合并消息的 id 只是最后一条 (chat_pipeline.merge_batch), 而飞书要求
+    message_id + file_key 属于同一条消息 —— 全用 ctx.message_id 会让前两份 404。
+    """
+    monkeypatch.setattr(client.platformdirs, "user_downloads_dir", lambda: str(tmp_path))
+    channel = _fake_channel()
+    sources = [
+        _file_source("om_1", "fk_1", "a.pdf"),
+        _file_source("om_2", "fk_2", "b.pdf"),
+        _file_source("om_3", "fk_3", "c.pdf"),
+    ]
+
+    async def _download(file_key: str, *, message_id: str, dest_dir: str, **kwargs: Any) -> str:
+        path = anyio.Path(dest_dir) / f"{file_key}.pdf"
+        await path.write_bytes(b"x")
+        return str(path)
+
+    channel.download_resource_to_file = AsyncMock(side_effect=_download)
+
+    chunks = await client._build_chunks(channel, _batched_ctx(sources))
+
+    pairs = {(c.kwargs["message_id"], c.args[0]) for c in channel.download_resource_to_file.call_args_list}
+    assert pairs == {("om_1", "fk_1"), ("om_2", "fk_2"), ("om_3", "fk_3")}
+    assert len([c for c in chunks if isinstance(c, FileChunk)]) == 3
+
+
+@pytest.mark.anyio
+async def test_build_chunks_fails_closed_and_names_missing_files(monkeypatch, tmp_path):
+    """任一附件下载失败 -> 整组 fail-closed, 异常里点名缺失文件, 不把残缺批次交给 agent。"""
+    monkeypatch.setattr(client.platformdirs, "user_downloads_dir", lambda: str(tmp_path))
+    channel = _fake_channel()
+    sources = [
+        _file_source("om_1", "fk_1", "贺雅诗.pdf"),
+        _file_source("om_2", "fk_2", "丁丽君.pdf"),
+        _file_source("om_3", "fk_3", "王鑫旺.pdf"),
+    ]
+
+    async def _download(file_key: str, *, message_id: str, dest_dir: str, **kwargs: Any) -> str:
+        if file_key != "fk_3":
+            raise RuntimeError(f"download failed: file_key={file_key}")
+        path = anyio.Path(dest_dir) / "ok.pdf"
+        await path.write_bytes(b"x")
+        return str(path)
+
+    channel.download_resource_to_file = AsyncMock(side_effect=_download)
+
+    with pytest.raises(client.AttachmentDownloadError) as excinfo:
+        await client._build_chunks(channel, _batched_ctx(sources))
+
+    message = str(excinfo.value)
+    assert "贺雅诗.pdf" in message
+    assert "丁丽君.pdf" in message
+    assert "王鑫旺.pdf" not in message
+
+
+@pytest.mark.anyio
+async def test_build_chunks_single_message_without_batched_sources(monkeypatch, tmp_path):
+    """batched_sources 为 None (单条消息) -> 退化到旧行为, 用 ctx.message_id。"""
+    monkeypatch.setattr(client.platformdirs, "user_downloads_dir", lambda: str(tmp_path))
+    channel = _fake_channel()
+    channel.download_resource_to_file = AsyncMock(return_value=str(tmp_path / "file.bin"))
+    ctx = _file_source("om_solo", "fk_solo", "file.bin")
+    ctx.batched_sources = None
+
+    chunks = await client._build_chunks(channel, ctx)
+
+    assert any(isinstance(c, FileChunk) for c in chunks)
+    call = channel.download_resource_to_file.call_args
+    assert call.args[0] == "fk_solo"
+    assert call.kwargs["message_id"] == "om_solo"
+
+
+@pytest.mark.anyio
+async def test_build_chunks_batched_audio_uses_own_message_id(monkeypatch, tmp_path):
+    """语音走同一条 bug: 合并文本里扫出的 audio key 必须配各自源消息的 message_id。"""
+    monkeypatch.setattr(client.platformdirs, "user_downloads_dir", lambda: str(tmp_path))
+    channel = _fake_channel()
+    sources = [
+        SimpleNamespace(message_id="om_1", content_text='<audio key="ak_1" />', resources=[], raw_content_type="audio"),
+        SimpleNamespace(message_id="om_2", content_text='<audio key="ak_2" />', resources=[], raw_content_type="audio"),
+    ]
+    ctx = SimpleNamespace(
+        message_id="om_2",
+        content_text='<audio key="ak_1" />\n\n<audio key="ak_2" />',
+        resources=[],
+        raw_content_type="audio",
+        batched_sources=list(sources),
+    )
+    channel.client.im.v1.message_resource.aget = AsyncMock(
+        return_value=SimpleNamespace(file_name="v.opus", file=SimpleNamespace(read=lambda: b"x"))
+    )
+
+    await client._build_chunks(channel, ctx)
+
+    pairs = {
+        (c.args[0].message_id, c.args[0].file_key) for c in channel.client.im.v1.message_resource.aget.call_args_list
+    }
+    assert pairs == {("om_1", "ak_1"), ("om_2", "ak_2")}
+
+
 # --------------------------------------------------------------------------
 # Document comment handling (@bot in doc comments -> reply on the comment)
 # --------------------------------------------------------------------------
