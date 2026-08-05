@@ -31,7 +31,8 @@
 - 飞书 bitable 的「查找引用」字段（type 19）API 建不出来，公式列写不进去 —— 总览表只能由工具双写维护。
 - 总览行**永远从明细整体重算**，不做增量加减。
 - 单卡最多 40 行。
-- 中文文案里的全角标点是正确排版，若 ruff 报 RUF001，在文件头加 `# ruff: noqa: RUF001`（参照 `systems/prompt_sections.py`）。
+- 各代码块开头写的 `# ruff: noqa: RUF00x` 是**占位提示，不要照抄**：先跑一遍 ruff，按它
+  实际报出的码来写；一个都不报就整行删掉（留着会被 `RUF100` 判为无用指令而报错）。
 
 ## File Structure
 
@@ -232,7 +233,7 @@ modules:
 
 from __future__ import annotations
 
-# ruff: noqa: RUF001
+# ruff: noqa: RUF002  # 占位: 按 ruff 实际报出的码改, 一个都不报就删掉这行
 import importlib.util
 import sys
 from datetime import date
@@ -344,7 +345,7 @@ Expected: FAIL，`FileNotFoundError` 或 `ModuleNotFoundError`（`_rookie_sop_co
 
 from __future__ import annotations
 
-# ruff: noqa: RUF001
+# ruff: noqa: RUF002  # 占位: 按 ruff 实际报出的码改, 一个都不报就删掉这行
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
@@ -610,7 +611,7 @@ Expected: FAIL，`_rookie_sop_progress.py` 不存在
 
 from __future__ import annotations
 
-# ruff: noqa: RUF001
+# ruff: noqa: RUF002  # 占位: 按 ruff 实际报出的码改, 一个都不报就删掉这行
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
@@ -3168,7 +3169,7 @@ Expected: 全部 PASS（若报「工具未在 AGENTS.md 登记」，按提示补
 - [ ] **Step 8: 跑 lint**
 
 Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m ruff check examples/haitun-workspace/tools/_rookie_sop_*.py examples/haitun-workspace/tools/rookie_sop_*.py examples/haitun-workspace/tests/test_rookie_sop.py`
-Expected: `All checks passed!`（RUF001 报中文全角标点时，在该文件头补 `# ruff: noqa: RUF001`）
+Expected: `All checks passed!`（中文全角标点在注释/docstring 里报 RUF002/RUF003，按实际报出的码补 noqa；不报就别加，否则 RUF100）
 
 - [ ] **Step 9: 提交**
 
