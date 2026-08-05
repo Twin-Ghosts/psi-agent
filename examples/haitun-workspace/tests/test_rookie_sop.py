@@ -4,6 +4,7 @@ from __future__ import annotations
 
 # ruff: noqa: RUF002, RUF003
 import importlib.util
+import json
 import sys
 from datetime import date
 from pathlib import Path
@@ -207,3 +208,133 @@ def test_overview_fields_role_unset_shows_pending() -> None:
     got = p.overview_fields(rows, date(2026, 8, 5), "张三", "ou_x", "")
 
     assert got["角色"] == "待确认"
+
+
+def _dump(card: dict[str, Any]) -> str:
+    return json.dumps(card, ensure_ascii=False)
+
+
+def test_module_card_gives_each_unfinished_row_its_own_action() -> None:
+    c = _load("_rookie_sop_card")
+    p = _load("_rookie_sop_progress")
+    rows = [
+        _row("wifi", p.STATUS_DONE, date(2026, 8, 5), title="连上 WiFi"),
+        _row("desk", p.STATUS_TODO, date(2026, 8, 5), title="找到工位"),
+    ]
+
+    card, handlers = c.module_card("环境准备", rows, "1/2", "Day 1 截止", "https://sop.example/doc")
+
+    # 每个未完成行一个唯一 action, 全部指向同一个 handler
+    assert handlers == {"rookie_tick_desk": "rookie_sop_tick"}
+    rendered = _dump(card)
+    # 已完成行渲染成实心 + 删除线且不给按钮
+    assert "~~连上 WiFi~~" in rendered
+    assert "rookie_tick_wifi" not in rendered
+    # 未完成行带验收标准与按钮
+    assert "找到工位" in rendered
+    assert "验收" in rendered
+    assert card["config"]["update_multi"] is True
+
+
+def test_module_card_all_done_turns_header_green() -> None:
+    c = _load("_rookie_sop_card")
+    p = _load("_rookie_sop_progress")
+    rows = [_row("wifi", p.STATUS_DONE, date(2026, 8, 5))]
+
+    card, handlers = c.module_card("环境准备", rows, "1/1", "Day 1 截止", "")
+
+    assert handlers == {}
+    assert card["header"]["template"] == "green"
+
+
+def test_role_card_offers_exactly_two_choices() -> None:
+    c = _load("_rookie_sop_card")
+
+    card, handlers = c.role_card("Day 1-7 截止")
+
+    assert handlers == {
+        "rookie_role_dev": "rookie_sop_role_set",
+        "rookie_role_nondev": "rookie_sop_role_set",
+    }
+    rendered = _dump(card)
+    assert "我是研发" in rendered
+    assert "我不是研发" in rendered
+
+
+def test_role_settled_card_for_nondev_is_terminal_and_has_no_buttons() -> None:
+    c = _load("_rookie_sop_card")
+
+    card, handlers = c.role_settled_card(False, [], "Day 1-7 截止", "")
+
+    assert handlers == {}
+    rendered = _dump(card)
+    assert "不适用" in rendered
+    assert "rookie_tick_" not in rendered
+
+
+def test_role_settled_card_for_dev_expands_the_five_items() -> None:
+    c = _load("_rookie_sop_card")
+    p = _load("_rookie_sop_progress")
+    rows = [
+        _row("git_workflow", p.STATUS_TODO, date(2026, 8, 11), title="Git 工作流", module="开发环境"),
+        _row("repo_access", p.STATUS_TODO, date(2026, 8, 11), title="开通仓库权限", module="开发环境"),
+    ]
+
+    _card, handlers = c.role_settled_card(True, rows, "Day 1-7 截止", "")
+
+    assert handlers == {
+        "rookie_tick_git_workflow": "rookie_sop_tick",
+        "rookie_tick_repo_access": "rookie_sop_tick",
+    }
+
+
+def test_remind_card_sections_overdue_and_due_today() -> None:
+    c = _load("_rookie_sop_card")
+    p = _load("_rookie_sop_progress")
+    rows = [
+        _row("wifi", p.STATUS_TODO, date(2026, 8, 5), title="连上 WiFi"),
+        _row("desk", p.STATUS_TODO, date(2026, 8, 7), title="找到工位"),
+        _row("attendance", p.STATUS_TODO, date(2026, 8, 9), title="了解考勤"),
+    ]
+    progress = p.summarize(rows, date(2026, 8, 7))
+
+    card, handlers = c.remind_card("张三", 3, progress, "")
+
+    rendered = _dump(card)
+    assert "已逾期" in rendered
+    assert "今天到期" in rendered
+    assert "下一个到期" in rendered
+    assert "入职第 3 天" in rendered
+    # 催办卡也是 multi_use, 逾期与今日到期的行都能直接勾
+    assert handlers == {
+        "rookie_tick_wifi": "rookie_sop_tick",
+        "rookie_tick_desk": "rookie_sop_tick",
+    }
+
+
+def test_digest_card_lists_one_line_per_rookie_and_links_the_table() -> None:
+    c = _load("_rookie_sop_card")
+    overview = [
+        {"姓名": "张三", "进度": "17/18", "逾期项数": 0, "状态": "已出新手村", "入职第N天": 8, "逾期项": ""},
+        {"姓名": "李四", "进度": "9/18", "逾期项数": 2, "状态": "进行中", "入职第N天": 5, "逾期项": "工位、校园卡"},
+    ]
+
+    card, handlers = c.digest_card(overview, "https://feishu.cn/base/bascnXXX", "8月5日")
+
+    assert handlers == {}
+    rendered = _dump(card)
+    assert "张三" in rendered and "李四" in rendered
+    assert "17/18" in rendered
+    assert "工位、校园卡" in rendered
+    assert "https://feishu.cn/base/bascnXXX" in rendered
+    # 表格链接是普通跳转按钮, 不能是交互 action
+    assert "rookie_" not in rendered
+
+
+def test_graduation_card_has_no_actions() -> None:
+    c = _load("_rookie_sop_card")
+
+    card, handlers = c.graduation_card("张三", 18)
+
+    assert handlers == {}
+    assert "新手村" in _dump(card)
