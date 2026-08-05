@@ -1153,7 +1153,7 @@ def digest_card(
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
-Expected: 20 passed
+Expected: 19 passed
 
 - [ ] **Step 5: 提交**
 
@@ -1680,14 +1680,14 @@ async def recompute_overview(
         )
         return {"ok": True, "created": False, "record_id": record_id, "fields": fields}
 
-    await bitable.create_records(app_token, overview_table_id, json.dumps([fields], ensure_ascii=False))
+    await bitable.create_records(app_token, overview_table_id, json.dumps([{"fields": fields}], ensure_ascii=False))
     return {"ok": True, "created": True, "fields": fields}
 ```
 
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
-Expected: 29 passed
+Expected: 28 passed
 
 - [ ] **Step 5: 提交**
 
@@ -1938,7 +1938,7 @@ async def ensure_base(bitable_api: Any, cfg: dict[str, Any]) -> dict[str, Any]:
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
-Expected: 31 passed
+Expected: 30 passed
 
 - [ ] **Step 5: 写入口工具**
 
@@ -2338,7 +2338,7 @@ async def rookie_sop_tick(card_action_json: str = "") -> str:
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
-Expected: 34 passed
+Expected: 33 passed
 
 - [ ] **Step 5: 提交**
 
@@ -2591,7 +2591,7 @@ async def rookie_sop_role_set(card_action_json: str = "") -> str:
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
-Expected: 36 passed
+Expected: 35 passed
 
 - [ ] **Step 5: 提交**
 
@@ -2791,7 +2791,7 @@ async def rookie_sop_remind(open_id: str = "") -> str:
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
-Expected: 40 passed
+Expected: 39 passed
 
 - [ ] **Step 5: 提交**
 
@@ -2971,7 +2971,7 @@ async def rookie_sop_digest(hr_open_id: str = "") -> str:
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
-Expected: 42 passed
+Expected: 41 passed
 
 - [ ] **Step 5: 提交**
 
@@ -3159,7 +3159,7 @@ agent_editable: true
 - [ ] **Step 6: 运行全部测试**
 
 Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
-Expected: 45 passed
+Expected: 44 passed
 
 - [ ] **Step 7: 跑工具发现测试确认没破坏既有登记**
 
