@@ -33,6 +33,11 @@
 - 单卡最多 40 行。
 - 各代码块开头写的 `# ruff: noqa: RUF00x` 是**占位提示，不要照抄**：先跑一遍 ruff，按它
   实际报出的码来写；一个都不报就整行删掉（留着会被 `RUF100` 判为无用指令而报错）。
+- **不得吞掉被调用方的返回值。** 本仓库的 workspace 工具用返回字符串/字典表达失败
+  （`schedule_manage` 失败返回 `"[Error] ..."` 而不抛异常；`mark_done` 会带回
+  `duplicates`；`search_records` 会带回 `has_more`/`page_token`）。凡是调用后拿到的
+  状态位，要么用上、要么往上报，不能读一半丢一半 —— 本计划已因此出过三次缺陷
+  （Task 4 丢分页、Task 5 丢定时结果、Task 6 丢重复计数）。
 
 ## File Structure
 
@@ -2324,15 +2329,18 @@ async def rookie_sop_tick(card_action_json: str = "") -> str:
             today=today,
         )
 
-    return json.dumps(
-        {
-            "ok": True,
-            "item_id": ctx["item_id"],
-            "already_done": bool(marked.get("already_done")),
-            "overview_updated": bool(overview.get("ok")),
-        },
-        ensure_ascii=False,
-    )
+    result: dict[str, Any] = {
+        "ok": True,
+        "item_id": ctx["item_id"],
+        "already_done": bool(marked.get("already_done")),
+        "overview_updated": bool(overview.get("ok")),
+    }
+    # 明细表出现同一 记录键 的重复行是数据完整性问题: mark_done 只会勾掉第一行,
+    # 孪生行会永远停在「未完成」而无人知晓, 总览的分母也就一直是错的。
+    # 所以 duplicates 必须往上报, 但只在真的 >0 时出现, 免得平常噪声化。
+    if int(marked.get("duplicates") or 0) > 0:
+        result["duplicates"] = int(marked["duplicates"])
+    return json.dumps(result, ensure_ascii=False)
 ```
 
 - [ ] **Step 4: 运行测试确认通过**
