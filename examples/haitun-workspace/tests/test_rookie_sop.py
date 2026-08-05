@@ -699,3 +699,50 @@ def test_plan_module_cards_keeps_each_card_within_the_forty_row_cap() -> None:
 
     for plan in r.plan_module_cards(items, rows, date(2026, 8, 5), date(2026, 8, 5), ""):
         assert len(plan["handlers"]) <= 40
+
+
+def test_should_send_cards_only_on_first_send_or_explicit_force() -> None:
+    r = _load("_rookie_sop_runtime")
+
+    assert r.should_send_cards(is_first_send=True, force_resend=False) is True
+    assert r.should_send_cards(is_first_send=True, force_resend=True) is True
+    assert r.should_send_cards(is_first_send=False, force_resend=True) is True
+    # 重复事件, 没人显式要求强发 —— 不该再发一遍卡片
+    assert r.should_send_cards(is_first_send=False, force_resend=False) is False
+
+
+def test_ensure_base_refuses_to_persist_an_incomplete_state(monkeypatch: Any) -> None:
+    """建表只成功了一半(比如总览表没拿到 table_id)时, 不该把半成品状态存下来。"""
+    r = _load("_rookie_sop_runtime")
+
+    async def _fake_load_state() -> dict[str, Any]:
+        return {}
+
+    saved: list[dict[str, Any]] = []
+
+    async def _fake_save_state(state: dict[str, Any]) -> None:
+        saved.append(state)
+
+    class _FakeApiModule:
+        @staticmethod
+        async def feishu_api(method: str, uri: str, body_json: str = "") -> str:
+            return json.dumps({"result": {"app": {"app_token": "app1"}}}, ensure_ascii=False)
+
+    class _FakeBitableModule:
+        @staticmethod
+        async def feishu_bitable_create_table(app_token: str, table_name: str, fields_json: str = "") -> str:
+            # 明细表建成功, 总览表建失败(没有 table_id) —— 模拟半成品
+            if table_name == "入职总览":
+                return json.dumps({"result": {}}, ensure_ascii=False)
+            return json.dumps({"result": {"table_id": "tblDetail"}}, ensure_ascii=False)
+
+    monkeypatch.setattr(r, "load_state", _fake_load_state)
+    monkeypatch.setattr(r, "save_state", _fake_save_state)
+    monkeypatch.setitem(sys.modules, "feishu_api", _FakeApiModule())
+    monkeypatch.setitem(sys.modules, "feishu_bitable", _FakeBitableModule())
+
+    out = anyio.run(lambda: r.ensure_base({"company_name": "Haitun"}))
+
+    assert out["ok"] is False
+    assert "overview_table_id" in out["error"]
+    assert saved == []

@@ -100,6 +100,11 @@ def plan_module_cards(
     return plans
 
 
+def should_send_cards(*, is_first_send: bool, force_resend: bool) -> bool:
+    """卡片/催办是否要发 —— 首次发, 或调用方显式要求强发。"""
+    return is_first_send or force_resend
+
+
 async def ensure_base(cfg: dict[str, Any]) -> dict[str, Any]:
     """首次运行时建 base + 明细表 + 总览表; 之后复用状态文件里的 id。"""
     state = await load_state()
@@ -131,10 +136,22 @@ async def ensure_base(cfg: dict[str, Any]) -> dict[str, Any]:
             app_token, "入职总览", json.dumps(_store.OVERVIEW_FIELDS, ensure_ascii=False)
         )
     )
+    detail_table_id = str((detail.get("result") or {}).get("table_id") or "")
+    overview_table_id = str((overview.get("result") or {}).get("table_id") or "")
+    # 不落半成品状态: 少了任何一个 table_id, 下次运行会拿着空 id 去调 fetch_detail /
+    # create_records, 换回一个不明所以的飞书原始错误, 不如现在就报清楚缺了什么。
+    if not detail_table_id or not overview_table_id:
+        missing = [
+            n for n, v in (("detail_table_id", detail_table_id), ("overview_table_id", overview_table_id)) if not v
+        ]
+        return {
+            "ok": False,
+            "error": f"table creation incomplete, missing {missing}: detail={detail}, overview={overview}",
+        }
     state = {
         "app_token": app_token,
-        "detail_table_id": str((detail.get("result") or {}).get("table_id") or ""),
-        "overview_table_id": str((overview.get("result") or {}).get("table_id") or ""),
+        "detail_table_id": detail_table_id,
+        "overview_table_id": overview_table_id,
         "table_url": f"https://feishu.cn/base/{app_token}",
     }
     await save_state(state)
