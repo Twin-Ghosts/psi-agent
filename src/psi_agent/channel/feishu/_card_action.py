@@ -11,13 +11,59 @@ from loguru import logger
 from psi_agent.channel._core import ChannelCore
 from psi_agent.channel._types import InputChunk, TextChunk
 
-from ._card_store import CardSnapshot, pop_card_snapshot
+from ._card_store import CardSnapshot, peek_card_multi_use, pop_card_snapshot, rewrite_card_snapshot
 
 _INTERACTIVE_CARD_TAGS = {"action", "button", "form"}
 _REMOVED_CARD_ELEMENT = object()
 
 type ResolveCore = Callable[[str | None], Awaitable[ChannelCore]]
 type MarkSeen = Callable[[str], bool]
+type RunCardBatch = Callable[[list[str]], Awaitable[None]]
+
+
+class CardActionBatcher:
+    """Coalesce card clicks that land while the agent is still answering.
+
+    A tick repaints the card immediately, but the agent turn behind it takes seconds,
+    and ``SessionAgent`` holds one lock per session. Without coalescing, an impatient
+    user's N ticks queue N turns and earn N replies — and the queue is what makes them
+    keep clicking. Clicks arriving mid-flight are merged into one follow-up turn.
+
+    Keyed per (card, clicker), never per card alone: two people ticking the same group
+    card must keep their own sessions and their own replies.
+    """
+
+    def __init__(self) -> None:
+        self._pending: dict[str, list[str]] = {}
+        self._running: set[str] = set()
+
+    async def submit(self, key: str, context: str, run: RunCardBatch) -> None:
+        """Queue one click, running it now unless a turn for ``key`` already owns it."""
+        self._pending.setdefault(key, []).append(context)
+        if key in self._running:
+            logger.info(f"card action merged into in-flight turn key={key}")
+            return
+        self._running.add(key)
+        try:
+            while True:
+                batch = self._pending.pop(key, [])
+                if not batch:
+                    return
+                if len(batch) > 1:
+                    logger.info(f"running {len(batch)} coalesced card actions key={key}")
+                await run(batch)
+        finally:
+            self._running.discard(key)
+            # 只有 run() 抛异常才会残留; 丢掉比留给"下一个点击者"重放更安全。
+            self._pending.pop(key, None)
+
+
+def _batched_card_context(contexts: list[str]) -> str:
+    """Join coalesced click payloads into one agent turn."""
+    if len(contexts) == 1:
+        return contexts[0]
+    body = "\n".join(contexts)
+    return f'<feishu_card_action_batch count="{len(contexts)}">\n{body}\n</feishu_card_action_batch>'
 
 
 class StreamReply(Protocol):
@@ -87,12 +133,19 @@ def _remove_card_interactions(
     action_value: Any,
     selected_element: dict[str, Any],
     selected_replaced: bool = False,
+    *,
+    keep_others: bool = False,
 ) -> tuple[Any, bool]:
+    """Replace the clicked interactive element, dropping the rest.
+
+    ``keep_others`` is the multi-use (TODO list) mode: every row other than the clicked
+    one keeps its button, so the remaining items stay tickable.
+    """
     if isinstance(value, dict):
         if value.get("tag") in _INTERACTIVE_CARD_TAGS:
             if not selected_replaced and _find_card_action_label(value, action_value):
                 return selected_element, True
-            return _REMOVED_CARD_ELEMENT, selected_replaced
+            return (value, selected_replaced) if keep_others else (_REMOVED_CARD_ELEMENT, selected_replaced)
 
         result: dict[str, Any] = {}
         for key, child in value.items():
@@ -101,6 +154,7 @@ def _remove_card_interactions(
                 action_value,
                 selected_element,
                 selected_replaced,
+                keep_others=keep_others,
             )
             if cleaned is not _REMOVED_CARD_ELEMENT:
                 result[key] = cleaned
@@ -114,6 +168,7 @@ def _remove_card_interactions(
                 action_value,
                 selected_element,
                 selected_replaced,
+                keep_others=keep_others,
             )
             if cleaned is not _REMOVED_CARD_ELEMENT:
                 result.append(cleaned)
@@ -122,14 +177,20 @@ def _remove_card_interactions(
     return value, selected_replaced
 
 
-def _consumed_card_content(card: Any, action_value: Any) -> dict[str, Any] | None:
+def _consumed_card_content(card: Any, action_value: Any, *, multi_use: bool = False) -> dict[str, Any] | None:
     if action_value is None or not isinstance(card, dict):
         return None
     selected_label = _find_card_action_label(card, action_value)
     if not selected_label:
         return None
-    if card.get("schema") == "2.0":
+    if multi_use:
+        # 已完成项: 实心 + 删除线, 且不再是交互元素。未完成项原样保留按钮。
         selected_element: dict[str, Any] = {
+            "tag": "markdown",
+            "content": f"● ~~{selected_label}~~",
+        }
+    elif card.get("schema") == "2.0":
+        selected_element = {
             "tag": "markdown",
             "content": f"已选择: {selected_label}",
         }
@@ -143,7 +204,12 @@ def _consumed_card_content(card: Any, action_value: Any) -> dict[str, Any] | Non
                 }
             ],
         }
-    consumed, selected_replaced = _remove_card_interactions(card, action_value, selected_element)
+    consumed, selected_replaced = _remove_card_interactions(
+        card,
+        action_value,
+        selected_element,
+        keep_others=multi_use,
+    )
     return consumed if selected_replaced and isinstance(consumed, dict) else None
 
 
@@ -220,6 +286,18 @@ def _card_action_context(
     return f"<feishu_card_action>\n{body}\n</feishu_card_action>"
 
 
+def _action_id_of(action_value: Any) -> str | None:
+    """The canonical action id inside a callback value, or ``None``."""
+    normalized = _normalize_card_action_value(action_value)
+    if not isinstance(normalized, dict):
+        return None
+    for key in ("action", "action_id"):
+        raw = normalized.get(key)
+        if isinstance(raw, str) and raw and raw.strip() == raw:
+            return raw
+    return None
+
+
 async def handle_card_action(
     channel: Any,
     resolve_core: ResolveCore,
@@ -228,6 +306,7 @@ async def handle_card_action(
     stream_reply: StreamReply,
     event: Any,
     appdata: str = "",
+    batcher: CardActionBatcher | None = None,
 ) -> None:
     """Route a Feishu card action into the operator's agent session."""
     chat_id = ""
@@ -249,9 +328,6 @@ async def handle_card_action(
         if allowed_ids is not None and operator_open_id not in allowed_ids:
             logger.debug(f"card action operator {operator_open_id} blocked by whitelist")
             return
-        if not mark_seen(message_id):
-            logger.info(f"card action ignored for already-consumed message={message_id}")
-            return
 
         action = getattr(event, "action", None)
         action_value = getattr(action, "value", None)
@@ -261,22 +337,43 @@ async def handle_card_action(
             raw_action = raw_event.get("action") if isinstance(raw_event, dict) else None
             action_value = raw_action.get("value") if isinstance(raw_action, dict) else None
 
+        action_id = _action_id_of(action_value)
+        try:
+            multi_use = await peek_card_multi_use(message_id, appdata)
+        except Exception as e:
+            logger.warning(f"failed to read card mode {message_id}, treating as single-use — {e!r}")
+            multi_use = False
+        # 多选卡把去重粒度从 message_id 降到 (message_id, action_id): 同一张卡上的
+        # 不同 todo 各自独立, 但没有 action_id 就无从区分, 只能退回整卡去重。
+        seen_key = f"{message_id}:{action_id}" if multi_use and action_id else message_id
+        if not mark_seen(seen_key):
+            logger.info(f"card action ignored for already-consumed key={seen_key}")
+            return
+
         snapshot = None
         snapshot_status = "error"
         original_card = None
         replacement = None
         try:
-            claim = await pop_card_snapshot(message_id, appdata)
+            claim = await pop_card_snapshot(
+                message_id,
+                appdata,
+                action_id=action_id if multi_use else None,
+            )
             if claim.status == "already_consumed":
-                logger.info(f"card action ignored for durably-consumed message={message_id}")
+                logger.info(f"card action ignored for durably-consumed message={message_id} action={action_id}")
                 return
             snapshot_status = claim.status
             snapshot = claim.snapshot
             if snapshot is not None:
                 original_card = snapshot.card
-                replacement = _consumed_card_content(snapshot.card, action_value)
+                replacement = _consumed_card_content(snapshot.card, action_value, multi_use=snapshot.multi_use)
                 if replacement is None:
                     logger.warning(f"failed to consume card snapshot {message_id}, trying Feishu payload")
+                elif snapshot.multi_use and not await rewrite_card_snapshot(message_id, replacement, appdata):
+                    # 必须回写: 下一次点击要从"已勾过的那张"渲染, 否则会把上一条的
+                    # 完成状态覆盖回未完成。
+                    logger.warning(f"failed to persist ticked card {message_id}, next tick may render stale rows")
         except Exception as e:
             logger.warning(f"failed to load card snapshot {message_id}, trying Feishu payload — {e!r}")
 
@@ -307,7 +404,7 @@ async def handle_card_action(
                                 break
                 if original_card is None:
                     original_card = fetched_card
-                replacement = _consumed_card_content(fetched_card, action_value)
+                replacement = _consumed_card_content(fetched_card, action_value, multi_use=multi_use)
                 if replacement is None:
                     logger.warning(f"failed to preserve consumed card {message_id}, using fallback")
             except Exception as e:
@@ -339,24 +436,28 @@ async def handle_card_action(
             f"card action operator={operator_open_id} chat={chat_id} "
             f"message={message_id or None} socket={core.session_socket}"
         )
-        chunks: list[InputChunk] = [
-            TextChunk(
-                _card_action_context(
-                    event,
-                    snapshot=snapshot,
-                    card=original_card,
-                    snapshot_status=snapshot_status,
-                )
-            )
-        ]
-        await stream_reply(
-            channel,
-            core,
-            chat_id,
-            chunks,
-            reply_to=message_id or None,
-            suppress_silent_reply=True,
+        context = _card_action_context(
+            event,
+            snapshot=snapshot,
+            card=original_card,
+            snapshot_status=snapshot_status,
         )
+
+        async def _run(batch: list[str]) -> None:
+            await stream_reply(
+                channel,
+                core,
+                chat_id,
+                [TextChunk(_batched_card_context(batch))],
+                reply_to=message_id or None,
+                suppress_silent_reply=True,
+            )
+
+        if batcher is None or not multi_use:
+            # 单次卡一张卡只可能点一次, 没有可合并的第二次点击。
+            await _run([context])
+        else:
+            await batcher.submit(f"{message_id}:{operator_open_id}", context, _run)
         logger.debug("card action stream completed")
     except Exception as e:
         logger.error(f"Card action handling error — {e!r}")

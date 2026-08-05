@@ -99,6 +99,7 @@ async def feishu_message_send_card(
     user_key: str = "",
     business_context_json: str = "{}",
     action_handlers_json: str = "{}",
+    multi_use: bool = False,
 ) -> str:
     """Send an **interactive card** message — buttons, forms, inputs, selectors, date pickers.
 
@@ -157,10 +158,11 @@ async def feishu_message_send_card(
     Every actionable element's ``value`` must include an explicit action name and a stable
     business identifier such as ``request_id``; different buttons need different values.
     Before a consequential operation, re-check authorization and current business state;
-    keep the underlying operation idempotent because delivery is at-least-once. A card is
-    single-use: the first accepted button/form action preserves its original content, replaces
-    its interactive region with a read-only selected-value note, and ignores later actions from
-    the same card. Send a new card when the user must submit another response.
+    keep the underlying operation idempotent because delivery is at-least-once. By default a
+    card is single-use: the first accepted button/form action preserves its original content,
+    replaces its interactive region with a read-only selected-value note, and ignores later
+    actions from the same card. Send a new card when the user must submit another response —
+    unless you pass ``multi_use=True`` (see below).
 
     After a successful call, the card is already visible to the recipient. If it carries all
     necessary user-facing information, finish with zero assistant content: do not emit ``NO_REPLY``,
@@ -190,8 +192,16 @@ async def feishu_message_send_card(
             Include every allowed action; unmatched configured actions are deliberately not
             dispatched. Keys and values must be non-empty canonical strings without surrounding
             whitespace.
+        multi_use: Consume each action **independently** instead of retiring the whole card on
+            the first click. This is what makes a TODO-list card work: ticking one row marks
+            that row done (``● ~~文字~~``) and updates the card in place, while every other row
+            keeps its button. Repeat clicks on an already-ticked row are still rejected exactly
+            once, so handlers stay at-most-once per row. Requires each row's ``value.action``
+            to be distinct and canonical — rows without a usable action id fall back to
+            whole-card deduplication. Leave ``False`` for approve/reject and any card where a
+            second answer must be impossible.
     """
-    if business_context_json == "{}" and action_handlers_json == "{}":
+    if business_context_json == "{}" and action_handlers_json == "{}" and not multi_use:
         result = await _f.send_card_impl(receive_id, card_json, receive_id_type, user_key or None)
     else:
         result = await _f.send_card_impl(
@@ -201,6 +211,7 @@ async def feishu_message_send_card(
             user_key or None,
             business_context_json,
             action_handlers_json,
+            multi_use,
         )
     return _f.dumps_result(result)
 

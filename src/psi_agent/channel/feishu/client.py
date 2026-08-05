@@ -30,7 +30,7 @@ from psi_agent.channel._core import ChannelCore
 from psi_agent.channel._types import FileChunk, InputChunk, ReasoningChunk, TextChunk
 from psi_agent.channel.feishu._agent_events import register_feishu_agent_events
 
-from ._card_action import handle_card_action
+from ._card_action import CardActionBatcher, handle_card_action
 
 _EMOJI_PROCESSING = "Typing"
 _EMOJI_FAILED = "CrossMark"
@@ -815,12 +815,14 @@ async def run_feishu(
                 _stream_reply,
                 event,
                 appdata,
+                card_action_batcher,
             )
 
         async def _on_comment(event: Any) -> None:
             portal.start_task_soon(_handle_comment, channel, resolve_core, allowed_user_ids, event)
 
         card_action_seen = _SeenEvents(maxlen=10_000)
+        card_action_batcher = CardActionBatcher()
         approval_seen = _SeenEvents()
 
         def _on_approval(event: Any) -> None:

@@ -1052,6 +1052,7 @@ async def send_card_impl(
     user_key: str | None = None,
     business_context_json: str = "{}",
     action_handlers_json: str = "{}",
+    multi_use: bool = False,
 ) -> dict[str, Any]:
     """Send an interactive card (``msg_type=interactive``) — buttons/forms/selectors etc.
 
@@ -1063,6 +1064,9 @@ async def send_card_impl(
 
     ``receive_id_type`` is auto-corrected from the id prefix, same as ``send_message_impl``.
     Returns ``message_id`` + ``thread_id`` (thread_id is the topic root if in a thread).
+
+    ``multi_use=True`` makes each action consumable **independently** (a TODO list whose
+    rows are ticked one at a time) instead of retiring the whole card on first click.
     """
     if not isinstance(card_json, str):
         return _error("card_json must be a JSON string containing an object")
@@ -1124,6 +1128,7 @@ async def send_card_impl(
                 source=source,
                 business_context=business_context,
                 action_handlers=action_handlers,
+                multi_use=multi_use,
             )
         except Exception as exc:
             logger.warning(f"failed to save Feishu card snapshot for {message_id} — {exc!r}")
