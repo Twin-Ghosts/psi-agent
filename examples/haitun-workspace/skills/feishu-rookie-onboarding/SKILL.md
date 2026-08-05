@@ -53,6 +53,14 @@ agent_editable: true
 - HR 日报：全局一份 `rookie-digest-daily`，落在 HR 自己的 Session，`cron="30 18 * * *"`、
   **`fire=prompt`**（内容要现算聚合，`fire=tool` 到点不经 LLM 只能传固定参数），
   TASK 正文写「调用 rookie_sop_digest」。
+  **这一份不会自动建**——它需要真实的 HR open_id，必须上线时手工建一次：
+  ```text
+  schedule_manage(action="create", schedule_name="rookie-digest-daily",
+    cron="30 18 * * *", fire="prompt",
+    content="调用 rookie_sop_digest 给 HR 发今天的新人入职进度日报。",
+    visibility="silent", description="新人入职进度 HR 日报")
+  ```
+  没建之前，`rookie_sop_digest` 工具本身可用（可手工调），但到点不会自己发。
 
 ## 边界
 
