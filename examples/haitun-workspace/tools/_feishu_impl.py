@@ -2183,21 +2183,8 @@ def _chat_settings(data: dict[str, Any]) -> dict[str, str]:
     return out
 
 
-async def get_chat_impl(chat_id: str, user_id_type: str = "open_id", user_key: str = "") -> dict[str, Any]:
-    """Read a group's owner, member counts, and settings.
-
-    Feishu deliberately answers a **non-member** caller with only name/avatar/counts
-    /status, so a thin result is not an error — ``partial`` says so rather than letting
-    the caller report "这个群没有群主". ``owner_id`` is also absent when the owner is a
-    bot, which is why the two cases are distinguished in the result.
-    """
-    cid = chat_id.strip()
-    if not cid:
-        return _error("chat_id is required (oc_...); resolve the group name first via feishu_api.")
-    res = await _invoke(_build_get_chat_request(cid, user_id_type), user_key=user_key, prefer="tenant")
-    if not res["ok"]:
-        return _with_hint(res, _CHAT_ADMIN_ERROR_HINTS)
-    data = res["data"] if isinstance(res["data"], dict) else {}
+def _chat_details(cid: str, data: dict[str, Any], user_id_type: str) -> dict[str, Any]:
+    """Shape one ``GET /chats/:chat_id`` payload into the tool's result."""
     owner_id = data.get("owner_id", "") or ""
     # user_count/bot_count come back as strings; a count is only useful as a number.
     counts: dict[str, Any] = {}
@@ -2228,6 +2215,47 @@ async def get_chat_impl(chat_id: str, user_id_type: str = "open_id", user_key: s
         # has no owner or no settings.
         "partial": not owner_id and not data.get("chat_mode"),
     }
+
+
+async def get_chat_impl(chat_id: str, user_id_type: str = "open_id", user_key: str = "") -> dict[str, Any]:
+    """Read a group's owner, member counts, and settings.
+
+    Feishu deliberately answers a **non-member** caller with only name/avatar/counts
+    /status, so a thin result is not an error — ``partial`` says so rather than letting
+    the caller report "这个群没有群主". ``owner_id`` is also absent when the owner is a
+    bot, which is why the two cases are distinguished in the result.
+
+    "Non-member" is about *whose token asked*. The bot is not in most groups the user is
+    in, so asking as the bot and reporting the stub reads as "this group is unreadable"
+    when the person who asked is sitting in it. So a stub is retried as the caller when
+    a ``user_key`` is available, and if it is still thin the result says what would make
+    it complete rather than leaving the caller to guess.
+    """
+    cid = chat_id.strip()
+    if not cid:
+        return _error("chat_id is required (oc_...); resolve the group name first via feishu_api.")
+    res = await _invoke(_build_get_chat_request(cid, user_id_type), user_key=user_key, prefer="tenant")
+    if not res["ok"]:
+        return _with_hint(res, _CHAT_ADMIN_ERROR_HINTS)
+    out = _chat_details(cid, res["data"] if isinstance(res["data"], dict) else {}, user_id_type)
+    if out["partial"] and (user_key or "").strip():
+        retry = await _invoke(
+            _build_get_chat_request(cid, user_id_type), user_key=user_key, prefer="user", identity="user"
+        )
+        if retry["ok"]:
+            asked_as_user = _chat_details(cid, retry["data"] if isinstance(retry["data"], dict) else {}, user_id_type)
+            if not asked_as_user["partial"]:
+                return {**asked_as_user, "asked_as": "user"}
+    if out["partial"]:
+        out["partial_because"] = (
+            "机器人不在这个群里, 飞书只给了群名/头像/状态。成员数和群主看不到 —— "
+            "user_count 是非成员视角的残缺值, 不代表群里真的没人。"
+        )
+        out["to_see_more"] = (
+            "本人在群里就带上本人 user_key 以其身份重读(本工具会自动重试一次); "
+            "本人也不在群里的话, 只能把机器人拉进群才看得到成员。"
+        )
+    return out
 
 
 # ── 群公告 (chat announcement) — read and write the pinned notice board ──────────

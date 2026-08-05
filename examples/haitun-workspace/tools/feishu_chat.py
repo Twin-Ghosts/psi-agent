@@ -70,15 +70,20 @@ async def feishu_chat_get(chat_id: str, user_id_type: str = "open_id", user_key:
     rather than Feishu's bare ``only_owner`` enums. ``owner_is_bot`` is true when the
     group is owned by a bot, which is why no ``owner_id`` is returned — not an error.
 
-    Feishu answers a **non-member** caller with only the name, avatar, counts and status;
-    that comes back as ``partial=true``. Don't read a thin result as "这个群没有群主/没有
-    设置" — add the bot to the group (or pass a member's ``user_key``) and ask again.
+    Feishu answers a **non-member** caller with only the name, avatar, counts and status.
+    "Non-member" is about whose token asked: the bot is not in most groups a person is in,
+    so a stub does not mean the group is unreadable. Passing ``user_key`` makes the tool
+    retry as that person, which returns the full details whenever they are in the group.
+    A result that is still ``partial=true`` carries ``partial_because`` and ``to_see_more``
+    — report those rather than reading the stub as "这个群没有群主/没人"; ``user_count`` in a
+    partial result is a non-member's view, not the real headcount.
 
     Args:
         chat_id: The group's chat_id (``oc_...``, from a 群名搜索 via ``feishu_api``).
         user_id_type: Id form for owner/admin ids — open_id (default), union_id, or user_id.
-        user_key: A group member's open_id as a fallback identity, for a group the bot
-            isn't in (optional).
+        user_key: The caller's open_id (from ``<feishu_context>``). Pass it whenever you
+            have it: for a group the bot isn't in but the person is, this is what turns a
+            stub into the real details.
     """
     return _f.dumps_result(await _f.get_chat_impl(chat_id, user_id_type, user_key))
 

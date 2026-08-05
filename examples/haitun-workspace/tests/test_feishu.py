@@ -987,6 +987,74 @@ async def test_get_chat_reports_partial_and_bot_owner(monkeypatch: pytest.Monkey
     assert bot_owned["partial"] is False
 
 
+class _ByToken:
+    """Answer differently per token, the way Feishu does for group membership."""
+
+    def __init__(self, tenant: dict[str, Any], user: dict[str, Any]) -> None:
+        self.prefers: list[str] = []
+        self._by_prefer = {"tenant": tenant, "user": user}
+
+    async def __call__(
+        self,
+        request: Any,
+        user_key: str | None = None,
+        prefer: str = "tenant",
+        identity: str = "",
+        capabilities: list[str] | None = None,
+    ) -> dict[str, Any]:
+        self.prefers.append(prefer)
+        return {"ok": True, "code": 0, "msg": "", "data": self._by_prefer.get(prefer, {})}
+
+
+_STUB = {"name": "卧龙山庄飞书第二分庄", "user_count": "0"}
+_FULL = {"name": "卧龙山庄飞书第二分庄", "owner_id": "ou_owner", "chat_mode": "group", "user_count": "9"}
+
+
+@pytest.mark.asyncio
+async def test_get_chat_retries_as_the_caller_when_the_bot_is_not_a_member(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Observed: 「机器人不在这个群里, 看不到成员」 reported for a group the *user* is in.
+
+    Membership is judged by whichever token asked, and the bot is not in most groups a
+    person is in — so asking only as the bot turns a readable group into "unreadable".
+    """
+    cap = _ByToken(tenant=_STUB, user=_FULL)
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    res = await _impl.get_chat_impl("oc_x", user_key="ou_caller")
+    assert cap.prefers == ["tenant", "user"], "the stub must be retried as the caller"
+    assert res["partial"] is False
+    assert res["owner_id"] == "ou_owner"
+    assert res["user_count"] == 9, "the non-member's 0 must not survive into the answer"
+    assert res["asked_as"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_get_chat_without_a_user_key_cannot_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No identity to ask as means one attempt — and the stub must say what would help."""
+    cap = _ByToken(tenant=_STUB, user=_FULL)
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    res = await _impl.get_chat_impl("oc_x")
+    assert cap.prefers == ["tenant"]
+    assert res["partial"] is True
+    assert "user_key" in res["to_see_more"]
+
+
+@pytest.mark.asyncio
+async def test_a_still_partial_result_explains_the_zero_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the caller is not in the group either, ``user_count: 0`` needs a caveat.
+
+    Reporting it bare invites "这个群没人", which is a wrong answer about a real group.
+    """
+    cap = _ByToken(tenant=_STUB, user=_STUB)
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    res = await _impl.get_chat_impl("oc_x", user_key="ou_outsider")
+    assert cap.prefers == ["tenant", "user"]
+    assert res["partial"] is True
+    assert "user_count" in res["partial_because"]
+    assert "asked_as" not in res, "the retry did not help; don't claim it was answered as the user"
+
+
 @pytest.mark.asyncio
 async def test_get_chat_restricted_mode_expands(monkeypatch: pytest.MonkeyPatch) -> None:
     cap = _CapturedInvoke(
