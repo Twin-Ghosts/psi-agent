@@ -4982,6 +4982,15 @@ button.metric-cell:disabled {
   width: 100%;
   padding: 0.15rem 0 0.1rem 1.1rem;
 }
+.focus-chat-process-note {
+  margin: 0 0 0.35rem;
+  padding: 0;
+  color: var(--text-muted, #6b7280);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .focus-chat-thinking-toggle {
   display: inline-flex;
   align-items: center;

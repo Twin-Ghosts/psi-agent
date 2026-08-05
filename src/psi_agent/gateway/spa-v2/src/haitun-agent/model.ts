@@ -81,6 +81,11 @@ export type ChatMessage = {
    * and/or history ``tools`` projection). Rendered separately from「已思考」.
    */
   tools?: string[];
+  /**
+   * Step-between narration sealed before tool rounds (live turn only).
+   * Shown under「已调用工具」after the turn; not the final bubble body.
+   */
+  processNotes?: string[];
   /** Local-only: like / dislike on agent replies (spa v1 parity). */
   feedback?: MessageFeedback;
   /** User turn did not get a complete agent reply. */

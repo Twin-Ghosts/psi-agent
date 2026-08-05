@@ -53,10 +53,13 @@ export function pathsByName(paths: string[]): Record<string, string> {
  * Assistant ``sends`` become file stubs (name + path, empty data) so chat chips
  * survive refresh and can lazy-load via ``GET /workspace/file``.
  *
- * **刻意为之**：连续 `assistant` 行合并成一个 agent 气泡（文案 `\n\n` 拼接、files 去重合并）。
+ * **刻意为之**：连续 `assistant` 行合并成一个 agent 气泡（files 去重合并）。
  * Session 在每轮 `tool_calls` 都会把带正文的 assistant 落盘，todo 多步时 JSONL 常有
  * 「Step N ✅ …」+ 短计划各占一行；流式 UI 经 `appendStreamingAgent` 累进同一气泡，
  * 若不合并，刷新后会拆成多个气泡并各挂一套操作栏。
+ *
+ * **刻意为之（最终正文）**：合并时只保留**最后一段** assistant 文案作气泡；
+ * 前面的步骤叙述进 `processNotes`（「已调用工具」区），与流式 `contentSegments` 结算对齐。
  */
 export function historyToChat(messages: HistoryMessage[]): ChatMessage[] {
   const out: ChatMessage[] = []
@@ -77,7 +80,8 @@ export function historyToChat(messages: HistoryMessage[]): ChatMessage[] {
     const tools = role === 'agent' ? toolSummariesFromHistory(m.tools) : []
     const last = out[out.length - 1]
     if (role === 'agent' && last?.role === 'agent') {
-      const mergedText = [last.text, text].filter((t) => t.trim()).join('\n\n')
+      const processNotes = [...(last.processNotes ?? [])]
+      if (last.text.trim()) processNotes.push(last.text.trim())
       const mergedFiles = mergeChatFiles(last.files, files)
       const mergedReasoning = [last.reasoning, reasoning]
         .filter((r): r is string => typeof r === 'string' && !!r.trim())
@@ -85,7 +89,9 @@ export function historyToChat(messages: HistoryMessage[]): ChatMessage[] {
       const mergedTools = mergeToolLines(last.tools, tools)
       out[out.length - 1] = {
         ...last,
-        text: mergedText,
+        text,
+        processNotes: undefined,
+        ...(processNotes.length ? { processNotes } : {}),
         ...(mergedFiles.length ? { files: mergedFiles } : {}),
         ...(mergedReasoning ? { reasoning: mergedReasoning } : {}),
         ...(mergedTools.length ? { tools: mergedTools } : {}),

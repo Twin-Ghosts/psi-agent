@@ -104,8 +104,9 @@ Hub「使用免费模型」→ clearAiPool → hydrateAiForSessions(全部 sessi
 - SSE `reasoning`：**刻意压缩**仍走同一字段；用 `kind`（`thinking` / `tool_call` / `tool_result`）区分——**≠** `/history` 消息 provenance `kind`。过程轴见 `services/turnProgress.ts`（对标 Cursor）：
   - **封存行**：仅 `tool_call` 短句（如 `读取 \`a.py\``）；thinking / `tool_result` **不**封存（`tool_result` 尾行回「规划下一步…」，刻意不要「整理结果…」行）。
   - **尾行**：只活「规划下一步…」/「撰写回复…」；**刻意**永不把「规划下一步」推进 `lines`。
-  - **流式短暂正文（对标 Cursor）**：过程轴下方**持续展示**步骤间自然语言——含 SSE `content`（工具轮之间的短计划/说明），以及尚无 content 时的 live thinking 散文（`liveThinking`，剥工具标记）。**刻意为之**：尾行即使因下一轮 `tool_call` 回到「规划下一步…」，也不再把已流出的正文藏掉（旧 `hideAgentProse`）。回合结束收起过程轴 + live thinking，落到「已调用工具 / 已思考」+ 最终气泡（与现在一致）；`preferResultBelowRule` 仅用于**已结束**气泡。
-  - **回合结束后过程拆分封装（对标 Cursor）**：流式期间过程轴 + 短暂正文；回合结束把思考挂到 `message.reasoning`、把过程轴封存行挂到 `message.tools`（短句列表）。`FocusChatThread` **分开两块**（工具优先）：①「已调用 N 个工具」——读 `message.tools`（**默认展开**）；②「已思考」——`stripToolMarkersFromReasoning(reasoning)` 散文（**默认收起**）。`/history` 透出 JSONL `reasoning`（仅思考），并把各轮结构化 ``tool_calls`` 投影为独立字段 ``tools: [{name, arguments}]``（**刻意为之**：不塞进 reasoning；Session 的 `[Tool Call:]` 只走 SSE）。`historyToChat` 用 `summarizeToolCall` 生成短句并在合并连续 assistant 时拼接。刷新同任务即可还原工具列表 + 思考。
+  - **流式短暂正文（对标 Cursor）**：过程轴下方**持续展示**步骤间自然语言——含 SSE `content`（工具轮之间的短计划/说明），以及尚无 content 时的 live thinking 散文（`liveThinking`，剥工具标记）。**刻意为之**：尾行即使因下一轮 `tool_call` 回到「规划下一步…」，也不再把已流出的正文藏掉（旧 `hideAgentProse`）。
+  - **回合结算只留最后一段正文（对标 Cursor，刻意为之）**：流式用 `contentSegments`——每次 `tool_call` 封存当前 content 为临时过程叙述；回合结束 `message.text` = **最后一段**，先前段落进 `message.processNotes`，渲染在「已调用工具 / 过程说明」展开区内（不进最终气泡）。`historyToChat` 合并连续 assistant 时同样只留末段、前段进 `processNotes`，刷新与当场结算一致。`preferResultBelowRule` 仅用于**已结束**气泡的额外展示偏好。
+  - **回合结束后过程拆分封装（对标 Cursor）**：流式期间过程轴 + 短暂正文；回合结束把思考挂到 `message.reasoning`、把过程轴封存行挂到 `message.tools`（短句列表）、步骤叙述挂到 `message.processNotes`。`FocusChatThread` **分开两块**（工具优先）：①「已调用 N 个工具」（或仅有叙述时「过程说明」）——`processNotes` + `message.tools`（**默认展开**）；②「已思考」——`stripToolMarkersFromReasoning(reasoning)` 散文（**默认收起**）。`/history` 透出 JSONL `reasoning`（仅思考），并把各轮结构化 ``tool_calls`` 投影为独立字段 ``tools: [{name, arguments}]``（**刻意为之**：不塞进 reasoning；Session 的 `[Tool Call:]` 只走 SSE）。`historyToChat` 用 `summarizeToolCall` 生成短句并在合并连续 assistant 时拼接。刷新同任务即可还原工具列表 + 思考 + 过程叙述。
   - **`preferResultBelowRule`（刻意为之）**：仅展示层——短计划在 `---` 之上时偏好渲染下半段结果；**不改** JSONL / 复制源可选策略以实现为准。
   - **任务摘要 `summary`（刻意为之）**：不再截取助手末条回复。回合成功后（及历史缺摘要时）`POST /summaries/generate` 另开一轮模型写 1～2 句；Gateway `SummaryManager` 持久化到 AppData state（与 titles 同级）。左栏标题为「任务摘要」；任务卡正文同字段。展示侧仍 `plainTextFromMarkdown` 兜底。对话气泡仍走完整 Markdown。段标题（P1）可复用该 summary 写入 open todo-segment。
 
@@ -126,7 +127,7 @@ Hub「使用免费模型」→ clearAiPool → hydrateAiForSessions(全部 sessi
 
 - Gateway `/history` 按 Session ``kind`` **白名单**过滤：只返回 `chat` 气泡，以及 `schedule.display` 的 assistant；`schedule.silent`（含 heartbeat）不返回。
 - `historyToChat` 再剥 `[SEND:]`/`[RECV:]`，并丢弃空行 / 泄漏的 `schedule.silent`（防御）。
-- **`historyToChat` 合并连续 assistant（刻意为之）**：Session 每轮 `tool_calls` 会把带正文的 assistant 落盘（todo 多步常见「Step N ✅ …」或短计划各占一行）。流式时 `appendStreamingAgent` 累进同一气泡；刷新若不合并会拆成多个气泡并各挂操作栏。合并只发生在相邻 assistant 之间，遇 `user` 切断；files/`sends` stub 按 basename 去重合并。
+- **`historyToChat` 合并连续 assistant（刻意为之）**：Session 每轮 `tool_calls` 会把带正文的 assistant 落盘（todo 多步常见「Step N ✅ …」或短计划各占一行）。流式时 `appendStreamingAgent` 累进同一气泡；刷新若不合并会拆成多个气泡并各挂操作栏。合并只发生在相邻 assistant 之间，遇 `user` 切断；files/`sends` stub 按 basename 去重合并。**最终正文**只留最后一段，前面段落进 `processNotes`（与当场 `contentSegments` 结算一致）。
 - 气泡渲染同样 `stripTransferMarkers`（与 v1 一致）。
 
 任务 `status` / `deliveryState` 仍是前端展示字段（Gateway 尚无 Task/Delivery 资源）。交付物分两轨：

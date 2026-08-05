@@ -83,6 +83,13 @@ import { filesFromClipboard } from "../services/clipboardFiles";
 import { useComposerFileDrop } from "../services/composerFileDrop";
 import { onComposerEnterKey } from "../services/composerKeys";
 import { streamSessionChat } from "../services/chatStream";
+import {
+  appendContentSegment,
+  contentSegmentsStart,
+  sealContentBeforeTools,
+  settleContentSegments,
+  type ContentSegments,
+} from "../services/contentSegments";
 import { applyProgressEvent, progressLogStart, type ProgressLog } from "../services/turnProgress";
 import {
   historyToChat,
@@ -198,6 +205,8 @@ export default function HaiTunAgentWorkspace({
   const turnReasoningRef = useRef("");
   /** Sealed tool one-liners for the current turn (mirrors progress log ``lines``). */
   const turnToolsRef = useRef<string[]>([]);
+  /** Content segments across tool rounds — only the last settles as bubble body. */
+  const turnContentSegRef = useRef<ContentSegments>(contentSegmentsStart());
   /** After Stop, block submit briefly — Stop↔Send swap under the same click would re-send the restored draft. */
   const suppressSubmitUntilRef = useRef(0);
   const historyLoadedRef = useRef<Set<string>>(new Set(["overview"]));
@@ -805,6 +814,7 @@ export default function HaiTunAgentWorkspace({
     setLiveThinking("");
     turnReasoningRef.current = "";
     turnToolsRef.current = [];
+    turnContentSegRef.current = contentSegmentsStart();
     setTodoSegmentSelection((current) => ({ ...current, [cardId]: "live" }));
     const userVisible = titleSource ?? (text.trim() || "附件");
     let turnOk = false;
@@ -827,6 +837,7 @@ export default function HaiTunAgentWorkspace({
         {
           onText: (delta) => {
             if (!live()) return;
+            turnContentSegRef.current = appendContentSegment(turnContentSegRef.current, delta);
             setTurnProgressLog((prev) =>
               applyProgressEvent(prev ?? progressLogStart(), "content", ""),
             );
@@ -858,6 +869,9 @@ export default function HaiTunAgentWorkspace({
           },
           onReasoning: (delta, kind) => {
             if (!live()) return;
+            if (kind === "tool_call") {
+              turnContentSegRef.current = sealContentBeforeTools(turnContentSegRef.current);
+            }
             if (delta) turnReasoningRef.current += delta;
             setLiveThinking(turnReasoningRef.current);
             setTurnProgressLog((prev) => {
@@ -954,21 +968,27 @@ export default function HaiTunAgentWorkspace({
       if (epoch === streamEpochRef.current) {
         const reasoningRaw = turnReasoningRef.current.trim();
         const tools = [...turnToolsRef.current];
-        // Keep thinking + tools when the agent bubble still exists (not Stop).
-        if ((reasoningRaw || tools.length) && !controller.signal.aborted) {
+        const { finalText, processNotes } = settleContentSegments(turnContentSegRef.current);
+        // Keep thinking + tools + settle final body when the agent bubble still exists (not Stop).
+        if (!controller.signal.aborted) {
           setMessages((current) => {
             const list = [...(current[cardId] ?? [])];
             const last = list[list.length - 1];
             if (last?.role === "agent") {
-              list[list.length - 1] = {
+              const next: typeof last = {
                 ...last,
+                // Only the last content segment remains as the bubble body.
+                text: finalText || last.text,
+                ...(processNotes.length ? { processNotes } : { processNotes: undefined }),
                 ...(reasoningRaw ? { reasoning: reasoningRaw } : {}),
                 ...(tools.length ? { tools } : {}),
               };
+              list[list.length - 1] = next;
               return { ...current, [cardId]: list };
             }
             return current;
           });
+          if (finalText) assistantFull = finalText;
         }
         setTypingCard((current) => (current === cardId ? null : current));
         setTurnProgressLog(null);

@@ -145,25 +145,34 @@ function CopyButton({ text, className }: { text: string; className?: string }) {
  * Cursor-style post-turn process: tools (primary, from ``message.tools``) + thinking prose.
  * Live streaming still uses the process log; after the turn, tools are a separate field
  * (history ``tools`` / live progress lines) — not parsed out of ``reasoning``.
+ * Step-between narration lands in ``processNotes`` under the tools block.
  */
 function TurnProcessDisclosure({
   reasoning,
   tools = [],
+  processNotes = [],
   streaming = false,
 }: {
   reasoning?: string;
   tools?: string[];
+  processNotes?: string[];
   streaming?: boolean;
 }) {
   const toolLines = tools.filter((t) => !!t.trim());
+  const notes = processNotes.map((n) => n.trim()).filter(Boolean);
   const thinking = stripToolMarkersFromReasoning(reasoning ?? "");
   const [toolsOpen, setToolsOpen] = useState(true);
   const [thinkingOpen, setThinkingOpen] = useState(false);
-  if (!toolLines.length && !thinking) return null;
+  const showToolsBlock = toolLines.length > 0 || notes.length > 0;
+  if (!showToolsBlock && !thinking) return null;
+
+  const toolsLabel = toolLines.length > 0
+    ? toolsHeaderLabel(toolLines.length)
+    : "过程说明";
 
   return (
     <div className="focus-chat-turn-process">
-      {toolLines.length > 0 ? (
+      {showToolsBlock ? (
         <div className={`focus-chat-thinking focus-chat-tools${toolsOpen ? " is-open" : ""}`}>
           <button
             type="button"
@@ -172,7 +181,7 @@ function TurnProcessDisclosure({
             onClick={() => setToolsOpen((v) => !v)}
           >
             <ChevronRight size={14} className="focus-chat-thinking-chevron" aria-hidden />
-            <span>{toolsHeaderLabel(toolLines.length)}</span>
+            <span>{toolsLabel}</span>
           </button>
           {toolsOpen ? (
             <div
@@ -180,6 +189,11 @@ function TurnProcessDisclosure({
               role="list"
               aria-label="工具调用"
             >
+              {notes.map((note, i) => (
+                <div className="focus-chat-process-note" role="listitem" key={`note-${i}`}>
+                  {note}
+                </div>
+              ))}
               {toolLines.map((line, i) => (
                 <div className="focus-chat-progress-line" role="listitem" key={`${i}-${line}`}>
                   {line}
@@ -462,12 +476,14 @@ export function FocusChatThread({
               && !isLiveAgent
               && (
                 (message.tools?.length ?? 0) > 0
+                || (message.processNotes?.length ?? 0) > 0
                 || hasDisplayableReasoning(message.reasoning ?? "")
               )
               ? (
                 <TurnProcessDisclosure
                   reasoning={message.reasoning}
                   tools={message.tools}
+                  processNotes={message.processNotes}
                 />
               )
               : null}
