@@ -1107,3 +1107,37 @@ def test_rookie_sop_digest_follows_has_more_when_reading_the_overview_table(monk
     assert out == {"ok": True, "sent": True, "rookies": 2}
     # 两次读总览各翻了一页, 一共发出 4 次 search_records
     assert len(fake.searches) == 4
+
+
+def test_all_five_tools_exist_as_files() -> None:
+    for name in (
+        "rookie_sop_card_send",
+        "rookie_sop_tick",
+        "rookie_sop_role_set",
+        "rookie_sop_remind",
+        "rookie_sop_digest",
+    ):
+        assert (TOOLS / f"{name}.py").is_file(), f"缺少工具文件 {name}.py"
+
+
+def test_trigger_and_skill_are_registered() -> None:
+    trigger = HAITUN / "triggers" / "rookie-sop-welcome" / "TRIGGER.md"
+    skill = HAITUN / "skills" / "feishu-rookie-onboarding" / "SKILL.md"
+    assert trigger.is_file()
+    assert skill.is_file()
+
+    trigger_text = trigger.read_text(encoding="utf-8")
+    # fire=tool: 到点/命中不经过 LLM
+    assert "fire: tool" in trigger_text
+    assert "tool: rookie_sop_card_send" in trigger_text
+    assert "event: feishu.hr.user_created" in trigger_text
+
+    skill_text = skill.read_text(encoding="utf-8")
+    assert "rookie_sop_tick" in skill_text
+    assert "rookie_sop_role_set" in skill_text
+
+
+def test_agents_md_documents_the_new_tools() -> None:
+    text = (HAITUN / "AGENTS.md").read_text(encoding="utf-8")
+    assert "rookie_sop_card_send" in text
+    assert "feishu-rookie-onboarding" in text
