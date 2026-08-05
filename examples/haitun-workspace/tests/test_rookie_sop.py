@@ -10,6 +10,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import anyio
+
 HAITUN = Path(__file__).resolve().parents[1]
 TOOLS = HAITUN / "tools"
 
@@ -338,3 +340,247 @@ def test_graduation_card_has_no_actions() -> None:
 
     assert handlers == {}
     assert "新手村" in _dump(card)
+
+
+class _FakeBitable:
+    """假的 bitable 适配器: 只记录调用并按预设返回, 不碰飞书。"""
+
+    def __init__(self, search_results: list[list[dict[str, Any]]] | None = None) -> None:
+        self._search_results = list(search_results or [])
+        self.searches: list[dict[str, Any]] = []
+        self.creates: list[dict[str, Any]] = []
+        self.updates: list[dict[str, Any]] = []
+
+    async def search_records(
+        self,
+        app_token: str,
+        table_id: str,
+        filter_json: str = "",
+        sort_json: str = "",
+        field_names: str = "",
+        view_id: str = "",
+        page_size: int = 100,
+        page_token: str = "",
+        automatic_fields: bool = False,
+        user_key: str = "",
+    ) -> str:
+        self.searches.append({"table_id": table_id, "filter_json": filter_json})
+        items = self._search_results.pop(0) if self._search_results else []
+        return json.dumps({"ok": True, "result": {"items": items, "has_more": False}}, ensure_ascii=False)
+
+    async def create_records(
+        self,
+        app_token: str,
+        table_id: str,
+        records_json: str,
+        user_key: str = "",
+        identity: str = "",
+        validate_fields: bool = True,
+    ) -> str:
+        self.creates.append({"table_id": table_id, "records": json.loads(records_json)})
+        return json.dumps({"ok": True}, ensure_ascii=False)
+
+    async def update_records(
+        self,
+        app_token: str,
+        table_id: str,
+        records_json: str,
+        user_key: str = "",
+        identity: str = "",
+        validate_fields: bool = True,
+    ) -> str:
+        self.updates.append({"table_id": table_id, "records": json.loads(records_json)})
+        return json.dumps({"ok": True}, ensure_ascii=False)
+
+
+def _item(record_id: str, fields: dict[str, Any]) -> dict[str, Any]:
+    return {"record_id": record_id, "fields": fields}
+
+
+def test_millis_roundtrip_preserves_the_date() -> None:
+    s = _load("_rookie_sop_store")
+    assert s.from_millis(s.to_millis(date(2026, 8, 5))) == date(2026, 8, 5)
+    assert s.to_millis(None) is None
+    assert s.from_millis(None) is None
+    assert s.from_millis("") is None
+
+
+def test_detail_fields_put_a_text_key_column_first() -> None:
+    s = _load("_rookie_sop_store")
+    # 飞书要求索引列(第一列)是 1/2/5/13/15/20/22 之一 —— 这里必须是文本 1
+    assert s.DETAIL_FIELDS[0]["field_name"] == "记录键"
+    assert s.DETAIL_FIELDS[0]["type"] == 1
+    assert s.OVERVIEW_FIELDS[0]["field_name"] == "open_id"
+    assert s.OVERVIEW_FIELDS[0]["type"] == 1
+    # 「查找引用」(19) API 建不出来, 不许出现
+    assert all(f["type"] != 19 for f in s.DETAIL_FIELDS + s.OVERVIEW_FIELDS)
+
+
+def test_fetch_detail_parses_rows_and_converts_dates() -> None:
+    s = _load("_rookie_sop_store")
+    p = _load("_rookie_sop_progress")
+    fake = _FakeBitable(
+        [
+            [
+                _item(
+                    "rec1",
+                    {
+                        "记录键": "ou_x:wifi",
+                        "姓名": "张三",
+                        "open_id": "ou_x",
+                        "模块": "环境准备",
+                        "项": "连上 WiFi",
+                        "状态": p.STATUS_TODO,
+                        "入职日": s.to_millis(date(2026, 8, 5)),
+                        "截止日": s.to_millis(date(2026, 8, 5)),
+                    },
+                )
+            ]
+        ]
+    )
+
+    rows = anyio.run(s.fetch_detail, fake, "app1", "tblDetail", "ou_x")
+
+    assert len(rows) == 1
+    assert rows[0]["record_id"] == "rec1"
+    assert rows[0]["入职日"] == date(2026, 8, 5)
+    assert rows[0]["截止日"] == date(2026, 8, 5)
+    # 按 open_id 过滤
+    assert "ou_x" in fake.searches[0]["filter_json"]
+
+
+def test_mark_done_updates_status_and_completion_time() -> None:
+    s = _load("_rookie_sop_store")
+    p = _load("_rookie_sop_progress")
+    fake = _FakeBitable([[_item("rec1", {"记录键": "ou_x:wifi", "状态": p.STATUS_TODO})]])
+
+    out = anyio.run(
+        lambda: s.mark_done(fake, "app1", "tblDetail", open_id="ou_x", item_id="wifi", today=date(2026, 8, 6))
+    )
+
+    assert out["ok"] is True
+    assert fake.updates[0]["records"][0]["record_id"] == "rec1"
+    fields = fake.updates[0]["records"][0]["fields"]
+    assert fields["状态"] == p.STATUS_DONE
+    assert fields["完成时间"] == s.to_millis(date(2026, 8, 6))
+
+
+def test_mark_done_is_idempotent_when_already_done() -> None:
+    s = _load("_rookie_sop_store")
+    p = _load("_rookie_sop_progress")
+    fake = _FakeBitable([[_item("rec1", {"记录键": "ou_x:wifi", "状态": p.STATUS_DONE})]])
+
+    out = anyio.run(
+        lambda: s.mark_done(fake, "app1", "tblDetail", open_id="ou_x", item_id="wifi", today=date(2026, 8, 6))
+    )
+
+    assert out["ok"] is True
+    assert out["already_done"] is True
+    # 已完成就不再写一次
+    assert fake.updates == []
+
+
+def test_mark_module_na_marks_every_row_of_that_module() -> None:
+    s = _load("_rookie_sop_store")
+    p = _load("_rookie_sop_progress")
+    fake = _FakeBitable(
+        [
+            [
+                _item("recA", {"记录键": "ou_x:git_workflow", "模块": "开发环境", "状态": p.STATUS_TODO}),
+                _item("recB", {"记录键": "ou_x:repo_access", "模块": "开发环境", "状态": p.STATUS_TODO}),
+            ]
+        ]
+    )
+
+    out = anyio.run(
+        lambda: s.mark_module_na(fake, "app1", "tblDetail", open_id="ou_x", module="开发环境", today=date(2026, 8, 6))
+    )
+
+    assert out["ok"] is True and out["marked"] == 2
+    updated = fake.updates[0]["records"]
+    assert {r["record_id"] for r in updated} == {"recA", "recB"}
+    assert all(r["fields"]["状态"] == p.STATUS_NA for r in updated)
+
+
+def test_recompute_overview_updates_the_existing_row_instead_of_adding_one() -> None:
+    s = _load("_rookie_sop_store")
+    p = _load("_rookie_sop_progress")
+    detail = [
+        {
+            "记录键": "ou_x:wifi",
+            "状态": p.STATUS_DONE,
+            "入职日": date(2026, 8, 5),
+            "截止日": date(2026, 8, 5),
+            "项": "wifi",
+        },
+        {
+            "记录键": "ou_x:desk",
+            "状态": p.STATUS_TODO,
+            "入职日": date(2026, 8, 5),
+            "截止日": date(2026, 8, 5),
+            "项": "desk",
+        },
+    ]
+    # 总览里已有该人一行 → 走 update 而不是 create
+    fake = _FakeBitable([[_item("recOv", {"open_id": "ou_x"})]])
+
+    out = anyio.run(
+        lambda: s.recompute_overview(
+            fake, "app1", "tblOverview", open_id="ou_x", name="张三", role="dev", rows=detail, today=date(2026, 8, 7)
+        )
+    )
+
+    assert out["ok"] is True
+    assert fake.creates == []
+    fields = fake.updates[0]["records"][0]["fields"]
+    assert fields["进度"] == "1/2"
+    assert fields["逾期项数"] == 1
+    assert fields["入职日"] == s.to_millis(date(2026, 8, 5))
+
+
+def test_recompute_overview_creates_the_row_when_absent() -> None:
+    s = _load("_rookie_sop_store")
+    p = _load("_rookie_sop_progress")
+    detail = [
+        {
+            "记录键": "ou_x:wifi",
+            "状态": p.STATUS_TODO,
+            "入职日": date(2026, 8, 5),
+            "截止日": date(2026, 8, 5),
+            "项": "wifi",
+        }
+    ]
+    fake = _FakeBitable([[]])  # 总览里还没有这一行
+
+    out = anyio.run(
+        lambda: s.recompute_overview(
+            fake, "app1", "tblOverview", open_id="ou_x", name="张三", role="", rows=detail, today=date(2026, 8, 5)
+        )
+    )
+
+    assert out["ok"] is True
+    assert fake.updates == []
+    assert fake.creates[0]["records"][0]["fields"]["open_id"] == "ou_x"
+
+
+def test_recompute_overview_heals_a_corrupted_row() -> None:
+    """人为改坏总览行后, 下一次重算必须把它算回正确值(验证「重算而非增量」)。"""
+    s = _load("_rookie_sop_store")
+    p = _load("_rookie_sop_progress")
+    detail = [
+        {"记录键": "ou_x:a", "状态": p.STATUS_DONE, "入职日": date(2026, 8, 5), "截止日": date(2026, 8, 5), "项": "a"},
+        {"记录键": "ou_x:b", "状态": p.STATUS_DONE, "入职日": date(2026, 8, 5), "截止日": date(2026, 8, 5), "项": "b"},
+    ]
+    # 总览行被改成了荒谬的值
+    fake = _FakeBitable([[_item("recOv", {"open_id": "ou_x", "进度": "99/99", "逾期项数": 42})]])
+
+    anyio.run(
+        lambda: s.recompute_overview(
+            fake, "app1", "tblOverview", open_id="ou_x", name="张三", role="nondev", rows=detail, today=date(2026, 8, 6)
+        )
+    )
+
+    fields = fake.updates[0]["records"][0]["fields"]
+    assert fields["进度"] == "2/2"
+    assert fields["逾期项数"] == 0
+    assert fields["状态"] == "已出新手村"
