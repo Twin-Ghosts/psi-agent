@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+
 import anyio
+import anyio.lowlevel
 import pytest
 
 from psi_agent.channel.feishu._card_action import (
@@ -11,8 +14,10 @@ from psi_agent.channel.feishu._card_action import (
     _consumed_card_content,
 )
 from psi_agent.channel.feishu._card_store import (
+    card_claim_guard,
     peek_card_multi_use,
     pop_card_snapshot,
+    rejected_claim_count,
     rewrite_card_snapshot,
     save_card_snapshot,
 )
@@ -245,3 +250,61 @@ async def test_batcher_recovers_after_a_failed_turn() -> None:
 
     await batcher.submit("om_1:user_a", "click_1", ok)
     assert seen == ["click_1"]  # 没有重放上一轮失败的 click_0
+
+
+# -- 回写竞态 -------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_interleaved_rewrites_do_not_undo_each_other(tmp_path) -> None:
+    """两行同时勾: 交错的读-改-写不能让后写的把先写的完成状态覆盖回未完成。
+
+    临界区必须同时罩住读和写 —— 只锁 rewrite 时两边都会读到未勾过的原卡, 第二次
+    回写就抹掉第一次的成果。
+    """
+    appdata = str(tmp_path)
+    await save_card_snapshot("om_race", _todo_card(), appdata=appdata, multi_use=True)
+
+    async def tick(index: int, title: str) -> None:
+        action_id = f"todo_tick_{index}"
+        async with card_claim_guard("om_race"):
+            claim = await pop_card_snapshot("om_race", appdata, action_id=action_id)
+            assert claim.status == "claimed"
+            assert claim.snapshot is not None
+            # 读到之后让出控制权 —— 没有锁的话另一条正好挤进来读同一份快照。
+            await anyio.lowlevel.checkpoint()
+            ticked = _consumed_card_content(
+                claim.snapshot.card, {"action": action_id, "todo_title": title}, multi_use=True
+            )
+            assert ticked is not None
+            assert await rewrite_card_snapshot("om_race", ticked, appdata)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(tick, 0, "写周报")
+        tg.start_soon(tick, 1, "改文档")
+
+    final = await pop_card_snapshot("om_race", appdata, action_id="todo_tick_probe")
+    assert final.status == "claimed" and final.snapshot is not None
+    rendered = json.dumps(final.snapshot.card, ensure_ascii=False)
+    # 两条都得留在"已完成"态 (实心 + 删除线), 并且都不再带按钮。
+    assert rendered.count("● ~~") == 2, "两行都必须保住已完成态, 后写的不能覆盖先写的"
+    assert "写周报~~" in rendered
+    assert "改文档~~" in rendered
+    assert _button_values(final.snapshot.card) == []
+
+
+@pytest.mark.anyio
+async def test_rejected_claims_are_counted_for_diagnostics(tmp_path) -> None:
+    """被墓碑拒掉要留下可查的上下文, 否则连点和跨进程重投在日志里没法区分。"""
+    appdata = str(tmp_path)
+    await save_card_snapshot("om_count", _todo_card(), appdata=appdata, multi_use=True)
+
+    first = await pop_card_snapshot("om_count", appdata, action_id="todo_tick_0")
+    assert first.status == "claimed"
+    assert first.rejected_count == 0
+
+    second = await pop_card_snapshot("om_count", appdata, action_id="todo_tick_0")
+    assert second.status == "already_consumed"
+    assert second.rejected_action_id == "todo_tick_0"
+    assert second.rejected_count >= 1
+    assert await rejected_claim_count("om_count") >= 1

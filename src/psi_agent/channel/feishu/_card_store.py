@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -19,6 +20,34 @@ _MESSAGE_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
 # 多选卡的 per-action 墓碑名里嵌了 action_id, 所以它必须是个安全的文件名片段。
 # 不匹配的 action_id 不给它退化成宽松名字 (会撞车), 直接按 hash 落盘。
 _ACTION_ID_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+
+# 多选卡回写是「读快照-改一行-写回」, 三步之间都有 await。同一张卡上两行同时被勾,
+# 交错成「A 读 → B 读 → A 写 → B 写」时 B 会拿勾选前的快照覆盖掉 A 的完成状态。
+# per-action 墓碑挡不住这个 —— 两行各自成立本来就是对的, 冲突在共享的那份快照上。
+# 按 message_id 分锁 (而不是一把全局锁): 不同卡的回写本就互不相干, 没必要互等。
+_REWRITE_LOCKS: dict[str, anyio.Lock] = {}
+_REWRITE_WAITERS: dict[str, int] = {}
+# 被墓碑拒掉的次数, 按 message_id 累计。手快连点和跨进程重复投递在日志里长得一样,
+# 计数能把两者分开: 前者集中在少数几行, 后者会均匀铺开。
+_REJECTED_CLAIMS: dict[str, int] = {}
+
+
+@contextlib.asynccontextmanager
+async def _rewrite_lock(message_id: str) -> AsyncIterator[None]:
+    """Serialize read-modify-write on one card's snapshot within this process."""
+    lock = _REWRITE_LOCKS.setdefault(message_id, anyio.Lock())
+    _REWRITE_WAITERS[message_id] = _REWRITE_WAITERS.get(message_id, 0) + 1
+    try:
+        async with lock:
+            yield
+    finally:
+        remaining = _REWRITE_WAITERS[message_id] - 1
+        if remaining:
+            _REWRITE_WAITERS[message_id] = remaining
+        else:
+            # 最后一个等待者负责清表, 否则长期运行会按卡数无界增长。
+            del _REWRITE_WAITERS[message_id]
+            _REWRITE_LOCKS.pop(message_id, None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +67,9 @@ class CardSnapshotClaim:
 
     status: Literal["claimed", "already_consumed", "not_found", "invalid"]
     snapshot: CardSnapshot | None = None
+    # 只在被墓碑拒掉时填, 用来把「手快连点」和「跨进程重复投递」分开。
+    rejected_action_id: str | None = None
+    rejected_count: int = 0
 
 
 def _validate_message_id(message_id: str) -> None:
@@ -165,11 +197,34 @@ async def peek_card_multi_use(message_id: str, appdata: str = "") -> bool:
     return snapshot is not None and snapshot.multi_use
 
 
+@contextlib.asynccontextmanager
+async def card_claim_guard(message_id: str) -> AsyncIterator[None]:
+    """Serialize one card's claim-render-rewrite cycle within this process.
+
+    The rewrite reads the snapshot, so the read must be inside the same critical section
+    as the write — locking only ``rewrite_card_snapshot`` would still let two ticks read
+    the same pristine card and have the second one undo the first.
+
+    Process-local on purpose: a Feishu app has exactly one WS consumer, so concurrent
+    ticks on one card always land in one process. Cross-process replay is handled by the
+    durable tombstones instead, which need no coordination.
+    """
+    async with _rewrite_lock(message_id):
+        yield
+
+
+async def rejected_claim_count(message_id: str) -> int:
+    """How many claims this card has had rejected by a tombstone (diagnostics only)."""
+    return _REJECTED_CLAIMS.get(message_id, 0)
+
+
 async def rewrite_card_snapshot(message_id: str, card: dict[str, Any], appdata: str = "") -> bool:
     """Replace a **multi-use** card's stored content, keeping its routing metadata.
 
     Called after each tick so the next callback sees the already-ticked rows. Without
     this, a second tick would render from the pristine card and silently undo the first.
+
+    Held under a per-card lock together with the caller's read — see ``claim_and_rewrite``.
     """
     path = await _snapshot_path(message_id, appdata)
     snapshot = await _peek_snapshot(path)
@@ -225,9 +280,16 @@ async def pop_card_snapshot(
             try:
                 # touch(exist_ok=False) 是这里唯一的并发闸: 同时点两条会各自建自己的
                 # 墓碑而互不影响, 重复点同一条则必然撞上 FileExistsError。
+                # CPython 的 touch(exist_ok=False) 就是 O_CREAT|O_EXCL|O_WRONLY, 与手写
+                # os.open 等价; exist_ok=True 才会走非原子的 utime 那条路。
                 await action_tombstone.touch(mode=0o600, exist_ok=False)
             except FileExistsError:
-                return CardSnapshotClaim(status="already_consumed")
+                _REJECTED_CLAIMS[message_id] = _REJECTED_CLAIMS.get(message_id, 0) + 1
+                return CardSnapshotClaim(
+                    status="already_consumed",
+                    rejected_action_id=action_id,
+                    rejected_count=_REJECTED_CLAIMS[message_id],
+                )
             await _write_consumed_marker(action_tombstone, "consumed")
             return CardSnapshotClaim(status="claimed", snapshot=peeked)
 

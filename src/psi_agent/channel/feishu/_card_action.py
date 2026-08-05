@@ -11,7 +11,13 @@ from loguru import logger
 from psi_agent.channel._core import ChannelCore
 from psi_agent.channel._types import InputChunk, TextChunk
 
-from ._card_store import CardSnapshot, peek_card_multi_use, pop_card_snapshot, rewrite_card_snapshot
+from ._card_store import (
+    CardSnapshot,
+    card_claim_guard,
+    peek_card_multi_use,
+    pop_card_snapshot,
+    rewrite_card_snapshot,
+)
 
 _INTERACTIVE_CARD_TAGS = {"action", "button", "form"}
 _REMOVED_CARD_ELEMENT = object()
@@ -355,25 +361,32 @@ async def handle_card_action(
         original_card = None
         replacement = None
         try:
-            claim = await pop_card_snapshot(
-                message_id,
-                appdata,
-                action_id=action_id if multi_use else None,
-            )
-            if claim.status == "already_consumed":
-                logger.info(f"card action ignored for durably-consumed message={message_id} action={action_id}")
-                return
-            snapshot_status = claim.status
-            snapshot = claim.snapshot
-            if snapshot is not None:
-                original_card = snapshot.card
-                replacement = _consumed_card_content(snapshot.card, action_value, multi_use=snapshot.multi_use)
-                if replacement is None:
-                    logger.warning(f"failed to consume card snapshot {message_id}, trying Feishu payload")
-                elif snapshot.multi_use and not await rewrite_card_snapshot(message_id, replacement, appdata):
-                    # 必须回写: 下一次点击要从"已勾过的那张"渲染, 否则会把上一条的
-                    # 完成状态覆盖回未完成。
-                    logger.warning(f"failed to persist ticked card {message_id}, next tick may render stale rows")
+            # 读-改-写必须在同一个临界区里: 只锁 rewrite 挡不住两次勾选各自读到
+            # 未勾过的原卡, 第二次会把第一次的完成状态覆盖回未完成。
+            async with card_claim_guard(message_id):
+                claim = await pop_card_snapshot(
+                    message_id,
+                    appdata,
+                    action_id=action_id if multi_use else None,
+                )
+                if claim.status == "already_consumed":
+                    logger.info(
+                        f"card action rejected by tombstone message={message_id} "
+                        f"action={claim.rejected_action_id or action_id} operator={operator_open_id} "
+                        f"multi_use={multi_use} rejected_so_far={claim.rejected_count}"
+                    )
+                    return
+                snapshot_status = claim.status
+                snapshot = claim.snapshot
+                if snapshot is not None:
+                    original_card = snapshot.card
+                    replacement = _consumed_card_content(snapshot.card, action_value, multi_use=snapshot.multi_use)
+                    if replacement is None:
+                        logger.warning(f"failed to consume card snapshot {message_id}, trying Feishu payload")
+                    elif snapshot.multi_use and not await rewrite_card_snapshot(message_id, replacement, appdata):
+                        # 必须回写: 下一次点击要从"已勾过的那张"渲染, 否则会把上一条的
+                        # 完成状态覆盖回未完成。
+                        logger.warning(f"failed to persist ticked card {message_id}, next tick may render stale rows")
         except Exception as e:
             logger.warning(f"failed to load card snapshot {message_id}, trying Feishu payload — {e!r}")
 
