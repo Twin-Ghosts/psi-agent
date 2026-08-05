@@ -37,22 +37,29 @@ def active_rookies(overview_rows: list[dict[str, Any]], today: date) -> list[dic
     return active
 
 
-async def _fetch_overview(bitable: Any, app_token: str, overview_table_id: str) -> list[dict[str, Any]]:
+async def _fetch_overview(bitable: Any, app_token: str, overview_table_id: str) -> tuple[list[dict[str, Any]], bool]:
     """拉取总览表全部行 —— 翻页直到 has_more 为假, 理由与 fetch_detail 一致:
 
     总览表随总在途人数增长, 迟早会超过一页; 只读第一页会让日报漏人、也会让
     兜底对账漏掉没读到的那些人。
+
+    同样地, 只看「空 token」或「token 与上次相同」不足以防死循环: 服务端若一直
+    回 has_more=true 且每次给一个新 token, 会永远翻下去。这里复用与 fetch_detail
+    相同的页数上限 + 已见 token 集合。返回 (rows, truncated) —— truncated 为真
+    时拿到的是不完整读取, 日报与对账都不能当成全量数据处理。
     """
     rows: list[dict[str, Any]] = []
     page_token = ""
-    while True:
+    seen_tokens = {""}
+    for _ in range(_store.MAX_PAGES):
         raw = await bitable.search_records(app_token, overview_table_id, "", page_size=500, page_token=page_token)
         rows.extend(_store._row_of(i) for i in _store._items_of(raw))
         has_more, next_token = _store._page_info(raw)
-        if not has_more or not next_token or next_token == page_token:
-            break
+        if not has_more or not next_token or next_token in seen_tokens:
+            return rows, False
+        seen_tokens.add(next_token)
         page_token = next_token
-    return rows
+    return rows, True
 
 
 async def rookie_sop_digest(hr_open_id: str = "") -> str:
@@ -93,7 +100,7 @@ async def rookie_sop_digest(hr_open_id: str = "") -> str:
     bitable = _rt.bitable_adapter()
     today = date.today()
 
-    overview_rows = await _fetch_overview(bitable, app_token, overview_table)
+    overview_rows, truncated = await _fetch_overview(bitable, app_token, overview_table)
 
     # 兜底对账: 每人从明细整体重算一遍, 修掉任何漏写造成的漂移。recompute_overview
     # 的返回值不吞: 万一某人重算失败, 报告里要能看出是谁、不能悄悄当没发生过。
@@ -102,7 +109,8 @@ async def rookie_sop_digest(hr_open_id: str = "") -> str:
         open_id = str(row.get("open_id") or "").strip()
         if not open_id or not detail_table:
             continue
-        detail = await _store.fetch_detail(bitable, app_token, detail_table, open_id)
+        detail, detail_truncated = await _store.fetch_detail(bitable, app_token, detail_table, open_id)
+        truncated = truncated or detail_truncated
         if not detail:
             continue
         role_label = next((str(r.get("适用角色") or "") for r in detail if r.get("适用角色") in {"研发", "非研发"}), "")
@@ -120,12 +128,15 @@ async def rookie_sop_digest(hr_open_id: str = "") -> str:
         if recomputed.get("ok") is not True:
             reconcile_errors.append(open_id)
 
-    overview_rows = await _fetch_overview(bitable, app_token, overview_table)
+    overview_rows, truncated_2 = await _fetch_overview(bitable, app_token, overview_table)
+    truncated = truncated or truncated_2
     active = active_rookies(overview_rows, today)
     if not active:
         result: dict[str, Any] = {"ok": True, "sent": False, "reason": "no active rookies"}
         if reconcile_errors:
             result["reconcile_errors"] = reconcile_errors
+        if truncated:
+            result["truncated"] = True
         return json.dumps(result, ensure_ascii=False)
 
     card, handlers = _card.digest_card(
@@ -158,4 +169,6 @@ async def rookie_sop_digest(hr_open_id: str = "") -> str:
     result = {"ok": True, "sent": True, "rookies": len(active)}
     if reconcile_errors:
         result["reconcile_errors"] = reconcile_errors
+    if truncated:
+        result["truncated"] = True
     return json.dumps(result, ensure_ascii=False)

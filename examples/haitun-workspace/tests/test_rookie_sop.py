@@ -345,19 +345,32 @@ def test_graduation_card_has_no_actions() -> None:
 class _FakeBitable:
     """假的 bitable 适配器: 只记录调用并按预设返回, 不碰飞书。
 
+    返回形状照抄 ``_feishu_impl.py`` 里真实工具的样子 —— 扁平, 没有 "result" 包装:
+
+    - ``search_bitable_records_impl`` → ``{ok, records, count, has_more, page_token, total}``
+    - ``create_bitable_records_impl``  → ``{ok, created: [record_id, ...], count}``
+    - ``update_bitable_records_impl``  → ``{ok, updated: [record_id, ...], count}``
+
     ``search_results`` 里每一页默认是「一批 item 字典」(单页, has_more=False,
     向后兼容原有测试); 若要测多页翻页, 传三元组
     ``(items, has_more, page_token)`` 代替。
+
+    ``fail_writes`` 为真时, ``create_records``/``update_records`` 返回
+    ``{"ok": False, "message": ...}`` —— 用来测「写被拒绝时调用方不能假装成功」
+    这条规则(FIX 3), 不用另起一个假适配器。
     """
 
     def __init__(
         self,
         search_results: list[list[dict[str, Any]] | tuple[list[dict[str, Any]], bool, str]] | None = None,
+        *,
+        fail_writes: bool = False,
     ) -> None:
         self._search_results = list(search_results or [])
         self.searches: list[dict[str, Any]] = []
         self.creates: list[dict[str, Any]] = []
         self.updates: list[dict[str, Any]] = []
+        self._fail_writes = fail_writes
 
     async def search_records(
         self,
@@ -378,8 +391,17 @@ class _FakeBitable:
             items, has_more, next_token = page
         else:
             items, has_more, next_token = page, False, ""
-        result = {"items": items, "has_more": has_more, "page_token": next_token}
-        return json.dumps({"ok": True, "result": result}, ensure_ascii=False)
+        return json.dumps(
+            {
+                "ok": True,
+                "records": items,
+                "count": len(items),
+                "has_more": has_more,
+                "page_token": next_token,
+                "total": len(items),
+            },
+            ensure_ascii=False,
+        )
 
     async def create_records(
         self,
@@ -390,8 +412,12 @@ class _FakeBitable:
         identity: str = "",
         validate_fields: bool = True,
     ) -> str:
-        self.creates.append({"table_id": table_id, "records": json.loads(records_json)})
-        return json.dumps({"ok": True}, ensure_ascii=False)
+        records = json.loads(records_json)
+        self.creates.append({"table_id": table_id, "records": records})
+        if self._fail_writes:
+            return json.dumps({"ok": False, "message": "fake create_records rejected"}, ensure_ascii=False)
+        created = [f"recNew{n}" for n in range(len(self.creates[-1]["records"]))]
+        return json.dumps({"ok": True, "created": created, "count": len(created)}, ensure_ascii=False)
 
     async def update_records(
         self,
@@ -402,8 +428,12 @@ class _FakeBitable:
         identity: str = "",
         validate_fields: bool = True,
     ) -> str:
-        self.updates.append({"table_id": table_id, "records": json.loads(records_json)})
-        return json.dumps({"ok": True}, ensure_ascii=False)
+        records = json.loads(records_json)
+        self.updates.append({"table_id": table_id, "records": records})
+        if self._fail_writes:
+            return json.dumps({"ok": False, "message": "fake update_records rejected"}, ensure_ascii=False)
+        updated = [str(r.get("record_id") or "") for r in records if isinstance(r, dict)]
+        return json.dumps({"ok": True, "updated": updated, "count": len(updated)}, ensure_ascii=False)
 
 
 def _item(record_id: str, fields: dict[str, Any]) -> dict[str, Any]:
@@ -429,6 +459,56 @@ def test_detail_fields_put_a_text_key_column_first() -> None:
     assert all(f["type"] != 19 for f in s.DETAIL_FIELDS + s.OVERVIEW_FIELDS)
 
 
+def test_detail_row_fields_seeds_dev_only_items_as_na_when_role_is_unknown() -> None:
+    """角色未答时开发环境项要直接种成 不适用, 否则 Day 1 分母会把它们算进去。"""
+    s = _load("_rookie_sop_store")
+    cfg = _load("_rookie_sop_config")
+    p = _load("_rookie_sop_progress")
+    items = cfg.load_sop(_CFG)
+    dev_item = next(i for i in items if i.dev_only)
+    plain_item = next(i for i in items if not i.dev_only)
+
+    dev_row = s.detail_row_fields(dev_item, open_id="ou_x", name="张三", onboard=date(2026, 8, 5))
+    plain_row = s.detail_row_fields(plain_item, open_id="ou_x", name="张三", onboard=date(2026, 8, 5))
+
+    assert dev_row["状态"] == p.STATUS_NA
+    assert plain_row["状态"] == p.STATUS_TODO
+
+
+def test_detail_row_fields_seeds_dev_only_items_as_todo_once_role_is_known() -> None:
+    """一旦落地时角色已知(比如重放事件时已经问过), 开发环境项不用再等复活。"""
+    s = _load("_rookie_sop_store")
+    cfg = _load("_rookie_sop_config")
+    p = _load("_rookie_sop_progress")
+    dev_item = next(i for i in cfg.load_sop(_CFG) if i.dev_only)
+
+    row = s.detail_row_fields(dev_item, open_id="ou_x", name="张三", onboard=date(2026, 8, 5), role_label="研发")
+
+    assert row["状态"] == p.STATUS_TODO
+
+
+def test_day_one_denominator_excludes_dev_items_before_role_is_chosen() -> None:
+    """Day 1: 三个非开发项 + 一个开发项(种成不适用)分母应是 3, 不是 4 ——
+    这正是 design 里「角色未答时开发环境不进分母」这条规格落到明细表里的效果。
+    """
+    s = _load("_rookie_sop_store")
+    cfg = _load("_rookie_sop_config")
+    p = _load("_rookie_sop_progress")
+    items = cfg.load_sop(_CFG)
+    onboard = date(2026, 8, 5)
+    rows = [s.detail_row_fields(i, open_id="ou_x", name="张三", onboard=onboard) for i in items]
+    # detail_row_fields 里的日期字段还是 millis, summarize 期望 date —— 用
+    # from_millis 转一下, 跟 fetch_detail 真实吐出来的行形状一致。
+    for row in rows:
+        row["入职日"] = s.from_millis(row["入职日"])
+        row["截止日"] = s.from_millis(row["截止日"])
+
+    got = p.summarize(rows, onboard)
+
+    assert got.total == len([i for i in items if not i.dev_only])
+    assert got.total == 3
+
+
 def test_fetch_detail_parses_rows_and_converts_dates() -> None:
     s = _load("_rookie_sop_store")
     p = _load("_rookie_sop_progress")
@@ -452,9 +532,10 @@ def test_fetch_detail_parses_rows_and_converts_dates() -> None:
         ]
     )
 
-    rows = anyio.run(s.fetch_detail, fake, "app1", "tblDetail", "ou_x")
+    rows, truncated = anyio.run(s.fetch_detail, fake, "app1", "tblDetail", "ou_x")
 
     assert len(rows) == 1
+    assert truncated is False
     assert rows[0]["record_id"] == "rec1"
     assert rows[0]["入职日"] == date(2026, 8, 5)
     assert rows[0]["截止日"] == date(2026, 8, 5)
@@ -480,13 +561,51 @@ def test_fetch_detail_follows_has_more_across_pages() -> None:
         ]
     )
 
-    rows = anyio.run(s.fetch_detail, fake, "app1", "tblDetail", "ou_x")
+    rows, truncated = anyio.run(s.fetch_detail, fake, "app1", "tblDetail", "ou_x")
 
     assert [r["record_id"] for r in rows] == ["rec1", "rec2"]
+    assert truncated is False
     assert len(fake.searches) == 2
     # 第一次不带 token, 第二次带上第一页返回的 token
     assert fake.searches[0]["page_token"] == ""
     assert fake.searches[1]["page_token"] == "tok1"
+
+
+def test_fetch_detail_stops_at_max_pages_against_a_server_that_never_stops() -> None:
+    """服务端一直回 has_more=True 且每页给一个新 token —— 没有页数上限会永远翻下去。
+
+    这里让假适配器每页都生成一个没见过的 token, 断言 fetch_detail 在
+    ``s.MAX_PAGES`` 页之后停手, 并把 truncated=True 报出来而不是假装读完了。
+    """
+    s = _load("_rookie_sop_store")
+    p = _load("_rookie_sop_progress")
+
+    class _NeverStopsBitable:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def search_records(self, app_token: str, table_id: str, filter_json: str = "", **kwargs: Any) -> str:
+            self.calls += 1
+            item = _item(f"rec{self.calls}", {"记录键": f"ou_x:item{self.calls}", "状态": p.STATUS_TODO})
+            return json.dumps(
+                {
+                    "ok": True,
+                    "records": [item],
+                    "count": 1,
+                    "has_more": True,
+                    "page_token": f"tok{self.calls}",
+                    "total": 1,
+                },
+                ensure_ascii=False,
+            )
+
+    fake = _NeverStopsBitable()
+
+    rows, truncated = anyio.run(s.fetch_detail, fake, "app1", "tblDetail", "ou_x")
+
+    assert truncated is True
+    assert fake.calls == s.MAX_PAGES
+    assert len(rows) == s.MAX_PAGES
 
 
 def test_mark_done_updates_status_and_completion_time() -> None:
@@ -503,6 +622,25 @@ def test_mark_done_updates_status_and_completion_time() -> None:
     fields = fake.updates[0]["records"][0]["fields"]
     assert fields["状态"] == p.STATUS_DONE
     assert fields["完成时间"] == s.to_millis(date(2026, 8, 6))
+
+
+def test_mark_done_surfaces_a_rejected_write_instead_of_reporting_ok() -> None:
+    """update_records 被飞书拒绝时不能报 ok=true —— 按钮已经被框架吃掉了, 行却
+    还停在未完成, 报成功等于让这一行永远点不动了。"""
+    s = _load("_rookie_sop_store")
+    p = _load("_rookie_sop_progress")
+    fake = _FakeBitable(
+        [[_item("rec1", {"记录键": "ou_x:wifi", "状态": p.STATUS_TODO})]],
+        fail_writes=True,
+    )
+
+    out = anyio.run(
+        lambda: s.mark_done(fake, "app1", "tblDetail", open_id="ou_x", item_id="wifi", today=date(2026, 8, 6))
+    )
+
+    assert out["ok"] is False
+    assert "error" in out
+    assert out["record_id"] == "rec1"
 
 
 def test_mark_done_is_idempotent_when_already_done() -> None:
@@ -726,15 +864,15 @@ def test_ensure_base_refuses_to_persist_an_incomplete_state(monkeypatch: Any) ->
     class _FakeApiModule:
         @staticmethod
         async def feishu_api(method: str, uri: str, body_json: str = "") -> str:
-            return json.dumps({"result": {"app": {"app_token": "app1"}}}, ensure_ascii=False)
+            return json.dumps({"ok": True, "code": 0, "data": {"app": {"app_token": "app1"}}}, ensure_ascii=False)
 
     class _FakeBitableModule:
         @staticmethod
         async def feishu_bitable_create_table(app_token: str, table_name: str, fields_json: str = "") -> str:
             # 明细表建成功, 总览表建失败(没有 table_id) —— 模拟半成品
             if table_name == "入职总览":
-                return json.dumps({"result": {}}, ensure_ascii=False)
-            return json.dumps({"result": {"table_id": "tblDetail"}}, ensure_ascii=False)
+                return json.dumps({"ok": True}, ensure_ascii=False)
+            return json.dumps({"ok": True, "table_id": "tblDetail"}, ensure_ascii=False)
 
     monkeypatch.setattr(r, "load_state", _fake_load_state)
     monkeypatch.setattr(r, "save_state", _fake_save_state)

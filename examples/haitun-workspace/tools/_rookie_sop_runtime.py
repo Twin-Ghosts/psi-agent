@@ -122,7 +122,9 @@ async def ensure_base(cfg: dict[str, Any]) -> dict[str, Any]:
             body_json=json.dumps({"name": f"{company}新人入职进度"}, ensure_ascii=False),
         )
     )
-    app_token = str(((created.get("result") or {}).get("app") or {}).get("app_token") or "")
+    # feishu_api 走的是通用 _resp_to_result 信封: {ok, code, msg, data} —— 没有
+    # "result" 这一层, app_token 在 data.app.app_token 里(飞书原始文档的结构)。
+    app_token = str(((created.get("data") or {}).get("app") or {}).get("app_token") or "")
     if not app_token:
         return {"ok": False, "error": f"cannot create bitable base: {created}"}
 
@@ -136,8 +138,10 @@ async def ensure_base(cfg: dict[str, Any]) -> dict[str, Any]:
             app_token, "入职总览", json.dumps(_store.OVERVIEW_FIELDS, ensure_ascii=False)
         )
     )
-    detail_table_id = str((detail.get("result") or {}).get("table_id") or "")
-    overview_table_id = str((overview.get("result") or {}).get("table_id") or "")
+    # feishu_bitable_create_table 是扁平结构 {ok, table_id, name, default_view_id,
+    # field_ids} —— table_id 直接在顶层, 同样没有 "result" 包装。
+    detail_table_id = str(detail.get("table_id") or "")
+    overview_table_id = str(overview.get("table_id") or "")
     # 不落半成品状态: 少了任何一个 table_id, 下次运行会拿着空 id 去调 fetch_detail /
     # create_records, 换回一个不明所以的飞书原始错误, 不如现在就报清楚缺了什么。
     if not detail_table_id or not overview_table_id:

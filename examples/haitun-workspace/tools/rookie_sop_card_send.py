@@ -11,6 +11,7 @@ import json
 import sys
 from datetime import date, datetime
 from pathlib import Path
+from typing import Any
 
 TOOLS_DIR = Path(__file__).resolve().parent
 if str(TOOLS_DIR) not in sys.path:
@@ -77,10 +78,10 @@ async def rookie_sop_card_send(
     overview_table = str(state["overview_table_id"])
 
     # 幂等: 已有明细行就不再建, 免得重复入职事件写出两套
-    rows = await _store.fetch_detail(bitable, app_token, detail_table, resolved_open_id)
+    rows, truncated = await _store.fetch_detail(bitable, app_token, detail_table, resolved_open_id)
     is_first_send = not rows
     if is_first_send:
-        await bitable.create_records(
+        seed_raw = await bitable.create_records(
             app_token,
             detail_table,
             json.dumps(
@@ -91,7 +92,16 @@ async def rookie_sop_card_send(
                 ensure_ascii=False,
             ),
         )
-        rows = await _store.fetch_detail(bitable, app_token, detail_table, resolved_open_id)
+        # 不查 ok 就往下走是致命的: 播种被飞书拒绝时明细表还是空的, 但下面仍会
+        # 当满员发出模块卡与建定时 —— 新人看见卡却点不出任何已存在的行, 且后续
+        # 事件因 is_first_send 已被此次(失败的)调用判过而永远不会再播种一次。
+        seed_ok, seed_error = _store._write_ok(seed_raw)
+        if not seed_ok:
+            return json.dumps(
+                {"ok": False, "error": f"create_records rejected: {seed_error}"}, ensure_ascii=False
+            )
+        rows, truncated_2 = await _store.fetch_detail(bitable, app_token, detail_table, resolved_open_id)
+        truncated = truncated or truncated_2
 
     today = date.today()
     await _store.recompute_overview(
@@ -159,13 +169,13 @@ async def rookie_sop_card_send(
     )
     schedule_failed = schedule_result.startswith("[Error]") and "already exists" not in schedule_result
 
-    return json.dumps(
-        {
-            "ok": not schedule_failed,
-            "open_id": resolved_open_id,
-            "items": len(items),
-            "cards_sent": sent,
-            "schedule": schedule_result,
-        },
-        ensure_ascii=False,
-    )
+    result: dict[str, Any] = {
+        "ok": not schedule_failed,
+        "open_id": resolved_open_id,
+        "items": len(items),
+        "cards_sent": sent,
+        "schedule": schedule_result,
+    }
+    if truncated:
+        result["truncated"] = True
+    return json.dumps(result, ensure_ascii=False)

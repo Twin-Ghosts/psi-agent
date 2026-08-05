@@ -104,6 +104,13 @@ def detail_row_fields(
     onboard: date,
     role_label: str = "",
 ) -> dict[str, Any]:
+    """种下一行明细。开发环境项在角色未答时状态直接种成 不适用, 而不是 未完成 ——
+    这样 Day 1 的分母从落地那一刻起就不含开发环境项(design 231 行的规格), 不用
+    等 recompute_overview 之外再补一次过滤调用点。选了「研发」后
+    rookie_sop_role_set 会把这些行复活成 未完成; 选「非研发」时它们保持
+    不适用, 与 mark_module_na 写出的终态一致。
+    """
+    status = _p.STATUS_NA if (item.dev_only and not role_label) else _p.STATUS_TODO
     return {
         "记录键": f"{open_id}:{item.item_id}",
         "姓名": name,
@@ -111,7 +118,7 @@ def detail_row_fields(
         "模块": item.module,
         "项": item.title,
         "验收标准": item.acceptance,
-        "状态": _p.STATUS_TODO,
+        "状态": status,
         "入职日": to_millis(onboard),
         "截止日": to_millis(_cfg.due_date(onboard, item.window_days)),
         "Mentor": "",
@@ -128,22 +135,29 @@ def _parse_result(raw: str) -> dict[str, Any]:
 
 
 def _items_of(raw: str) -> list[dict[str, Any]]:
+    """飞书搜索类工具返回的是扁平结构 {ok, records, count, has_more, page_token,
+    total} —— 没有 result 包装。"""
     payload = _parse_result(raw)
-    result = payload.get("result")
-    if not isinstance(result, dict):
-        return []
-    items = result.get("items")
-    return [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
+    records = payload.get("records")
+    return [i for i in records if isinstance(i, dict)] if isinstance(records, list) else []
 
 
 def _page_info(raw: str) -> tuple[bool, str]:
     payload = _parse_result(raw)
-    result = payload.get("result")
-    if not isinstance(result, dict):
-        return False, ""
-    has_more = bool(result.get("has_more"))
-    page_token = str(result.get("page_token") or "")
+    has_more = bool(payload.get("has_more"))
+    page_token = str(payload.get("page_token") or "")
     return has_more, page_token
+
+
+def _write_ok(raw: str) -> tuple[bool, str]:
+    """create_records/update_records 的返回同样是扁平 {ok, created/updated, count}。
+
+    ok 为假时把 message/error 带出来, 让调用方能报出真实原因而不是一句空的失败。
+    """
+    payload = _parse_result(raw)
+    if payload.get("ok") is True:
+        return True, ""
+    return False, str(payload.get("message") or payload.get("error") or "write failed")
 
 
 def _row_of(item: dict[str, Any]) -> dict[str, Any]:
@@ -163,26 +177,39 @@ def _eq_filter(field_name: str, value: str) -> str:
     )
 
 
-async def fetch_detail(bitable: Any, app_token: str, detail_table_id: str, open_id: str) -> list[dict[str, Any]]:
+MAX_PAGES = 50
+
+
+async def fetch_detail(
+    bitable: Any, app_token: str, detail_table_id: str, open_id: str
+) -> tuple[list[dict[str, Any]], bool]:
     """拉取一个人的全部明细行 —— 翻页直到 has_more 为假, 绝不只读第一页。
 
     单页缺失会让 recompute_overview 用不完整的行数算进度, 所以这里循环翻页而
-    不是信任 page_size 上限。防御性退出: 若响应说还有更多但没给新 token(空或
-    与刚发出的相同), 视为服务端异常, 停止而不是死循环。
+    不是信任 page_size 上限。防御性退出有两层: 响应说还有更多但没给新 token(空
+    或与刚发出的相同)视为服务端异常, 停止而不是死循环; 服务端若持续给「有更多」
+    且每次都换新 token(已见过的 token 集合挡不住这种), 循环页数上限
+    MAX_PAGES(与 _feishu_api_impl.py 的翻页上限同一防线)兜底, 与其死循环挂死
+    整个 fire=tool 回合, 不如报出「读到一半就停了」。
+
+    返回 (rows, truncated) —— truncated 为真时调用方拿到的是不完整读取, 不能
+    当成全量对待。
     """
     filter_json = _eq_filter("open_id", open_id)
     rows: list[dict[str, Any]] = []
     page_token = ""
-    while True:
+    seen_tokens = {""}
+    for _ in range(MAX_PAGES):
         raw = await bitable.search_records(
             app_token, detail_table_id, filter_json, page_size=500, page_token=page_token
         )
         rows.extend(_row_of(i) for i in _items_of(raw))
         has_more, next_token = _page_info(raw)
-        if not has_more or not next_token or next_token == page_token:
-            break
+        if not has_more or not next_token or next_token in seen_tokens:
+            return rows, False
+        seen_tokens.add(next_token)
         page_token = next_token
-    return rows
+    return rows, True
 
 
 async def mark_done(
@@ -206,7 +233,10 @@ async def mark_done(
     row = rows[0]
     if str(row.get("状态") or "") == _p.STATUS_DONE:
         return {"ok": True, "already_done": True, "record_id": row["record_id"], "duplicates": duplicates}
-    await bitable.update_records(
+    # 不查 ok 就返回成功是致命的: 框架此时已经消耗了这一行的墓碑并重绘掉了按钮,
+    # 一旦这次写入被飞书拒绝, 这一项就再也点不了了, 却还停在未完成 —— 必须让
+    # 调用方能看见写失败, 而不是替它掩盖。
+    raw = await bitable.update_records(
         app_token,
         detail_table_id,
         json.dumps(
@@ -214,6 +244,9 @@ async def mark_done(
             ensure_ascii=False,
         ),
     )
+    ok, error = _write_ok(raw)
+    if not ok:
+        return {"ok": False, "error": f"update_records rejected: {error}", "record_id": row["record_id"]}
     return {"ok": True, "already_done": False, "record_id": row["record_id"], "duplicates": duplicates}
 
 
@@ -226,11 +259,14 @@ async def mark_module_na(
     module: str,
     today: date,
 ) -> dict[str, Any]:
-    rows = await fetch_detail(bitable, app_token, detail_table_id, open_id)
+    rows, truncated = await fetch_detail(bitable, app_token, detail_table_id, open_id)
     targets = [r for r in rows if str(r.get("模块") or "") == module and str(r.get("状态") or "") != _p.STATUS_DONE]
     if not targets:
-        return {"ok": True, "marked": 0}
-    await bitable.update_records(
+        result: dict[str, Any] = {"ok": True, "marked": 0}
+        if truncated:
+            result["truncated"] = True
+        return result
+    raw = await bitable.update_records(
         app_token,
         detail_table_id,
         json.dumps(
@@ -238,7 +274,13 @@ async def mark_module_na(
             ensure_ascii=False,
         ),
     )
-    return {"ok": True, "marked": len(targets)}
+    ok, error = _write_ok(raw)
+    if not ok:
+        return {"ok": False, "error": f"update_records rejected: {error}"}
+    result = {"ok": True, "marked": len(targets)}
+    if truncated:
+        result["truncated"] = True
+    return result
 
 
 async def recompute_overview(
@@ -262,14 +304,20 @@ async def recompute_overview(
     existing = _items_of(raw)
     if existing:
         record_id = str(existing[0].get("record_id") or "")
-        await bitable.update_records(
+        write_raw = await bitable.update_records(
             app_token,
             overview_table_id,
             json.dumps([{"record_id": record_id, "fields": fields}], ensure_ascii=False),
         )
+        ok, error = _write_ok(write_raw)
+        if not ok:
+            return {"ok": False, "error": f"update_records rejected: {error}", "record_id": record_id}
         return {"ok": True, "created": False, "record_id": record_id, "fields": fields}
 
-    await bitable.create_records(
+    write_raw = await bitable.create_records(
         app_token, overview_table_id, json.dumps([{"fields": fields}], ensure_ascii=False)
     )
+    ok, error = _write_ok(write_raw)
+    if not ok:
+        return {"ok": False, "error": f"create_records rejected: {error}"}
     return {"ok": True, "created": True, "fields": fields}

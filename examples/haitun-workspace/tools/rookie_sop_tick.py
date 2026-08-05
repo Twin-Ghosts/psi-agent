@@ -105,7 +105,7 @@ async def rookie_sop_tick(card_action_json: str = "") -> str:
     if marked.get("ok") is not True:
         return json.dumps({"ok": False, "error": marked.get("error") or "mark_done failed"}, ensure_ascii=False)
 
-    rows = await _store.fetch_detail(bitable, app_token, detail_table, ctx["open_id"])
+    rows, truncated = await _store.fetch_detail(bitable, app_token, detail_table, ctx["open_id"])
     role = ""
     for row in rows:
         label = str(row.get("适用角色") or "")
@@ -141,4 +141,6 @@ async def rookie_sop_tick(card_action_json: str = "") -> str:
         result["duplicates"] = duplicates
     if overview_skipped_reason:
         result["overview_skipped_reason"] = overview_skipped_reason
+    if truncated:
+        result["truncated"] = True
     return json.dumps(result, ensure_ascii=False)

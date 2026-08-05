@@ -58,14 +58,17 @@ async def rookie_sop_remind(open_id: str = "") -> str:
         return json.dumps({"ok": False, "error": "rookie SOP base is not initialised"}, ensure_ascii=False)
 
     bitable = _rt.bitable_adapter()
-    rows = await _store.fetch_detail(bitable, app_token, detail_table, target)
+    rows, truncated = await _store.fetch_detail(bitable, app_token, detail_table, target)
     today = date.today()
     decision = decide_remind(rows, today)
     kind = decision["kind"]
     progress = decision["progress"]
 
     if kind == "silent":
-        return json.dumps({"ok": True, "sent": False, "reason": "nothing overdue or due today"}, ensure_ascii=False)
+        result = {"ok": True, "sent": False, "reason": "nothing overdue or due today"}
+        if truncated:
+            result["truncated"] = True
+        return json.dumps(result, ensure_ascii=False)
 
     cfg = await _store.load_config()
     name = next((str(r.get("姓名") or "") for r in rows if r.get("姓名")), target)
@@ -137,4 +140,6 @@ async def rookie_sop_remind(open_id: str = "") -> str:
     }
     if schedule_result:
         result["schedule"] = schedule_result
+    if truncated:
+        result["truncated"] = True
     return json.dumps(result, ensure_ascii=False)

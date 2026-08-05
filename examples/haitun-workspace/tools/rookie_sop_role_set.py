@@ -108,7 +108,7 @@ async def rookie_sop_role_set(card_action_json: str = "") -> str:
     is_dev = ctx["role"] == "dev"
     label = "研发" if is_dev else "非研发"
 
-    rows = await _store.fetch_detail(bitable, app_token, detail_table, ctx["open_id"])
+    rows, truncated = await _store.fetch_detail(bitable, app_token, detail_table, ctx["open_id"])
     dev_rows = [r for r in rows if str(r.get("模块") or "") == _DEV_MODULE]
     label_update_error = ""
     if dev_rows:
@@ -151,7 +151,8 @@ async def rookie_sop_role_set(card_action_json: str = "") -> str:
             if revived.get("ok") is not True:
                 revived_error = revived.get("message") or revived.get("error") or "状态 revive failed"
 
-    rows = await _store.fetch_detail(bitable, app_token, detail_table, ctx["open_id"])
+    rows, truncated_2 = await _store.fetch_detail(bitable, app_token, detail_table, ctx["open_id"])
+    truncated = truncated or truncated_2
     cfg = await _store.load_config()
     items = _cfg.load_sop(cfg)
     window = next((i.window_days for i in items if i.module == _DEV_MODULE), 7)
@@ -230,4 +231,6 @@ async def rookie_sop_role_set(card_action_json: str = "") -> str:
         result["label_update_error"] = label_update_error
     if overview_skipped_reason:
         result["overview_skipped_reason"] = overview_skipped_reason
+    if truncated:
+        result["truncated"] = True
     return json.dumps(result, ensure_ascii=False)
