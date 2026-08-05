@@ -88,6 +88,14 @@ import { filesFromClipboard } from "../services/clipboardFiles";
 import { useComposerFileDrop } from "../services/composerFileDrop";
 import { onComposerEnterKey } from "../services/composerKeys";
 import { streamSessionChat } from "../services/chatStream";
+import {
+  appendContentSegment,
+  contentSegmentsStart,
+  sealContentBeforeTools,
+  settleContentSegments,
+  streamSegmentBodies,
+  type ContentSegments,
+} from "../services/contentSegments";
 import { applyProgressEvent, progressLogStart, type ProgressLog } from "../services/turnProgress";
 import {
   historyToChat,
@@ -207,6 +215,8 @@ export default function HaiTunAgentWorkspace({
   const turnReasoningRef = useRef("");
   /** Sealed tool one-liners for the current turn (mirrors progress log ``lines``). */
   const turnToolsRef = useRef<string[]>([]);
+  /** Content segments across tool rounds — interim bubble + last segment as final. */
+  const turnContentSegRef = useRef<ContentSegments>(contentSegmentsStart());
   /** After Stop, block submit briefly — Stop↔Send swap under the same click would re-send the restored draft. */
   const suppressSubmitUntilRef = useRef(0);
   const historyLoadedRef = useRef<Set<string>>(new Set(["overview"]));
@@ -709,15 +719,23 @@ export default function HaiTunAgentWorkspace({
     setSidebarOpen(false);
   }, [collapseChat]);
 
-  const appendStreamingAgent = (cardId: string, delta: string) => {
+  const applyStreamBodies = (cardId: string, seg: ContentSegments) => {
+    const { interimText, text } = streamSegmentBodies(seg);
     setMessages((current) => {
       const list = [...(current[cardId] ?? [])];
       const last = list[list.length - 1];
       if (last?.role === "agent") {
-        // Preserve files: blob may arrive before more text deltas.
-        list[list.length - 1] = { ...last, text: last.text + delta };
+        list[list.length - 1] = {
+          ...last,
+          text,
+          ...(interimText.trim() ? { interimText } : { interimText: undefined }),
+        };
       } else {
-        list.push({ role: "agent", text: delta });
+        list.push({
+          role: "agent",
+          text,
+          ...(interimText.trim() ? { interimText } : {}),
+        });
       }
       return { ...current, [cardId]: list };
     });
@@ -820,6 +838,7 @@ export default function HaiTunAgentWorkspace({
     setTurnProgressLog(progressLogStart());
     turnReasoningRef.current = "";
     turnToolsRef.current = [];
+    turnContentSegRef.current = contentSegmentsStart();
     setTodoSegmentSelection((current) => ({ ...current, [cardId]: "live" }));
     const userVisible = titleSource ?? (text.trim() || "附件");
     let turnOk = false;
@@ -842,10 +861,11 @@ export default function HaiTunAgentWorkspace({
         {
           onText: (delta) => {
             if (!live()) return;
+            turnContentSegRef.current = appendContentSegment(turnContentSegRef.current, delta);
             setTurnProgressLog((prev) =>
               applyProgressEvent(prev ?? progressLogStart(), "content", ""),
             );
-            appendStreamingAgent(cardId, delta);
+            applyStreamBodies(cardId, turnContentSegRef.current);
           },
           onBlob: (name, data, path) => {
             if (!live()) return;
@@ -874,6 +894,10 @@ export default function HaiTunAgentWorkspace({
           },
           onReasoning: (delta, kind) => {
             if (!live()) return;
+            if (kind === "tool_call") {
+              turnContentSegRef.current = sealContentBeforeTools(turnContentSegRef.current);
+              applyStreamBodies(cardId, turnContentSegRef.current);
+            }
             if (delta) turnReasoningRef.current += delta;
             setTurnProgressLog((prev) => {
               const next = applyProgressEvent(prev ?? progressLogStart(), kind, delta);
@@ -889,9 +913,9 @@ export default function HaiTunAgentWorkspace({
         return;
       }
       turnOk = true;
-      assistantFull = full.trim();
+      assistantFull = settleContentSegments(turnContentSegRef.current).finalText || full.trim();
       const hasBlob = blobs.length > 0;
-      if (!full.trim() && !hasBlob) {
+      if (!full.trim() && !hasBlob && !assistantFull) {
         // No displayable reply — mark orphan user failed (same as history normalize).
         turnOk = false;
         setMessages((current) => {
@@ -969,14 +993,17 @@ export default function HaiTunAgentWorkspace({
       if (epoch === streamEpochRef.current) {
         const reasoningRaw = turnReasoningRef.current.trim();
         const tools = [...turnToolsRef.current];
-        // Keep thinking + tools when the agent bubble still exists (not Stop).
-        if ((reasoningRaw || tools.length) && !controller.signal.aborted) {
+        const { finalText } = settleContentSegments(turnContentSegRef.current);
+        // Settle: drop temporary step bubble; keep only the last segment as body.
+        if (!controller.signal.aborted) {
           setMessages((current) => {
             const list = [...(current[cardId] ?? [])];
             const last = list[list.length - 1];
             if (last?.role === "agent") {
               list[list.length - 1] = {
                 ...last,
+                text: finalText || last.text,
+                interimText: undefined,
                 ...(reasoningRaw ? { reasoning: reasoningRaw } : {}),
                 ...(tools.length ? { tools } : {}),
               };

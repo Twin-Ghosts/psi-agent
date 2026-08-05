@@ -306,7 +306,7 @@ export function FocusChatThread({
   };
 
   const hasContent =
-    messages.some((m) => m.text.trim() || (m.files?.length ?? 0) > 0) || typing;
+    messages.some((m) => m.text.trim() || (m.interimText ?? "").trim() || (m.files?.length ?? 0) > 0) || typing;
 
   const showAgentActions = (msg: ChatMessage) => {
     if (msg.role !== "agent") return false;
@@ -362,15 +362,18 @@ export function FocusChatThread({
       {messages.map((message, index) => {
         const isLast = index === messages.length - 1;
         const isLiveAgent = typing && isLast && message.role === "agent";
-        // Cursor-style: hide interim prose during tools/planning; once content
-        // SSE arrives (trailer → 撰写回复…), stream 正文 live under the process log.
         const writing = progressLog?.current === TURN_PROGRESS.writing;
-        const hideAgentProse = isLiveAgent && !writing;
         const clean = stripTransferMarkers(message.text);
-        const displayText = hideAgentProse ? "" : preferResultBelowRule(clean);
-        const showFiles = !hideAgentProse && (message.files?.length ?? 0) > 0;
+        const interimClean = stripTransferMarkers(message.interimText ?? "");
+        // Live: keep step interim + current segment visible (do not hide on tool rounds).
+        // Settled: optional prefer-below---- on the final body only.
+        const displayText = isLiveAgent ? clean : preferResultBelowRule(clean);
+        const interimDisplay = interimClean;
+        const showFiles = (message.files?.length ?? 0) > 0;
+        const showLiveProgress = isLiveAgent && Boolean(progressLog);
+        const showProse = Boolean(displayText.trim()) || Boolean(interimDisplay.trim()) || showFiles;
 
-        if (hideAgentProse) {
+        if (isLiveAgent && !showProse) {
           return (
             <ChatBlock role="agent" key={`typing-${index}`}>
               {thinkingBubble}
@@ -378,11 +381,12 @@ export function FocusChatThread({
           );
         }
 
-        if (!displayText.trim() && !showFiles && !(isLiveAgent && writing)) return null;
+        if (!showProse && !(isLiveAgent && writing)) return null;
 
-        const html = message.role === "agent"
+        const finalHtml = message.role === "agent"
           ? renderMd(displayText)
           : htmlEscape(displayText).replace(/\n/g, "<br>");
+        const interimHtml = interimDisplay.trim() ? renderMd(interimDisplay) : "";
 
         const failedLabel = message.failed
           ? (FAILED_REASON_LABEL[message.failedReason ?? "incomplete"] ?? FAILED_REASON_LABEL.incomplete)
@@ -432,7 +436,7 @@ export function FocusChatThread({
 
         return (
           <ChatBlock role={message.role} key={`${message.role}-${index}`}>
-            {isLiveAgent && writing ? thinkingBubble : null}
+            {showLiveProgress ? thinkingBubble : null}
             {message.role === "agent"
               && !isLiveAgent
               && (
@@ -464,10 +468,17 @@ export function FocusChatThread({
                   )}
                 </div>
               )}
+              {interimDisplay.trim() ? (
+                <div
+                  className="focus-chat-bubble is-interim"
+                  aria-label="步骤临时说明"
+                  dangerouslySetInnerHTML={{ __html: interimHtml }}
+                />
+              ) : null}
               {displayText.trim() ? (
                 <div
                   className="focus-chat-bubble"
-                  dangerouslySetInnerHTML={{ __html: html }}
+                  dangerouslySetInnerHTML={{ __html: finalHtml }}
                 />
               ) : null}
             </div>

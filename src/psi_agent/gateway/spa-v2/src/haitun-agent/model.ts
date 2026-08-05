@@ -70,6 +70,12 @@ export type FailedReason = "error" | "stopped" | "incomplete";
 export type ChatMessage = {
   role: "agent" | "user";
   text: string;
+  /**
+   * Live-only: concatenated step-between prose (sealed on each tool_call).
+   * Shown as a temporary bubble under the process log; cleared when the turn
+   * settles — not kept in ``processNotes`` / tools disclosures.
+   */
+  interimText?: string;
   files?: ChatFile[];
   /**
    * Thinking prose for this assistant turn (may still contain live SSE tool markers;
