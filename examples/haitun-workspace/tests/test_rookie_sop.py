@@ -1036,3 +1036,74 @@ def test_decide_remind_on_empty_rows_is_silent_not_graduate() -> None:
 
     # 明细还没建好时不能误报毕业
     assert rm.decide_remind([], date(2026, 8, 7))["kind"] == "silent"
+
+
+def test_active_rookies_keeps_in_progress_and_todays_graduates() -> None:
+    dg = _load("rookie_sop_digest")
+    overview = [
+        {"姓名": "张三", "状态": "进行中", "最后更新": date(2026, 8, 7)},
+        {"姓名": "李四", "状态": "已出新手村", "最后更新": date(2026, 8, 7)},  # 今天毕业, 报一次
+        {"姓名": "王五", "状态": "已出新手村", "最后更新": date(2026, 8, 1)},  # 早就毕业, 退场
+    ]
+
+    got = dg.active_rookies(overview, date(2026, 8, 7))
+
+    assert [r["姓名"] for r in got] == ["张三", "李四"]
+
+
+def test_active_rookies_on_empty_overview_is_empty() -> None:
+    dg = _load("rookie_sop_digest")
+    assert dg.active_rookies([], date(2026, 8, 7)) == []
+
+
+def test_rookie_sop_digest_sends_nothing_on_empty_roster(monkeypatch: Any) -> None:
+    """总览表空 —— 兜底对账无事可做, 也不该发卡, 但要报清楚 sent=False 的原因。"""
+    dg = _load("rookie_sop_digest")
+    fake = _FakeBitable([[], []])  # 对账前后各查一次总览, 都是空的
+
+    async def _fake_load_state() -> dict[str, Any]:
+        return {"app_token": "app1", "detail_table_id": "tblDetail", "overview_table_id": "tblOverview"}
+
+    dg._rt.bitable_adapter = lambda: fake
+    dg._rt.load_state = _fake_load_state
+
+    async def _fail_if_called(*args: Any, **kwargs: Any) -> str:
+        raise AssertionError("feishu_message_send_card must not be called on an empty roster")
+
+    monkeypatch.setattr(dg, "feishu_message_send_card", _fail_if_called)
+
+    out = json.loads(anyio.run(lambda: dg.rookie_sop_digest("ou_hr")))
+
+    assert out == {"ok": True, "sent": False, "reason": "no active rookies"}
+
+
+def test_rookie_sop_digest_follows_has_more_when_reading_the_overview_table(monkeypatch: Any) -> None:
+    """总览表随人数增长会翻页 —— 日报和兜底对账都不能只读第一页。"""
+    dg = _load("rookie_sop_digest")
+    page1 = _item("recOv1", {"open_id": "ou_x", "姓名": "张三", "状态": "进行中"})
+    page2 = _item("recOv2", {"open_id": "ou_y", "姓名": "李四", "状态": "进行中"})
+    fake = _FakeBitable(
+        [
+            ([page1], True, "tok1"),  # 第一次读总览(对账前): 第一页
+            ([page2], False, ""),  # 第一次读总览(对账前): 第二页
+            ([page1], True, "tok1"),  # 第二次读总览(渲染前): 第一页
+            ([page2], False, ""),  # 第二次读总览(渲染前): 第二页
+        ]
+    )
+
+    async def _fake_load_state() -> dict[str, Any]:
+        return {"app_token": "app1", "detail_table_id": "", "overview_table_id": "tblOverview"}
+
+    dg._rt.bitable_adapter = lambda: fake
+    dg._rt.load_state = _fake_load_state
+
+    async def _fake_send_card_ok(*args: Any, **kwargs: Any) -> str:
+        return json.dumps({"ok": True}, ensure_ascii=False)
+
+    monkeypatch.setattr(dg, "feishu_message_send_card", _fake_send_card_ok)
+
+    out = json.loads(anyio.run(lambda: dg.rookie_sop_digest("ou_hr")))
+
+    assert out == {"ok": True, "sent": True, "rookies": 2}
+    # 两次读总览各翻了一页, 一共发出 4 次 search_records
+    assert len(fake.searches) == 4
