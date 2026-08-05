@@ -894,3 +894,100 @@ def test_role_context_rejects_wrong_handler() -> None:
     payload["dispatch"] = {"handler": "rookie_sop_tick", "matched": True}
 
     assert rs._resolve_role(payload)["error"]
+
+
+def _dev_detail_rows(open_id: str = "ou_x", *, status: str = "未完成") -> list[dict[str, Any]]:
+    """五条 开发环境 明细行, 供角色回调的端到端测试用。"""
+    ids = ["read_agents_md", "setup_dev_env", "git_workflow", "code_review", "repo_access"]
+    return [
+        _item(
+            f"rec_{item_id}",
+            {"记录键": f"{open_id}:{item_id}", "模块": "开发环境", "状态": status, "适用角色": "仅研发"},
+        )
+        for item_id in ids
+    ]
+
+
+def test_role_set_surfaces_card_send_failure_as_not_ok(monkeypatch: Any) -> None:
+    """卡发送失败(含"发了但快照没存下来")时, 工具必须报 ok=false, 不能报成功。"""
+    rs = _load("rookie_sop_role_set")
+    fake = _FakeBitable(
+        [
+            _dev_detail_rows(),  # fetch_detail 拿开发环境明细行, 用于 适用角色 改写
+            _dev_detail_rows(),  # 复活/改写后重拉一次明细
+        ]
+    )
+    rs._rt.bitable_adapter = lambda: fake
+
+    async def _fake_load_state() -> dict[str, Any]:
+        return {}
+
+    rs._rt.load_state = _fake_load_state
+
+    async def _fake_send_card_fails(*args: Any, **kwargs: Any) -> str:
+        # send_card_impl 描述的"卡发出去了但快照没存下来"路径: ok=False 且
+        # callback_context_saved=False —— 按钮全是死的, 必须当失败处理。
+        return json.dumps(
+            {
+                "ok": False,
+                "message": "Feishu card was sent, but its callback context could not be saved",
+                "sent": True,
+                "callback_context_saved": False,
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(rs, "feishu_message_send_card", _fake_send_card_fails)
+
+    out = json.loads(anyio.run(lambda: rs.rookie_sop_role_set(_role_callback("dev"))))
+
+    assert out["ok"] is False
+    assert "error" in out
+
+
+def test_role_set_switching_nondev_to_dev_revives_all_five_rows(monkeypatch: Any) -> None:
+    """先选非研发(五行标不适用), 再选研发: 新卡必须拿到全部五行活的勾选行, 不能是 0。"""
+    rs = _load("rookie_sop_role_set")
+    na_rows = _dev_detail_rows(status="不适用")
+    fake = _FakeBitable(
+        [
+            na_rows,  # fetch_detail: 改写 适用角色 前先拉明细, 五行都还是 不适用
+            _dev_detail_rows(status="未完成"),  # 复活写回后重拉一次明细, 五行都变回未完成
+            [],  # recompute_overview 查总览 —— 没有, 走创建
+        ]
+    )
+    rs._rt.bitable_adapter = lambda: fake
+
+    async def _fake_load_state() -> dict[str, Any]:
+        return {}
+
+    rs._rt.load_state = _fake_load_state
+
+    sent_cards: list[dict[str, Any]] = []
+
+    async def _fake_send_card_ok(
+        receive_id: str,
+        card_json: str,
+        receive_id_type: str = "chat_id",
+        user_key: str = "",
+        business_context_json: str = "{}",
+        action_handlers_json: str = "{}",
+        multi_use: bool = False,
+    ) -> str:
+        sent_cards.append({"card": json.loads(card_json), "handlers": json.loads(action_handlers_json)})
+        return json.dumps(
+            {"ok": True, "callback_context_saved": True, "message_id": "om_1", "thread_id": "", "chat_id": ""},
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(rs, "feishu_message_send_card", _fake_send_card_ok)
+
+    out = json.loads(anyio.run(lambda: rs.rookie_sop_role_set(_role_callback("dev"))))
+
+    assert out["ok"] is True
+    assert out["dev_items"] == 5
+    # 复活写回: 五行 不适用 → 未完成 都要发生, 不是只改了 适用角色 标签
+    revive_call = next(u for u in fake.updates if any(f["fields"].get("状态") == "未完成" for f in u["records"]))
+    assert len(revive_call["records"]) == 5
+    # 新卡真的带着 5 个可点的 handlers, 不是零行死卡
+    assert len(sent_cards[0]["handlers"]) == 5

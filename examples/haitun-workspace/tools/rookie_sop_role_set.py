@@ -125,6 +125,7 @@ async def rookie_sop_role_set(card_action_json: str = "") -> str:
             label_update_error = updated.get("message") or updated.get("error") or "适用角色 update failed"
 
     na_marked = 0
+    revived_error = ""
     if not is_dev:
         na = await _store.mark_module_na(
             bitable, app_token, detail_table, open_id=ctx["open_id"], module=_DEV_MODULE, today=today
@@ -132,6 +133,23 @@ async def rookie_sop_role_set(card_action_json: str = "") -> str:
         if na.get("ok") is not True:
             return json.dumps({"ok": False, "error": na.get("error") or "mark_module_na failed"}, ensure_ascii=False)
         na_marked = na.get("marked") or 0
+    else:
+        # 刻意为之: 之前若选过「非研发」, 这五行已被标 不适用 —— 选回「研发」必须把它们
+        # 复活成 未完成(已完成的行不动, 免得把已做完的项目倒退回未完成), 否则
+        # fresh_dev_rows 会把它们继续当不适用过滤掉, 新卡发出去也是零行的死卡。
+        na_rows = [r for r in dev_rows if str(r.get("状态") or "") == _p.STATUS_NA]
+        if na_rows:
+            revive_raw = await bitable.update_records(
+                app_token,
+                detail_table,
+                json.dumps(
+                    [{"record_id": r["record_id"], "fields": {"状态": _p.STATUS_TODO}} for r in na_rows],
+                    ensure_ascii=False,
+                ),
+            )
+            revived = _store._parse_result(revive_raw)
+            if revived.get("ok") is not True:
+                revived_error = revived.get("message") or revived.get("error") or "状态 revive failed"
 
     rows = await _store.fetch_detail(bitable, app_token, detail_table, ctx["open_id"])
     cfg = await _store.load_config()
@@ -153,7 +171,7 @@ async def rookie_sop_role_set(card_action_json: str = "") -> str:
         "detail_table_id": detail_table,
         "overview_table_id": overview_table,
     }
-    await feishu_message_send_card(
+    sent_raw = await feishu_message_send_card(
         ctx["open_id"],
         json.dumps(card, ensure_ascii=False),
         "open_id",
@@ -162,6 +180,19 @@ async def rookie_sop_role_set(card_action_json: str = "") -> str:
         json.dumps(handlers, ensure_ascii=False),
         True,
     )
+    sent = _store._parse_result(sent_raw)
+    # 刻意为之: send_card_impl 在"卡发出去了但快照没存下来"时也回 ok=False
+    # (callback_context_saved=False) —— 那种情况按钮全是死的, 跟没发出去一样不能
+    # 报成功。不重试: 重试会把同一张卡再发一遍, 造出两张卡在新人面前抢按钮。
+    if sent.get("ok") is not True or sent.get("callback_context_saved") is False:
+        return json.dumps(
+            {
+                "ok": False,
+                "error": sent.get("message") or sent.get("error") or "feishu_message_send_card failed",
+                "role": ctx["role"],
+            },
+            ensure_ascii=False,
+        )
 
     overview_updated = False
     overview_skipped_reason = ""
@@ -188,6 +219,13 @@ async def rookie_sop_role_set(card_action_json: str = "") -> str:
     }
     if not is_dev:
         result["na_marked"] = na_marked
+    if is_dev and not fresh_dev_rows:
+        # dev_items == 0 在研发分支下是异常, 不是正常态: 新卡会是零行的死卡,
+        # 不能让调用方把它当普通成功悄悄放过。
+        result["ok"] = False
+        result["anomaly"] = "dev role settled with zero live 开发环境 rows; card has no tick buttons"
+    if revived_error:
+        result["revive_error"] = revived_error
     if label_update_error:
         result["label_update_error"] = label_update_error
     if overview_skipped_reason:
