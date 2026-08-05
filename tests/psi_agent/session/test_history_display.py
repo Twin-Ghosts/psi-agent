@@ -48,6 +48,37 @@ def test_messages_for_ai_rewrites_legacy_schedule_roles() -> None:
     assert not is_displayable_chat_message({"role": "user_schedule", "content": "heartbeat"})
 
 
+def test_messages_for_ai_drops_assistant_row_without_content_or_tool_calls() -> None:
+    # A reasoning-only turn (e.g. zero-text card-callback reply) must not reach
+    # the backend: OpenAI-compatible APIs reject an assistant message that has
+    # neither content nor tool_calls.
+    projected = messages_for_ai(
+        [
+            {"role": "user", "content": "click like", "kind": KIND_CHAT},
+            {"role": "assistant", "reasoning": "handled card callback", "kind": KIND_CHAT},
+            {"role": "user", "content": "next", "kind": KIND_CHAT},
+        ]
+    )
+    assert projected == [
+        {"role": "user", "content": "click like"},
+        {"role": "user", "content": "next"},
+    ]
+
+
+def test_messages_for_ai_keeps_assistant_rows_with_content_or_tool_calls() -> None:
+    # Content rows survive, and tool-call rows survive even without content.
+    projected = messages_for_ai(
+        [
+            {"role": "assistant", "content": "answer", "kind": KIND_CHAT},
+            {"role": "assistant", "reasoning": "thinking", "tool_calls": [{"id": "c1"}], "kind": KIND_CHAT},
+        ]
+    )
+    assert projected == [
+        {"role": "assistant", "content": "answer"},
+        {"role": "assistant", "reasoning": "thinking", "tool_calls": [{"id": "c1"}]},
+    ]
+
+
 def test_is_displayable_filters_by_kind_whitelist() -> None:
     assert is_displayable_chat_message({"role": "user", "content": "hi", "kind": KIND_CHAT})
     assert is_displayable_chat_message({"role": "assistant", "content": "hey"})  # omit → chat

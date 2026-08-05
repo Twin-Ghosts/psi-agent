@@ -182,7 +182,9 @@ def messages_for_ai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 role = wire_role(msg.get("role"))
                 if role is None:
                     continue
-                result.append(_project_for_ai(msg, role))
+                projected = _project_for_ai(msg, role)
+                if projected is not None:
+                    result.append(projected)
             return result
 
     out: list[dict[str, Any]] = []
@@ -192,12 +194,27 @@ def messages_for_ai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         role = wire_role(msg.get("role"))
         if role is None:
             continue
-        out.append(_project_for_ai(msg, role))
+        projected = _project_for_ai(msg, role)
+        if projected is not None:
+            out.append(projected)
     return out
 
 
-def _project_for_ai(msg: dict[str, Any], role: str) -> dict[str, Any]:
-    """Strip display-only keys, pin ``role``, and fold in ``turn_context``."""
+def _project_for_ai(msg: dict[str, Any], role: str) -> dict[str, Any] | None:
+    """Strip display-only keys, pin ``role``, and fold in ``turn_context``.
+
+    Returns ``None`` for an assistant row that carries neither text nor tool
+    calls — OpenAI-compatible backends reject such a message with
+    ``Invalid assistant message: content or tool_calls must be set``.  They
+    arise when a turn ends with reasoning only (e.g. a card-callback turn that
+    intentionally finishes with zero assistant content); dropping the row is
+    lossless because it holds no wire-visible output.
+    """
+    if role == "assistant" and not msg.get("tool_calls"):
+        content = msg.get("content")
+        has_content = content is not None and (not isinstance(content, str) or content.strip())
+        if not has_content:
+            return None
     projected = {k: v for k, v in msg.items() if k not in _DISPLAY_ONLY_KEYS}
     projected["role"] = role
     turn_context = msg.get(TURN_CONTEXT_KEY)
