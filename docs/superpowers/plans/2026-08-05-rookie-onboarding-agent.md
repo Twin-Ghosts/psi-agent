@@ -12,7 +12,17 @@
 
 ## Global Constraints
 
-- 所有测试用项目 venv 运行：`cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest <路径> -q`。不要用系统 `python3`（缺 `psi_agent`）。
+- 所有测试用项目 venv 运行，并且**必须带 `-o addopts=""`**：
+  `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest <路径> -q -o addopts=""`。
+  不要用系统 `python3`（缺 `psi_agent`）。
+  为什么要 `-o addopts=""`：`pyproject.toml` 的 `addopts` 里有 `--cov`，覆盖率会扫描整个仓库，
+  单文件测试会因此挂住几分钟而不是零点几秒（实测：加了这个开关是 0.06s，不加会超时）。
+- 测试里用 `importlib` 按路径加载 workspace 工具模块时，**必须在 `exec_module` 之前**
+  `sys.modules[spec.name] = mod`。Python 3.14 的 dataclasses 内部按
+  `sys.modules[cls.__module__]` 找命名空间，不注册会在 `@dataclass` 处抛 `AttributeError`。
+- 中文全角标点若出现在**文档字符串或注释**里，ruff 报的是 `RUF002`/`RUF003`（不是 `RUF001`，
+  那个只管字符串字面量）。按实际报出的码加 `# ruff: noqa: RUF002`（或 `RUF002, RUF003`）；
+  加了不该加的码会被 `RUF100`（unused noqa）反过来报错。仓库里 `tools/_chart_caption.py` 是先例。
 - 工具文件放 `examples/haitun-workspace/tools/`。**下划线开头的文件不会被注册成工具**（`_rookie_sop_*.py` 是内部模块），无下划线的每个文件对外暴露同名 async 函数。
 - 纯逻辑模块（`_rookie_sop_config.py` / `_rookie_sop_progress.py` / `_rookie_sop_card.py`）**禁止 import `_feishu_impl` 或任何飞书模块**，以便单测不需要凭据。
 - 工具返回值统一是 JSON 字符串；失败返回 `{"ok": false, "error": "..."}`，成功返回 `{"ok": true, ...}`。
@@ -318,7 +328,7 @@ def test_applicable_items_filters_dev_only_unless_role_is_dev() -> None:
 
 - [ ] **Step 3: 运行测试确认失败**
 
-Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q`
+Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
 Expected: FAIL，`FileNotFoundError` 或 `ModuleNotFoundError`（`_rookie_sop_config.py` 还不存在）
 
 - [ ] **Step 4: 写最小实现**
@@ -410,7 +420,7 @@ def applicable_items(items: list[SopItem], role: str) -> list[SopItem]:
 
 - [ ] **Step 5: 运行测试确认通过**
 
-Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q`
+Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
 Expected: 4 passed
 
 - [ ] **Step 6: 校验 yaml 能被解析且 item_id 唯一**
@@ -431,7 +441,8 @@ dev = [i for i in items if i.dev_only]
 print(f'共 {len(ids)} 项, 其中仅研发 {len(dev)} 项, 全员 {len(ids)-len(dev)} 项')
 "
 ```
-Expected: 输出 `共 33 项, 其中仅研发 5 项, 全员 28 项`（数字随 yaml 内容，只要无 assert 失败即可）
+Expected: 输出 `共 32 项, 其中仅研发 5 项, 全员 27 项`（模块分布：环境准备 5 / 认识人 4 /
+协同体系 5 / 工作规范 6 / 核心制度 3 / 每周节奏 4 / 开发环境 5）
 
 - [ ] **Step 7: 提交**
 
@@ -582,7 +593,7 @@ def test_overview_fields_role_unset_shows_pending() -> None:
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q`
+Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
 Expected: FAIL，`_rookie_sop_progress.py` 不存在
 
 - [ ] **Step 3: 写最小实现**
@@ -691,7 +702,7 @@ def overview_fields(
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q`
+Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
 Expected: 11 passed
 
 - [ ] **Step 5: 提交**
@@ -871,7 +882,7 @@ def test_graduation_card_has_no_actions() -> None:
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q`
+Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
 Expected: FAIL，`_rookie_sop_card.py` 不存在
 
 - [ ] **Step 3: 写最小实现**
@@ -1140,7 +1151,7 @@ def digest_card(
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q`
+Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
 Expected: 20 passed
 
 - [ ] **Step 5: 提交**
@@ -1420,7 +1431,7 @@ def test_recompute_overview_heals_a_corrupted_row() -> None:
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q`
+Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
 Expected: FAIL，`_rookie_sop_store.py` 不存在
 
 - [ ] **Step 3: 写最小实现**
@@ -1674,7 +1685,7 @@ async def recompute_overview(
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q`
+Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
 Expected: 29 passed
 
 - [ ] **Step 5: 提交**
@@ -1772,7 +1783,7 @@ def test_plan_module_cards_keeps_each_card_within_the_forty_row_cap() -> None:
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q`
+Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
 Expected: FAIL，`_rookie_sop_runtime.py` 不存在
 
 - [ ] **Step 3: 写 runtime 模块**
@@ -1925,7 +1936,7 @@ async def ensure_base(bitable_api: Any, cfg: dict[str, Any]) -> dict[str, Any]:
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q`
+Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
 Expected: 31 passed
 
 - [ ] **Step 5: 写入口工具**
@@ -2176,7 +2187,7 @@ def test_resolve_context_rejects_a_wrong_handler() -> None:
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q`
+Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
 Expected: FAIL，`rookie_sop_tick.py` 不存在
 
 - [ ] **Step 3: 写实现**
@@ -2325,7 +2336,7 @@ async def rookie_sop_tick(card_action_json: str = "") -> str:
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q`
+Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
 Expected: 34 passed
 
 - [ ] **Step 5: 提交**
@@ -2401,7 +2412,7 @@ def test_role_context_rejects_wrong_handler() -> None:
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q`
+Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
 Expected: FAIL，`rookie_sop_role_set.py` 不存在
 
 - [ ] **Step 3: 写实现**
@@ -2578,7 +2589,7 @@ async def rookie_sop_role_set(card_action_json: str = "") -> str:
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q`
+Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
 Expected: 36 passed
 
 - [ ] **Step 5: 提交**
@@ -2660,7 +2671,7 @@ def test_decide_remind_on_empty_rows_is_silent_not_graduate() -> None:
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q`
+Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
 Expected: FAIL，`rookie_sop_remind.py` 不存在
 
 - [ ] **Step 3: 写实现**
@@ -2778,7 +2789,7 @@ async def rookie_sop_remind(open_id: str = "") -> str:
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q`
+Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
 Expected: 40 passed
 
 - [ ] **Step 5: 提交**
@@ -2833,7 +2844,7 @@ def test_active_rookies_on_empty_overview_is_empty() -> None:
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q`
+Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
 Expected: FAIL，`rookie_sop_digest.py` 不存在
 
 - [ ] **Step 3: 写实现**
@@ -2958,7 +2969,7 @@ async def rookie_sop_digest(hr_open_id: str = "") -> str:
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q`
+Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
 Expected: 42 passed
 
 - [ ] **Step 5: 提交**
@@ -3025,7 +3036,7 @@ def test_agents_md_documents_the_new_tools() -> None:
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -k "trigger or agents_md"`
+Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -k "trigger or agents_md" -o addopts=""`
 Expected: FAIL，TRIGGER.md / SKILL.md 不存在
 
 - [ ] **Step 3: 写触发器**
@@ -3146,12 +3157,12 @@ agent_editable: true
 
 - [ ] **Step 6: 运行全部测试**
 
-Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q`
+Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_rookie_sop.py -q -o addopts=""`
 Expected: 45 passed
 
 - [ ] **Step 7: 跑工具发现测试确认没破坏既有登记**
 
-Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_tool_discovery.py examples/haitun-workspace/tests/test_prompt_sections.py -q`
+Run: `cd /public/home/wwb/Dolphin-Agent && .venv/bin/python -m pytest examples/haitun-workspace/tests/test_tool_discovery.py examples/haitun-workspace/tests/test_prompt_sections.py -q -o addopts=""`
 Expected: 全部 PASS（若报「工具未在 AGENTS.md 登记」，按提示补齐 Step 5 的两行）
 
 - [ ] **Step 8: 跑 lint**
@@ -3207,7 +3218,7 @@ Gateway/Session 与 Channel 进程都需要 `PSI_FEISHU_APP_ID` / `PSI_FEISHU_AP
 
 - [ ] **Step 5: 验证角色分支**
 
-选「我不是研发」，确认开发环境 5 项在明细表里变成 `不适用`，且总览的进度分母从 33 降到 28。
+选「我不是研发」，确认开发环境 5 项在明细表里变成 `不适用`，且总览的进度分母从 32 降到 27。
 另找一个测试 open_id 选「我是研发」，确认收到一张新卡列出 5 项。
 
 - [ ] **Step 6: 验证定时**
