@@ -1424,7 +1424,19 @@ export default function HaiTunAgentWorkspace({
         return;
       }
       const target = event.target as HTMLElement;
-      if (["INPUT", "TEXTAREA"].includes(target.tagName)) return;
+      const inField = ["INPUT", "TEXTAREA"].includes(target.tagName);
+      // Task flip: ←/→ when not typing; Alt+←/→ also works inside the composer.
+      if (
+        mainView === "workspace"
+        && (event.key === "ArrowLeft" || event.key === "ArrowRight")
+        && (!inField || event.altKey)
+      ) {
+        event.preventDefault();
+        if (event.key === "ArrowLeft") goTo(currentIndex - 1);
+        else goTo(currentIndex + 1);
+        return;
+      }
+      if (inField) return;
       if (mainView !== "workspace") {
         if (event.key === "Escape") {
           if (mainView === "new-task") setMainView(newTaskReturnView);
@@ -1432,8 +1444,6 @@ export default function HaiTunAgentWorkspace({
         }
         return;
       }
-      if (event.key === "ArrowLeft") goTo(currentIndex - 1);
-      if (event.key === "ArrowRight") goTo(currentIndex + 1);
       if (event.key === "Escape") setSidebarOpen(false);
     };
     window.addEventListener("keydown", onKeyDown);
@@ -1576,6 +1586,31 @@ export default function HaiTunAgentWorkspace({
               )}
               <AgentMark /><span>{expanded ? "任务工作区" : "关于"} <strong>{unitCard.title}</strong>{!expanded && " 的对话"}</span>
             </div>
+            {expanded && interactive && cards.length > 0 && (
+              <div className="focus-card-pager" role="navigation" aria-label="任务翻页">
+                <button
+                  type="button"
+                  className="focus-card-pager-btn"
+                  onClick={() => goTo(index - 1)}
+                  disabled={index === 0}
+                  aria-label="上一任务"
+                >
+                  <ArrowLeft size={14} />
+                </button>
+                <span className="focus-card-pager-label" aria-live="polite">
+                  {String(index + 1).padStart(2, "0")} / {String(cards.length).padStart(2, "0")}
+                </span>
+                <button
+                  type="button"
+                  className="focus-card-pager-btn"
+                  onClick={() => goTo(index + 1)}
+                  disabled={index === cards.length - 1}
+                  aria-label="下一任务"
+                >
+                  <ArrowRight size={14} />
+                </button>
+              </div>
+            )}
             <div className="quick-actions">
               {expanded && (
                 <>
@@ -2040,9 +2075,7 @@ export default function HaiTunAgentWorkspace({
 
         {mainView === "workspace" && cards.length > 0 && (
           <section className={`card-stage ${chatExpanded ? "chat-focus-stage" : ""}`} aria-label="任务卡片">
-            {!chatExpanded && (
-              <button type="button" className="card-arrow previous" onClick={() => goTo(currentIndex - 1)} disabled={currentIndex === 0} aria-label="上一张卡片"><ArrowLeft size={20} /></button>
-            )}
+            <button type="button" className="card-arrow previous" onClick={() => goTo(currentIndex - 1)} disabled={currentIndex === 0} aria-label="上一张卡片"><ArrowLeft size={20} /></button>
 
             <div className="task-unit-frame">
               {cardTransition && (
@@ -2059,9 +2092,7 @@ export default function HaiTunAgentWorkspace({
               </div>
             </div>
 
-            {!chatExpanded && (
-              <button type="button" className="card-arrow next" onClick={() => goTo(currentIndex + 1)} disabled={currentIndex === cards.length - 1} aria-label="下一张卡片"><ArrowRight size={20} /></button>
-            )}
+            <button type="button" className="card-arrow next" onClick={() => goTo(currentIndex + 1)} disabled={currentIndex === cards.length - 1} aria-label="下一张卡片"><ArrowRight size={20} /></button>
           </section>
         )}
 
