@@ -136,6 +136,16 @@ def _items_of(raw: str) -> list[dict[str, Any]]:
     return [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
 
 
+def _page_info(raw: str) -> tuple[bool, str]:
+    payload = _parse_result(raw)
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return False, ""
+    has_more = bool(result.get("has_more"))
+    page_token = str(result.get("page_token") or "")
+    return has_more, page_token
+
+
 def _row_of(item: dict[str, Any]) -> dict[str, Any]:
     fields = item.get("fields")
     row: dict[str, Any] = dict(fields) if isinstance(fields, dict) else {}
@@ -154,8 +164,25 @@ def _eq_filter(field_name: str, value: str) -> str:
 
 
 async def fetch_detail(bitable: Any, app_token: str, detail_table_id: str, open_id: str) -> list[dict[str, Any]]:
-    raw = await bitable.search_records(app_token, detail_table_id, _eq_filter("open_id", open_id), page_size=500)
-    return [_row_of(i) for i in _items_of(raw)]
+    """拉取一个人的全部明细行 —— 翻页直到 has_more 为假, 绝不只读第一页。
+
+    单页缺失会让 recompute_overview 用不完整的行数算进度, 所以这里循环翻页而
+    不是信任 page_size 上限。防御性退出: 若响应说还有更多但没给新 token(空或
+    与刚发出的相同), 视为服务端异常, 停止而不是死循环。
+    """
+    filter_json = _eq_filter("open_id", open_id)
+    rows: list[dict[str, Any]] = []
+    page_token = ""
+    while True:
+        raw = await bitable.search_records(
+            app_token, detail_table_id, filter_json, page_size=500, page_token=page_token
+        )
+        rows.extend(_row_of(i) for i in _items_of(raw))
+        has_more, next_token = _page_info(raw)
+        if not has_more or not next_token or next_token == page_token:
+            break
+        page_token = next_token
+    return rows
 
 
 async def mark_done(
@@ -172,9 +199,13 @@ async def mark_done(
     rows = [_row_of(i) for i in _items_of(raw)]
     if not rows:
         return {"ok": False, "error": f"detail row not found for {key}"}
+    # page_size=2 是特意选的: 只需要区分「恰好一行」和「不止一行」, 不需要拉全部
+    # 重复行。记录键理应唯一, 但重试等原因可能双写 —— 只标第一行会让重复行
+    # 永远卡在未完成, 悄悄破坏一人一项一行的前提, 所以这里必须报出重复数。
+    duplicates = len(rows) - 1
     row = rows[0]
     if str(row.get("状态") or "") == _p.STATUS_DONE:
-        return {"ok": True, "already_done": True, "record_id": row["record_id"]}
+        return {"ok": True, "already_done": True, "record_id": row["record_id"], "duplicates": duplicates}
     await bitable.update_records(
         app_token,
         detail_table_id,
@@ -183,7 +214,7 @@ async def mark_done(
             ensure_ascii=False,
         ),
     )
-    return {"ok": True, "already_done": False, "record_id": row["record_id"]}
+    return {"ok": True, "already_done": False, "record_id": row["record_id"], "duplicates": duplicates}
 
 
 async def mark_module_na(

@@ -343,9 +343,17 @@ def test_graduation_card_has_no_actions() -> None:
 
 
 class _FakeBitable:
-    """假的 bitable 适配器: 只记录调用并按预设返回, 不碰飞书。"""
+    """假的 bitable 适配器: 只记录调用并按预设返回, 不碰飞书。
 
-    def __init__(self, search_results: list[list[dict[str, Any]]] | None = None) -> None:
+    ``search_results`` 里每一页默认是「一批 item 字典」(单页, has_more=False,
+    向后兼容原有测试); 若要测多页翻页, 传三元组
+    ``(items, has_more, page_token)`` 代替。
+    """
+
+    def __init__(
+        self,
+        search_results: list[list[dict[str, Any]] | tuple[list[dict[str, Any]], bool, str]] | None = None,
+    ) -> None:
         self._search_results = list(search_results or [])
         self.searches: list[dict[str, Any]] = []
         self.creates: list[dict[str, Any]] = []
@@ -364,9 +372,14 @@ class _FakeBitable:
         automatic_fields: bool = False,
         user_key: str = "",
     ) -> str:
-        self.searches.append({"table_id": table_id, "filter_json": filter_json})
-        items = self._search_results.pop(0) if self._search_results else []
-        return json.dumps({"ok": True, "result": {"items": items, "has_more": False}}, ensure_ascii=False)
+        self.searches.append({"table_id": table_id, "filter_json": filter_json, "page_token": page_token})
+        page = self._search_results.pop(0) if self._search_results else []
+        if isinstance(page, tuple):
+            items, has_more, next_token = page
+        else:
+            items, has_more, next_token = page, False, ""
+        result = {"items": items, "has_more": has_more, "page_token": next_token}
+        return json.dumps({"ok": True, "result": result}, ensure_ascii=False)
 
     async def create_records(
         self,
@@ -449,6 +462,33 @@ def test_fetch_detail_parses_rows_and_converts_dates() -> None:
     assert "ou_x" in fake.searches[0]["filter_json"]
 
 
+def test_fetch_detail_follows_has_more_across_pages() -> None:
+    s = _load("_rookie_sop_store")
+    p = _load("_rookie_sop_progress")
+    fake = _FakeBitable(
+        [
+            (
+                [_item("rec1", {"记录键": "ou_x:wifi", "状态": p.STATUS_TODO})],
+                True,
+                "tok1",
+            ),
+            (
+                [_item("rec2", {"记录键": "ou_x:badge", "状态": p.STATUS_TODO})],
+                False,
+                "",
+            ),
+        ]
+    )
+
+    rows = anyio.run(s.fetch_detail, fake, "app1", "tblDetail", "ou_x")
+
+    assert [r["record_id"] for r in rows] == ["rec1", "rec2"]
+    assert len(fake.searches) == 2
+    # 第一次不带 token, 第二次带上第一页返回的 token
+    assert fake.searches[0]["page_token"] == ""
+    assert fake.searches[1]["page_token"] == "tok1"
+
+
 def test_mark_done_updates_status_and_completion_time() -> None:
     s = _load("_rookie_sop_store")
     p = _load("_rookie_sop_progress")
@@ -478,6 +518,29 @@ def test_mark_done_is_idempotent_when_already_done() -> None:
     assert out["already_done"] is True
     # 已完成就不再写一次
     assert fake.updates == []
+
+
+def test_mark_done_reports_duplicates_instead_of_silently_dropping_them() -> None:
+    s = _load("_rookie_sop_store")
+    p = _load("_rookie_sop_progress")
+    # 记录键理应唯一, 但这里模拟重试双写: 同一个键命中两行。
+    fake = _FakeBitable(
+        [
+            [
+                _item("rec1", {"记录键": "ou_x:wifi", "状态": p.STATUS_TODO}),
+                _item("rec2", {"记录键": "ou_x:wifi", "状态": p.STATUS_TODO}),
+            ]
+        ]
+    )
+
+    out = anyio.run(
+        lambda: s.mark_done(fake, "app1", "tblDetail", open_id="ou_x", item_id="wifi", today=date(2026, 8, 6))
+    )
+
+    assert out["ok"] is True
+    assert out["duplicates"] == 1
+    # 只标第一行, 但把重复情况报出来而不是悄悄吞掉
+    assert fake.updates[0]["records"][0]["record_id"] == "rec1"
 
 
 def test_mark_module_na_marks_every_row_of_that_module() -> None:
