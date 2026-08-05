@@ -1,0 +1,139 @@
+# 新人入职 SOP 清单 —— 改这里不用改代码。
+# window_days: SOP 的 Day 窗口天数（「Day 1-3」= 3）；截止日 = 入职日 + window_days - 1
+# dev_only: true 表示仅研发适用（新人在卡上自选角色后生效）
+
+company_name: 真知
+card_title_prefix: 入职路线图
+sop_doc_url: ""          # 完整 SOP 文档链接，上线前替换
+hr_notify_id: ""         # 罗霖的 open_id，空则日报不发
+hr_notify_id_type: open_id
+
+modules:
+  - name: 环境准备
+    window_days: 1
+    items:
+      - id: wifi
+        title: 连上 WiFi
+        acceptance: 能上网
+      - id: campus_card
+        title: 领取校园卡
+        acceptance: 能刷脸进校门
+      - id: desk
+        title: 找到工位
+        acceptance: 知道「我的座位在哪」
+      - id: feishu_account
+        title: 开通飞书账号
+        acceptance: 能登录飞书、看到团队群
+      - id: todo_account
+        title: 开通 TODO 账号
+        acceptance: 能打开 TODO 库
+
+  - name: 认识人
+    window_days: 1
+    items:
+      - id: know_mentor
+        title: 认识 Mentor
+        acceptance: 知道 Mentor 的名字和飞书
+      - id: know_leader
+        title: 认识小组负责人
+        acceptance: 知道谁给你派活
+      - id: know_functions
+        title: 认识职能对接人
+        acceptance: 知道缺东西、报销、请假找谁
+      - id: join_groups
+        title: 加入所有必要飞书群
+        acceptance: 日会群、项目群、全员群都在
+
+  - name: 协同体系
+    window_days: 2
+    items:
+      - id: mosaic_org
+        title: 理解马赛克组织
+        acceptance: 能理解「角色 ≠ 职级」
+      - id: todo_is_core
+        title: 理解 TODO 是核心工具
+        acceptance: 打开 TODO 库并能编辑
+      - id: who_assigns
+        title: 搞清谁派活、谁管你
+        acceptance: 能说出三个人分别是谁
+      - id: role_not_promotion
+        title: 理解角色不是晋升
+        acceptance: 理解「专家和复合型人才同样被认可」
+      - id: cross_project
+        title: 理解兼角色和跨项目
+        acceptance: 知道自己当前在哪些项目里
+
+  - name: 工作规范
+    window_days: 2
+    items:
+      - id: todo_writing
+        title: TODO 写法
+        acceptance: 每条 TODO = 做什么 + 标准 + 截止时间
+      - id: closed_loop
+        title: 闭环要求
+        acceptance: 接任务→按时交付→主动反馈
+      - id: communication
+        title: 沟通规范
+        acceptance: 带着方案找人，飞书文字留痕
+      - id: delivery_standard
+        title: 交付标准
+        acceptance: 别人拿到可以直接用、不用返工
+      - id: confidentiality
+        title: 保密规范
+        acceptance: 不把公司代码/数据喂给公共 AI
+      - id: ai_usage
+        title: AI 使用规范
+        acceptance: AI 生成的代码需要审查后提交
+
+  - name: 核心制度
+    window_days: 3
+    items:
+      - id: attendance
+        title: 了解考勤制度
+        acceptance: 知道打卡时间与补卡规则
+      - id: leave
+        title: 了解请假制度
+        acceptance: 知道飞书审批怎么请假
+      - id: payroll
+        title: 了解薪酬与考核
+        acceptance: 知道发薪日与 7:3 考核口径
+
+  - name: 每周节奏
+    window_days: 5
+    items:
+      - id: daily_meeting
+        title: 参加日会
+        acceptance: 知道会议号和项目组
+      - id: todo_update
+        title: 按时更新 TODO
+        acceptance: 第一次成功更新 TODO
+      - id: weekly_meeting
+        title: 参加周会
+        acceptance: 线下参加周会（A450）
+      - id: monthly_review
+        title: 月度复盘
+        acceptance: 完成第一次月度复盘
+
+  - name: 开发环境
+    window_days: 7
+    items:
+      - id: read_agents_md
+        title: 读 AGENTS.md
+        acceptance: 能用一句话说出项目的代码规范
+        dev_only: true
+      - id: setup_dev_env
+        title: 配好开发环境
+        acceptance: 能 clone 代码并跑起来
+        dev_only: true
+      - id: git_workflow
+        title: 了解 Git 工作流
+        acceptance: 知道怎么提 PR
+        dev_only: true
+      - id: code_review
+        title: 了解 Code Review
+        acceptance: 知道代码要谁 review
+        dev_only: true
+      - id: repo_access
+        title: 开通仓库权限
+        acceptance: 能 push 代码
+        dev_only: true
