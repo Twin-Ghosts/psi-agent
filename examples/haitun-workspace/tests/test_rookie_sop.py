@@ -991,3 +991,48 @@ def test_role_set_switching_nondev_to_dev_revives_all_five_rows(monkeypatch: Any
     assert len(revive_call["records"]) == 5
     # 新卡真的带着 5 个可点的 handlers, 不是零行死卡
     assert len(sent_cards[0]["handlers"]) == 5
+
+
+def test_decide_remind_stays_silent_when_nothing_is_due() -> None:
+    rm = _load("rookie_sop_remind")
+    p = _load("_rookie_sop_progress")
+    rows = [
+        _row("wifi", p.STATUS_DONE, date(2026, 8, 5)),
+        _row("attendance", p.STATUS_TODO, date(2026, 8, 20)),  # 还早
+    ]
+
+    got = rm.decide_remind(rows, date(2026, 8, 7))
+
+    assert got["kind"] == "silent"
+
+
+def test_decide_remind_fires_when_overdue_or_due_today() -> None:
+    rm = _load("rookie_sop_remind")
+    p = _load("_rookie_sop_progress")
+
+    overdue = [_row("wifi", p.STATUS_TODO, date(2026, 8, 5))]
+    assert rm.decide_remind(overdue, date(2026, 8, 7))["kind"] == "remind"
+
+    due_today = [_row("desk", p.STATUS_TODO, date(2026, 8, 7))]
+    assert rm.decide_remind(due_today, date(2026, 8, 7))["kind"] == "remind"
+
+
+def test_decide_remind_graduates_when_all_applicable_items_are_done() -> None:
+    rm = _load("rookie_sop_remind")
+    p = _load("_rookie_sop_progress")
+    rows = [
+        _row("wifi", p.STATUS_DONE, date(2026, 8, 5)),
+        _row("git_workflow", p.STATUS_NA, date(2026, 8, 11), module="开发环境"),
+    ]
+
+    got = rm.decide_remind(rows, date(2026, 8, 7))
+
+    assert got["kind"] == "graduate"
+    assert got["progress"].total == 1
+
+
+def test_decide_remind_on_empty_rows_is_silent_not_graduate() -> None:
+    rm = _load("rookie_sop_remind")
+
+    # 明细还没建好时不能误报毕业
+    assert rm.decide_remind([], date(2026, 8, 7))["kind"] == "silent"
