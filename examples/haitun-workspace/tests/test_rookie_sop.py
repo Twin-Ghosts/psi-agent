@@ -746,3 +746,55 @@ def test_ensure_base_refuses_to_persist_an_incomplete_state(monkeypatch: Any) ->
     assert out["ok"] is False
     assert "overview_table_id" in out["error"]
     assert saved == []
+
+
+def _callback(item_id: str, *, open_id: str = "ou_x", with_business: bool = True) -> str:
+    payload: dict[str, Any] = {
+        "action": {"value": {"action": f"rookie_tick_{item_id}", "item_id": item_id}},
+        "source": {"operator_open_id": open_id},
+        "dispatch": {"handler": "rookie_sop_tick", "matched": True},
+    }
+    if with_business:
+        payload["business_context"] = {
+            "type": "rookie_sop",
+            "open_id": open_id,
+            "name": "张三",
+            "module": "环境准备",
+            "app_token": "app1",
+            "detail_table_id": "tblDetail",
+            "overview_table_id": "tblOverview",
+        }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def test_resolve_context_prefers_business_context() -> None:
+    t = _load("rookie_sop_tick")
+
+    got = t._resolve_context(json.loads(_callback("wifi")))
+
+    assert got["open_id"] == "ou_x"
+    assert got["item_id"] == "wifi"
+    assert got["detail_table_id"] == "tblDetail"
+
+
+def test_resolve_context_falls_back_to_operator_and_action_value() -> None:
+    t = _load("rookie_sop_tick")
+
+    got = t._resolve_context(json.loads(_callback("desk", with_business=False)))
+
+    # business_context 缺失时仍能拿到点击者与 item_id
+    assert got["open_id"] == "ou_x"
+    assert got["item_id"] == "desk"
+    # 表 id 只能来自 business_context 或状态文件, 这里留空由工具兜底
+    assert got["detail_table_id"] == ""
+
+
+def test_resolve_context_rejects_a_wrong_handler() -> None:
+    t = _load("rookie_sop_tick")
+
+    payload = json.loads(_callback("wifi"))
+    payload["dispatch"] = {"handler": "something_else", "matched": True}
+
+    got = t._resolve_context(payload)
+
+    assert got["error"]
