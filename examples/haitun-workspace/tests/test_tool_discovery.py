@@ -6,16 +6,20 @@ Covers ``_tool_index`` (static AST scan) and the ``tool_search`` /
 
 from __future__ import annotations
 
+import base64
 import builtins
 import hashlib
 import importlib
+import inspect
 import json
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import anyio
+import httpx
 
 from psi_agent.session.tool_registry import ToolFunction
 
@@ -50,6 +54,7 @@ async def test_index_finds_known_tools_and_skips_private_files():
         "assignment_send_card",
         "assignment_accept",
         "assignment_delivery_refresh",
+        "organization_memory_add",
     } <= names
     # Private helper files (``_fetch_impl.py``) never expose a tool.
     assert "fetch_impl" not in names
@@ -62,6 +67,350 @@ async def test_assignment_read_tools_are_replayable():
     assert '"assignment_get"' in read_tools
     assert '"assignment_list"' in read_tools
     assert '"assignment_upsert"' not in read_tools
+
+
+async def test_memory_read_tools_route_one_explicit_visibility(monkeypatch):
+    memory = _MemoryStub(
+        memory_search=[{"ok": True}, {"ok": True}],
+        memory_answer_context=[{"ok": True}],
+    )
+    search_module = _import_memory_module("memory_search", memory, monkeypatch)
+    context_module = _import_memory_module("memory_answer_context", memory, monkeypatch)
+
+    personal = json.loads(await search_module.memory_search("release plan"))
+    organization = json.loads(await search_module.memory_search("release plan", visibility="organization"))
+    invalid = json.loads(await context_module.memory_answer_context("release plan", visibility="both"))
+
+    assert personal["ok"] is True
+    assert organization["ok"] is True
+    assert invalid["error"]["code"] == "invalid_argument"
+    assert memory.calls == [("memory_search", {"query": "release plan", "limit": 8, "visibility": "personal"}, True)]
+    assert memory.organization_calls == [
+        ("memory_search", {"query": "release plan", "limit": 8, "visibility": "organization"}, True)
+    ]
+    search_schema = ToolFunction.from_callable(search_module.memory_search).parameters["properties"]
+    context_schema = ToolFunction.from_callable(context_module.memory_answer_context).parameters["properties"]
+    assert search_schema["visibility"]["enum"] == ["personal", "organization"]
+    assert context_schema["visibility"]["enum"] == ["personal", "organization"]
+
+
+async def test_organization_memory_add_exposes_fact_fields_without_identity(monkeypatch):
+    memory = _MemoryStub(organization_memory_add=[{"ok": True, "result": {"deduplicated": False}}])
+    module = _import_memory_module("organization_memory_add", memory, monkeypatch)
+
+    signature = inspect.signature(module.organization_memory_add)
+    assert "organization_id" not in signature.parameters
+    assert "actor_user_id" not in signature.parameters
+    assert "feishu_open_id" not in signature.parameters
+    schema = ToolFunction.from_callable(module.organization_memory_add).parameters["properties"]
+    assert schema["category"]["enum"] == [
+        "project_context",
+        "decision",
+        "status",
+        "process",
+        "constraint",
+        "shared_reference",
+    ]
+    assert schema["source_type"]["enum"] == [
+        "feishu_message",
+        "feishu_doc",
+        "repository",
+        "task",
+        "other",
+    ]
+    assert "standalone" in schema["content"]["description"]
+    assert "evidence" in schema["source_ref"]["description"]
+    assert "ISO-8601" in schema["observed_at"]["description"]
+    assert "replaces" in schema["supersedes_fact_id"]["description"]
+
+    result = json.loads(
+        await module.organization_memory_add(
+            content="The project release window is Monday.",
+            category="decision",
+            source_type="feishu_doc",
+            source_ref="https://example.invalid/doc",
+            project="Project Alpha",
+            tags=["release", "decision"],
+        )
+    )
+
+    assert result["ok"] is True
+    assert memory.calls == []
+    name, arguments, retryable = memory.organization_calls[0]
+    assert name == "organization_memory_add"
+    assert retryable is False
+    assert arguments == {
+        "content": "The project release window is Monday.",
+        "category": "decision",
+        "source_type": "feishu_doc",
+        "source_ref": "https://example.invalid/doc",
+        "project": "Project Alpha",
+        "observed_at": None,
+        "supersedes_fact_id": None,
+        "tags": ["release", "decision"],
+    }
+
+
+async def test_organization_router_refreshes_stale_membership_once(monkeypatch):
+    mcp_module = importlib.import_module("_fusion_memory_mcp")
+    router = mcp_module.MemoryMcpRouter(SimpleNamespace())
+    sync_calls: list[tuple[str, bool]] = []
+    tool_calls: list[tuple[str, str]] = []
+
+    async def sync_membership(_config, open_id: str, *, force: bool = False):
+        sync_calls.append((open_id, force))
+        return {"ok": True}
+
+    async def call_for_session(session_id: str, name: str, arguments: dict[str, Any], *, retryable: bool):
+        del arguments, retryable
+        tool_calls.append((session_id, name))
+        if len(tool_calls) == 1:
+            return {"ok": False, "error": {"code": "organization_membership_stale", "retryable": True}}
+        return {"ok": True}
+
+    monkeypatch.setattr(mcp_module, "sync_current_membership", sync_membership)
+    monkeypatch.setattr(router, "call_tool_for_session", call_for_session)
+    monkeypatch.setattr(mcp_module, "get_session_id", lambda: "feishu-ou_member1")
+
+    result = await router.call_organization_tool("memory_search", {"query": "project"}, retryable=True)
+
+    assert result == {"ok": True}
+    assert sync_calls == [("ou_member1", True), ("ou_member1", True)]
+    assert tool_calls == [
+        ("feishu-ou_member1", "memory_search"),
+        ("feishu-ou_member1", "memory_search"),
+    ]
+
+
+async def test_organization_router_rechecks_cached_member_before_memory_access(monkeypatch):
+    mcp_module = importlib.import_module("_fusion_memory_mcp")
+    router = mcp_module.MemoryMcpRouter(SimpleNamespace())
+    tool_calls: list[str] = []
+
+    async def sync_membership(_config, _open_id: str, *, force: bool = False):
+        if force:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "organization_access_denied",
+                    "message": "Organization access is not available",
+                    "retryable": False,
+                },
+            }
+        return {"ok": True, "cached": True}
+
+    async def call_for_session(_session_id: str, name: str, _arguments: dict[str, Any], *, retryable: bool):
+        del retryable
+        tool_calls.append(name)
+        return {"ok": True}
+
+    monkeypatch.setattr(mcp_module, "sync_current_membership", sync_membership)
+    monkeypatch.setattr(router, "call_tool_for_session", call_for_session)
+    monkeypatch.setattr(mcp_module, "get_session_id", lambda: "feishu-ou_former_member")
+
+    result = await router.call_organization_tool("memory_search", {"query": "project"}, retryable=True)
+
+    assert result["error"]["code"] == "organization_access_denied"
+    assert tool_calls == []
+
+
+async def test_membership_assertion_reflects_group_roster(monkeypatch):
+    impl = types.ModuleType("_feishu_impl")
+
+    async def list_members(_chat_id: str):
+        return {"ok": True, "members": [{"id": "ou_member1", "name": "Member One"}]}
+
+    impl.list_chat_members_impl = list_members
+    monkeypatch.setitem(sys.modules, "_feishu_impl", impl)
+    sys.modules.pop("_fusion_memory_membership", None)
+    membership = importlib.import_module("_fusion_memory_membership")
+    config = SimpleNamespace(
+        organization_id="org-one",
+        organization_chat_id="oc_group",
+        feishu_app_id="cli_app",
+        feishu_app_secret="secret-value",
+    )
+
+    active = await membership.build_current_assertion(config, "ou_member1")
+    disabled = await membership.build_current_assertion(config, "ou_outsider")
+    active_payload = json.loads(base64.urlsafe_b64decode(active.encode("ascii")))["payload"]
+    disabled_payload = json.loads(base64.urlsafe_b64decode(disabled.encode("ascii")))["payload"]
+
+    assert active_payload["membership_status"] == "active"
+    assert disabled_payload["membership_status"] == "disabled"
+    assert active_payload["source_group_id"] == "oc_group"
+    assert active_payload["organization_id"] == "org-one"
+
+
+async def test_membership_sync_posts_once_until_refresh(monkeypatch):
+    impl = types.ModuleType("_feishu_impl")
+    roster_calls: list[str] = []
+
+    async def list_members(chat_id: str):
+        roster_calls.append(chat_id)
+        return {"ok": True, "members": [{"id": "ou_member1"}]}
+
+    impl.list_chat_members_impl = list_members
+    monkeypatch.setitem(sys.modules, "_feishu_impl", impl)
+    sys.modules.pop("_fusion_memory_membership", None)
+    membership = importlib.import_module("_fusion_memory_membership")
+    membership._SYNC_CACHE.clear()
+    posts: list[str] = []
+
+    async def post_assertion(_config, assertion: str):
+        posts.append(assertion)
+        return {"ok": True}
+
+    monkeypatch.setattr(membership, "_post_membership_assertion", post_assertion)
+    config = SimpleNamespace(
+        url="https://memory.example.invalid/mcp",
+        timeout_seconds=3,
+        organization_id="org-one",
+        organization_chat_id="oc_group",
+        feishu_app_id="cli_app",
+        feishu_app_secret="secret-value",
+    )
+
+    first = await membership.sync_current_membership(config, "ou_member1")
+    cached = await membership.sync_current_membership(config, "ou_member1")
+    refreshed = await membership.sync_current_membership(config, "ou_member1", force=True)
+
+    assert first == {"ok": True, "cached": False}
+    assert cached == {"ok": True, "cached": True}
+    assert refreshed == {"ok": True, "cached": False}
+    assert roster_calls == ["oc_group", "oc_group"]
+    assert len(posts) == 2
+
+
+async def test_membership_sync_records_revocation_and_denies_access(monkeypatch):
+    impl = types.ModuleType("_feishu_impl")
+
+    async def list_members(_chat_id: str):
+        return {"ok": True, "members": []}
+
+    impl.list_chat_members_impl = list_members
+    monkeypatch.setitem(sys.modules, "_feishu_impl", impl)
+    sys.modules.pop("_fusion_memory_membership", None)
+    membership = importlib.import_module("_fusion_memory_membership")
+    membership._SYNC_CACHE.clear()
+    statuses: list[str] = []
+
+    async def post_assertion(_config, assertion: str):
+        statuses.append(json.loads(base64.urlsafe_b64decode(assertion.encode("ascii")))["payload"]["membership_status"])
+        return {"ok": True}
+
+    monkeypatch.setattr(membership, "_post_membership_assertion", post_assertion)
+    config = SimpleNamespace(
+        url="https://memory.example.invalid/mcp",
+        timeout_seconds=3,
+        organization_id="org-one",
+        organization_chat_id="oc_group",
+        feishu_app_id="cli_app",
+        feishu_app_secret="secret-value",
+    )
+
+    result = await membership.sync_current_membership(config, "ou_outsider")
+
+    assert result["error"]["code"] == "organization_access_denied"
+    assert result["error"]["retryable"] is False
+    assert statuses == ["disabled"]
+
+
+async def test_membership_sync_hides_unexpected_feishu_failure(monkeypatch):
+    impl = types.ModuleType("_feishu_impl")
+
+    async def list_members(_chat_id: str):
+        raise RuntimeError("transport internals and secret-value")
+
+    impl.list_chat_members_impl = list_members
+    monkeypatch.setitem(sys.modules, "_feishu_impl", impl)
+    sys.modules.pop("_fusion_memory_membership", None)
+    membership = importlib.import_module("_fusion_memory_membership")
+    membership._SYNC_CACHE.clear()
+    config = SimpleNamespace(
+        url="https://memory.example.invalid/mcp",
+        timeout_seconds=3,
+        organization_id="org-one",
+        organization_chat_id="oc_group",
+        feishu_app_id="cli_app",
+        feishu_app_secret="secret-value",
+    )
+
+    result = await membership.sync_current_membership(config, "ou_member1")
+
+    assert result["error"] == {
+        "code": "organization_membership_unverified",
+        "message": "Organization membership could not be verified",
+        "retryable": True,
+    }
+    assert "secret-value" not in json.dumps(result)
+
+
+async def test_membership_sync_classifies_remote_http_status(monkeypatch):
+    impl = types.ModuleType("_feishu_impl")
+
+    async def list_members(_chat_id: str):
+        return {"ok": True, "members": [{"id": "ou_member1"}]}
+
+    impl.list_chat_members_impl = list_members
+    monkeypatch.setitem(sys.modules, "_feishu_impl", impl)
+    sys.modules.pop("_fusion_memory_membership", None)
+    membership = importlib.import_module("_fusion_memory_membership")
+    membership._SYNC_CACHE.clear()
+    config = SimpleNamespace(
+        url="https://memory.example.invalid/mcp",
+        timeout_seconds=3,
+        organization_id="org-one",
+        organization_chat_id="oc_group",
+        feishu_app_id="cli_app",
+        feishu_app_secret="secret-value",
+    )
+
+    async def reject(_config, _assertion: str):
+        request = httpx.Request("POST", "https://memory.example.invalid/feishu/membership")
+        response = httpx.Response(403, request=request)
+        raise httpx.HTTPStatusError("secret-value", request=request, response=response)
+
+    monkeypatch.setattr(membership, "_post_membership_assertion", reject)
+
+    rejected = await membership.sync_current_membership(config, "ou_member1")
+
+    assert rejected["error"] == {
+        "code": "organization_membership_rejected",
+        "message": "Organization membership proof was rejected",
+        "retryable": False,
+    }
+    assert "secret-value" not in json.dumps(rejected)
+
+    async def unavailable(_config, _assertion: str):
+        request = httpx.Request("POST", "https://memory.example.invalid/feishu/membership")
+        response = httpx.Response(503, request=request)
+        raise httpx.HTTPStatusError("secret-value", request=request, response=response)
+
+    monkeypatch.setattr(membership, "_post_membership_assertion", unavailable)
+
+    retryable = await membership.sync_current_membership(config, "ou_member1")
+
+    assert retryable["error"] == {
+        "code": "organization_membership_unverified",
+        "message": "Organization membership could not be verified",
+        "retryable": True,
+    }
+    assert "secret-value" not in json.dumps(retryable)
+
+
+def test_memory_config_reads_organization_chat_id():
+    config_module = importlib.import_module("_fusion_memory_config")
+    config = config_module.build_memory_config(
+        {
+            "FUSION_MEMORY_MCP_URL": "https://memory.example.invalid/mcp",
+            "FUSION_MEMORY_ORGANIZATION_ID": "org-one",
+            "FUSION_MEMORY_FEISHU_ORGANIZATION_CHAT_ID": "oc_group",
+        }
+    )
+
+    assert config.organization_id == "org-one"
+    assert config.organization_chat_id == "oc_group"
 
 
 async def test_assignment_upsert_binds_session_identity_and_normalizes_fields(monkeypatch):
@@ -359,9 +708,22 @@ class _MemoryStub:
     def __init__(self, **responses: list[dict[str, Any]]) -> None:
         self.responses = {name: list(values) for name, values in responses.items()}
         self.calls: list[tuple[str, dict[str, Any], bool]] = []
+        self.organization_calls: list[tuple[str, dict[str, Any], bool]] = []
 
     async def call_tool(self, name: str, arguments: dict[str, Any], *, retryable: bool) -> dict[str, Any]:
         self.calls.append((name, arguments, retryable))
+        queue = self.responses.get(name)
+        if queue:
+            return queue.pop(0)
+        return {
+            "ok": False,
+            "error": {"code": "not_configured", "message": f"no response for {name}", "retryable": False},
+        }
+
+    async def call_organization_tool(
+        self, name: str, arguments: dict[str, Any], *, retryable: bool
+    ) -> dict[str, Any]:
+        self.organization_calls.append((name, arguments, retryable))
         queue = self.responses.get(name)
         if queue:
             return queue.pop(0)
@@ -553,6 +915,16 @@ def _button_values(card: dict[str, Any]) -> list[dict[str, Any]]:
         for action in element.get("actions", [])
         if isinstance(action, dict) and isinstance(action.get("value"), dict)
     ]
+
+
+def _import_memory_module(name: str, memory: _MemoryStub, monkeypatch) -> Any:
+    mcp_path = TOOLS_DIR / "_fusion_memory_mcp.py"
+    mcp_name = f"fusion_memory_tool__fusion_memory_mcp_{hashlib.sha256(str(mcp_path).encode()).hexdigest()[:12]}"
+    mcp_module = types.ModuleType(mcp_name)
+    mcp_module.__dict__["CLIENT"] = memory
+    monkeypatch.setitem(sys.modules, mcp_name, mcp_module)
+    sys.modules.pop(name, None)
+    return importlib.import_module(name)
 
 
 def _import_assignment_module(

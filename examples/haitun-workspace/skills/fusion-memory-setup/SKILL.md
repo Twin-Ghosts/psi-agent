@@ -17,6 +17,8 @@ values before starting Haitun:
 ```bash
 export FUSION_MEMORY_MCP_URL="https://memory.example.com/mcp"
 export FUSION_MEMORY_TOKEN_MAP_FILE="/absolute/path/to/memory_tokens.json"
+export FUSION_MEMORY_ORGANIZATION_ID="<organization>"
+export FUSION_MEMORY_FEISHU_ORGANIZATION_CHAT_ID="<organization-chat>"
 ```
 
 - `FUSION_MEMORY_MCP_URL` is the remote MCP Streamable HTTP endpoint. TLS is
@@ -25,6 +27,20 @@ export FUSION_MEMORY_TOKEN_MAP_FILE="/absolute/path/to/memory_tokens.json"
   by Feishu `open_id`. Each entry requires a non-empty `token`; `workspace_id`
   is optional provenance and defaults to `haitun` when empty or omitted. Keep
   the file outside the workspace and source control.
+- `FUSION_MEMORY_ORGANIZATION_ID` and
+  `FUSION_MEMORY_FEISHU_ORGANIZATION_CHAT_ID` bind shared memory to the
+  configured organization and its current Feishu group roster. Both are
+  required whenever organization memory is enabled; the model cannot choose
+  either value.
+
+The Gateway/Session process must also receive `PSI_FEISHU_APP_ID` and
+`PSI_FEISHU_APP_SECRET` for the same Feishu application used by its channel.
+The bot must belong to the configured organization group and the application
+must have `im:chat` permission so the runtime can page through the full member
+roster. Configure the Memory service with the matching
+`FUSION_MEMORY_FEISHU_APP_ID`, `FUSION_MEMORY_FEISHU_APP_SECRET`, and
+`FUSION_MEMORY_FEISHU_ORGANIZATION_CHAT_ID`; a mismatch is rejected rather than
+falling back to cached or model-provided identity.
 
 Map membership enables durable memory. On a mapped user's first message after
 startup, Haitun initiates authenticated `memory_health` and starts passive
@@ -48,10 +64,11 @@ next message.
 
 ## Use
 
-Use `memory_health` for an explicit connectivity check, `memory_add` only for
-durable reusable facts, and the search/context tools when previous information
-is relevant. Completed conversation turns are already written passively; do
-not duplicate transient turns with explicit `memory_add`.
+Use `memory_health` for an explicit connectivity check and `memory_add` only
+for durable personal facts. Use the `organization-memory` Skill for shared
+project and organization facts, including the explicit read visibility and
+provenance rules. Completed conversation turns are already written passively;
+do not duplicate transient turns with explicit memory writes.
 
 If the current user is not mapped or the remote service is unavailable,
 continue with the current conversation and workspace files. Do not edit `.env`,

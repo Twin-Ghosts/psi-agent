@@ -37,6 +37,7 @@ class MemoryMcpConfig:
     max_retries: int
     auto_register_feishu: bool = False
     organization_id: str | None = None
+    organization_chat_id: str | None = None
     feishu_app_id: str | None = field(default=None, repr=False)
     feishu_app_secret: str | None = field(default=None, repr=False)
 
@@ -129,6 +130,7 @@ def build_memory_config(env: Mapping[str, str] | None = None) -> MemoryMcpConfig
         ),
         auto_register_feishu=_bool_env(values.get("FUSION_MEMORY_AUTO_REGISTER_FEISHU")),
         organization_id=(values.get("FUSION_MEMORY_ORGANIZATION_ID") or "").strip() or None,
+        organization_chat_id=(values.get("FUSION_MEMORY_FEISHU_ORGANIZATION_CHAT_ID") or "").strip() or None,
         feishu_app_id=(values.get("PSI_FEISHU_APP_ID") or values.get("FUSION_MEMORY_FEISHU_APP_ID") or "").strip()
         or None,
         feishu_app_secret=(

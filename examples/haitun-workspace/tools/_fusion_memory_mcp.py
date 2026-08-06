@@ -50,6 +50,10 @@ ResolvedMemoryConfig = _config_module["ResolvedMemoryConfig"]
 CONFIG = _config_module["CONFIG"]
 resolve_memory_config = _config_module["resolve_memory_config"]
 validate_mcp_url = _config_module["validate_mcp_url"]
+_open_id_from_session = _config_module["_open_id_from_session"]
+
+_, _membership_module = _load_sibling_module("_fusion_memory_membership")
+sync_current_membership = _membership_module["sync_current_membership"]
 
 _, _history_module = _load_sibling_module("_fusion_memory_history")
 completed_history_batches = _history_module["completed_history_batches"]
@@ -399,6 +403,36 @@ class MemoryMcpRouter:
 
     async def call_tool(self, name: str, arguments: dict[str, Any], *, retryable: bool) -> dict[str, Any]:
         return await self.call_tool_for_session(get_session_id(), name, arguments, retryable=retryable)
+
+    async def call_organization_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        retryable: bool,
+    ) -> dict[str, Any]:
+        session_id = get_session_id().strip()
+        open_id = _open_id_from_session(session_id)
+        if open_id is None:
+            return _error(
+                "memory_user_not_configured",
+                "Organization memory requires a trusted Feishu Session",
+                False,
+            )
+        # Organization access is checked against the current group roster on
+        # every operation so a cached proof cannot outlive group membership.
+        membership = await sync_current_membership(self._config, open_id, force=True)
+        if membership.get("ok") is not True:
+            return membership
+        result = await self.call_tool_for_session(session_id, name, arguments, retryable=retryable)
+        error = result.get("error")
+        error_code = error.get("code") if isinstance(error, dict) else None
+        if error_code != "organization_membership_stale":
+            return result
+        membership = await sync_current_membership(self._config, open_id, force=True)
+        if membership.get("ok") is not True:
+            return membership
+        return await self.call_tool_for_session(session_id, name, arguments, retryable=retryable)
 
     async def call_tool_for_session(
         self,

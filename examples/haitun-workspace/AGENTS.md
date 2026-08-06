@@ -48,7 +48,8 @@ them. Haitun consumes this MCP service only and must not use legacy REST routes.
 | `FUSION_MEMORY_MCP_URL` | Remote Fusion Memory MCP Streamable HTTP endpoint; TLS is terminated by its reverse proxy. |
 | `FUSION_MEMORY_TOKEN_MAP_FILE` | Absolute path to the operator-owned JSON map keyed by Feishu `open_id`; each entry requires `token`, while empty or omitted `workspace_id` defaults to `haitun`. |
 | `FUSION_MEMORY_AUTO_REGISTER_FEISHU` | Optional first-use Feishu private-chat registration. When true and a `feishu-<open_id>` Session is missing from the token map, the workspace signs a short-lived registration assertion with the Feishu app secret, asks Memory to register that `open_id`, and writes the returned bearer token into the token map. |
-| `FUSION_MEMORY_ORGANIZATION_ID` | Required with automatic registration; identifies the organization selected for this deployment. |
+| `FUSION_MEMORY_ORGANIZATION_ID` | Required whenever organization memory or automatic registration is enabled; identifies the organization selected for this deployment. |
+| `FUSION_MEMORY_FEISHU_ORGANIZATION_CHAT_ID` | Required for organization memory; identifies the Feishu group whose current roster may access shared facts. Organization operations refresh a signed membership record without exposing the group or assertion to the model. |
 | `FUSION_MEMORY_TOKEN` | Legacy single-user bearer token, used only when no token-map path is configured. |
 | `FUSION_MEMORY_WORKSPACE_ID` | Legacy single-user workspace provenance (defaults to `haitun`). |
 | `FUSION_MEMORY_SESSION_ID` | Optional legacy single-user Session provenance. |
@@ -65,6 +66,15 @@ ordinary chat turns, excludes schedule/heartbeat/compaction rows, and skips unch
 Validated maps are cached by file signature. Each active turn renews a five-minute watcher lease;
 idle watcher/client resources are reclaimed and restart on the next message. Server provisioning
 and token creation remain operator actions.
+
+Organization memory also requires the Gateway/Session process to receive
+`PSI_FEISHU_APP_ID` and `PSI_FEISHU_APP_SECRET` for the same Feishu application
+used by the channel. The bot must be a member of the configured organization
+group and the application must have the `im:chat` permission needed to list its
+full roster. The Memory service must use the matching
+`FUSION_MEMORY_FEISHU_APP_ID`, `FUSION_MEMORY_FEISHU_APP_SECRET`, and
+`FUSION_MEMORY_FEISHU_ORGANIZATION_CHAT_ID`; otherwise membership assertions
+fail closed.
 
 This is a trusted-runtime boundary: the Feishu Channel, Gateway, Session runtime and management
 tools, host shell, and token-map file must be trusted. `feishu-<open_id>` is not a cryptographic
@@ -161,7 +171,7 @@ service tools:
 | `channel_event_check` | 自查 agent `channel_events/` 的事件（只读、无副作用）。`action=list` 看加载了哪些事件名；`action=shape` + `platform_event=` 用真实 lark SDK 模型给出字段所在层级（`im.message.receive_v1` 的 `chat_id` 在 `event['message']['chat_id']`）；`action=probe` + `event=` 拿样例事件试跑该事件自己的 `map.py`，返回空时打印 mapper 实际拿到的结构与可读路径。**改完 `map.py` 必须先 probe 再上线** —— mapper 返回 `[]` 在日志里与「去重跳过」无法区分。 |
 | `handbook_onboarding_send_welcome` / `handbook_onboarding_process_submit` | 入职管理制度确认闭环：欢迎卡（链接+表单）→ 校验 → 通过双侧通知 / 失败重发新卡。配置 `config/handbook_onboarding.yaml`；触发器 `handbook-onboarding-welcome` 挂 `feishu.hr.user_created`。卡片回调 skill：`feishu-handbook-onboarding`。 |
 | `feishu_todo_card_send` / `feishu_todo_card_tick` | 一张卡列多条待办、**逐条勾选**（普通卡片点一次就整张退休，故用不了）。`feishu_todo_card_send` 组卡：每行一个形状勾选框（`circle` ○● / `square` □■ / `diamond` ◇◆ / `triangle` △▲ / `star` ☆★ / `check` ☐☑）、标题链到该行的飞书任务（applink，因为 `task/v2` 返回体里**没有** web URL）、可选 `detail` 第二行、进度行，单卡上限 40 条，`done` 行渲染成删除线且不给按钮。底层用 `send_card_impl(multi_use=True)`，逐行 at-most-once（详见 `channel/AGENTS.md`「`multi_use` 卡」）；每行 `action` 必须唯一规范，工具自动生成 `todo_tick_<行号>`。`feishu_todo_card_tick` 是它的回调 handler：`PATCH /open-apis/task/v2/tasks/:task_guid` 写 `completed_at`（**毫秒**字符串）**且必须带 `update_fields: ["completed_at"]`**——不带会返回成功但什么都不改。**必须先建飞书任务再发卡**（行链接指向任务）；行内无 `task_guid` 时返回 `task_updated: false` 并说明原因，这不是错误。机器人不是任务成员时会被拒，传点击者 `user_key` 以本人身份完成。连点会被合并成一个批（`<feishu_card_action_batch>`），**每条都要逐个调本工具、但只回一条消息**。技能：`feishu-todo-card`。 |
-| `memory_add` / `memory_search` / `memory_answer_context` / `memory_health` / `assignment_upsert` / `assignment_get` / `assignment_list` / `assignment_transition` | Per-Session routed Fusion Memory MCP tools. Authentication comes only from the trusted runtime Session and operator token map. Assignment tools carry generic work-arrangement facts and state transitions; they do not expose organization_id in tool arguments. |
+| `memory_add` / `memory_search` / `memory_answer_context` / `organization_memory_add` / `memory_health` / `assignment_upsert` / `assignment_get` / `assignment_list` / `assignment_transition` | Per-Session routed Fusion Memory MCP tools. Authentication comes only from the trusted runtime Session and operator token map. Reads select exactly one `personal` or `organization` visibility; the sole organization write tool stores one traceable shared fact after a server-derived Feishu membership check. Assignment tools remain the authority for work-arrangement facts and state transitions. No tool exposes organization or actor identity arguments. |
 | `assignment_send_card` / `assignment_accept` | Work-assignment delivery pair. `assignment_send_card` fetches the authoritative Memory record and explicitly separates unmodified assigner input, Agent analysis, and references in one single-action Feishu card. `assignment_accept` trusts only the current Feishu Session identity, verifies that operator is a listed recipient, confirms receipt, then internally uses Memory's atomic publication claim so only one Gateway creates the bot-owned Feishu task. Finalization appends the task URL or failure without faking a business-state transition. Failed or unfinished claims require manual reconciliation and are never automatically retried because Feishu task creation has no client idempotency key. |
 | `assignment_feedback` | Shared feedback-thread adapter for blocking, non-blocking, and record-only task feedback. It derives the actor from the trusted Feishu Session or validated card callback, appends immutable replies in Memory, edits the assigner card in place, and sends the recipient confirmation projection when required. |
 | `assignment_delivery_refresh` | Trigger-only assignment progress refresher. The synthetic `haitun.assignment.delivery_check` event routes one silent `fire=tool` invocation to each registered Feishu Session; the tool lists only that authenticated assigner's pending Memory records, checks bot-message readers for at most seven days, and edits the existing assigner progress card in place. Conversation flows and skills must not call it directly. |
