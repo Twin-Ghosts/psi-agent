@@ -321,7 +321,10 @@ class FileEntry:
 
 
 _SYS_PATH_LOCK = anyio.Lock()
-"""Guards the read-then-insert on ``sys.path``; held only for that, never for a scan."""
+"""Guards the refcount read-then-modify; held only for that, never for a scan."""
+
+_SYS_PATH_DEPTH: dict[str, int] = {}
+"""How many in-flight loads need each ``sys.path`` entry (see ``_tools_dir_on_sys_path``)."""
 
 
 @asynccontextmanager
@@ -343,30 +346,34 @@ async def _tools_dir_on_sys_path(entry: str) -> AsyncIterator[None]:
     the overlap window. It does **not** give exclusive path access: two *different*
     agent packages can be on ``sys.path`` simultaneously.
 
-    Note what is *not* broken without the guard: a duplicate self-corrects, because
-    each exit removes one copy — ``sys.path`` acts as a crude refcount, so no loader
-    is ever left without its entry (verified, not assumed). The guard buys a path
-    that stays honest to read and avoids paying for duplicate entries on every
-    import lookup; it is not preventing a stranding bug.
-
     A scan-wide lock would cost far more than it fixes: a full load is ~2.7s for
     haitun's 262 tools (longer on an ``.mcp_cache`` miss, where ``@mcp`` shells out
     to ``npx`` during import), so N Sessions starting together would queue
     N x 2.7s before any of them answered a request — and it would still not fix the
-    real cross-package hazard, which lives in ``sys.modules``, not ``sys.path``:
+    three hazards below, none of which live in ``sys.path`` at all. All three are
+    inherent to bare sibling imports and all three are **observed**, not theorized:
 
-    - Helpers are cached under their **bare** name and stay there after the load.
-      Whichever package imports ``_fusion_memory_config`` first wins for the life
-      of the process; a later package with a same-named helper silently gets the
-      first one. Five such names already exist across the bundled example
-      workspaces. Serializing the scans would not change this — it only changes
-      *which* load happens to be first.
-    - A helper whose name shadows a stdlib module wins over the stdlib while the
-      entry is in front. Keeping the underscore prefix convention avoids this.
+    1. **Helpers never reload.** They are cached in ``sys.modules`` under their bare
+       name and nothing here evicts them (only ``psi_tool_*`` modules are, on the
+       error path). Editing ``_helper.py`` therefore has *no effect* even after a
+       ``refresh()`` that re-imports the tool file: the re-import gets the stale
+       helper. Restarting the Session is the only way. Hot reload covers tool files,
+       not their helpers.
+    2. **Same-named helpers collide across agent packages.** Whichever package
+       imports ``_fusion_memory_config`` first wins for the life of the process; a
+       later package with a same-named helper silently gets the first one. Five such
+       names already exist across the bundled example workspaces. Serializing the
+       scans would not change this — only *which* load happens to be first.
+    3. **A tool file whose name shadows a stdlib module poisons the process.** With
+       ``tools/`` in front of ``sys.path``, a ``tools/secrets.py`` makes
+       ``import secrets`` resolve to the tool file — and because that lands in
+       ``sys.modules``, it **outlives the load window** and every later importer in
+       the process, framework included, gets the tool file. The underscore
+       convention does not help: tool files are not underscore-prefixed.
 
-    So the honest boundary is: **one agent package per process is safe; several
-    distinct packages sharing helper names in one process is not**, and no locking
-    here can make it safe. Give such deployments separate processes.
+    So the honest boundary is: **one agent package per process, and no tool file
+    named after a stdlib module.** No locking here can make either case safe.
+    Deployments that need several distinct packages should use separate processes.
 
     *entry* must already be an absolute path string. It is normalized by the caller
     rather than here: turning a relative path absolute reads the process CWD, which
@@ -374,27 +381,50 @@ async def _tools_dir_on_sys_path(entry: str) -> AsyncIterator[None]:
     ``ASYNC240`` exists to catch. In production the path arrives absolute anyway —
     ``Session.run`` resolves it with ``await anyio.Path(...).resolve()``.
 
-    Only the exact string this inserted is removed, and only if this call is the
-    one that inserted it — so an entry a tool file added itself, or one an
-    overlapping load already put there, is left for its owner to remove.
+    **Refcounted, 刻意为之 — both simpler alternatives are wrong, each in its own
+    direction (observed, not reasoned about):**
+
+    - Insert unconditionally and always remove → every overlapping loader stacks
+      another copy of the entry, so ``sys.path`` grows for the overlap window and
+      is misleading to read.
+    - Insert only when absent and remove only what you inserted → the loader that
+      inserted can finish first and pull the entry out from under a second one that
+      is still mid-scan, whose bare ``from _helper import ...`` then raises
+      ``ModuleNotFoundError``. This is *worse* than the duplicate.
+
+    One counter keyed by path fixes both: exactly one entry for any number of
+    overlapping loaders, removed only when the last of them leaves. An entry that
+    was **already on the path before any load** is borrowed rather than counted —
+    tool files insert this very directory themselves at import time, and removing
+    theirs would be a different corruption.
     """
     async with _SYS_PATH_LOCK:
-        # Already present (same agent pack loading concurrently, or a tool file
-        # inserted it itself): leave it alone and do not remove it on exit.
-        inserted = entry not in sys.path
-        if inserted:
-            sys.path.insert(0, entry)
+        depth = _SYS_PATH_DEPTH.get(entry, 0)
+        if depth == 0 and entry in sys.path:
+            # Someone else owns this entry — a tool file that inserted it at import
+            # time, or the host process. Borrow it and never remove it.
+            owned = False
+        else:
+            owned = True
+            _SYS_PATH_DEPTH[entry] = depth + 1
+            if depth == 0:
+                sys.path.insert(0, entry)
     try:
         yield
     finally:
         # No ``await`` in this cleanup, 刻意为之: re-acquiring the lock here would be
         # a cancellation checkpoint, and a cancelled scan would skip the removal and
-        # leak the entry for the life of the process (observed, then fixed). Mutating
-        # a list is atomic under the GIL and needs no lock; only the read-then-insert
-        # above does, and that is where the lock is.
-        if inserted:
-            with suppress(ValueError):
-                sys.path.remove(entry)
+        # leak the entry for the life of the process (observed, then fixed). Dict and
+        # list mutation is atomic under the GIL; only the read-then-modify on entry
+        # needs the lock, and that is where the lock is.
+        if owned:
+            remaining = _SYS_PATH_DEPTH.get(entry, 1) - 1
+            if remaining <= 0:
+                _SYS_PATH_DEPTH.pop(entry, None)
+                with suppress(ValueError):
+                    sys.path.remove(entry)
+            else:
+                _SYS_PATH_DEPTH[entry] = remaining
 
 
 # ── ToolRegistry — loading, state, incremental refresh ───────────────────────

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import sys
 import textwrap
 from pathlib import Path
@@ -731,15 +732,13 @@ async def test_import_failure_is_recorded_with_its_reason(tmp_path: Path) -> Non
 
 @pytest.mark.anyio
 async def test_overlapping_loads_of_one_dir_do_not_duplicate_the_path_entry() -> None:
-    """Overlapping loaders on the same dir must not stack duplicate entries.
+    """Overlapping loaders on one dir keep exactly one entry, not two.
 
-    Two Sessions on one agent pack overlap routinely (Gateway starts them
-    together, and every ``await py_file.read_bytes()`` is a yield point). Inserting
-    unconditionally leaves the entry on ``sys.path`` twice for the overlap window.
-    That happens to self-correct — each exit removes one copy — so it is not a
-    stranding bug, but a growing path is still measurable import-time cost paid on
-    every lookup, and the duplicate makes ``sys.path`` misleading to read while
-    debugging. Overlap is forced with an explicit await inside the outer context.
+    Two Sessions on one agent pack overlap routinely: Gateway starts them together
+    and every ``await py_file.read_bytes()`` is a yield point. Inserting
+    unconditionally would leave the entry on ``sys.path`` twice for the overlap
+    window — a longer path is cost paid on every import lookup, and it makes
+    ``sys.path`` misleading to read while debugging.
     """
     entry = "/overlap-test-tools-dir"
     before = list(sys.path)
@@ -763,6 +762,38 @@ async def test_overlapping_loads_of_one_dir_do_not_duplicate_the_path_entry() ->
 
 
 @pytest.mark.anyio
+async def test_first_loader_to_exit_does_not_strand_a_still_running_one() -> None:
+    """The entry survives until the *last* overlapping loader leaves.
+
+    Regression guard for a refcount that was once a boolean: with "remove only what
+    I inserted", the loader that inserted could finish first and pull the entry out
+    from under a second one still mid-scan, whose bare ``from _helper import ...``
+    then raised ModuleNotFoundError. Timing is the reverse of the test above — here
+    the *inserter* is short-lived and the follower outlives it.
+    """
+    entry = "/strand-test-tools-dir"
+    before = list(sys.path)
+    follower_saw_entry: list[bool] = []
+
+    async def inserter() -> None:
+        async with _tools_dir_on_sys_path(entry):
+            await anyio.sleep(0.03)
+
+    async def follower() -> None:
+        await anyio.sleep(0.01)  # enter while `inserter` holds it
+        async with _tools_dir_on_sys_path(entry):
+            await anyio.sleep(0.06)  # outlive `inserter`
+            follower_saw_entry.append(entry in sys.path)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(inserter)
+        tg.start_soon(follower)
+
+    assert follower_saw_entry == [True], "an exiting loader stranded one that was still importing"
+    assert sys.path == before
+
+
+@pytest.mark.anyio
 async def test_cancelled_load_still_removes_its_path_entry() -> None:
     """Cancellation must not leak the entry for the life of the process.
 
@@ -783,6 +814,70 @@ async def test_cancelled_load_still_removes_its_path_entry() -> None:
 
     assert entry not in sys.path, "cancelled load leaked its sys.path entry"
     assert sys.path == before
+
+
+@pytest.mark.anyio
+async def test_editing_a_helper_does_not_take_effect_until_restart(tmp_path: Path) -> None:
+    """Documents a known limit: hot reload covers tool files, not their helpers.
+
+    Helpers are cached in ``sys.modules`` under their bare name and nothing evicts
+    them, so a re-imported tool file still binds the *old* helper. This test asserts
+    the stale behaviour on purpose — if someone later makes helpers reload, this test
+    should fail and be rewritten, not deleted.
+    """
+    tools_dir = tmp_path / "tools"
+    await anyio.Path(tools_dir).mkdir()
+    helper = anyio.Path(tools_dir / "_hot.py")
+    await helper.write_text("VALUE = 'v1'\n", encoding="utf-8")
+    await anyio.Path(tools_dir / "uses_hot.py").write_text(
+        "from _hot import VALUE\n\n\nasync def read_hot() -> str:\n    return VALUE\n",
+        encoding="utf-8",
+    )
+    registry = await ToolRegistry.load(tools_dir, "hot")
+    func = registry.get("read_hot")
+    assert func is not None
+    assert await func() == "v1"
+
+    await helper.write_text("VALUE = 'v2'\n", encoding="utf-8")
+    await anyio.Path(tools_dir / "uses_hot.py").write_text(
+        "from _hot import VALUE\n\n\nasync def read_hot() -> str:\n    return VALUE  # touched\n",
+        encoding="utf-8",
+    )
+    await registry.refresh()
+
+    refreshed = registry.get("read_hot")
+    assert refreshed is not None
+    assert await refreshed() == "v1", "helper unexpectedly reloaded — update this test and the docs"
+
+
+@pytest.mark.anyio
+async def test_tool_file_named_after_a_stdlib_module_shadows_it(tmp_path: Path) -> None:
+    """Documents the sharpest hazard of putting ``tools/`` on ``sys.path``.
+
+    A ``tools/<stdlib name>.py`` wins over the stdlib for any importer in the
+    process while the entry is in front, and the result is cached in ``sys.modules``
+    so it outlasts the load window. Pinned here so the constraint "do not name a
+    tool after a stdlib module" is enforced by a failing test if it ever changes.
+    """
+    stdlib_name = "secrets"
+    tools_dir = tmp_path / "tools"
+    await anyio.Path(tools_dir).mkdir()
+    await anyio.Path(tools_dir / f"{stdlib_name}.py").write_text(
+        "SHADOW_MARKER = True\n\n\nasync def shadowing_tool() -> str:\n    return 'shadow'\n",
+        encoding="utf-8",
+    )
+    had_it = sys.modules.pop(stdlib_name, None)
+    try:
+        entry = str(await anyio.Path(tools_dir).absolute())
+        async with _tools_dir_on_sys_path(entry):
+            shadowed = importlib.import_module(stdlib_name)
+            assert getattr(shadowed, "SHADOW_MARKER", False) is True, "expected the tool file to win"
+        # Still poisoned after the window, because sys.modules kept it.
+        assert getattr(sys.modules[stdlib_name], "SHADOW_MARKER", False) is True
+    finally:
+        sys.modules.pop(stdlib_name, None)
+        if had_it is not None:
+            sys.modules[stdlib_name] = had_it
 
 
 @pytest.mark.anyio

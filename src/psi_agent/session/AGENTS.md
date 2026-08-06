@@ -231,12 +231,33 @@ result = run.result   # 正常耗尽后非 None
 - 用 `inspect.getdoc()` 提取描述（支持 Google-style 的 `Args:` 格式）
 - 跨文件同名 tool 以后加载者覆盖（`tools` property 展平时 `dict.update` 自然行为）
 - 加载期间 `tools/` 会被放到 `sys.path` 首位并在结束后移除（只移除本次插入的那一条），让 `from _helper import x` 这类**裸导入同目录 helper** 稳定可用。此前能否解析取决于 glob 顺序和前面文件有没有顺手 `sys.path.insert`，同一文件可能这次注册成功、下次 `ModuleNotFoundError`
-- **`_SYS_PATH_LOCK` 只锁「查了再插」这一瞬间，不锁整个扫描（刻意为之，勿"修"成锁全程）**：满载 haitun 262 个工具实测约 **2.7s**（`.mcp_cache` 未命中时 `@mcp` 还会在 import 期 spawn `npx`，更久），锁全程会让 N 个 Session 同时启动时排成 N x 2.7s。锁只保证同目录并发加载不会把同一条 entry 叠成两份；**没有**它也不会有谁被抽走 entry —— 每次退出各移除一份，`sys.path` 天然当了引用计数（已实测，非推断）
+- **entry 用「按路径计数」而非布尔（刻意为之，两种更简单的写法各错一个方向，均已实测）**：
+  无条件插+总是摘 → 并发加载会把同一条 entry 叠成两份；「原来没有才插、只摘自己插的」**更糟** ——
+  先插的那个先退出时会把 entry 从**仍在扫描**的另一个脚下抽走，它的裸导入当场 `ModuleNotFoundError`。
+  一个按路径的计数器解决两边：不论多少并发只有一条 entry，最后一个退出才摘。**加载前就已在 path 上的
+  entry 只借不计数**（工具文件自己会插同一条，摘掉别人的是另一种破坏）
+- **`_SYS_PATH_LOCK` 只锁计数的「读了再改」，不锁整个扫描（勿"修"成锁全程）**：满载 haitun 262 个工具
+  实测约 **2.7s**（`.mcp_cache` 未命中时 `@mcp` 还会在 import 期 spawn `npx`，更久），锁全程会让
+  N 个 Session 同时启动排成 N x 2.7s
 - **摘除 entry 的 `finally` 里不能有 `await`（刻意为之）**：曾在 `finally` 里重新 `async with` 那把锁，
   而 `await` 是取消检查点 —— 扫描被 cancel 时摘除整段跳过，entry **泄漏到进程结束**（实测复现后才修）。
-  改动列表本身在 GIL 下是原子的，不需要锁；需要锁的只有前面「查了再插」那一下
-- **真正的跨包风险在 `sys.modules` 而不在 `sys.path`，锁不掉**：helper 以**裸名**进 `sys.modules` 且加载后长驻，谁先 import `_fusion_memory_config` 谁赢，后来的同名 helper 静默拿到前者（bundled 示例 workspace 之间已有 5 个这样的重名）。串行化只改变「谁碰巧第一个」。诚实的边界是**一进程一个 agent 包安全；多个不同包共享重名 helper 不安全**，这种部署要拆进程
-- helper 若与 stdlib 同名会在 entry 位于首位期间遮蔽 stdlib（保持 `_` 前缀约定即可避免）
+  改 dict/list 在 GIL 下是原子的，不需要锁
+
+### 裸导入的三个已知隐患（都实测过，锁一个都挡不住）
+
+1. **helper 改了不生效，必须重启 Session**。helper 以**裸名**长驻 `sys.modules`，没有任何地方摘除它
+   （只有出错路径会摘 `psi_tool_*`）。改 `_helper.py` 后即使 `refresh()` 重新导入了工具文件，
+   工具拿到的仍是**旧 helper**。热重载覆盖工具文件，**不覆盖它们的 helper**
+2. **同名 helper 跨 agent 包互相顶替**。谁先 import `_fusion_memory_config` 谁赢，后来的静默拿到前者
+   （bundled 示例 workspace 间已有 5 个这样的重名）。串行化只改变「谁碰巧第一个」
+3. **工具文件名与 stdlib 撞名会污染整个进程**。`tools/` 在 `sys.path` 首位时，一个
+   `tools/secrets.py` 会让进程里**任何** `import secrets` 拿到该工具文件；且结果进 `sys.modules`，
+   **活过加载窗口**，之后连框架自己 import 都中招。`_` 前缀约定救不了这条 —— 工具文件本来就不带 `_`
+
+诚实的边界：**一进程一个 agent 包，且不要用 stdlib 的名字给工具文件命名**。两条都不是加锁能解决的，
+多包部署应拆进程。前两条各有一个 pin 住现状的测试（`test_editing_a_helper_does_not_take_effect_until_restart`
+/ `test_tool_file_named_after_a_stdlib_module_shadows_it`）——将来若真做了 helper 热重载，
+那个测试会红，应该改写它而不是删掉。
 - 导入失败的文件记进 `ToolRegistry.load_failures`（`文件名 → 错误 repr`），供启动一致性检查区分「缺依赖」和「名字根本不存在」
 
 ## 提示词/运行时暴露一致性检查（启动即断言）

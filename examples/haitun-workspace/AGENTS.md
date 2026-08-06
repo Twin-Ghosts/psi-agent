@@ -134,6 +134,11 @@ service tools:
 - **别用 `from _helper import some_async_fn` 再导出**：注册依据是 `dir(module)`，再导出的协程会被注册成
   模型可调用的工具。这样漏出过 `get_profile`（`profile_tools.py`）和 `send_card_impl` / `edit_card_impl`
   （`assignment_feedback.py`）。要么加 `_` 前缀，要么 `import _user_profile` 后限定调用。
+- **工具文件名不能和 stdlib 模块撞名**：加载期 `tools/` 在 `sys.path` 首位，一个 `tools/secrets.py`
+  会让进程里任何 `import secrets` 拿到该工具文件，且结果进 `sys.modules` **活过加载窗口**，
+  连框架自己都中招。当前 0 处撞名（`json` / `types` / `select` / `secrets` / `signal` 这类都别用）。
+- **改 `_` helper 后必须重启 Session**：helper 以裸名长驻 `sys.modules`，热重载只覆盖工具文件、
+  不覆盖 helper。改了 `_feishu_impl.py` 却发现行为没变，先重启再怀疑代码。
 - **`systems/system.py` 的两个 hook 必须跟着工具目录一起改**：`advertised_tool_names()`（AST 静态解析，
   含 `.mcp_cache` 展开名与再导出协程）和 `indexed_skill_entries()`。启动期框架会拿它们和
   `ToolRegistry` 实际注册的集合比对，不等即抛 `ExposureMismatchError` 拒绝启动
