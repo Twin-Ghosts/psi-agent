@@ -289,11 +289,13 @@ def test_insert_and_delete_rows_are_different_endpoints(monkeypatch: pytest.Monk
     """
     insert, _ = _call(monkeypatch, "insert_rows")
     delete, _ = _call(monkeypatch, "delete_rows")
+    base = "/open-apis/sheets/v2/spreadsheets/:spreadsheet_token"
     assert insert.requests[0].http_method == HttpMethod.POST
-    assert insert.requests[0].uri.endswith("/insert_dimension_range")
+    assert insert.requests[0].uri == f"{base}/insert_dimension_range"
     assert delete.requests[0].http_method == HttpMethod.DELETE
-    assert delete.requests[0].uri.endswith("/dimension_range")
-    assert not delete.requests[0].uri.endswith("/insert_dimension_range")
+    # The whole URI, not a suffix: "/dimension_range" is also a suffix of
+    # "/insert_dimension_range", so a suffix check would pass on the wrong endpoint.
+    assert delete.requests[0].uri == f"{base}/dimension_range"
 
 
 def test_appending_rows_needs_no_index_at_all(monkeypatch: pytest.MonkeyPatch) -> None:

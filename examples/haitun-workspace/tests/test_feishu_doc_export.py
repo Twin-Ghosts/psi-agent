@@ -298,6 +298,10 @@ def test_polling_gives_up_rather_than_looping_forever(monkeypatch: pytest.Monkey
 @pytest.mark.parametrize("blank", ["token", "save_path"])
 def test_token_and_save_path_are_both_required(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, blank: str) -> None:
     """Neither can be filled in for the caller: one names the document, one the target."""
-    fake, out = _run(monkeypatch, [_created(), _done()], tmp_path / "a.pdf", **{blank: "  "})
+    # Typed rather than splatted inline: `**{blank: "  "}` tells the checker only that
+    # *some* keyword gets a str, so it picks the first candidate parameter and reports a
+    # mismatch against ``downloaded``.
+    overrides: dict[str, Any] = {blank: "  "}
+    fake, out = _run(monkeypatch, [_created(), _done()], tmp_path / "a.pdf", **overrides)
     assert out["ok"] is False, out
     assert fake.requests == []

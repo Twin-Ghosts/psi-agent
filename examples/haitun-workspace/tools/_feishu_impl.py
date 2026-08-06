@@ -6008,7 +6008,7 @@ async def _await_export_file_token(ticket: str, token: str, user_key: str) -> di
         if not res["ok"]:
             return res
         data = res["data"] if isinstance(res["data"], dict) else {}
-        result = data.get("result") if isinstance(data.get("result"), dict) else {}
+        result = data.get("result", {}) if isinstance(data.get("result"), dict) else {}
         last_status = result.get("job_status")
         if last_status == 0:
             file_token = str(result.get("file_token") or "")
