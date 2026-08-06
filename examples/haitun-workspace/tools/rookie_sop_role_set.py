@@ -26,6 +26,7 @@ from feishu_message import feishu_message_send_card
 
 _HANDLER = "rookie_sop_role_set"
 _DEV_MODULE = "开发环境"
+_ROLE_CONFIRMED_ITEM = "role_confirmed"
 
 
 def _as_dict(raw: Any) -> dict[str, Any]:
@@ -109,7 +110,13 @@ async def rookie_sop_role_set(card_action_json: str = "") -> str:
     label = "研发" if is_dev else "非研发"
 
     rows, truncated = await _store.fetch_detail(bitable, app_token, detail_table, ctx["open_id"])
-    dev_rows = [r for r in rows if str(r.get("模块") or "") == _DEV_MODULE]
+    # role_confirmed 同在 开发环境 模块但全员适用 —— 它不参与 适用角色 改写/不适用
+    # 改写, 只走下面独立的 mark_done(需求 4: 它绝不能被种成/改成 不适用)。
+    dev_rows = [
+        r
+        for r in rows
+        if str(r.get("模块") or "") == _DEV_MODULE and _store._item_id_of(r) != _ROLE_CONFIRMED_ITEM
+    ]
     label_update_error = ""
     if dev_rows:
         raw = await bitable.update_records(
@@ -124,11 +131,26 @@ async def rookie_sop_role_set(card_action_json: str = "") -> str:
         if updated.get("ok") is not True:
             label_update_error = updated.get("message") or updated.get("error") or "适用角色 update failed"
 
+    role_confirm = await _store.mark_done(
+        bitable, app_token, detail_table, open_id=ctx["open_id"], item_id=_ROLE_CONFIRMED_ITEM, today=today
+    )
+    if role_confirm.get("ok") is not True:
+        return json.dumps(
+            {"ok": False, "error": role_confirm.get("error") or "mark_done(role_confirmed) failed"},
+            ensure_ascii=False,
+        )
+
     na_marked = 0
     revived_error = ""
     if not is_dev:
         na = await _store.mark_module_na(
-            bitable, app_token, detail_table, open_id=ctx["open_id"], module=_DEV_MODULE, today=today
+            bitable,
+            app_token,
+            detail_table,
+            open_id=ctx["open_id"],
+            module=_DEV_MODULE,
+            today=today,
+            exclude_item_ids=frozenset({_ROLE_CONFIRMED_ITEM}),
         )
         if na.get("ok") is not True:
             return json.dumps({"ok": False, "error": na.get("error") or "mark_module_na failed"}, ensure_ascii=False)
@@ -160,9 +182,19 @@ async def rookie_sop_role_set(card_action_json: str = "") -> str:
     due_text = f"Day 1-{window} 截止（{_cfg.due_date(onboard, window)}）"
 
     fresh_dev_rows = [
-        r for r in rows if str(r.get("模块") or "") == _DEV_MODULE and str(r.get("状态") or "") != _p.STATUS_NA
+        r
+        for r in rows
+        if str(r.get("模块") or "") == _DEV_MODULE
+        and str(r.get("状态") or "") != _p.STATUS_NA
+        and _store._item_id_of(r) != _ROLE_CONFIRMED_ITEM
     ]
-    card, handlers = _card.role_settled_card(is_dev, fresh_dev_rows, due_text, str(cfg.get("sop_doc_url") or ""))
+    role_confirmed_row = next(
+        (r for r in rows if _store._item_id_of(r) == _ROLE_CONFIRMED_ITEM),
+        None,
+    )
+    card, handlers = _card.role_settled_card(
+        is_dev, fresh_dev_rows, due_text, str(cfg.get("sop_doc_url") or ""), role_confirmed_row
+    )
     business = {
         "type": "rookie_sop",
         "open_id": ctx["open_id"],

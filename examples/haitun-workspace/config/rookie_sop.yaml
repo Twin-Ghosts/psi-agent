@@ -117,6 +117,9 @@ modules:
   - name: 开发环境
     window_days: 7
     items:
+      - id: role_confirmed
+        title: 确认角色
+        acceptance: 已在卡片上点选「是否为技术人员」
       - id: read_agents_md
         title: 读 AGENTS.md
         acceptance: 能用一句话说出项目的代码规范

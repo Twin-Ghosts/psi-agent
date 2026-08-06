@@ -290,6 +290,44 @@ def test_role_settled_card_for_dev_expands_the_five_items() -> None:
     }
 
 
+def test_role_settled_card_for_nondev_shows_role_confirmed_as_done_with_no_button() -> None:
+    """非研发终态卡也要能看到「角色已确认」这一勾, 但它不能带按钮(一次点击够了)。"""
+    c = _load("_rookie_sop_card")
+    p = _load("_rookie_sop_progress")
+    role_row = _row("role_confirmed", p.STATUS_DONE, date(2026, 8, 11), title="确认角色", module="开发环境")
+
+    card, handlers = c.role_settled_card(False, [], "Day 1-7 截止", "", role_row)
+
+    assert handlers == {}
+    rendered = _dump(card)
+    assert "确认角色" in rendered
+    assert "rookie_tick_" not in rendered
+    assert "rookie_role_" not in rendered
+
+
+def test_role_settled_card_for_dev_shows_role_confirmed_done_alongside_five_live_rows() -> None:
+    """研发展开卡里, role_confirmed 已完成且不占用一个可点的 handler, 五个开发项仍都可点。"""
+    c = _load("_rookie_sop_card")
+    p = _load("_rookie_sop_progress")
+    role_row = _row("role_confirmed", p.STATUS_DONE, date(2026, 8, 11), title="确认角色", module="开发环境")
+    rows = [
+        _row("git_workflow", p.STATUS_TODO, date(2026, 8, 11), title="Git 工作流", module="开发环境"),
+        _row("repo_access", p.STATUS_TODO, date(2026, 8, 11), title="开通仓库权限", module="开发环境"),
+    ]
+
+    card, handlers = c.role_settled_card(True, rows, "Day 1-7 截止", "", role_row)
+
+    assert handlers == {
+        "rookie_tick_git_workflow": "rookie_sop_tick",
+        "rookie_tick_repo_access": "rookie_sop_tick",
+    }
+    rendered = _dump(card)
+    assert "确认角色" in rendered
+    assert "rookie_tick_role_confirmed" not in rendered
+    # 进度分子分母把 role_confirmed 算进去: 1 个已完成(role_confirmed) + 2 个未完成 = 1/3
+    assert "1/3" in rendered
+
+
 def test_remind_card_sections_overdue_and_due_today() -> None:
     c = _load("_rookie_sop_card")
     p = _load("_rookie_sop_progress")
@@ -475,6 +513,22 @@ def test_detail_row_fields_seeds_dev_only_items_as_na_when_role_is_unknown() -> 
     assert plain_row["状态"] == p.STATUS_TODO
 
 
+def test_detail_row_fields_never_seeds_role_confirmed_as_na() -> None:
+    """role_confirmed 不是 dev_only —— 即便角色未答, 也必须种成 未完成 而不是 不适用,
+    且 适用角色 标全员, 不能被当成仅研发项处理(需求 4)。用真实 yaml 的条目, 不是
+    _CFG 小样, 因为 role_confirmed 只存在于真实 config/rookie_sop.yaml 里。"""
+    s = _load("_rookie_sop_store")
+    p = _load("_rookie_sop_progress")
+    items = _real_items()
+    role_item = next(i for i in items if i.item_id == "role_confirmed")
+    assert role_item.dev_only is False
+
+    row = s.detail_row_fields(role_item, open_id="ou_x", name="张三", onboard=date(2026, 8, 5))
+
+    assert row["状态"] == p.STATUS_TODO
+    assert row["适用角色"] == "全员"
+
+
 def test_detail_row_fields_seeds_dev_only_items_as_todo_once_role_is_known() -> None:
     """一旦落地时角色已知(比如重放事件时已经问过), 开发环境项不用再等复活。"""
     s = _load("_rookie_sop_store")
@@ -507,6 +561,117 @@ def test_day_one_denominator_excludes_dev_items_before_role_is_chosen() -> None:
 
     assert got.total == len([i for i in items if not i.dev_only])
     assert got.total == 3
+
+
+def _real_items() -> list[Any]:
+    """加载真实 config/rookie_sop.yaml 展开出的条目 —— 用来验证真实数字, 不是 _CFG 小样。"""
+    cfg = _load("_rookie_sop_config")
+    s = _load("_rookie_sop_store")
+    return cfg.load_sop(anyio.run(s.load_config))
+
+
+def _real_rows(items: Any, onboard: date, *, done_ids: set[str] = frozenset()) -> list[dict[str, Any]]:
+    """按真实条目播种明细行(角色未答), 把 done_ids 里的项直接改成已完成, 供分母/毕业测试用。"""
+    s = _load("_rookie_sop_store")
+    rows = [s.detail_row_fields(i, open_id="ou_x", name="张三", onboard=onboard) for i in items]
+    for row, item in zip(rows, items, strict=True):
+        row["入职日"] = s.from_millis(row["入职日"])
+        row["截止日"] = s.from_millis(row["截止日"])
+        if item.item_id in done_ids:
+            row["状态"] = "已完成"
+    return rows
+
+
+def test_real_config_has_28_general_items_and_5_dev_only_items() -> None:
+    """先钉死真实 yaml 的数字: 27 个通用项 + role_confirmed + 5 个 dev_only —— 与需求里
+    的 28/33 目标对齐, 后面的分母测试都建立在这个前提上。"""
+    items = _real_items()
+    non_dev_only = [i for i in items if not i.dev_only]
+    dev_only = [i for i in items if i.dev_only]
+
+    assert len(items) == 33
+    assert len(non_dev_only) == 28
+    assert len(dev_only) == 5
+    assert any(i.item_id == "role_confirmed" for i in non_dev_only)
+
+
+def test_day_one_denominator_with_real_config_is_28_before_role_is_chosen() -> None:
+    """Day 1, 角色未答: 5 个开发项种成不适用不进分母, role_confirmed 是未完成且进分母
+    —— 分母必须是 28, 不是 27(否则新人不答角色也能靠 27 个通用项凑齐毕业条件)。"""
+    p = _load("_rookie_sop_progress")
+    items = _real_items()
+    onboard = date(2026, 8, 5)
+    rows = _real_rows(items, onboard)
+
+    got = p.summarize(rows, onboard)
+
+    assert got.total == 28
+    assert got.done == 0
+    assert got.all_done is False
+
+
+def test_applicable_total_after_nondev_is_28_with_role_confirmed_done() -> None:
+    """选「非研发」后: 5 个开发项标不适用(退出分母), role_confirmed 已完成 ——
+    分母仍是 28(27 通用 + role_confirmed), 但分子里包含 role_confirmed 这一项。"""
+    p = _load("_rookie_sop_progress")
+    cfg = _load("_rookie_sop_config")
+    items = _real_items()
+    onboard = date(2026, 8, 5)
+    rows = _real_rows(items, onboard, done_ids={"role_confirmed"})
+    for row, item in zip(rows, items, strict=True):
+        if item.dev_only:
+            row["状态"] = "不适用"
+
+    got = p.summarize(rows, onboard)
+    applicable_ids = {i.item_id for i in cfg.applicable_items(items, "nondev")}
+
+    assert got.total == 28
+    assert got.done == 1
+    assert "role_confirmed" in applicable_ids
+    assert len(applicable_ids) == 28
+
+
+def test_applicable_total_after_dev_is_33_with_all_five_dev_items_live() -> None:
+    """选「研发」后: 5 个开发项复活成未完成(不再是不适用), role_confirmed 已完成 ——
+    分母变成 33(27 通用 + role_confirmed + 5 开发项), 全都参与催办/进度计算。"""
+    p = _load("_rookie_sop_progress")
+    cfg = _load("_rookie_sop_config")
+    items = _real_items()
+    onboard = date(2026, 8, 5)
+    rows = _real_rows(items, onboard, done_ids={"role_confirmed"})
+    # 种子行里角色未答时 dev_only 项直接是不适用; 「选研发」会把它们复活成未完成 ——
+    # 在这里手动模拟 rookie_sop_role_set 的复活写回, 不是引入新的产品逻辑。
+    for row, item in zip(rows, items, strict=True):
+        if item.dev_only:
+            row["状态"] = "未完成"
+
+    got = p.summarize(rows, onboard)
+    applicable_ids = {i.item_id for i in cfg.applicable_items(items, "dev")}
+
+    assert got.total == 33
+    assert got.done == 1
+    assert len(applicable_ids) == 33
+    assert all(i.item_id in applicable_ids for i in items if i.dev_only)
+
+
+def test_unanswered_role_card_cannot_graduate_even_with_every_general_item_done() -> None:
+    """回归测试(需求里点名的毕业漏洞): 新人从没点过角色卡, 27 个通用项全部勾完 ——
+    role_confirmed 仍未完成, all_done 必须是 False。撤掉 role_confirmed 这个条目
+    (回到旧的 27+5 清单)会让这条断言失败: 分母会退回 27, 27 个通用项做完就等于
+    done==total, all_done 会被误判成 True —— 这正是这次要堵住的毕业漏洞。"""
+    p = _load("_rookie_sop_progress")
+    items = _real_items()
+    onboard = date(2026, 8, 5)
+    general_done_ids = {i.item_id for i in items if not i.dev_only and i.item_id != "role_confirmed"}
+    assert len(general_done_ids) == 27  # 确保真的是「其余全做完」, 不是漏了几项
+
+    rows = _real_rows(items, onboard, done_ids=general_done_ids)
+
+    got = p.summarize(rows, onboard)
+
+    assert got.total == 28
+    assert got.done == 27
+    assert got.all_done is False
 
 
 def test_fetch_detail_parses_rows_and_converts_dates() -> None:
@@ -701,6 +866,38 @@ def test_mark_module_na_marks_every_row_of_that_module() -> None:
     updated = fake.updates[0]["records"]
     assert {r["record_id"] for r in updated} == {"recA", "recB"}
     assert all(r["fields"]["状态"] == p.STATUS_NA for r in updated)
+
+
+def test_mark_module_na_skips_excluded_item_ids() -> None:
+    """role_confirmed 与开发环境同模块但全员适用 —— exclude_item_ids 必须让它躲开
+    这次不适用改写(需求 4), 只有真正的 dev_only 行才被标不适用。"""
+    s = _load("_rookie_sop_store")
+    p = _load("_rookie_sop_progress")
+    fake = _FakeBitable(
+        [
+            [
+                _item("recA", {"记录键": "ou_x:git_workflow", "模块": "开发环境", "状态": p.STATUS_TODO}),
+                # 特意留成未完成: 若 exclude_item_ids 不起作用, 这一行会被误标不适用。
+                _item("recB", {"记录键": "ou_x:role_confirmed", "模块": "开发环境", "状态": p.STATUS_TODO}),
+            ]
+        ]
+    )
+
+    out = anyio.run(
+        lambda: s.mark_module_na(
+            fake,
+            "app1",
+            "tblDetail",
+            open_id="ou_x",
+            module="开发环境",
+            today=date(2026, 8, 6),
+            exclude_item_ids=frozenset({"role_confirmed"}),
+        )
+    )
+
+    assert out["ok"] is True and out["marked"] == 1
+    updated = fake.updates[0]["records"]
+    assert {r["record_id"] for r in updated} == {"recA"}
 
 
 def test_recompute_overview_updates_the_existing_row_instead_of_adding_one() -> None:
@@ -1046,13 +1243,22 @@ def _dev_detail_rows(open_id: str = "ou_x", *, status: str = "未完成") -> lis
     ]
 
 
+def _role_confirmed_row(open_id: str = "ou_x", *, status: str = "未完成") -> dict[str, Any]:
+    """role_confirmed 明细行 —— 与开发环境同模块但全员适用, 供角色回调端到端测试用。"""
+    return _item(
+        "rec_role_confirmed",
+        {"记录键": f"{open_id}:role_confirmed", "模块": "开发环境", "状态": status, "适用角色": "全员"},
+    )
+
+
 def test_role_set_surfaces_card_send_failure_as_not_ok(monkeypatch: Any) -> None:
     """卡发送失败(含"发了但快照没存下来")时, 工具必须报 ok=false, 不能报成功。"""
     rs = _load("rookie_sop_role_set")
     fake = _FakeBitable(
         [
-            _dev_detail_rows(),  # fetch_detail 拿开发环境明细行, 用于 适用角色 改写
-            _dev_detail_rows(),  # 复活/改写后重拉一次明细
+            [*_dev_detail_rows(), _role_confirmed_row()],  # fetch_detail 拿开发环境明细行, 用于 适用角色 改写
+            [_role_confirmed_row()],  # mark_done(role_confirmed) 按记录键查
+            [*_dev_detail_rows(), _role_confirmed_row(status="已完成")],  # 复活/改写后重拉一次明细
         ]
     )
     rs._rt.bitable_adapter = lambda: fake
@@ -1089,8 +1295,9 @@ def test_role_set_switching_nondev_to_dev_revives_all_five_rows(monkeypatch: Any
     na_rows = _dev_detail_rows(status="不适用")
     fake = _FakeBitable(
         [
-            na_rows,  # fetch_detail: 改写 适用角色 前先拉明细, 五行都还是 不适用
-            _dev_detail_rows(status="未完成"),  # 复活写回后重拉一次明细, 五行都变回未完成
+            [*na_rows, _role_confirmed_row(status="已完成")],  # fetch_detail: 改写 适用角色 前先拉明细
+            [_role_confirmed_row(status="已完成")],  # mark_done(role_confirmed) 按记录键查, 早就已完成
+            [*_dev_detail_rows(status="未完成"), _role_confirmed_row(status="已完成")],  # 复活写回后重拉明细
             [],  # recompute_overview 查总览 —— 没有, 走创建
         ]
     )

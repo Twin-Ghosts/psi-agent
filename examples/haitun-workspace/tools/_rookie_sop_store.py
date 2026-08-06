@@ -250,6 +250,12 @@ async def mark_done(
     return {"ok": True, "already_done": False, "record_id": row["record_id"], "duplicates": duplicates}
 
 
+def _item_id_of(row: dict[str, Any]) -> str:
+    """明细行的 item_id 藏在 记录键 = "{open_id}:{item_id}" 的后半段。"""
+    key = str(row.get("记录键") or "")
+    return key.rsplit(":", 1)[-1] if ":" in key else key
+
+
 async def mark_module_na(
     bitable: Any,
     app_token: str,
@@ -258,9 +264,21 @@ async def mark_module_na(
     open_id: str,
     module: str,
     today: date,
+    exclude_item_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
+    """把一个模块里除 exclude_item_ids 外、尚未完成的行标 不适用。
+
+    刻意为之: exclude_item_ids 用于 role_confirmed 这类「同模块但全员适用」的项 ——
+    它不该跟着 dev_only 的五项一起被非研发分支标不适用(需求 4)。
+    """
     rows, truncated = await fetch_detail(bitable, app_token, detail_table_id, open_id)
-    targets = [r for r in rows if str(r.get("模块") or "") == module and str(r.get("状态") or "") != _p.STATUS_DONE]
+    targets = [
+        r
+        for r in rows
+        if str(r.get("模块") or "") == module
+        and str(r.get("状态") or "") != _p.STATUS_DONE
+        and _item_id_of(r) not in exclude_item_ids
+    ]
     if not targets:
         result: dict[str, Any] = {"ok": True, "marked": 0}
         if truncated:

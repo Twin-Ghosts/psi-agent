@@ -146,14 +146,26 @@ def role_settled_card(
     rows: list[dict[str, Any]],
     due_text: str,
     sop_url: str,
+    role_confirmed_row: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
+    """role_confirmed_row 渲染在最前面, 展示「角色已确认」这一勾已经落地 ——
+    role_confirmed 不是 dev_only, 点了任一角色按钮时调用方已经把它标成已完成,
+    这里只负责把这一行摆出来, 不给它按钮(需求 3: 一次点击, 不要第二个动作)。
+    """
+    lead_rows = [role_confirmed_row] if role_confirmed_row else []
     if not is_dev:
-        elements = [{"tag": "markdown", "content": "你选择了「非研发」，这部分不需要完成。"}]
+        elements: list[dict[str, Any]] = []
+        for row in lead_rows:
+            row_elements, _action = _row_elements(row)
+            elements.extend([{"tag": "hr"}, *row_elements])
+        elements.append({"tag": "hr"})
+        elements.append({"tag": "markdown", "content": "你选择了「非研发」，这部分不需要完成。"})
         return _shell("入职路线图 · 开发环境 ✅ 不适用", elements, "grey"), {}
+    all_rows = lead_rows + rows
     return module_card(
         "开发环境",
-        rows,
-        f"{sum(1 for r in rows if str(r.get('状态') or '') == _p.STATUS_DONE)}/{len(rows)}",
+        all_rows,
+        f"{sum(1 for r in all_rows if str(r.get('状态') or '') == _p.STATUS_DONE)}/{len(all_rows)}",
         due_text,
         sop_url,
     )
