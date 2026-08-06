@@ -188,12 +188,12 @@ scope 是 `contact:functional_role`（只读用 `contact:functional_role:readonl
 
 ### 日历
 
-| 要什么 | method + uri |
-|---|---|
-| 日程列表 | `GET /open-apis/calendar/v4/calendars/:calendar_id/events` — query: `start_time`/`end_time`（**秒级时间戳字符串**）、`page_size` |
-| 主日历 id | `POST /open-apis/calendar/v4/calendars/primary` | `prefer="user"` 拿本人主日历 |
-
-建日程仍用 `feishu_calendar_create_event` / `_create_per_person`。
+**看 `feishu-calendar` 那份接口表**（建/改/删日程、日程详情、日程列表与搜索、重复日程实例、
+参与人增删与 RSVP、日历本身的建删改与列表/订阅、忙闲查询都在里面）。挪过去是因为这个域
+有三处「照着别处写就会错」：**日程时间是秒级**而任务的 `due` 是毫秒；`timestamp` 与 `date`
+互斥；参与人对象**按 type 换 id 键名**（`user`→`user_id`、`chat`→`chat_id`、
+`resource`→`room_id`），写成统一的 `id` 会被拒成 194004。删日程和删共享日历都不可恢复，
+后者带 `confirm` 闸门。
 
 ### 任务 (Task v2)
 

@@ -850,21 +850,6 @@ from _feishu.bitable import (  # noqa: E402,F401
     update_bitable_record_impl,
     update_bitable_records_impl,
 )
-from _feishu.calendar import (  # noqa: E402,F401
-    _build_add_attendees_request,
-    _build_create_event_request,
-    _build_list_events_request,
-    _event_time_str,
-    _fmt_ms,
-    _get_primary_calendar_id,
-    _normalize_event,
-    _primary_calendar_id,
-    _time_to_info,
-    _ts_of,
-    create_event_impl,
-    create_events_per_person_impl,
-    list_events_impl,
-)
 from _feishu.contact import (  # noqa: E402,F401
     _BATCH_GET_ID_MAX,
     _CONTACT_ADMIN_ERROR_HINTS,
