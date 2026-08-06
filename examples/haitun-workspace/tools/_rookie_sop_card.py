@@ -115,44 +115,26 @@ def _row_elements(row: dict[str, Any], today: date | None = None) -> tuple[list[
 
 
 def _two_col(left_markdown: str, action_value: dict[str, Any] | None) -> dict[str, Any]:
-    """左文右框的一行。action_value 为 None 时右列留空(已完成/不适用行)。"""
-    right: list[dict[str, Any]] = []
+    """左文右框的一行 —— 用 div + extra, 这是飞书原生的「左侧文字 + 右侧控件」结构。
+
+    刻意为之: 不能用 column_set 把按钮放进列里 —— 飞书会整张卡拒收,
+    返回 230099 / ErrCode 200410 "action components are not allowed in the column"
+    (实测踩过: 7 张卡全部被拒, 而当时代码丢了返回值, 于是照报「已发送」)。
+    也不要把文字塞进按钮文字里 —— 那样框和字挤在一个按钮内, 很难看。
+
+    框架勾选后只把 extra 换成「● ~~□~~」(实测 text 原样保留、同卡其余行按钮完好),
+    那个实心 ● 就是「打上勾」的即时反馈; 完成态的删除线由下次重绘时本方渲染。
+    """
+    element: dict[str, Any] = {"tag": "div", "text": {"tag": "lark_md", "content": left_markdown}}
     if action_value is not None:
-        right = [
-            {
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": _BOX},
-                        "type": "default",
-                        "size": "tiny",
-                        "value": action_value,
-                    }
-                ],
-            }
-        ]
-    return {
-        "tag": "column_set",
-        "flex_mode": "none",
-        "background_style": "default",
-        "horizontal_spacing": "small",
-        "columns": [
-            {
-                "tag": "column",
-                "width": "weighted",
-                "weight": 1,
-                "vertical_align": "center",
-                "elements": [{"tag": "markdown", "content": left_markdown}],
-            },
-            {
-                "tag": "column",
-                "width": "auto",
-                "vertical_align": "center",
-                "elements": right,
-            },
-        ],
-    }
+        element["extra"] = {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": _BOX},
+            "type": "default",
+            "size": "tiny",
+            "value": action_value,
+        }
+    return element
 
 
 def _rows_section(

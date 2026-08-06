@@ -132,6 +132,7 @@ async def rookie_sop_card_send(
 
     sop_url = str(cfg.get("sop_doc_url") or "")
     sent: list[str] = []
+    failed: list[dict[str, str]] = []
     for plan in _rt.plan_module_cards(items, rows, onboard, today, sop_url):
         business = {
             "type": "rookie_sop",
@@ -142,7 +143,11 @@ async def rookie_sop_card_send(
             "detail_table_id": detail_table,
             "overview_table_id": overview_table,
         }
-        await feishu_message_send_card(
+        # 发卡结果不能丢。飞书会因卡片 JSON 不合规整张拒收(例如把 action 组件放进
+        # column 会返回 230099/200410), 此时消息根本没发出去; 吞掉返回值就会把
+        # 「7 张卡全部被拒」报成「已发送」—— 实测踩过这个坑, 新人一张都没收到,
+        # 而工具和模型都说发好了。
+        sent_raw = await feishu_message_send_card(
             resolved_open_id,
             json.dumps(plan["card"], ensure_ascii=False),
             "open_id",
@@ -151,6 +156,17 @@ async def rookie_sop_card_send(
             json.dumps(plan["handlers"], ensure_ascii=False),
             True,
         )
+        sent_result = _store._parse_result(sent_raw)
+        if sent_result.get("ok") is not True or sent_result.get("callback_context_saved") is False:
+            failed.append(
+                {
+                    "module": str(plan["module"]),
+                    "error": str(
+                        sent_result.get("message") or sent_result.get("error") or "feishu_message_send_card failed"
+                    ),
+                }
+            )
+            continue
         sent.append(plan["module"])
 
     # 每人一份催办定时任务, 落在这个新人自己的 Session workspace 里。结果不能丢:
@@ -170,12 +186,16 @@ async def rookie_sop_card_send(
     schedule_failed = schedule_result.startswith("[Error]") and "already exists" not in schedule_result
 
     result: dict[str, Any] = {
-        "ok": not schedule_failed,
+        # 有任何一张卡没发出去就不能报 ok —— 否则模型会告诉新人「卡片已送达」,
+        # 而对方一张都没收到。
+        "ok": not schedule_failed and not failed,
         "open_id": resolved_open_id,
         "items": len(items),
         "cards_sent": sent,
         "schedule": schedule_result,
     }
+    if failed:
+        result["cards_failed"] = failed
     if truncated:
         result["truncated"] = True
     return json.dumps(result, ensure_ascii=False)

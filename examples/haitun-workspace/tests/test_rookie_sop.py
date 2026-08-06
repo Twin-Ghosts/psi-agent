@@ -1662,17 +1662,18 @@ def test_row_is_two_columns_with_the_box_on_the_right() -> None:
     )
 
     assert len(todo_elements) == 1
-    cs = todo_elements[0]
-    assert cs["tag"] == "column_set"
-    # 左列是文字, 右列是那个可点的方框
-    assert "连上 WiFi" in cs["columns"][0]["elements"][0]["content"]
-    button = cs["columns"][1]["elements"][0]["actions"][0]
-    assert button["text"]["content"] == c._BOX
+    row_el = todo_elements[0]
+    # div + extra 是飞书原生的「左文右控件」。刻意不用 column_set 装按钮 ——
+    # 飞书会整张卡拒收(230099 / 200410 action components are not allowed in the column)。
+    assert row_el["tag"] == "div"
+    assert "连上 WiFi" in row_el["text"]["content"]
+    assert row_el["extra"]["tag"] == "button"
+    assert row_el["extra"]["text"]["content"] == c._BOX
     assert action == "rookie_tick_wifi"
-    # 已完成行: 文字划掉, 右列没有按钮
-    done_cs = done_elements[0]
-    assert "~~连上 WiFi~~" in done_cs["columns"][0]["elements"][0]["content"]
-    assert done_cs["columns"][1]["elements"] == []
+    # 已完成行: 文字划掉, 没有 extra 按钮
+    done_el = done_elements[0]
+    assert "~~连上 WiFi~~" in done_el["text"]["content"]
+    assert "extra" not in done_el
     assert done_action == ""
 
 
@@ -1688,7 +1689,7 @@ def test_rows_section_is_compact_without_a_rule_between_rows() -> None:
     elements, handlers = c._rows_section(rows, date(2026, 8, 6))
 
     assert len(handlers) == 2
-    assert all(e["tag"] == "column_set" for e in elements)
+    assert all(e["tag"] == "div" for e in elements)
 
 
 def test_progress_bar_renders_a_bar_and_degrades_safely() -> None:
