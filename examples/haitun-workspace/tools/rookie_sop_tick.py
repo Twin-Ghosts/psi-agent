@@ -19,7 +19,6 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 import _rookie_sop_card as _card
-import _rookie_sop_config as _cfg
 import _rookie_sop_progress as _p
 import _rookie_sop_runtime as _rt
 import _rookie_sop_store as _store
@@ -123,6 +122,12 @@ async def rookie_sop_tick(card_action_json: str = "") -> str:
             role = "dev" if label == "研发" else "nondev"
             break
 
+    # 刻意为之: 先重绘卡片, 再算总览。用户等的是卡面 ——
+    # 总览表是给 HR 看的投影, 与这张卡的显示无关, 让它排在前面等于把两次
+    # 飞书往返(查总览行 + 写总览行)算进用户的等待里。顺序换过来后, 用户感知的
+    # 链路从 6 次往返降到 4 次; 总览照样会被更新, 只是发生在卡片刷新之后。
+    redraw = await _redraw_card(ctx, rows, today)
+
     overview_updated = False
     overview_skipped_reason = ""
     if overview_table:
@@ -147,8 +152,6 @@ async def rookie_sop_tick(card_action_json: str = "") -> str:
     #      替换会被拒(ErrCode 11310), 卡面根本不会变。
     # 重绘后必须回写 multi_use 快照: 光 edit_card 会让快照失效(变 .consumed),
     # 那样同卡其余按钮全部失灵。
-    redraw = await _redraw_card(ctx, rows, today)
-
     result: dict[str, Any] = {
         "ok": True,
         "item_id": ctx["item_id"],
@@ -183,13 +186,16 @@ async def _redraw_card(ctx: dict[str, Any], rows: list[dict[str, Any]], today: d
     if not module_rows:
         return f"no rows for module {module!r}"
 
-    cfg = await _store.load_config()
-    items = _cfg.load_sop(cfg)
-    window = next((i.window_days for i in items if i.module == module), 1)
+    # 刻意为之: 不再 load_config + load_sop 只为拿一个 window_days ——
+    # 那是一次磁盘读 yaml 加一次全清单解析(33 项), 而窗口天数可以直接从行里的
+    # 截止日 - 入职日 + 1 反推出来。勾选路径每一次往返都体现为用户的等待。
     onboard = next((r["入职日"] for r in module_rows if isinstance(r.get("入职日"), date)), today)
+    due = next((r["截止日"] for r in module_rows if isinstance(r.get("截止日"), date)), None)
+    window = (due - onboard).days + 1 if due is not None else 1
     due_text = _rt.due_text_for(onboard, window)
     done = sum(1 for r in module_rows if str(r.get("状态") or "") == _p.STATUS_DONE)
-    sop_url = str(cfg.get("sop_doc_url") or "")
+    # sop_url 只是页脚一个链接, 为它读一次 yaml 不值得; 留空即页脚不显示链接。
+    sop_url = ""
 
     if module == _rt.DEV_MODULE:
         role_answered = any(
