@@ -212,7 +212,9 @@ async def rookie_sop_role_set(card_action_json: str = "") -> str:
             ensure_ascii=False,
         )
     edited = _store._parse_result(
-        await feishu_message_edit_card(message_id, json.dumps(card, ensure_ascii=False))
+        await feishu_message_edit_card(
+            message_id, json.dumps(card, ensure_ascii=False), ctx.get("open_id") or ""
+        )
     )
     if edited.get("ok") is not True:
         return json.dumps(

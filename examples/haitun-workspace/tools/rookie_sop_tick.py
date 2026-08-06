@@ -208,7 +208,13 @@ async def _redraw_card(ctx: dict[str, Any], rows: list[dict[str, Any]], today: d
             module, module_rows, f"{done}/{len(module_rows)}", due_text, sop_url, today=today
         )
 
-    edited = _store._parse_result(await feishu_message_edit_card(message_id, json.dumps(card, ensure_ascii=False)))
+    # 传 user_key: 与 _assignment_delivery.update_progress_card 的做法一致
+    # (它传 assigner_open_id), 让这次 patch 带上卡片接收者的身份。
+    edited = _store._parse_result(
+        await feishu_message_edit_card(
+            message_id, json.dumps(card, ensure_ascii=False), ctx.get("open_id") or ""
+        )
+    )
     if edited.get("ok") is not True:
         return f"edit_card failed: {edited.get('message') or edited.get('error')}"
 
