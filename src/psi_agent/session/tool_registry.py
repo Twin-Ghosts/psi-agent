@@ -20,6 +20,7 @@ import inspect
 import math
 import re
 import sys
+import threading
 import types
 import typing
 from collections.abc import AsyncIterator, Callable
@@ -309,19 +310,32 @@ class FileEntry:
     ``fresh`` is ``True`` when the file was actually imported during
     this refresh round; ``False`` when the entry was copied from a
     previous state (hash matched, file skipped).
+
+    ``module_name`` is the ``sys.modules`` key this file's code was executed
+    under. It is kept so a refresh can evict the module it supersedes: the name
+    embeds the file's content hash, so every edit mints a *new* key and the old
+    one would otherwise stay in ``sys.modules`` for the life of the process.
     """
 
     file_hash: str
     tools: dict[str, ToolFunction]
     funcs: dict[str, Callable[..., Any]]
     fresh: bool = False
+    module_name: str = ""
 
 
 # ── sys.path handling for helper imports ─────────────────────────────────────
 
 
-_SYS_PATH_LOCK = anyio.Lock()
-"""Guards the refcount read-then-modify; held only for that, never for a scan."""
+_SYS_PATH_LOCK = threading.Lock()
+"""Guards the refcount read-then-modify; held only for that, never for a scan.
+
+A ``threading.Lock``, not ``anyio.Lock``, 刻意为之: acquiring it is not an ``await``,
+so the same lock can guard the decrement inside ``finally``. An ``anyio.Lock`` there
+would be a cancellation checkpoint — a cancelled scan would skip the removal and leak
+the entry for the life of the process (observed, then fixed). It also removes the need
+to reason about which mutations the GIL happens to make atomic.
+"""
 
 _SYS_PATH_DEPTH: dict[str, int] = {}
 """How many in-flight loads need each ``sys.path`` entry (see ``_tools_dir_on_sys_path``)."""
@@ -374,7 +388,7 @@ async def _tools_dir_on_sys_path(entry: str) -> AsyncIterator[None]:
     ``ASYNC240`` exists to catch. In production it arrives absolute anyway
     (``Session.run`` resolves it via ``await anyio.Path(...).resolve()``).
     """
-    async with _SYS_PATH_LOCK:
+    with _SYS_PATH_LOCK:
         depth = _SYS_PATH_DEPTH.get(entry, 0)
         if depth == 0 and entry in sys.path:
             # Someone else owns this entry — a tool file that inserted it at import
@@ -388,19 +402,18 @@ async def _tools_dir_on_sys_path(entry: str) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        # No ``await`` in this cleanup, 刻意为之: re-acquiring the lock here would be
-        # a cancellation checkpoint, and a cancelled scan would skip the removal and
-        # leak the entry for the life of the process (observed, then fixed). Dict and
-        # list mutation is atomic under the GIL; only the read-then-modify on entry
-        # needs the lock, and that is where the lock is.
+        # Same lock on the way out, and still no ``await`` in this cleanup: a
+        # cancellation checkpoint here would let a cancelled scan skip the removal
+        # and leak the entry for the life of the process (observed, then fixed).
         if owned:
-            remaining = _SYS_PATH_DEPTH.get(entry, 1) - 1
-            if remaining <= 0:
-                _SYS_PATH_DEPTH.pop(entry, None)
-                with suppress(ValueError):
-                    sys.path.remove(entry)
-            else:
-                _SYS_PATH_DEPTH[entry] = remaining
+            with _SYS_PATH_LOCK:
+                remaining = _SYS_PATH_DEPTH.get(entry, 1) - 1
+                if remaining <= 0:
+                    _SYS_PATH_DEPTH.pop(entry, None)
+                    with suppress(ValueError):
+                        sys.path.remove(entry)
+                else:
+                    _SYS_PATH_DEPTH[entry] = remaining
 
 
 # ── ToolRegistry — loading, state, incremental refresh ───────────────────────
@@ -490,7 +503,7 @@ class ToolRegistry:
             if path not in new_files:
                 for name in self._files[path].tools:
                     result[name] = "removed"
-                del self._files[path]
+                self._evict_module(self._files.pop(path))
 
         # added / updated / skipped — per file
         for path, new_entry in new_files.items():
@@ -512,9 +525,29 @@ class ToolRegistry:
                     else:
                         result[name] = "updated"
                 self._files[path] = new_entry
+                self._evict_module(old_entry)
 
         logger.info(f"Tool refresh complete: {result or 'no changes'}")
         return result
+
+    @staticmethod
+    def _evict_module(superseded: FileEntry) -> None:
+        """Drop a superseded tool module from ``sys.modules``.
+
+        The module name embeds the file's content hash, so each edit mints a new
+        key; without this, every refresh left the previous module resident for the
+        life of the process (measured: one file edited six times leaves seven dead
+        modules, and it grows without bound in a long-lived Gateway).
+
+        Only *tool* modules are evicted, 刻意为之. Helpers are cached under their
+        bare name and are deliberately not touched — a live tool that imported one
+        still holds a reference to it, and dropping the ``sys.modules`` entry would
+        only cause the next importer to build a second, divergent copy. That helpers
+        do not reload is a documented limitation (see ``session/AGENTS.md``), not
+        something this eviction is trying to fix.
+        """
+        if superseded.module_name:
+            sys.modules.pop(superseded.module_name, None)
 
     # -- internals -------------------------------------------------------------
 
@@ -543,9 +576,13 @@ class ToolRegistry:
 
         try:
             tools_dir_exists = await tools_anyio.is_dir()
-            # Absolutize here, not inside the sys.path helper: it reads the process
-            # CWD, and anyio.Path keeps that off the event loop thread.
-            sys_path_entry = str(await tools_anyio.absolute())
+            # Normalize here, not inside the sys.path helper: this reads the
+            # filesystem, and anyio.Path keeps that off the event loop thread.
+            # ``resolve()`` rather than ``absolute()`` because the string is a
+            # refcount key — the same directory reached via a symlink, a ``.``
+            # segment, or different case would otherwise get its own entry and its
+            # own counter, putting two spellings of one directory on ``sys.path``.
+            sys_path_entry = str(await tools_anyio.resolve())
         except Exception as e:
             logger.warning(f"Cannot access tools directory {tools_dir!r}: {e!r}")
             return files
@@ -574,15 +611,24 @@ class ToolRegistry:
                         ):
                             logger.debug(f"Skipping unchanged file: {py_file!r}")
                             old = old_files[str_path]
+                            # Carry module_name across: it is what a later refresh
+                            # evicts, so dropping it here would strand the module.
                             files[str_path] = FileEntry(
-                                file_hash=old.file_hash, tools=old.tools, funcs=old.funcs, fresh=False
+                                file_hash=old.file_hash,
+                                tools=old.tools,
+                                funcs=old.funcs,
+                                fresh=False,
+                                module_name=old.module_name,
                             )
                             continue
 
                         module_name = f"psi_tool_{py_file.stem}_{session_id}_{file_hash}"
 
-                        source = await py_file.read_text(encoding="utf-8")
-                        compiled = compile(source, str_path, "exec")
+                        # Decode the bytes already read for the hash rather than
+                        # re-reading: one less IO, and it guarantees the compiled
+                        # source is the exact revision `file_hash` and `module_name`
+                        # were derived from even if the file changes mid-scan.
+                        compiled = compile(file_bytes.decode("utf-8"), str_path, "exec")
 
                         module = types.ModuleType(module_name)
                         module.__file__ = str_path
@@ -615,6 +661,7 @@ class ToolRegistry:
                             tools=tools,
                             funcs=funcs,
                             fresh=True,
+                            module_name=module_name,
                         )
                     except Exception as e:
                         if module_name is not None:

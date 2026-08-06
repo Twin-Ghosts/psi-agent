@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 import textwrap
 from pathlib import Path
@@ -9,7 +10,13 @@ from typing import Annotated, Any, Literal
 import anyio
 import pytest
 
-from psi_agent.session.tool_registry import FileEntry, ToolFunction, ToolRegistry, _tools_dir_on_sys_path
+from psi_agent.session.tool_registry import (
+    _SYS_PATH_DEPTH,
+    FileEntry,
+    ToolFunction,
+    ToolRegistry,
+    _tools_dir_on_sys_path,
+)
 
 # ── FileEntry ─────────────────────────────────────────────────────────────────
 
@@ -921,3 +928,75 @@ async def test_refresh_recomputes_load_failures(tmp_path: Path) -> None:
 
     assert tr.load_failures == {}
     assert set(tr.tools) == {"now_works"}
+
+
+@pytest.mark.anyio
+async def test_refresh_evicts_the_module_it_supersedes(tmp_path: Path) -> None:
+    """``sys.modules`` must not grow by one dead module per edit.
+
+    The module name embeds the file's content hash, so each edit mints a new key.
+    Before eviction, one file edited six times left seven modules resident for the
+    life of the process — unbounded growth in a long-lived Gateway.
+    """
+    tools_dir = tmp_path / "tools"
+    await anyio.Path(tools_dir).mkdir()
+    target = anyio.Path(tools_dir / "evictme.py")
+    await target.write_text("async def evictme() -> str:\n    return 'v0'\n", encoding="utf-8")
+    registry = await ToolRegistry.load(tools_dir, "evict")
+
+    def live() -> int:
+        return len([k for k in sys.modules if k.startswith("psi_tool_evictme_evict")])
+
+    for i in range(1, 5):
+        await target.write_text(f"async def evictme() -> str:\n    return 'v{i}'\n", encoding="utf-8")
+        await registry.refresh()
+        assert live() == 1, f"module count grew to {live()} after edit {i}"
+
+    func = registry.get("evictme")
+    assert func is not None
+    assert await func() == "v4", "eviction must not break the surviving tool"
+
+    await target.unlink()
+    await registry.refresh()
+    assert live() == 0, "deleting a tool file should evict its module too"
+
+
+@pytest.mark.anyio
+async def test_the_path_entry_is_normalized_before_being_used_as_a_key() -> None:
+    """The refcount key must be a resolved path, or one dir gets two counters.
+
+    ``_load_from_dir`` passes ``await anyio.Path(...).resolve()`` precisely because
+    the string is a refcount key: the same directory reached through a symlink, a
+    ``.`` segment, or different case would otherwise take its own slot and put a
+    second spelling of one directory on ``sys.path``. This pins that the helper is
+    key-faithful — two *distinct* strings really do get two entries, which is why
+    the caller must normalize rather than relying on the helper to do it.
+    """
+    plain = os.path.join("C:" + os.sep, "aliased", "tools")
+    dotted = os.path.join(plain, "sub", "..")
+    assert plain != dotted, "test needs two distinct spellings"
+    before = list(sys.path)
+
+    async with _tools_dir_on_sys_path(plain), _tools_dir_on_sys_path(dotted):
+        assert _SYS_PATH_DEPTH.get(plain) == 1
+        assert _SYS_PATH_DEPTH.get(dotted) == 1, "distinct strings are distinct keys — hence caller-side resolve()"
+
+    assert _SYS_PATH_DEPTH == {}
+    assert sys.path == before
+
+
+@pytest.mark.anyio
+async def test_loading_one_dir_twice_reuses_a_single_path_entry(tmp_path: Path) -> None:
+    """Two Sessions on the same resolved directory share one entry and one counter."""
+    tools_dir = tmp_path / "tools"
+    await anyio.Path(tools_dir).mkdir()
+    await anyio.Path(tools_dir / "t.py").write_text("async def t() -> str:\n    return 't'\n", encoding="utf-8")
+    before = list(sys.path)
+
+    first = await ToolRegistry.load(tools_dir, "spell-a")
+    second = await ToolRegistry.load(tools_dir, "spell-b")
+
+    assert set(first.tools) == {"t"}
+    assert set(second.tools) == {"t"}
+    assert _SYS_PATH_DEPTH == {}, "refcount table should be empty once both loads finish"
+    assert sys.path == before, "no spelling of the directory should be left behind"

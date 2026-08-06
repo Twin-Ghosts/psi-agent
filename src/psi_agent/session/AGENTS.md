@@ -236,12 +236,17 @@ result = run.result   # 正常耗尽后非 None
   先插的那个先退出时会把 entry 从**仍在扫描**的另一个脚下抽走，它的裸导入当场 `ModuleNotFoundError`。
   一个按路径的计数器解决两边：不论多少并发只有一条 entry，最后一个退出才摘。**加载前就已在 path 上的
   entry 只借不计数**（工具文件自己会插同一条，摘掉别人的是另一种破坏）
-- **`_SYS_PATH_LOCK` 只锁计数的「读了再改」，不锁整个扫描（勿"修"成锁全程）**：满载 haitun 262 个工具
+- **计数的 key 必须是 `resolve()` 过的路径**：调用方传进来前先
+  `await anyio.Path(...).resolve()`（不是 `absolute()`）。这个字符串是计数键 ——
+  同一目录经软链、`.`/`..` 片段或不同大小写抵达会各占一个槽位，于是**一个目录的两种拼法同时在
+  `sys.path` 上**、各自计数。规范化放调用方是因为它读文件系统，`anyio.Path` 才能把这活挪出事件循环线程
+- **`_SYS_PATH_LOCK` 用 `threading.Lock` 而非 `anyio.Lock`（刻意为之）**：取它不是 `await`，所以
+  `finally` 里摘除 entry 时能用同一把锁。用 `anyio.Lock` 会让 `finally` 变成取消检查点 —— 扫描被
+  cancel 时摘除整段跳过，entry **泄漏到进程结束**（实测复现后才修）。顺带也不用再去论证「改 dict/list
+  在 GIL 下恰好原子」这种微妙假设
+- **锁只锁计数的「读了再改」，不锁整个扫描（勿"修"成锁全程）**：满载 haitun 262 个工具
   实测约 **2.7s**（`.mcp_cache` 未命中时 `@mcp` 还会在 import 期 spawn `npx`，更久），锁全程会让
   N 个 Session 同时启动排成 N x 2.7s
-- **摘除 entry 的 `finally` 里不能有 `await`（刻意为之）**：曾在 `finally` 里重新 `async with` 那把锁，
-  而 `await` 是取消检查点 —— 扫描被 cancel 时摘除整段跳过，entry **泄漏到进程结束**（实测复现后才修）。
-  改 dict/list 在 GIL 下是原子的，不需要锁
 
 ### 裸导入的三个已知隐患（都实测过，锁一个都挡不住）
 
@@ -306,6 +311,16 @@ result = run.result   # 正常耗尽后非 None
   - 文件删除 → 其所有 tool 标记 `removed`
   - 文件内 tool 增删 → 分别标记 `added` / `removed`
 - `fresh` 标志保证 skipped 文件不被误删
+- **被取代的 tool 模块要从 `sys.modules` 摘掉**：module name 里嵌了内容 hash，所以**每改一次文件就铸一个
+  新 key**，旧的不摘就常驻到进程结束。实测一个文件改 6 次留下 **7 个死模块**，长跑 Gateway 上无上界增长。
+  `FileEntry.module_name` 记住这个 key，`_do_refresh` 在「文件被替换」和「文件被删」两条路径上调
+  `_evict_module`。hash 未变而复制旧 entry 时**必须把 `module_name` 一起带过去**，否则下次就摘不掉了
+- **只摘 tool 模块，不摘 helper（刻意为之）**：helper 按裸名缓存，仍活着的 tool 还持有它的引用；摘掉
+  只会让下一个导入者另建一份分叉的副本。「helper 不热重载」是记录在案的限制（见上文三个隐患），
+  不是这个摘除想解决的问题
+- **`compile` 用的是算 hash 时已读进来的那份 bytes**，不二次 `read_text()`：省一次 IO，并且保证编译的源码
+  正是 `file_hash` / `module_name` 派生自的那个版本（扫描途中被改也不会错配）。非 UTF-8 仍照旧降级进
+  `load_failures`
 - `ScheduleRegistry` 以 per-file `ScheduleEntry` 存储（含 hash），`refresh()` 支持 add/update/remove/skip。每个 schedule 有独立 `CancelScope`，update/remove 时取消旧 runner 并启动新 runner。`refresh()` 内部已 try/except，失败时 log warning 返回 `{}`，不修改内部状态，调用方可直接 await 无需自行容错
 - Schedule 刷新的两个时机：
   1. 每次 `run()` 入口（turn 开始），与 tool 一并刷新

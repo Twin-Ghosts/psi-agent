@@ -92,23 +92,36 @@ def check_tool_exposure(
     if missing:
         failures = load_failures or {}
         if failures:
-            reasons = "; ".join(f"{name}: {reason}" for name, reason in sorted(failures.items()))
+            items = sorted(failures.items())[:_NAMES_PREVIEWED]
+            reasons = "; ".join(f"{name}: {reason}" for name, reason in items)
+            if len(failures) > _NAMES_PREVIEWED:
+                reasons += f"; … (+{len(failures) - _NAMES_PREVIEWED} more files)"
             problems.append(
                 f"{len(missing)} tool(s) advertised in the prompt but not registered, "
                 f"and {len(failures)} tool file(s) failed to import — most likely the same cause. "
+                f"Fix: resolve the import errors below, then restart the Session; "
+                f"the names come back on their own. "
                 f"Advertised-only: {_bullets(missing)}. Import failures: {reasons}"
             )
         else:
             problems.append(
                 f"{len(missing)} tool(s) advertised in the prompt but not registered — "
-                f"the model will be told to call names that dispatch to nothing: {_bullets(missing)}"
+                f"the model will be told to call names that dispatch to nothing. "
+                f"These are usually *file* names where a *function* name was meant "
+                f"(a file may define many tools): have the prompt builder take the "
+                f"registry's list via its 'tool_names' argument instead of scanning "
+                f"'tools/' itself. Advertised-only: {_bullets(missing)}"
             )
 
     extra = registered - advertised
     if extra:
         problems.append(
             f"{len(extra)} tool(s) registered but not advertised in the prompt — "
-            f"the model is not told they exist: {_bullets(extra)}"
+            f"the model is not told they exist, so a working feature never gets used. "
+            f"Fix: widen the prompt side's own scan (the 'advertised_tool_names' hook) "
+            f"to cover them — e.g. names an '@mcp' declaration expands to, or async "
+            f"functions re-exported from a '_helper' module. "
+            f"Registered-only: {_bullets(extra)}"
         )
 
     return problems

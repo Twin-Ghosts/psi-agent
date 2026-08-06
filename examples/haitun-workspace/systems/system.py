@@ -865,6 +865,16 @@ def _tool_names_in_module(tree: ast.Module) -> tuple[list[str], dict[str, list[s
     be a class, a constant, or a coroutine), so they are returned as candidates
     keyed by source module for the caller to resolve.
 
+    **Only absolute ``from _helper import name`` is understood** — ``level == 0`` and
+    no ``*``. Relative imports and star imports are skipped, and neither appears in
+    any of the 124 tool files across the bundled workspaces. The omission is safe
+    because of which way it fails: a re-export this parse cannot see is still
+    registered by the loader, so it surfaces as "registered but not advertised" and
+    the startup check **refuses loudly** with a message naming the fix. It never
+    silently passes. Widening the parse would be the fix if that pattern ever gets
+    used; guessing at it now would risk the opposite error, advertising names that
+    do not exist.
+
     Returns:
         ``(local async def names, {module name: imported names})``.
     """
