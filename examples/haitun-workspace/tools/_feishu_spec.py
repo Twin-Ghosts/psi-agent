@@ -24,6 +24,13 @@ Rule fields, all optional except ``endpoint``:
     required      body/query field names that must be present
     fields        per-field: pattern / forbid / max / min / choices / default /
                   requires / max_items / min_items / in / on_fail
+
+``max``/``min`` are **numeric bounds**, not length limits: they coerce with ``float()``
+and give up quietly on anything that is not a number (see :func:`_check_field`), so
+``max: 255`` on a *title* checks nothing at all and reads as if it does. A length cap on
+a string is a ``pattern`` — ``'^[\\s\\S]{1,255}$'`` — with ``[\\s\\S]`` rather than ``.``
+so a value containing a newline is judged on its length like any other. Three rules
+carried the silent no-op spelling before this was noticed.
     pitfalls      free text surfaced on failure — never enforced, only explained
     paginate      true, or a mapping — follow ``page_token`` until ``has_more`` is false
     confirm       a token the caller must echo before an irreversible call goes out

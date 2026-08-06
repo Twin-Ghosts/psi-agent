@@ -5738,10 +5738,21 @@ async def get_users_batch_impl(
 # them straight, NOT via medias).
 
 
-def _build_media_download_request(file_token: str) -> BaseRequest:
+#: The two download endpoints, by ``source_type``. They are not interchangeable and
+#: picking the wrong one is a 404 rather than a redirect: ``medias`` serves what lives
+#: *inside* a document (images, attachments) and ``files`` serves standalone resource
+#: files in Drive (a PDF someone uploaded). Feishu's own online documents — docx, sheet,
+#: bitable — are in neither; those have to be exported (``export_doc_impl``).
+_DOWNLOAD_URIS = {
+    "media": "/open-apis/drive/v1/medias/:file_token/download",
+    "file": "/open-apis/drive/v1/files/:file_token/download",
+}
+
+
+def _build_media_download_request(file_token: str, source_type: str = "media") -> BaseRequest:
     req = BaseRequest()
     req.http_method = HttpMethod.GET
-    req.uri = "/open-apis/drive/v1/medias/:file_token/download"
+    req.uri = _DOWNLOAD_URIS.get(source_type, _DOWNLOAD_URIS["media"])
     req.paths["file_token"] = file_token
     req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
     return req
@@ -5782,18 +5793,20 @@ def _media_resp_to_bytes(resp: Any) -> tuple[bytes | None, str]:
     return data, ""
 
 
-async def _download_media_as_tenant(file_token: str) -> tuple[bytes | None, str]:
+async def _download_media_as_tenant(file_token: str, source_type: str = "media") -> tuple[bytes | None, str]:
     client = _get_client()
     if client is None:
         return None, "Feishu app not configured."
     try:
-        resp = await client.arequest(_build_media_download_request(file_token))
+        resp = await client.arequest(_build_media_download_request(file_token, source_type))
     except Exception as exc:  # SDK/transport failure
         return None, f"{type(exc).__name__}: {exc}"
     return _media_resp_to_bytes(resp)
 
 
-async def _download_media_as_user(file_token: str, user_key: str) -> tuple[bytes | None, str] | None:
+async def _download_media_as_user(
+    file_token: str, user_key: str, source_type: str = "media"
+) -> tuple[bytes | None, str] | None:
     """Download as the user's UAT. None → no usable UAT (caller decides need_auth)."""
     client = _get_uat_client()
     if client is None:
@@ -5805,47 +5818,310 @@ async def _download_media_as_user(file_token: str, user_key: str) -> tuple[bytes
 
     option = RequestOption.builder().user_access_token(uat.access_token).build()
     try:
-        resp = await client.arequest(_build_media_download_request(file_token), option)
+        resp = await client.arequest(_build_media_download_request(file_token, source_type), option)
     except Exception as exc:  # SDK/transport failure
         return None, f"{type(exc).__name__}: {exc}"
     return _media_resp_to_bytes(resp)
 
 
-async def _download_media_bytes(file_token: str, user_key: str = "") -> tuple[bytes | None, str]:
+async def _download_media_bytes(
+    file_token: str, user_key: str = "", source_type: str = "media"
+) -> tuple[bytes | None, str]:
     # Tenant-first: try the bot's token, and only if it's denied (and the user has a
     # cached UAT) retry as the user — so we still fetch files the user can see but the
     # bot can't (e.g. a PDF in the user's wiki/drive) without forcing authorization.
-    data, err = await _download_media_as_tenant(file_token)
+    data, err = await _download_media_as_tenant(file_token, source_type)
     if data is not None:
         return data, ""
     key = user_key.strip()
     if not key:
         return None, err
-    user_out = await _download_media_as_user(file_token, key)
+    user_out = await _download_media_as_user(file_token, key, source_type)
     if user_out is None:
         return None, f"{err} — 或需用户授权后重试. (need_auth)"
     return user_out
 
 
-async def download_file_impl(source: str, save_path: str, is_url: bool = False, user_key: str = "") -> dict[str, Any]:
-    """Download a Feishu file to disk. is_url=True treats source as a direct URL, else a media file_token.
+async def download_file_impl(
+    source: str,
+    save_path: str,
+    is_url: bool = False,
+    user_key: str = "",
+    source_type: str = "media",
+) -> dict[str, Any]:
+    """Download a Feishu file to disk, from one of three kinds of source.
 
-    Pass ``user_key`` (only used when is_url=False) to download as that user — needed for
+    ``source_type`` selects the endpoint: ``media`` (default — an image or attachment
+    that lives inside a document), ``file`` (a standalone resource file in Drive, e.g. an
+    uploaded PDF), or ``url`` (a direct link, which is what approval-form attachments
+    are). ``is_url=True`` is the older spelling of ``source_type="url"`` and still works.
+
+    ``media`` and ``file`` are not interchangeable — the wrong one is a 404, not a
+    redirect — and neither serves Feishu's own online documents (docx/sheet/bitable);
+    those must be exported (``export_doc_impl``).
+
+    Pass ``user_key`` (ignored for a direct URL) to download as that user — needed for
     files the user can see but the bot can't (e.g. a PDF in the user's wiki/drive).
     """
     if not source or not save_path:
         return _error("source and save_path are required.")
-    data, err = await (_download_url_bytes(source) if is_url else _download_media_bytes(source, user_key))
+    kind = (source_type or "media").strip().lower()
+    if is_url:
+        kind = "url"
+    if kind not in ("media", "file", "url"):
+        return _error(
+            f"source_type must be one of media / file / url, got {source_type!r}. "
+            "media = inside a document, file = a resource file in Drive, url = a direct link.",
+            source_type=source_type,
+        )
+    data, err = await (_download_url_bytes(source) if kind == "url" else _download_media_bytes(source, user_key, kind))
     if data is None:
         extra = {"need_auth": True} if "need_auth" in (err or "") else {}
-        return _error(err or "download failed", source=source, **extra)
+        return _error(err or "download failed", source=source, source_type=kind, **extra)
     path = pathlib.Path(save_path)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         await anyio.Path(path).write_bytes(data)
     except OSError as exc:
         return _error(f"could not write file: {exc}", path=str(path))
-    return {"ok": True, "path": str(path), "bytes": len(data)}
+    return {"ok": True, "path": str(path), "bytes": len(data), "source_type": kind}
+
+
+# ── Export a cloud doc to pdf / docx / xlsx / csv, on disk ─────────────────────
+# Three calls, and unlike every other multi-step flow here the middle one has to be
+# *repeated*: Feishu builds the file asynchronously and only says so through job_status.
+#
+#   1. POST drive/v1/export_tasks {token, type, file_extension, sub_id?} → ticket
+#   2. GET  drive/v1/export_tasks/:ticket?token=… until job_status == 0 → file_token
+#   3. GET  drive/v1/export_tasks/file/:file_token/download → the bytes
+#
+# Neither the polling nor the disk write can be expressed as an endpoint-table row, which
+# is why this is a tool. Step 3 reuses the download path above (same two-stage
+# tenant→user fallback), since an export of someone's own document is exactly the case
+# where the bot's token may not be enough.
+#
+# The 10-minute expiry is why the three steps cannot be split across calls: Feishu
+# deletes the built file 10 minutes after the task finishes, so a ticket handed back to
+# the caller would usually be worthless by the time it came back.
+
+#: Which target extensions each source type can actually produce. A mismatched pair is
+#: refused locally rather than spending an HTTP round trip on Feishu's 1069918.
+_EXPORT_FORMATS = {
+    "docx": ("pdf", "docx"),
+    "doc": ("pdf", "docx"),
+    "sheet": ("xlsx", "csv"),
+    "bitable": ("xlsx", "csv"),
+}
+
+#: ``job_status`` values that will never become 0 no matter how long we wait, and what
+#: each one actually means. Polling through these would burn the whole budget on a
+#: document that cannot be exported at all.
+_EXPORT_FATAL = {
+    3: "飞书内部错误, 稍后重试",
+    107: "文档过大, 导不出来(重试无用)",
+    108: "导出超时",
+    109: "文档里有块没权限读",
+    110: "没有导出权限",
+    111: "文档已被删除",
+    122: "文档正在创建副本, 此时不允许导出",
+    123: "文档不存在",
+    6000: "文档图片过多, 导不出来(重试无用)",
+}
+
+#: Poll budget. Feishu's own rate limit on the query endpoint is 100/min, and a normal
+#: document finishes in a few seconds; a big one that has not finished in ~60s is better
+#: reported than waited on inside one tool call.
+_EXPORT_POLL_DELAYS = (0.5, 1.0, 1.5, 2.0, 3.0, 3.0, 4.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0)
+
+
+def _build_export_create_request(token: str, doc_type: str, file_extension: str, sub_id: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.POST
+    req.uri = "/open-apis/drive/v1/export_tasks"
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    body: dict[str, Any] = {"token": token, "type": doc_type, "file_extension": file_extension}
+    if sub_id:
+        body["sub_id"] = sub_id
+    req.body = body
+    return req
+
+
+def _build_export_query_request(ticket: str, token: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.GET
+    req.uri = "/open-apis/drive/v1/export_tasks/:ticket"
+    req.paths["ticket"] = ticket
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    # The doc's own token rides in the query even though the ticket already identifies
+    # the task; omitting it is a 1069904 invalid param, not a lookup by ticket alone.
+    req.add_query("token", token)
+    return req
+
+
+def _build_export_download_request(file_token: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.GET
+    req.uri = "/open-apis/drive/v1/export_tasks/file/:file_token/download"
+    req.paths["file_token"] = file_token
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    return req
+
+
+def _export_format_error(doc_type: str, file_extension: str, sub_id: str) -> dict[str, Any] | None:
+    """Refuse a combination Feishu will reject, before spending a request on it."""
+    allowed = _EXPORT_FORMATS.get(doc_type)
+    if allowed is None:
+        return _error(
+            f"file_type must be one of {', '.join(sorted(_EXPORT_FORMATS))}, got {doc_type!r}.",
+            file_type=doc_type,
+        )
+    if file_extension not in allowed:
+        return _error(
+            f"{doc_type} 只能导出成 {' / '.join(allowed)}, 不能导出成 {file_extension} (飞书会回 1069918 格式不匹配).",
+            file_type=doc_type,
+            file_extension=file_extension,
+        )
+    if file_extension == "csv" and not sub_id:
+        # A spreadsheet holds several worksheets and a base several tables; one csv can
+        # only be one of them, so Feishu requires the caller to say which.
+        need = "sheet_id" if doc_type == "sheet" else "table_id"
+        return _error(
+            f"导出 csv 必须给 sub_id (这里是 {need}) —— 一个{'表格' if doc_type == 'sheet' else '多维表格'}"
+            f"里有多张表, csv 装不下多张。缺了飞书回 1069904.",
+            file_type=doc_type,
+            file_extension=file_extension,
+        )
+    return None
+
+
+async def _await_export_file_token(ticket: str, token: str, user_key: str) -> dict[str, Any]:
+    """Poll one export task until it produces a file_token, or explain why it never will."""
+    last_status: Any = None
+    for delay in _EXPORT_POLL_DELAYS:
+        # A factory rather than one request object: `_invoke` mutates what it is given
+        # (token_types narrowed by verify), so a polling loop must build a fresh one.
+        res = await _invoke(
+            lambda: _build_export_query_request(ticket, token),
+            user_key=user_key or None,
+            prefer="tenant",
+        )
+        if not res["ok"]:
+            return res
+        data = res["data"] if isinstance(res["data"], dict) else {}
+        result = data.get("result") if isinstance(data.get("result"), dict) else {}
+        last_status = result.get("job_status")
+        if last_status == 0:
+            file_token = str(result.get("file_token") or "")
+            if not file_token:
+                return _error("导出任务完成了, 但响应里没有 file_token.", ticket=ticket)
+            return {
+                "ok": True,
+                "file_token": file_token,
+                "file_name": result.get("file_name", ""),
+                "file_size": result.get("file_size"),
+            }
+        if last_status in _EXPORT_FATAL:
+            return _error(
+                f"导出失败: {_EXPORT_FATAL[last_status]} (job_status={last_status})"
+                + (f" —— {result.get('job_error_msg')}" if result.get("job_error_msg") else ""),
+                ticket=ticket,
+                job_status=last_status,
+            )
+        await anyio.sleep(delay)
+    return _error(
+        f"导出任务还没做完就到了等待上限 (最后 job_status={last_status}). "
+        "大文档可以过一会儿重新导一次 —— 导出结果 10 分钟后就会被删, 所以这里不把 ticket 交回去。",
+        ticket=ticket,
+        job_status=last_status,
+    )
+
+
+async def export_doc_impl(
+    token: str,
+    file_type: str,
+    file_extension: str,
+    save_path: str,
+    sub_id: str = "",
+    user_key: str = "",
+) -> dict[str, Any]:
+    """Export a Feishu cloud doc to a local file: create task → poll → download."""
+    doc = token.strip()
+    if not doc or not save_path.strip():
+        return _error("token and save_path are required.")
+    doc_type = (file_type or "").strip().lower()
+    extension = (file_extension or "").strip().lower().lstrip(".")
+    sub = sub_id.strip()
+    if refusal := _export_format_error(doc_type, extension, sub):
+        return refusal
+
+    created = await _invoke(
+        lambda: _build_export_create_request(doc, doc_type, extension, sub),
+        user_key=user_key or None,
+        prefer="tenant",
+    )
+    if not created["ok"]:
+        return created
+    cdata = created["data"] if isinstance(created["data"], dict) else {}
+    ticket = str(cdata.get("ticket") or "")
+    if not ticket:
+        return _error("建导出任务成功了, 但响应里没有 ticket.", token=doc)
+
+    ready = await _await_export_file_token(ticket, doc, user_key)
+    if not ready["ok"]:
+        return ready
+
+    data, err = await _download_export_bytes(ready["file_token"], user_key)
+    if data is None:
+        return _error(
+            f"{err or 'download failed'} (导出的文件在任务结束 10 分钟后就会被删, 过期了要重新导一次)",
+            ticket=ticket,
+            file_token=ready["file_token"],
+        )
+    path = pathlib.Path(save_path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        await anyio.Path(path).write_bytes(data)
+    except OSError as exc:
+        return _error(f"could not write file: {exc}", path=str(path))
+    return {
+        "ok": True,
+        "path": str(path),
+        "bytes": len(data),
+        "file_extension": extension,
+        "file_name": ready.get("file_name", ""),
+        "ticket": ticket,
+    }
+
+
+async def _download_export_bytes(file_token: str, user_key: str = "") -> tuple[bytes | None, str]:
+    """The export download, with the same tenant→user fallback as a media download."""
+    client = _get_client()
+    if client is None:
+        return None, "Feishu app not configured."
+    try:
+        resp = await client.arequest(_build_export_download_request(file_token))
+    except Exception as exc:  # SDK/transport failure
+        return None, f"{type(exc).__name__}: {exc}"
+    data, err = _media_resp_to_bytes(resp)
+    if data is not None:
+        return data, ""
+    key = user_key.strip()
+    if not key:
+        return None, err
+    uat_client = _get_uat_client()
+    if uat_client is None:
+        return None, err
+    uat = await _get_valid_uat(key)
+    if uat is None or not uat.access_token:
+        return None, f"{err} — 或需用户授权后重试. (need_auth)"
+    from lark_channel.core.model import RequestOption  # noqa: PLC0415
+
+    option = RequestOption.builder().user_access_token(uat.access_token).build()
+    try:
+        resp = await uat_client.arequest(_build_export_download_request(file_token), option)
+    except Exception as exc:  # SDK/transport failure
+        return None, f"{type(exc).__name__}: {exc}"
+    return _media_resp_to_bytes(resp)
 
 
 # ── Message resources — download an image / file attached to a chat message ────
@@ -7178,6 +7454,122 @@ async def append_doc_image_impl(
     if caption.strip():
         # A failed caption doesn't invalidate the chart itself, so it's reported
         # rather than treated as a failure of the whole append.
+        note = await append_doc_content_impl(doc, caption.strip(), user_key, identity)
+        result["caption_written"] = bool(note.get("ok"))
+        if not note.get("ok"):
+            result["caption_error"] = note.get("message", "")
+    return result
+
+
+# ── Attachments as docx file blocks (block_type 23) ────────────────────────────
+# The same three-step dance as the image block above, with three constants swapped:
+# block_type 27 → 23, parent_type "docx_image" → "docx_file", and the patch field
+# ``replace_image`` → ``replace_file`` (whose only member is ``token``). Keeping it
+# beside the image path rather than folding both into one parameterized helper would
+# save a few lines but hide which of the three constants belong together — a mismatched
+# pair (file block bound with replace_image) is accepted with code 0 and renders as a
+# broken placeholder.
+_FILE_BLOCK_TYPE = 23
+
+
+def _build_file_block_create_request(document_id: str, block_id: str, index: int) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.POST
+    req.uri = "/open-apis/docx/v1/documents/:document_id/blocks/:block_id/children"
+    req.paths["document_id"] = document_id
+    req.paths["block_id"] = block_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    body: dict[str, Any] = {"children": [{"block_type": _FILE_BLOCK_TYPE, "file": {"token": ""}}]}
+    if index >= 0:
+        body["index"] = index
+    req.body = body
+    return req
+
+
+def _build_file_block_patch_request(document_id: str, block_id: str, file_token: str) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.PATCH
+    req.uri = "/open-apis/docx/v1/documents/:document_id/blocks/:block_id"
+    req.paths["document_id"] = document_id
+    req.paths["block_id"] = block_id
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    req.body = {"replace_file": {"token": file_token}}
+    return req
+
+
+async def _upload_into_file_block(file_path: str, block_id: str, user_key: str, identity: str = "") -> dict[str, Any]:
+    """Upload a local file into an existing docx file block; returns its file_token."""
+    path = anyio.Path(file_path)
+    if not await path.is_file():
+        return _error(f"file not found: {file_path}")
+    data = await path.read_bytes()
+    size = len(data)
+    if size > _UPLOAD_ALL_MAX_BYTES:
+        return _error(
+            f"file is {size} bytes (> 20MB). Attaching into a document uses upload_all, "
+            "which caps at 20MB; larger files need Feishu's chunked upload flow.",
+            size=size,
+        )
+    res = await _invoke(
+        lambda: _build_media_upload_all_request(path.name, "docx_file", block_id, size, data, None),
+        user_key=user_key,
+        prefer="user",
+        identity=identity,
+    )
+    if not res["ok"]:
+        return res
+    rdata = res["data"] if isinstance(res["data"], dict) else {}
+    token = rdata.get("file_token", "")
+    if not token:
+        return _error("upload succeeded but returned no file_token.")
+    return {"ok": True, "file_token": token, "size": size}
+
+
+async def append_doc_file_impl(
+    document_id: str, file_path: str, caption: str = "", user_key: str = "", identity: str = ""
+) -> dict[str, Any]:
+    """Attach a local file to a docx as a real file block, with an optional caption.
+
+    Mirrors :func:`append_doc_image_impl` step for step, including the cleanup: an empty
+    file block left behind by a failed upload or patch renders as a broken placeholder,
+    which is worse than no attachment at all.
+    """
+    doc = document_id.strip()
+    if not doc:
+        return _error("document_id is required.")
+    created = await _invoke(
+        lambda: _build_file_block_create_request(doc, doc, -1), user_key=user_key, prefer="user", identity=identity
+    )
+    if not created["ok"]:
+        return created
+    cdata = created["data"] if isinstance(created["data"], dict) else {}
+    children = cdata.get("children") or []
+    block_id = children[0].get("block_id", "") if children and isinstance(children[0], dict) else ""
+    if not block_id:
+        return _error("created the file block but the response carried no block_id.")
+    index = cdata.get("index")
+
+    uploaded = await _upload_into_file_block(file_path, block_id, user_key, identity)
+    if not uploaded["ok"]:
+        await _discard_image_block(doc, block_id, index, user_key, identity)
+        return uploaded
+    patched = await _invoke(
+        lambda: _build_file_block_patch_request(doc, block_id, uploaded["file_token"]),
+        user_key=user_key,
+        prefer="user",
+        identity=identity,
+    )
+    if not patched["ok"]:
+        await _discard_image_block(doc, block_id, index, user_key, identity)
+        return patched
+    result: dict[str, Any] = {
+        "ok": True,
+        "document_id": doc,
+        "block_id": block_id,
+        "file_token": uploaded["file_token"],
+        "bytes": uploaded["size"],
+    }
+    if caption.strip():
         note = await append_doc_content_impl(doc, caption.strip(), user_key, identity)
         result["caption_written"] = bool(note.get("ok"))
         if not note.get("ok"):

@@ -153,7 +153,8 @@ description: 飞书多维表格（bitable）接口表 —— 建 base、建/删�
   token: user
   required: [name]
   fields:
-    name: {max: 255}
+    # pattern 而不是 max: max 用 float() 转换值, 对字符串一律放过, 长度根本没被拦。
+    name: {pattern: '^[\s\S]{1,255}$', on_fail: 'base 名字最长 255 字符'}
 
 - endpoint: GET /open-apis/bitable/v1/apps/:app_token
 
@@ -161,9 +162,11 @@ description: 飞书多维表格（bitable）接口表 —— 建 base、建/删�
   token: user
   fields:
     name:
-      max: 100
+      # 长度用 pattern 而不是 max(max 对字符串一律放过);两条共用一个 on_fail,
+      # 所以文案把长度和非法字符都写上。
+      pattern: '^[\s\S]{1,100}$'
       forbid: '[?/\\*:\[\]]'
-      on_fail: 'base 名字不能含 ? / \ * : [ ] (飞书返回 1254031)'
+      on_fail: 'base 名字最长 100 字符, 且不能含 ? / \ * : [ ] (飞书返回 1254031)'
   pitfalls:
     - 'base 在 wiki 里或被嵌进文档时开不了高级权限 (1254301)。'
     - '飞书先改名再切权限, 可能只成功一半; 看返回里的 changed。'

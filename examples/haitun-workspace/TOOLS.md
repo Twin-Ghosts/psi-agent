@@ -261,12 +261,35 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
   `values_json` 是「行的数组」如 `'[["姓名","分数"],["张三",95],["合计","=SUM(B2:B2)"]]'`——**单元格值以 `=` 开头即写成公式**。
   写表格是写操作：带 `user_key=<sender_open_id>`，归属按上面「问归属」的结果走（`identity`
   留空即沿用记住的选择）。
+- **表格的结构操作**（建表、改名、加/插/删行列、合并拆分单元格、查找替换、工作表增删复制）：
+  走 `feishu-sheet` 技能的接口表，用 `feishu_api` 按表调用。**那份技能里有一处必须照抄不能推理的坑**：
+  插行列（`insert_dimension_range`）的 `startIndex/endIndex` 是 **0-based 左闭右开**，
+  删行列（`DELETE dimension_range`）却是 **1-based 两端都闭** —— 同一份 `{3, 7}` 插入 4 行、删除 5 行，
+  两边都返回成功。另外飞书**没有创建透视表/图表的接口**（要图表走 `feishu_chart`），
+  保护范围的写入和条件格式那两个端点未核实，技能里都写清了。
+- **云盘的文件管理**（查文档元数据、建文件夹、列目录、复制、移动、建快捷方式、查异步任务）：
+  走 `feishu-drive` 技能的接口表。几个要点：复制**不支持文件夹**而移动支持；移动/删除文件夹是
+  **异步**的，回一个 `task_id` 要拿 `GET /open-apis/drive/v1/files/task_check` 查；列目录**不递归**
+  且 `page_size` 上限 200；`metas/batch_query` 查不到的落在 `failed_list[]` 里不报错。
+- **重命名云文档**：飞书**没有统一接口**。表格走 `feishu-sheet` 的改标题端点；wiki 节点走
+  `wiki/v2/.../update_title`（只支持 doc/docx/shortcut）；**独立 docx 没有改名接口**，
+  只能复制成新名字再删旧的（换了 token、评论和历史留在旧文件上）——这个后果先告诉用户再动手。
 - **删除文档/文件**：走 `feishu-drive` 技能的接口表——`DELETE /open-apis/drive/v1/files/:file_token`
   带 `type`，删除进**回收站可恢复**。type 是 docx/doc/sheet/bitable/mindnote/slides/file/folder/shortcut。
   删**知识库(wiki)里的文档**：飞书没有独立删 wiki 节点的接口——先 `feishu_api` 打
   `GET /open-apis/wiki/v2/spaces/get_node` 取 `obj_token`+`obj_type`，再拿 `obj_token` 当
   `file_token`、`obj_type` 当 `type` 删。
   删除不可轻率，动手前先跟用户确认清楚删的是哪一个。
+  **回收站没有公开 API**：列出/恢复/清空都得用户自己去飞书客户端做，别去猜一个 `/trash` 路径试。
+- **把飞书文档导出成 pdf/docx/xlsx/csv 存到本地**：`feishu_doc_export(token, file_type,
+  file_extension, save_path, sub_id="", user_key=...)`。一次调用走完飞书的三步（建任务→轮询→下载）。
+  格式按源类型配对：docx/doc → pdf 或 docx，sheet/bitable → xlsx 或 csv；**导 csv 必须给 `sub_id`**
+  （表格的 sheet_id 或多维表格的 table_id，因为一个 csv 装不下多张表）。配错格式会本地就拦下来。
+  文档过大（107）或图片过多（6000）是导不出来的，重试无用。
+- **往文档正文里插本地图片/附件**：`feishu_doc_append_image(document_id, image_path, caption="")` /
+  `feishu_doc_append_file(document_id, file_path, caption="")`。各自都是「建空块→上传进这个块→
+  PATCH 绑 token」三步，工具替你走完；单个文件 20MB 上限。图片块自己没有图注字段，
+  所以 `caption` 会写成下面一个段落。
 - **访问/浏览知识库**：`feishu_wiki_list_spaces` / `feishu_wiki_list_nodes` 两个列表工具
   已做「tenant 先试，返回空且带了 user_key 时自动改用户身份重试」。带上 `user_key=<sender_open_id>`：
   `feishu_wiki_list_spaces(user_key=...)` 列库 → `feishu_wiki_list_nodes(space_id, user_key=...)` 列文档
@@ -276,6 +299,10 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
   `data.node` 是空的就带 `user_key` 加 `prefer="user"` 再问一次，别当成节点不存在。
 - **读知识库里的 PDF/附件（下载）**：飞书文档 API 只能直接读 docx/doc/sheet；PDF、图片等要先下载再解析。
   `feishu_file_download(source, save_path, user_key=...)` 已 tenant 优先、机器人下不到时自动回退到用户身份。
+  **`source_type` 分三种，选错是 404 不是自动跳转**：`"media"`（默认，文档**里面**的图片/附件）、
+  `"file"`（云盘里独立的资源文件，如别人上传的 PDF）、`"url"`（直链，审批表单附件就是这种，约 12 小时失效）。
+  两个 token 端点服务的是不相交的东西；而飞书自己的在线文档（docx/sheet/bitable）**两个都不管**，
+  那些要用 `feishu_doc_export` 导出。
   流程：`feishu_api` 打 `GET /open-apis/wiki/v2/spaces/get_node`（带 user_key）拿 `obj_token`
   → `feishu_file_download`（带 user_key）
   存到本地 → 用 `read_pdf(pdf_path)` 抽文本（数字版 PDF 直接读文本层；扫描件/图片型 PDF 自动逐页

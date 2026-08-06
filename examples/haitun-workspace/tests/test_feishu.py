@@ -3502,6 +3502,112 @@ async def test_download_file_url_expired_message(monkeypatch: pytest.MonkeyPatch
     assert "expired" in result["message"]
 
 
+@pytest.mark.asyncio
+async def test_download_file_via_drive_file_endpoint(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """``source_type="file"`` reaches the *files* endpoint, not the medias one.
+
+    The two are disjoint — medias serves what lives inside a document, files serves a
+    standalone resource file in Drive — and the wrong one is a 404 rather than a redirect.
+    """
+    captured: dict[str, Any] = {}
+
+    class _Client:
+        async def arequest(self, req: Any) -> Any:
+            captured["uri"] = req.uri
+            captured["token"] = req.paths.get("file_token")
+            return _FakeResp(None, "", b"%PDF-1.7 body")
+
+    monkeypatch.setattr(_impl, "_get_client", lambda: _Client())
+    dest = tmp_path / "docs" / "handbook.pdf"
+    result = await _impl.download_file_impl("boxcn_tok", str(dest), False, "", "file")
+    assert result["ok"] is True
+    assert captured["uri"].endswith("/drive/v1/files/:file_token/download")
+    assert captured["token"] == "boxcn_tok"
+    assert dest.read_bytes() == b"%PDF-1.7 body"
+    assert result["source_type"] == "file"
+
+
+@pytest.mark.asyncio
+async def test_download_defaults_to_media_endpoint(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Callers that predate ``source_type`` keep hitting the endpoint they always did."""
+    captured: dict[str, Any] = {}
+
+    class _Client:
+        async def arequest(self, req: Any) -> Any:
+            captured["uri"] = req.uri
+            return _FakeResp(None, "", b"data")
+
+    monkeypatch.setattr(_impl, "_get_client", lambda: _Client())
+    result = await _impl.download_file_impl("media_tok", str(tmp_path / "a.bin"))
+    assert result["ok"] is True
+    assert captured["uri"].endswith("/drive/v1/medias/:file_token/download")
+    assert result["source_type"] == "media"
+
+
+@pytest.mark.asyncio
+async def test_is_url_still_wins_over_source_type(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """``is_url=True`` is the older spelling of ``source_type="url"`` and must keep working.
+
+    Existing call sites pass it positionally alongside the default ``source_type``, so the
+    two have to agree rather than the newer argument quietly overriding the older one.
+    """
+
+    async def fake_url_bytes(url: str) -> tuple[bytes | None, str]:
+        assert url == "https://f.co/a.jpg"
+        return b"JPEGDATA", ""
+
+    monkeypatch.setattr(_impl, "_download_url_bytes", fake_url_bytes)
+    dest = tmp_path / "a.jpg"
+    result = await _impl.download_file_impl("https://f.co/a.jpg", str(dest), True)
+    assert result["ok"] is True
+    assert result["source_type"] == "url"
+    assert dest.read_bytes() == b"JPEGDATA"
+
+
+@pytest.mark.asyncio
+async def test_download_rejects_an_unknown_source_type(tmp_path: Path) -> None:
+    """A typo must not silently fall back to a different endpoint than intended."""
+    result = await _impl.download_file_impl("tok", str(tmp_path / "a.bin"), False, "", "drive")
+    assert result["ok"] is False
+    assert "source_type" in result["message"]
+    assert not (tmp_path / "a.bin").exists()
+
+
+@pytest.mark.asyncio
+async def test_download_as_user_keeps_the_chosen_endpoint(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The tenant→user retry must not drop back to the medias endpoint.
+
+    A user-owned PDF is exactly the case where the bot's token fails and the retry
+    matters, so a retry that silently changed endpoint would 404 on the second try and
+    read as "the user has no access".
+    """
+    seen: list[str] = []
+
+    class _TenantClient:
+        async def arequest(self, req: Any) -> Any:
+            seen.append(req.uri)
+            return _FakeResp(None, "", b"")  # no content → falls through to the user retry
+
+    class _UatClient:
+        async def arequest(self, req: Any, option: Any = None) -> Any:
+            seen.append(req.uri)
+            return _FakeResp(None, "", b"%PDF user copy")
+
+    monkeypatch.setattr(_impl, "_get_client", lambda: _TenantClient())
+    monkeypatch.setattr(_impl, "_get_uat_client", lambda: _UatClient())
+
+    async def _uat(user_key: str = "") -> Any:
+        return _FakeUAT()
+
+    monkeypatch.setattr(_impl, "_get_valid_uat", _uat)
+    dest = tmp_path / "u.pdf"
+    result = await _impl.download_file_impl("boxcn_tok", str(dest), False, "ou_a", "file")
+    assert result["ok"] is True, result
+    assert len(seen) == 2, seen
+    assert all(uri.endswith("/drive/v1/files/:file_token/download") for uri in seen), seen
+    assert dest.read_bytes() == b"%PDF user copy"
+
+
 def test_file_download_tool_async_with_docstring() -> None:
     mod = importlib.import_module("feishu_drive")
     fn = mod.feishu_file_download
