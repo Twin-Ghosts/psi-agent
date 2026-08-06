@@ -1645,10 +1645,14 @@ def test_card_template_takes_the_most_urgent_row() -> None:
     assert c._card_template([done], today) == "green"
 
 
-def test_row_is_two_columns_with_the_box_on_the_right() -> None:
-    """一行 = 左文字、右方框, 排成一个 column_set(紧凑的一行, 不是上下两块)。
+def test_row_renders_text_then_an_independent_action_block() -> None:
+    """一行 = markdown 文字 + 紧随其后的独立 action 块。
 
-    未完成行右列有可点按钮; 已完成行右列为空(按钮消失)。
+    刻意不用 div.extra 装按钮: 卡能发出去, 但框架勾选后要把 extra 换成
+    markdown「● ~~完成~~」, 而飞书的 div.extra 只接受
+    [img button select_static select_person overflow date_picker ...] ——
+    patch 被拒(230099 / ErrCode 11310), 卡面永远不更新, 表现为「点了没反应」。
+    也不用 column_set 装按钮: 整张卡会被拒收(230099 / ErrCode 200410)。
     """
     c = _load("_rookie_sop_card")
     p = _load("_rookie_sop_progress")
@@ -1661,24 +1665,27 @@ def test_row_is_two_columns_with_the_box_on_the_right() -> None:
         _row("wifi", p.STATUS_DONE, date(2026, 8, 9), title="连上 WiFi"), today
     )
 
-    assert len(todo_elements) == 1
-    row_el = todo_elements[0]
-    # div + extra 是飞书原生的「左文右控件」。刻意不用 column_set 装按钮 ——
-    # 飞书会整张卡拒收(230099 / 200410 action components are not allowed in the column)。
-    assert row_el["tag"] == "div"
-    assert "连上 WiFi" in row_el["text"]["content"]
-    assert row_el["extra"]["tag"] == "button"
-    assert row_el["extra"]["text"]["content"] == c._BOX
+    # 未完成: 文字块 + action 块
+    assert [e["tag"] for e in todo_elements] == ["markdown", "action"]
+    # 条目名写在按钮上, 上方文字块只放状态标记与验收标准 —— 勾选后框架把整个
+    # action 块换成「● ~~连上 WiFi~~」, 既看得出勾了哪项, 也不会上下重复。
+    assert "连上 WiFi" not in todo_elements[0]["content"]
+    assert "验收" in todo_elements[0]["content"]  # _row 助手的验收标准就是「验收」
+    button = todo_elements[1]["actions"][0]
+    assert button["text"]["content"] == "连上 WiFi"
+    assert button["value"]["action"] == "rookie_tick_wifi"
     assert action == "rookie_tick_wifi"
-    # 已完成行: 文字划掉, 没有 extra 按钮
-    done_el = done_elements[0]
-    assert "~~连上 WiFi~~" in done_el["text"]["content"]
-    assert "extra" not in done_el
+    # 按钮不得藏在 div.extra 或 column 里 —— 那两种飞书都不接受
+    assert all("extra" not in e for e in todo_elements)
+    assert all(e["tag"] != "column_set" for e in todo_elements)
+    # 已完成: 只剩划掉的文字, 没有 action 块
+    assert [e["tag"] for e in done_elements] == ["markdown"]
+    assert "~~连上 WiFi~~" in done_elements[0]["content"]
     assert done_action == ""
 
 
 def test_rows_section_is_compact_without_a_rule_between_rows() -> None:
-    """行与行之间不插 hr —— 每行本身已是 column_set, 分隔线会把卡片撑散。"""
+    """行与行之间不插 hr —— 分隔线会把卡片撑得很松散。"""
     c = _load("_rookie_sop_card")
     p = _load("_rookie_sop_progress")
     rows = [
@@ -1689,7 +1696,8 @@ def test_rows_section_is_compact_without_a_rule_between_rows() -> None:
     elements, handlers = c._rows_section(rows, date(2026, 8, 6))
 
     assert len(handlers) == 2
-    assert all(e["tag"] == "div" for e in elements)
+    assert all(e["tag"] in ("markdown", "action") for e in elements)
+    assert not any(e["tag"] == "hr" for e in elements)
 
 
 def test_progress_text_is_plain_numbers_and_degrades_safely() -> None:
