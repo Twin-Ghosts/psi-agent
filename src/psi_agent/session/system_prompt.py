@@ -128,30 +128,47 @@ class SystemPrompt:
             return
 
         problems: list[str] = []
+        checked: list[str] = []
 
-        if self._advertised_tools_fn is not None:
-            try:
-                advertised = await self._advertised_tools_fn()
-            except Exception as e:
-                logger.warning(f"advertised_tool_names() failed, skipping tool exposure check: {e!r}")
-            else:
-                problems += check_tool_exposure(
-                    {str(name) for name in advertised},
-                    registered,
-                    load_failures=load_failures,
-                )
+        advertised = await self._hook_result(self._advertised_tools_fn, "advertised_tool_names")
+        if advertised is not None:
+            problems += check_tool_exposure(
+                {str(name) for name in advertised},
+                registered,
+                load_failures=load_failures,
+            )
+            checked.append(f"{len(registered)} tool(s)")
 
-        if self._indexed_skills_fn is not None:
-            try:
-                entries = await self._indexed_skills_fn()
-            except Exception as e:
-                logger.warning(f"indexed_skill_entries() failed, skipping skill exposure check: {e!r}")
-            else:
-                problems += await check_skill_exposure(entries)
+        entries = await self._hook_result(self._indexed_skills_fn, "indexed_skill_entries")
+        if entries is not None:
+            problems += await check_skill_exposure(entries)
+            checked.append(f"{len(list(entries))} skill(s)")
 
         enforce(problems, context="Session startup")
-        if not problems:
-            logger.info(f"Exposure check passed: {len(registered)} tool(s) advertised and registered consistently")
+        if checked:
+            logger.info(f"Exposure check passed: {' and '.join(checked)} consistent")
+
+    @staticmethod
+    async def _hook_result(hook: Callable[..., Any] | None, name: str) -> list[Any] | None:
+        """Call an exposure hook and return its entries, or ``None`` to skip it.
+
+        A hook that is undefined, raises, or returns something that is not a list or
+        tuple yields ``None`` and a WARNING. The check is a safety net; a broken net
+        must not become a worse failure than the thing it looks for — and the caller
+        must be able to tell "checked and agreed" from "could not check", so that the
+        success log never claims a check that did not run.
+        """
+        if hook is None:
+            return None
+        try:
+            result = await hook()
+        except Exception as e:
+            logger.warning(f"{name}() failed, skipping that half of the exposure check: {e!r}")
+            return None
+        if not isinstance(result, list | tuple):
+            logger.warning(f"{name}() returned {type(result).__name__}, expected a sequence; skipping")
+            return None
+        return list(result)
 
     async def ensure(
         self,

@@ -88,7 +88,11 @@ CORE_TOOL_SUMMARIES: dict[str, str] = {
     "text_to_speech": "Create an MP3 file with iFLYTEK online TTS and deliver it with [SEND:]",
 }
 
-# Display order - listed tools first, any extra tools (e.g. MCP search) after.
+# Display order for the ## Tooling section. This list is also the *filter*: only
+# these tools are named there, and everything else the registry loaded is collapsed
+# into a trailing count (see build_tooling_section). Adding a name here therefore
+# promotes a tool into the prompt; it needs an entry in CORE_TOOL_SUMMARIES too, or
+# it renders as a bare name.
 TOOL_ORDER: list[str] = [
     "read",
     "write",

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from loguru import logger
 
 from psi_agent.session.conversation import Conversation
 from psi_agent.session.exposure import ALLOW_MISMATCH_ENV, ExposureMismatchError
@@ -217,3 +218,47 @@ async def test_env_var_lets_a_known_mismatch_boot(monkeypatch: pytest.MonkeyPatc
     sp = SystemPrompt(advertised_tools_fn=advertised_tool_names)
 
     await sp.check_exposure(registered={"read", "unlisted"})
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("bad", [None, 42, "read", {"read": 1}])
+async def test_a_hook_returning_a_non_sequence_is_skipped_not_crashed(
+    bad: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed hook must degrade like every other optional workspace hook.
+
+    Iterating whatever the hook returned used to raise a bare ``TypeError`` out of
+    ``SessionAgent.create`` — a broken safety net taking down startup harder than the
+    thing it was watching for. A ``str`` and a ``dict`` are iterable but still wrong,
+    so the guard checks for list/tuple rather than merely for iterability.
+    """
+    monkeypatch.delenv(ALLOW_MISMATCH_ENV, raising=False)
+
+    async def advertised_tool_names() -> object:
+        return bad
+
+    sp = SystemPrompt(advertised_tools_fn=advertised_tool_names)
+
+    await sp.check_exposure(registered={"read"})
+
+
+@pytest.mark.anyio
+async def test_success_log_names_only_what_was_actually_checked(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With only the skills hook defined, the log must not claim tools were checked."""
+    monkeypatch.delenv(ALLOW_MISMATCH_ENV, raising=False)
+    messages: list[str] = []
+    sink_id = logger.add(lambda m: messages.append(m.record["message"]), level="INFO")
+
+    async def indexed_skill_entries() -> list[tuple[str, str]]:
+        return []
+
+    try:
+        await SystemPrompt(indexed_skills_fn=indexed_skill_entries).check_exposure(registered={"a", "b", "c"})
+    finally:
+        logger.remove(sink_id)
+
+    assert messages, "expected a success log line"
+    assert "skill(s)" in messages[-1]
+    assert "tool(s)" not in messages[-1], "claimed a tool check that never ran"

@@ -340,63 +340,39 @@ async def _tools_dir_on_sys_path(entry: str) -> AsyncIterator[None]:
     happened to patch the path. The same file would register on one run and raise
     ``ModuleNotFoundError`` on the next.
 
-    **What the lock does and does not buy (刻意为之 — do not "fix" it into a
-    scan-wide lock):** it makes the read-then-insert atomic, so overlapping loads of
-    the *same* directory keep exactly one entry instead of stacking duplicates for
-    the overlap window. It does **not** give exclusive path access: two *different*
-    agent packages can be on ``sys.path`` simultaneously.
-
-    A scan-wide lock would cost far more than it fixes: a full load is ~2.7s for
-    haitun's 262 tools (longer on an ``.mcp_cache`` miss, where ``@mcp`` shells out
-    to ``npx`` during import), so N Sessions starting together would queue
-    N x 2.7s before any of them answered a request — and it would still not fix the
-    three hazards below, none of which live in ``sys.path`` at all. All three are
-    inherent to bare sibling imports and all three are **observed**, not theorized:
-
-    1. **Helpers never reload.** They are cached in ``sys.modules`` under their bare
-       name and nothing here evicts them (only ``psi_tool_*`` modules are, on the
-       error path). Editing ``_helper.py`` therefore has *no effect* even after a
-       ``refresh()`` that re-imports the tool file: the re-import gets the stale
-       helper. Restarting the Session is the only way. Hot reload covers tool files,
-       not their helpers.
-    2. **Same-named helpers collide across agent packages.** Whichever package
-       imports ``_fusion_memory_config`` first wins for the life of the process; a
-       later package with a same-named helper silently gets the first one. Five such
-       names already exist across the bundled example workspaces. Serializing the
-       scans would not change this — only *which* load happens to be first.
-    3. **A tool file whose name shadows a stdlib module poisons the process.** With
-       ``tools/`` in front of ``sys.path``, a ``tools/secrets.py`` makes
-       ``import secrets`` resolve to the tool file — and because that lands in
-       ``sys.modules``, it **outlives the load window** and every later importer in
-       the process, framework included, gets the tool file. The underscore
-       convention does not help: tool files are not underscore-prefixed.
-
-    So the honest boundary is: **one agent package per process, and no tool file
-    named after a stdlib module.** No locking here can make either case safe.
-    Deployments that need several distinct packages should use separate processes.
-
-    *entry* must already be an absolute path string. It is normalized by the caller
-    rather than here: turning a relative path absolute reads the process CWD, which
-    is filesystem state, and doing that inside an async function is exactly what
-    ``ASYNC240`` exists to catch. In production the path arrives absolute anyway —
-    ``Session.run`` resolves it with ``await anyio.Path(...).resolve()``.
-
-    **Refcounted, 刻意为之 — both simpler alternatives are wrong, each in its own
-    direction (observed, not reasoned about):**
+    **Refcounted per path, 刻意为之 — both simpler alternatives are wrong, each in
+    its own direction (observed, not reasoned about):**
 
     - Insert unconditionally and always remove → every overlapping loader stacks
-      another copy of the entry, so ``sys.path`` grows for the overlap window and
-      is misleading to read.
+      another copy of the entry, so ``sys.path`` grows for the overlap window.
     - Insert only when absent and remove only what you inserted → the loader that
       inserted can finish first and pull the entry out from under a second one that
       is still mid-scan, whose bare ``from _helper import ...`` then raises
       ``ModuleNotFoundError``. This is *worse* than the duplicate.
 
     One counter keyed by path fixes both: exactly one entry for any number of
-    overlapping loaders, removed only when the last of them leaves. An entry that
-    was **already on the path before any load** is borrowed rather than counted —
-    tool files insert this very directory themselves at import time, and removing
-    theirs would be a different corruption.
+    overlapping loaders, removed only when the last leaves. An entry that was
+    **already on the path before any load** is borrowed rather than counted — tool
+    files insert this very directory themselves at import time, and removing theirs
+    would be a different corruption.
+
+    The lock covers only that counter's read-then-modify, never a whole scan: a full
+    load is ~2.7s for haitun's 262 tools, so a scan-wide lock would make N Sessions
+    starting together queue N x 2.7s. It therefore does **not** give exclusive path
+    access — two different agent packages can be on ``sys.path`` at once.
+
+    That is accepted because the real hazards of bare sibling imports are not in
+    ``sys.path`` and no lock here can reach them: helpers never reload, same-named
+    helpers collide across agent packages, and a tool file named after a stdlib
+    module poisons the whole process. The honest boundary is **one agent package per
+    process, and no tool file named after a stdlib module** — see
+    ``session/AGENTS.md`` § 裸导入的三个已知隐患, where each is spelled out and
+    pinned by a test.
+
+    *entry* must already be an absolute path string. Normalizing here would read the
+    process CWD — filesystem state, inside an async function, which is what
+    ``ASYNC240`` exists to catch. In production it arrives absolute anyway
+    (``Session.run`` resolves it via ``await anyio.Path(...).resolve()``).
     """
     async with _SYS_PATH_LOCK:
         depth = _SYS_PATH_DEPTH.get(entry, 0)

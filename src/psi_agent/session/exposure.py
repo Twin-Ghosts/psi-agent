@@ -14,9 +14,12 @@ name that resolves to no callable at all (the model calls it and gets an error).
 Both failures were silent.
 
 The same split exists for skills: the prompt tells the model to read
-``skills/<name>/SKILL.md``, where ``<name>`` comes from the skill's frontmatter,
-while the file lives under its *directory* name. When the two differ, the path in
-the prompt does not exist.
+``skills/<name>/SKILL.md``, so ``<name>`` has to be a real directory. Taking it
+from the skill's frontmatter instead handed the model a path that did not exist
+(and broke ``skill_manage``, which resolves by directory too). haitun now takes
+the index name from the directory and lets frontmatter supply metadata only, so
+this check is mostly a regression guard on that — plus a real check that every
+indexed ``SKILL.md`` is still readable.
 
 These checks run at Session startup and raise ``ExposureMismatchError`` rather than
 logging and continuing. A mismatch means the model has been told something untrue
@@ -35,11 +38,14 @@ from pathlib import Path
 import anyio
 from loguru import logger
 
-SkillEntries = Iterable[tuple[str, "str | Path"]]
+SkillEntries = Iterable[tuple[str, str | Path]]
 """``(skill name, path to its SKILL.md)`` pairs, as the index used them."""
 
 ALLOW_MISMATCH_ENV = "PSI_ALLOW_EXPOSURE_MISMATCH"
 """Set to ``1``/``true``/``yes`` to log instead of raising."""
+
+_NAMES_PREVIEWED = 20
+"""How many names a problem line lists before collapsing to a count."""
 
 
 class ExposureMismatchError(RuntimeError):
@@ -47,10 +53,12 @@ class ExposureMismatchError(RuntimeError):
 
 
 def _bullets(names: Iterable[str]) -> str:
-    """Render a sorted, comma-joined preview of at most 20 names."""
+    """Render a sorted, comma-joined preview, collapsing the tail to a count."""
     items = sorted(names)
-    shown = ", ".join(items[:20])
-    return f"{shown}, … (+{len(items) - 20} more)" if len(items) > 20 else shown
+    shown = ", ".join(items[:_NAMES_PREVIEWED])
+    if len(items) <= _NAMES_PREVIEWED:
+        return shown
+    return f"{shown}, … (+{len(items) - _NAMES_PREVIEWED} more)"
 
 
 def check_tool_exposure(
@@ -114,9 +122,9 @@ async def check_skill_exposure(entries: SkillEntries) -> list[str]:
 
     Two things have to hold for the prompt's ``skills/<name>/SKILL.md`` instruction
     to work: the file must exist, and the directory holding it must be named
-    exactly ``name``. Frontmatter ``name:`` overriding the directory name is the
-    way this breaks in practice — the index shows one thing, the path needs
-    another, and the model's read fails.
+    exactly ``name``. An index that derives the name from frontmatter rather than
+    from the directory is how this breaks — the index shows one thing, the path
+    needs another, and the model's read fails.
 
     Args:
         entries: Sequence of ``(name, path)`` pairs from the skills index.
@@ -138,7 +146,8 @@ async def check_skill_exposure(entries: SkillEntries) -> list[str]:
             problems.append(
                 f"skill is indexed as {name!r} but lives in directory {dir_name!r} — "
                 f"the prompt tells the model to read 'skills/{name}/SKILL.md', which does not exist. "
-                f"Make the frontmatter 'name:' match the directory ({path})"
+                f"Fix the index to use the directory name; do not rename the skill to match, since "
+                f"runtime skills such as fusion-flow are packaged upstream and overwritten ({path})"
             )
 
     return problems
