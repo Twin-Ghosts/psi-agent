@@ -34,7 +34,7 @@ _FILLED = "■"
 # 未勾选的方框按钮文字。刻意用空心方框而非「标记完成」:
 # 文字在左、方框在右, 框架勾选后把这个按钮换成「● ~~□~~」——
 # 那个实心 ● 恰好就是「打上勾」的视觉反馈。
-_BOX = "□"
+_BOX = "完成"
 
 # DDL 状态 → (emoji, 卡片主题色)。绿=还早, 黄=今天到期, 红=已逾期。
 _DUE_OK = "🟢"
@@ -130,7 +130,7 @@ def _two_col(left_markdown: str, action_value: dict[str, Any] | None) -> dict[st
         element["extra"] = {
             "tag": "button",
             "text": {"tag": "plain_text", "content": _BOX},
-            "type": "default",
+            "type": "primary",
             "size": "tiny",
             "value": action_value,
         }
@@ -160,7 +160,11 @@ def _footer(sop_url: str) -> list[dict[str, Any]]:
 
 
 def _progress_bar(progress_text: str) -> str:
-    """把 "3/5" 画成一小条进度块, 比纯数字直观。"""
+    """进度用纯数字。
+
+    刻意为之: 不画 ▰▱ 方块进度条 —— 那串方框会和行尾按钮在视觉上撞车,
+    整张卡显得杂乱(实测反馈)。全部做完时加一个 🎉 作为完成信号。
+    """
     try:
         done_s, total_s = progress_text.split("/", 1)
         done, total = int(done_s), int(total_s)
@@ -168,9 +172,8 @@ def _progress_bar(progress_text: str) -> str:
         return progress_text
     if total <= 0:
         return progress_text
-    slots = 10
-    filled = round(done * slots / total)
-    return f"{'▰' * filled}{'▱' * (slots - filled)} {done}/{total}"
+    tail = "　🎉" if done == total else ""
+    return f"**已完成 {done} / {total} 项**{tail}"
 
 
 def module_card(

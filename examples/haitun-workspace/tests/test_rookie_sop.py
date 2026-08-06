@@ -357,7 +357,7 @@ def test_role_settled_card_for_dev_shows_role_confirmed_done_alongside_five_live
     assert "确认角色" in rendered
     assert "rookie_tick_role_confirmed" not in rendered
     # 进度分子分母把 role_confirmed 算进去: 1 个已完成(role_confirmed) + 2 个未完成 = 1/3
-    assert "1/3" in rendered
+    assert "已完成 1 / 3 项" in rendered  # 进度改成纯数字, 不再画 ▰▱ 方块条
 
 
 def test_remind_card_sections_overdue_and_due_today() -> None:
@@ -1692,12 +1692,13 @@ def test_rows_section_is_compact_without_a_rule_between_rows() -> None:
     assert all(e["tag"] == "div" for e in elements)
 
 
-def test_progress_bar_renders_a_bar_and_degrades_safely() -> None:
+def test_progress_text_is_plain_numbers_and_degrades_safely() -> None:
     c = _load("_rookie_sop_card")
 
-    assert c._progress_bar("0/5") == "▱▱▱▱▱▱▱▱▱▱ 0/5"
-    assert c._progress_bar("5/5") == "▰▰▰▰▰▰▰▰▰▰ 5/5"
-    assert "3/5" in c._progress_bar("3/5")
+    # 纯数字进度: ▰▱ 方块条会和行尾按钮视觉撞车, 已弃用
+    assert c._progress_bar("0/5") == "**已完成 0 / 5 项**"
+    assert c._progress_bar("5/5") == "**已完成 5 / 5 项**　🎉"  # 全部做完加个完成信号
+    assert "3 / 5" in c._progress_bar("3/5")
     # 非法输入原样返回, 不抛异常
     assert c._progress_bar("0/0") == "0/0"
     assert c._progress_bar("坏数据") == "坏数据"
