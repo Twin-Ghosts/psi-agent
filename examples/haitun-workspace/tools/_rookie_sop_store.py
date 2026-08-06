@@ -104,13 +104,16 @@ def detail_row_fields(
     onboard: date,
     role_label: str = "",
 ) -> dict[str, Any]:
-    """种下一行明细。开发环境项在角色未答时状态直接种成 不适用, 而不是 未完成 ——
-    这样 Day 1 的分母从落地那一刻起就不含开发环境项(design 231 行的规格), 不用
-    等 recompute_overview 之外再补一次过滤调用点。选了「研发」后
-    rookie_sop_role_set 会把这些行复活成 未完成; 选「非研发」时它们保持
-    不适用, 与 mark_module_na 写出的终态一致。
+    """种下一行明细 —— 所有项一律种成 未完成, 包括开发环境项。
+
+    刻意为之: 开发环境的 5 项与角色选择同在一张卡上、Day 1 就可点(见
+    _rookie_sop_card.role_card), 所以它们从落地起就计入分母 —— Day 1 是 33。
+    选「非研发人员」后 mark_module_na 把这 5 项标成 不适用, 分母降到 28;
+    选「研发人员」则保持 33。
+    (早先的做法是未答角色时先种成 不适用 让 Day 1 显示 28, 但那与「一张卡上
+    5 项立即可点」矛盾 —— 可点却不计分母会让进度看起来对不上。)
     """
-    status = _p.STATUS_NA if (item.dev_only and not role_label) else _p.STATUS_TODO
+    status = _p.STATUS_TODO
     return {
         "记录键": f"{open_id}:{item.item_id}",
         "姓名": name,

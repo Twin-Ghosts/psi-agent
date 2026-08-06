@@ -249,18 +249,50 @@ def test_module_card_all_done_turns_header_green() -> None:
     assert card["header"]["template"] == "green"
 
 
-def test_role_card_offers_exactly_two_choices() -> None:
+def test_role_card_carries_role_choices_and_dev_items_on_one_card() -> None:
+    """一张卡装完角色选择与开发项 —— 两类 action 共存于同一个 handlers 里。
+
+    multi_use 按 action 逐个消费, 点掉一个角色按钮只退休那一个, 5 个开发项照旧可点,
+    所以不必先发角色卡再发第二张。
+    """
     c = _load("_rookie_sop_card")
+    p = _load("_rookie_sop_progress")
+    dev_rows = [
+        _row("git_workflow", p.STATUS_TODO, date(2026, 8, 12), title="了解 Git 工作流", module="开发环境"),
+        _row("repo_access", p.STATUS_TODO, date(2026, 8, 12), title="开通仓库权限", module="开发环境"),
+    ]
 
-    card, handlers = c.role_card("Day 1-7 截止")
+    card, handlers = c.role_card("Day 1-7 截止", dev_rows=dev_rows, progress_text="0/2")
 
+    # 角色的两个 action 与开发项的 tick action 同在一张卡上
     assert handlers == {
         "rookie_role_dev": "rookie_sop_role_set",
         "rookie_role_nondev": "rookie_sop_role_set",
+        "rookie_tick_git_workflow": "rookie_sop_tick",
+        "rookie_tick_repo_access": "rookie_sop_tick",
     }
     rendered = _dump(card)
-    assert "我是研发" in rendered
-    assert "我不是研发" in rendered
+    assert "研发人员" in rendered
+    assert "非研发人员" in rendered
+    # 开发项的文字写在按钮里(而不是另起一块 markdown + 通用的「标记完成」按钮)
+    assert "了解 Git 工作流" in rendered
+    assert "标记完成" not in rendered
+
+
+def test_role_card_hides_role_confirmed_row_before_the_role_is_answered() -> None:
+    """role_confirmed 就是「角色是否已答」本身, 未答时由两个角色按钮代表,
+    不再单独给它一个勾选按钮 —— 否则同一件事有两个可点动作。"""
+    c = _load("_rookie_sop_card")
+    p = _load("_rookie_sop_progress")
+    rows = [
+        _row("role_confirmed", p.STATUS_TODO, date(2026, 8, 12), title="确认是否为技术人员", module="开发环境"),
+        _row("git_workflow", p.STATUS_TODO, date(2026, 8, 12), title="了解 Git 工作流", module="开发环境"),
+    ]
+
+    _card_json, handlers = c.role_card("Day 1-7 截止", dev_rows=rows, progress_text="0/2")
+
+    assert "rookie_tick_role_confirmed" not in handlers
+    assert "rookie_tick_git_workflow" in handlers
 
 
 def test_role_settled_card_for_nondev_is_terminal_and_has_no_buttons() -> None:
@@ -574,8 +606,13 @@ def test_detail_fields_put_a_text_key_column_first() -> None:
     assert all(f["type"] != 19 for f in s.DETAIL_FIELDS + s.OVERVIEW_FIELDS)
 
 
-def test_detail_row_fields_seeds_dev_only_items_as_na_when_role_is_unknown() -> None:
-    """角色未答时开发环境项要直接种成 不适用, 否则 Day 1 分母会把它们算进去。"""
+def test_detail_row_fields_seeds_dev_only_items_as_todo_not_na() -> None:
+    """开发环境项也种成 未完成 —— 它们与角色选择同在一张卡上、Day 1 就可点。
+
+    早先是种成 不适用 让 Day 1 分母显示 28, 但那与「一张卡上 5 项立即可点」矛盾:
+    可点却不计分母, 新人看到的进度会对不上。现在 Day 1 是 33, 选「非研发人员」后
+    由 mark_module_na 标不适用、降到 28。
+    """
     s = _load("_rookie_sop_store")
     cfg = _load("_rookie_sop_config")
     p = _load("_rookie_sop_progress")
@@ -586,7 +623,7 @@ def test_detail_row_fields_seeds_dev_only_items_as_na_when_role_is_unknown() -> 
     dev_row = s.detail_row_fields(dev_item, open_id="ou_x", name="张三", onboard=date(2026, 8, 5))
     plain_row = s.detail_row_fields(plain_item, open_id="ou_x", name="张三", onboard=date(2026, 8, 5))
 
-    assert dev_row["状态"] == p.STATUS_NA
+    assert dev_row["状态"] == p.STATUS_TODO
     assert plain_row["状态"] == p.STATUS_TODO
 
 
@@ -618,9 +655,12 @@ def test_detail_row_fields_seeds_dev_only_items_as_todo_once_role_is_known() -> 
     assert row["状态"] == p.STATUS_TODO
 
 
-def test_day_one_denominator_excludes_dev_items_before_role_is_chosen() -> None:
-    """Day 1: 三个非开发项 + 一个开发项(种成不适用)分母应是 3, 不是 4 ——
-    这正是 design 里「角色未答时开发环境不进分母」这条规格落到明细表里的效果。
+def test_day_one_denominator_counts_dev_items_because_they_are_tickable() -> None:
+    """Day 1: 全部 4 项都计入分母(含那个开发项)。
+
+    开发环境的项与角色选择同在一张卡上、Day 1 就可点, 所以必须计入分母 ——
+    「可点却不计分母」会让新人看到的进度对不上。选「非研发人员」后
+    mark_module_na 才把它们标不适用、分母随之下降。
     """
     s = _load("_rookie_sop_store")
     cfg = _load("_rookie_sop_config")
@@ -636,8 +676,10 @@ def test_day_one_denominator_excludes_dev_items_before_role_is_chosen() -> None:
 
     got = p.summarize(rows, onboard)
 
-    assert got.total == len([i for i in items if not i.dev_only])
-    assert got.total == 3
+    assert got.total == len(items)
+    assert got.total == 4
+    # 没有任何一行被种成不适用
+    assert all(r["状态"] == p.STATUS_TODO for r in rows)
 
 
 def _real_items() -> list[Any]:
@@ -672,9 +714,11 @@ def test_real_config_has_28_general_items_and_5_dev_only_items() -> None:
     assert any(i.item_id == "role_confirmed" for i in non_dev_only)
 
 
-def test_day_one_denominator_with_real_config_is_28_before_role_is_chosen() -> None:
-    """Day 1, 角色未答: 5 个开发项种成不适用不进分母, role_confirmed 是未完成且进分母
-    —— 分母必须是 28, 不是 27(否则新人不答角色也能靠 27 个通用项凑齐毕业条件)。"""
+def test_day_one_denominator_with_real_config_is_33_because_dev_items_are_tickable() -> None:
+    """Day 1, 角色未答: 分母是 33 —— 5 个开发项与角色选择同在一张卡上、立即可点,
+    所以从落地起就计入分母; role_confirmed 也未完成且计入。
+    选「非研发人员」后那 5 项才被标不适用、分母降到 28。
+    """
     p = _load("_rookie_sop_progress")
     items = _real_items()
     onboard = date(2026, 8, 5)
@@ -682,7 +726,7 @@ def test_day_one_denominator_with_real_config_is_28_before_role_is_chosen() -> N
 
     got = p.summarize(rows, onboard)
 
-    assert got.total == 28
+    assert got.total == 33
     assert got.done == 0
     assert got.all_done is False
 
@@ -746,7 +790,9 @@ def test_unanswered_role_card_cannot_graduate_even_with_every_general_item_done(
 
     got = p.summarize(rows, onboard)
 
-    assert got.total == 28
+    # 分母 33 = 27 通用 + role_confirmed + 5 开发项; 做完 27 个通用项后
+    # 仍差 role_confirmed 与 5 个开发项, 所以 all_done 必须是 False。
+    assert got.total == 33
     assert got.done == 27
     assert got.all_done is False
 
@@ -1082,12 +1128,14 @@ def test_plan_module_cards_makes_the_dev_module_a_role_card() -> None:
     plans = r.plan_module_cards(items, rows, date(2026, 8, 5), date(2026, 8, 5), "")
 
     by_module = {p_["module"]: p_ for p_ in plans}
-    # 开发环境先问角色, 不直接列 5 项
+    dev_handlers = by_module["开发环境"]["handlers"]
+    # 开发环境仍标记为 role_card, 但现在是「一张卡装完」: 角色按钮与开发项同在其中
     assert by_module["开发环境"]["is_role_card"] is True
-    assert by_module["开发环境"]["handlers"] == {
-        "rookie_role_dev": "rookie_sop_role_set",
-        "rookie_role_nondev": "rookie_sop_role_set",
-    }
+    assert dev_handlers["rookie_role_dev"] == "rookie_sop_role_set"
+    assert dev_handlers["rookie_role_nondev"] == "rookie_sop_role_set"
+    assert dev_handlers["rookie_tick_git_workflow"] == "rookie_sop_tick"
+    # role_confirmed 由角色按钮代表, 不另给勾选按钮
+    assert "rookie_tick_role_confirmed" not in dev_handlers
     # 其余模块直接给勾选行
     assert by_module["环境准备"]["is_role_card"] is False
     assert "rookie_tick_wifi" in by_module["环境准备"]["handlers"]

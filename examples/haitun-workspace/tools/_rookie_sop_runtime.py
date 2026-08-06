@@ -87,12 +87,21 @@ def plan_module_cards(
     for module in modules:
         window = _module_window(items, module)
         due_text = _due_text(onboard, window)
-        if module == _DEV_MODULE:
-            card, handlers = _card.role_card(due_text)
-            plans.append({"module": module, "card": card, "handlers": handlers, "is_role_card": True})
-            continue
         module_rows = [r for r in rows if str(r.get("模块") or "") == module][:_MAX_ROWS_PER_CARD]
         done = sum(1 for r in module_rows if str(r.get("状态") or "") == _p.STATUS_DONE)
+        if module == _DEV_MODULE:
+            # 一张卡装完角色选择与开发项 —— multi_use 按 action 逐个消费, 点掉角色
+            # 按钮不影响其余行, 所以不必先发角色卡再发第二张。role_confirmed 也在
+            # 这个模块里, 它有自己的勾选按钮, 但点角色按钮时会被工具一并标完成。
+            card, handlers = _card.role_card(
+                due_text,
+                dev_rows=module_rows,
+                sop_url=sop_url,
+                progress_text=f"{done}/{len(module_rows)}",
+                role_answered=False,
+            )
+            plans.append({"module": module, "card": card, "handlers": handlers, "is_role_card": True})
+            continue
         card, handlers = _card.module_card(
             module, module_rows, f"{done}/{len(module_rows)}", due_text, sop_url
         )
