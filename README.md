@@ -294,10 +294,10 @@ skills/
 
 `system_prompt_builder` 应按约定遍历 `skills/*/SKILL.md`、解析 YAML 头并将内容注入 system prompt。psi-agent 框架本身不直接解析 skill 文件——由 workspace 自行定义如何使用。
 
-> **YAML 头里的 `name:` 要么省略，要么等于所在目录名。** 索引通常用 `name`，而提示词让模型去读
-> `skills/<name>/SKILL.md`——两者不一致时那条路径根本不存在，模型每次都读失败。省略 `name:`
-> 最安全（回落到目录名）。workspace 若实现了 `indexed_skill_entries()` hook，Session 启动时会
-> 断言这一点并拒绝带着错路径启动。
+> **技能在提示词里叫什么，应当由目录名决定。** 提示词让模型读 `skills/<name>/SKILL.md`，
+> 所以那个 `<name>` 必须是真实目录名；若让 YAML 头的 `name:` 覆盖它，模型拿到的路径就不存在。
+> haitun 的做法是索引一律取目录名、YAML 头只供 description/category。workspace 若实现了
+> `indexed_skill_entries()` hook，Session 启动时会断言每个索引名都能解析到可读的 `SKILL.md`。
 
 ### 对话历史持久化
 

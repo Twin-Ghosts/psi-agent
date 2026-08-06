@@ -266,14 +266,21 @@ result = run.result   # 正常耗尽后非 None
 `ToolRegistry` 导入文件注册 `async def`。没有东西保证两边一致，实际也不一致——
 提示词列的是**文件名**（`browser`），执行侧注册的是**函数名**（`browser_click`），
 于是提示词既宣告了调不通的名字，又漏掉了能调的。技能侧同理：提示词让模型读
-`skills/<name>/SKILL.md`，而 `<name>` 取自 frontmatter，文件却在**目录名**下。
+`skills/<name>/SKILL.md`，而 `<name>` 曾取自 frontmatter，文件却在**目录名**下。
 
 - `SessionAgent.create()` 在 registry 与 system prompt 就绪后调
   `SystemPrompt.check_exposure()`，两侧工具名集合必须**相等**，否则抛
   `ExposureMismatchError` 中止启动——模型被告知了关于自身能力的假话，不该等三周后从日志里发现
 - agent 包通过两个可选 async hook 参与：`advertised_tool_names()` 返回提示词侧自算的工具名，
   `indexed_skill_entries()` 返回 `(索引名, SKILL.md 路径)`。两个都没定义则跳过检查（向后兼容）
-- 技能检查断言索引名等于其所在目录名且文件存在
+- 技能检查断言索引名等于其所在目录名且文件存在。**修法是改索引而不是改 SKILL.md**：
+  `_build_skills_index` 的 `name` 一律取**目录名**，frontmatter 只供 description/category
+  等元数据。因为「索引名」既是提示词让模型读的路径（`skills/<name>/SKILL.md`），也是
+  `skill_manage` 解析的路径（`skills_dir / skill_name / "SKILL.md"`）——两个都是目录路径，
+  frontmatter 里的 `name` 赢了就等于让它们都指向不存在的目录。`fusion-flow-legacy` /
+  `fusion-flow` 声明 `name: flow`，而这两个是**上游打包的 immutable 运行时技能**（真源在内网
+  gitea，改了会被覆盖），所以让索引让步、不动文件。改完这条断言基本成了**回归守卫**
+  （名字由构造保证相等），仍然真查「每个索引到的 SKILL.md 还读得到」
 - hook 自身抛异常只记 WARNING 跳过该项（与 `system_before_turn` / `system_after_turn`
   这类可选 workspace hook 同级），不把「检查坏了」升级成比它要查的问题更严重的故障
 - `PSI_ALLOW_EXPOSURE_MISMATCH=1` 把 raise 降级为 ERROR 日志继续启动；报错文案里写明该变量

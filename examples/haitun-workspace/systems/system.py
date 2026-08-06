@@ -473,11 +473,6 @@ def _parse_frontmatter(content: str) -> dict[str, str]:
     return fields
 
 
-def _skill_index_name(content: str, dir_name: str) -> str:
-    """The name the index shows for a skill: frontmatter ``name:`` else the dir."""
-    return _parse_frontmatter(content).get("name") or dir_name
-
-
 async def _build_skills_index(workspace_dir: anyio.Path) -> str:
     skills_dir = workspace_dir / "skills"
 
@@ -522,7 +517,16 @@ async def _build_skills_index(workspace_dir: anyio.Path) -> str:
         if not content:
             continue
         skill_info: dict[str, str] = {"name": name, "description": "", "category": ""}
-        skill_info |= _parse_frontmatter(content)
+        # Frontmatter supplies metadata only. ``name`` stays the **directory** name,
+        # 刻意为之: the index name is what the prompt tells the model to read
+        # (``skills/<name>/SKILL.md``) and what ``skill_manage`` resolves against
+        # (``skills_dir / skill_name / "SKILL.md"``) — both are directory paths. A
+        # frontmatter ``name:`` that disagreed used to win here, and the resulting
+        # path simply did not exist: ``fusion-flow-legacy/SKILL.md`` declares
+        # ``name: flow``, so the index advertised ``flow`` and every read of
+        # ``skills/flow/SKILL.md`` failed. Those runtime skills are immutable
+        # (upstream-packaged), so the index yields instead of the file.
+        skill_info |= {k: v for k, v in _parse_frontmatter(content).items() if k != "name"}
         if not skill_info["description"]:
             body = _strip_frontmatter(content)
             for line in body.splitlines():
@@ -962,18 +966,18 @@ async def advertised_tool_names() -> list[str]:
 async def indexed_skill_entries() -> list[tuple[str, str]]:
     """``(indexed name, SKILL.md path)`` for every skill the prompt lists.
 
-    The framework asserts each name resolves to ``skills/<name>/SKILL.md``, which
-    is the path the prompt tells the model to read. Frontmatter ``name:`` that
-    disagrees with the directory name breaks exactly that instruction.
+    The framework asserts each name resolves to ``skills/<name>/SKILL.md`` — the
+    path the prompt tells the model to read and the one ``skill_manage`` resolves
+    against. Since ``_build_skills_index`` takes the name from the **directory**
+    and lets frontmatter supply metadata only, this now holds by construction; the
+    assertion is a regression guard on that, plus a real check that each indexed
+    ``SKILL.md`` is still readable.
     """
     agent_dir = anyio.Path(__file__).parent.parent
     entries: list[tuple[str, str]] = []
     for skills_root in (_GLOBAL_AGENT_SKILLS_DIR, agent_dir / "skills"):
         for dir_name, skill_md in await _collect_skill_dirs(skills_root):
-            content = await _read_file_optional(skill_md)
-            if content is None:
-                continue
-            entries.append((_skill_index_name(content, dir_name), str(skill_md)))
+            entries.append((dir_name, str(skill_md)))
     return entries
 
 

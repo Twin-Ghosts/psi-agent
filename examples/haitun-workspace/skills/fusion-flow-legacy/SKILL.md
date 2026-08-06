@@ -1,5 +1,5 @@
 ---
-name: fusion-flow-legacy
+name: flow
 description: Legacy fallback for authoring or running existing `@agent-flow/core` (Fuclaw) TypeScript `.flow.ts` workflows. Activate only for an explicit `.flow.ts`, Fuclaw, or `@agent-flow/core` request; use `workflow` for new multi-agent workflows.
 metadata: { "openclaw": { "emoji": "🐾", "homepage": "https://github.com/fuclaw" } }
 ---

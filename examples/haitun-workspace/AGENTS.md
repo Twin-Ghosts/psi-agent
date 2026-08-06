@@ -216,10 +216,12 @@ service tools:
 
 ## Skills (`skills/`)
 
-> **frontmatter `name:` 必须等于所在目录名**（启动即断言）。索引用的是 frontmatter 的 `name`，
-> 而提示词让模型读 `skills/<name>/SKILL.md`——两者不一致时那个路径根本不存在。
-> `fusion-flow-legacy/SKILL.md` 曾声明 `name: flow`，于是索引出 `flow`、模型去读 `skills/flow/`
-> 读不到。省略 `name:` 是安全的（回落到目录名）；写了就必须对齐。详见根 `AGENTS.md` 坑 22。
+> **技能在提示词里的名字一律是目录名**，frontmatter 只供 description / category 等元数据。
+> 因为这个名字既是提示词让模型读的路径（`skills/<name>/SKILL.md`），也是 `skill_manage`
+> 解析的路径——frontmatter 里的 `name` 若赢了，两者都指向不存在的目录。
+> `fusion-flow-legacy/SKILL.md` 声明 `name: flow`，索引曾因此出 `flow`、模型去读
+> `skills/flow/` 读不到；它是**上游打包的 immutable 运行时技能**，所以让索引取目录名、
+> 不动那个文件。写自己的技能时 `name:` 可省（本来就不生效）。详见根 `AGENTS.md` 坑 22。
 
 - `_universal` — always-relevant working discipline.
 - `skill-authoring-when` — **whether** to create/patch（复用价值门 + **先 list，有同类则 patch，无则 create**；自进化前同样遵守）。

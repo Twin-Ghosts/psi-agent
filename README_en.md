@@ -309,11 +309,12 @@ skills/
 
 `system_prompt_builder` should, by convention, scan `skills/*/SKILL.md`, parse YAML front matter, and inject content into the system prompt. The psi-agent framework does not directly parse skill files — the workspace defines how to use them.
 
-> **Either omit `name:` in the front matter, or make it equal the directory name.** The index
-> normally uses `name`, while the prompt tells the model to read `skills/<name>/SKILL.md` — when
-> the two disagree that path does not exist and every read fails. Omitting `name:` is safest (it
-> falls back to the directory name). A workspace that implements the `indexed_skill_entries()`
-> hook gets this asserted at Session startup rather than starting with a broken path.
+> **What a skill is called in the prompt should come from its directory name.** The prompt tells
+> the model to read `skills/<name>/SKILL.md`, so that `<name>` must be a real directory; letting
+> front-matter `name:` override it hands the model a path that does not exist. haitun takes the
+> name from the directory and lets front matter supply description/category only. A workspace that
+> implements `indexed_skill_entries()` gets every indexed name asserted to resolve to a readable
+> `SKILL.md` at Session startup.
 
 ### Conversation History Persistence
 
