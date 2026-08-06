@@ -26,6 +26,8 @@ import _runtime_paths as _paths
 
 _STATE_REL = ".psi/rookie_sop/base.json"
 _DEV_MODULE = "开发环境"
+# 公开别名: rookie_sop_tick 重绘整卡时要判断是不是开发环境那张
+DEV_MODULE = _DEV_MODULE
 _MAX_ROWS_PER_CARD = 40
 
 
@@ -62,6 +64,11 @@ async def save_state(state: dict[str, Any]) -> None:
 
 def _module_window(items: list[_cfg.SopItem], module: str) -> int:
     return next((i.window_days for i in items if i.module == module), 1)
+
+
+def due_text_for(onboard: date, window_days: int) -> str:
+    """公开别名 —— rookie_sop_tick 重绘时要复算同样的截止文案。"""
+    return _due_text(onboard, window_days)
 
 
 def _due_text(onboard: date, window_days: int) -> str:

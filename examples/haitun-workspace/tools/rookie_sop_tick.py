@@ -8,6 +8,7 @@ from __future__ import annotations
 
 # ruff: noqa: E402
 import json
+import os
 import sys
 from datetime import date
 from pathlib import Path
@@ -17,8 +18,14 @@ TOOLS_DIR = Path(__file__).resolve().parent
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
+import _rookie_sop_card as _card
+import _rookie_sop_config as _cfg
+import _rookie_sop_progress as _p
 import _rookie_sop_runtime as _rt
 import _rookie_sop_store as _store
+from feishu_message import feishu_message_edit_card
+
+from psi_agent.channel.feishu._card_store import rewrite_card_snapshot as _rewrite_card_snapshot
 
 _HANDLER = "rookie_sop_tick"
 
@@ -62,6 +69,9 @@ def _resolve_context(payload: dict[str, Any]) -> dict[str, Any]:
         "app_token": str(business.get("app_token") or "").strip(),
         "detail_table_id": str(business.get("detail_table_id") or "").strip(),
         "overview_table_id": str(business.get("overview_table_id") or "").strip(),
+        # 重绘整卡要用它: 框架只替换被点的那一块, 不会重算头部「已完成 N / M 项」
+        "message_id": str(payload.get("message_id") or "").strip(),
+        "module": str(business.get("module") or "").strip(),
     }
 
 
@@ -130,6 +140,15 @@ async def rookie_sop_tick(card_action_json: str = "") -> str:
     else:
         overview_skipped_reason = "no overview_table_id available"
 
+    # 勾选后重绘整张卡。必须由本方做, 有两个原因:
+    #   1) 框架只把被点的那一块换成「● ~~…~~」, 不会重算头部「已完成 N / M 项」——
+    #      不重绘的话那个数字永远不动(实测踩过, 用户第一句反馈就是这个)。
+    #   2) 本卡的按钮放在 div.extra 里, 而飞书的 extra 不接受 markdown, 框架那次
+    #      替换会被拒(ErrCode 11310), 卡面根本不会变。
+    # 重绘后必须回写 multi_use 快照: 光 edit_card 会让快照失效(变 .consumed),
+    # 那样同卡其余按钮全部失灵。
+    redraw = await _redraw_card(ctx, rows, today)
+
     result: dict[str, Any] = {
         "ok": True,
         "item_id": ctx["item_id"],
@@ -143,4 +162,61 @@ async def rookie_sop_tick(card_action_json: str = "") -> str:
         result["overview_skipped_reason"] = overview_skipped_reason
     if truncated:
         result["truncated"] = True
+    if redraw:
+        result["card_redraw"] = redraw
     return json.dumps(result, ensure_ascii=False)
+
+
+async def _redraw_card(ctx: dict[str, Any], rows: list[dict[str, Any]], today: date) -> str:
+    """按最新明细重绘这张卡, 并保住 multi_use 快照。返回空串表示无需重绘/已跳过。
+
+    刻意为之: 只 edit_card 是不够的 —— 它不重新注册回调, 快照会被判为已消费,
+    同卡其余按钮随之全部失灵。必须同时用框架的 rewrite_card_snapshot 把新卡面
+    写回快照(它专门用于"替换 multi_use 卡的内容、保留路由元数据")。
+    """
+    message_id = ctx.get("message_id") or ""
+    module = ctx.get("module") or ""
+    if not message_id or not module:
+        return "no message_id/module in callback; card left as-is"
+
+    module_rows = [r for r in rows if str(r.get("模块") or "") == module]
+    if not module_rows:
+        return f"no rows for module {module!r}"
+
+    cfg = await _store.load_config()
+    items = _cfg.load_sop(cfg)
+    window = next((i.window_days for i in items if i.module == module), 1)
+    onboard = next((r["入职日"] for r in module_rows if isinstance(r.get("入职日"), date)), today)
+    due_text = _rt.due_text_for(onboard, window)
+    done = sum(1 for r in module_rows if str(r.get("状态") or "") == _p.STATUS_DONE)
+    sop_url = str(cfg.get("sop_doc_url") or "")
+
+    if module == _rt.DEV_MODULE:
+        role_answered = any(
+            str(r.get("适用角色") or "") in {"研发", "非研发"} for r in module_rows
+        )
+        card, _handlers = _card.role_card(
+            due_text,
+            dev_rows=module_rows,
+            sop_url=sop_url,
+            progress_text=f"{done}/{len(module_rows)}",
+            role_answered=role_answered,
+            today=today,
+        )
+    else:
+        card, _handlers = _card.module_card(
+            module, module_rows, f"{done}/{len(module_rows)}", due_text, sop_url, today=today
+        )
+
+    edited = _store._parse_result(await feishu_message_edit_card(message_id, json.dumps(card, ensure_ascii=False)))
+    if edited.get("ok") is not True:
+        return f"edit_card failed: {edited.get('message') or edited.get('error')}"
+
+    # 回写快照, 否则同卡其余按钮全死。
+    try:
+        rewritten = await _rewrite_card_snapshot(message_id, card, os.environ.get("PSI_APPDATA", ""))
+    except Exception as exc:  # 框架不可用时不该让整次勾选失败
+        return f"redrawn but snapshot rewrite unavailable: {exc!r}"
+    if not rewritten:
+        return "redrawn but snapshot rewrite failed; remaining buttons may be dead"
+    return ""

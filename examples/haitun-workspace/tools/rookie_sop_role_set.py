@@ -8,6 +8,7 @@ from __future__ import annotations
 
 # ruff: noqa: E402, RUF001
 import json
+import os
 import sys
 from datetime import date
 from pathlib import Path
@@ -22,7 +23,9 @@ import _rookie_sop_config as _cfg
 import _rookie_sop_progress as _p
 import _rookie_sop_runtime as _rt
 import _rookie_sop_store as _store
-from feishu_message import feishu_message_send_card
+from feishu_message import feishu_message_edit_card
+
+from psi_agent.channel.feishu._card_store import rewrite_card_snapshot as _rewrite_card_snapshot
 
 _HANDLER = "rookie_sop_role_set"
 _DEV_MODULE = "开发环境"
@@ -71,6 +74,8 @@ def _resolve_role(payload: dict[str, Any]) -> dict[str, Any]:
         "app_token": str(business.get("app_token") or "").strip(),
         "detail_table_id": str(business.get("detail_table_id") or "").strip(),
         "overview_table_id": str(business.get("overview_table_id") or "").strip(),
+        # 原地更新这张卡要用它(不再补发第二张)
+        "message_id": str(payload.get("message_id") or "").strip(),
     }
 
 
@@ -195,37 +200,36 @@ async def rookie_sop_role_set(card_action_json: str = "") -> str:
     card, handlers = _card.role_settled_card(
         is_dev, fresh_dev_rows, due_text, str(cfg.get("sop_doc_url") or ""), role_confirmed_row
     )
-    business = {
-        "type": "rookie_sop",
-        "open_id": ctx["open_id"],
-        "name": ctx["name"] or ctx["open_id"],
-        "module": _DEV_MODULE,
-        "app_token": app_token,
-        "detail_table_id": detail_table,
-        "overview_table_id": overview_table,
-    }
-    sent_raw = await feishu_message_send_card(
-        ctx["open_id"],
-        json.dumps(card, ensure_ascii=False),
-        "open_id",
-        "",
-        json.dumps(business, ensure_ascii=False),
-        json.dumps(handlers, ensure_ascii=False),
-        True,
-    )
-    sent = _store._parse_result(sent_raw)
-    # 刻意为之: send_card_impl 在"卡发出去了但快照没存下来"时也回 ok=False
-    # (callback_context_saved=False) —— 那种情况按钮全是死的, 跟没发出去一样不能
-    # 报成功。不重试: 重试会把同一张卡再发一遍, 造出两张卡在新人面前抢按钮。
-    if sent.get("ok") is not True or sent.get("callback_context_saved") is False:
+    # 刻意为之: 原地更新这张卡, 不再补发第二张。
+    # 以前是 send_card 另发一张终态卡, 结果新人面前摆着两张开发环境卡(用户反馈"发了两张")。
+    # 现在改成 edit + 回写 multi_use 快照 —— 光 edit_card 会让快照被判为已消费、
+    # 同卡其余按钮全死, 所以两步必须成对做。
+    message_id = ctx.get("message_id") or ""
+    if not message_id:
         return json.dumps(
-            {
-                "ok": False,
-                "error": sent.get("message") or sent.get("error") or "feishu_message_send_card failed",
-                "role": ctx["role"],
-            },
+            {"ok": False, "error": "no message_id in callback; cannot update the card in place",
+             "role": ctx["role"]},
             ensure_ascii=False,
         )
+    edited = _store._parse_result(
+        await feishu_message_edit_card(message_id, json.dumps(card, ensure_ascii=False))
+    )
+    if edited.get("ok") is not True:
+        return json.dumps(
+            {"ok": False, "error": f"edit_card failed: {edited.get('message') or edited.get('error')}",
+             "role": ctx["role"]},
+            ensure_ascii=False,
+        )
+    # 回写 multi_use 快照: 光 edit_card 会让快照被判为已消费, 同卡其余按钮全死。
+    snapshot_note = ""
+    if handlers:
+        try:
+            rewritten = await _rewrite_card_snapshot(message_id, card, os.environ.get("PSI_APPDATA", ""))
+        except Exception as exc:  # 框架不可用时不该让整次点击失败
+            snapshot_note = f"snapshot rewrite unavailable: {exc!r}"
+        else:
+            if not rewritten:
+                snapshot_note = "snapshot rewrite failed; remaining buttons may be dead"
 
     overview_updated = False
     overview_skipped_reason = ""
@@ -263,6 +267,8 @@ async def rookie_sop_role_set(card_action_json: str = "") -> str:
         result["label_update_error"] = label_update_error
     if overview_skipped_reason:
         result["overview_skipped_reason"] = overview_skipped_reason
+    if snapshot_note:
+        result["snapshot_note"] = snapshot_note
     if truncated:
         result["truncated"] = True
     return json.dumps(result, ensure_ascii=False)

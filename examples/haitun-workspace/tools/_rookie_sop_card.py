@@ -34,7 +34,7 @@ _FILLED = "■"
 # 未勾选的方框按钮文字。刻意用空心方框而非「标记完成」:
 # 文字在左、方框在右, 框架勾选后把这个按钮换成「● ~~□~~」——
 # 那个实心 ● 恰好就是「打上勾」的视觉反馈。
-_BOX = "完成"
+_BOX = "□"
 
 # DDL 状态 → (emoji, 卡片主题色)。绿=还早, 黄=今天到期, 红=已逾期。
 _DUE_OK = "🟢"
@@ -88,13 +88,11 @@ def _item_id_of(row: dict[str, Any]) -> str:
 
 
 def _row_elements(row: dict[str, Any], today: date | None = None) -> tuple[list[dict[str, Any]], str]:
-    """一行 = 状态标记 + 验收小字, 再跟一个写着条目名的可点按钮。
+    """一行 = 左侧「状态标记 + 条目名 + 验收小字」, 右侧一个方框按钮。
 
-    刻意为之: 按钮文字就是条目名, 而上方文字块只放状态标记与验收标准, 不重复条目名。
-    因为框架勾选后会把整个 action 块换成 f"● ~~{按钮文字}~~"(_card_action.py 的
-    _consumed_card_content) —— 按钮文字若是「完成」, 勾完只会看到「● ~~完成~~」,
-    看不出勾掉了哪一项; 若上下都写条目名, 勾完又会一行原文、一行删除线地重复。
-    只有「上方不写名、按钮写名」这一种组合, 勾选后正好留下「● ~~连上 WiFi~~」。
+    方框只写一个符号(见 _BOX), 条目名留在左侧文字里 —— 框和字挤在一个按钮内很难看。
+    勾选后的完成态由 rookie_sop_tick 重绘整卡实现, 不依赖框架替换 div.extra
+    (那条路会被飞书拒: div.extra 不接受 markdown, 详见 _two_col 的说明)。
     """
     title = str(row.get("项") or "").strip()
     acceptance = str(row.get("验收标准") or "").strip()
@@ -104,53 +102,41 @@ def _row_elements(row: dict[str, Any], today: date | None = None) -> tuple[list[
     if status == _p.STATUS_DONE:
         finished = row.get("完成时间")
         tail = f"　<font color='grey'>{finished}</font>" if finished is not None else ""
-        return [{"tag": "markdown", "content": f"{mark} ~~{title}~~{tail}"}], ""
+        return _two_col(f"{mark} ~~{title}~~{tail}", None), ""
     if status == _p.STATUS_NA:
-        return [{"tag": "markdown", "content": f"{mark} <font color='grey'>~~{title}~~　不适用</font>"}], ""
+        return _two_col(f"{mark} <font color='grey'>~~{title}~~　不适用</font>", None), ""
 
-    head = f"{mark} <font color='grey'>{acceptance}</font>" if acceptance else mark
+    left = f"{mark} **{title}**"
+    if acceptance:
+        left += f"\n<font color='grey'>{acceptance}</font>"
     action = f"{ACTION_TICK_PREFIX}{_item_id_of(row)}"
-    return (
-        _two_col(head, {"action": action, "item_id": _item_id_of(row)}, label=title),
-        action,
-    )
+    return _two_col(left, {"action": action, "item_id": _item_id_of(row)}), action
 
 
 def _two_col(
     left_markdown: str, action_value: dict[str, Any] | None, label: str = ""
 ) -> list[dict[str, Any]]:
-    """一行 = 一段文字 + 紧随其后的独立 action 块。返回元素列表(一个或两个)。
+    """一行 = div 左侧文字 + extra 右侧方框, 这是飞书原生的「左文右控件」结构。
 
-    刻意为之: 「左文右框同一行」试过两种写法都被飞书否掉, 都是它的硬限制 ——
-      1) column_set 把按钮放进列里: 整张卡直接拒收,
-         230099 / ErrCode 200410 "action components are not allowed in the column";
-      2) div + extra 放按钮: 卡发得出去, 但框架勾选后要把 extra 换成
-         markdown「● ~~完成~~」, 而 div.extra 只接受
-         [img button select_static select_person overflow date_picker ...]
-         —— 这次 patch 被拒(230099 / ErrCode 11310), 卡面永远停在原样,
-         用户看到的就是「点了完成没反应」。实测踩过这两个坑。
-    独立的 action 块是框架唯一能整体安全替换的容器(实测 patch 成功: True),
-    代价是方框落在文字下一行、无法真正同行 —— 这是飞书组件模型的限制。
+    刻意为之: 按钮放 div.extra, 文字与方框同一行, 观感最紧凑。
+    但飞书的 div.extra 只接受 [img button select_static select_person overflow
+    date_picker ...] —— 不接受 markdown。所以**不能**让框架去替换它:
+    框架勾选后会把被点元素换成 markdown「● ~~…~~」, patch 会被拒
+    (230099 / ErrCode 11310), 卡面永远不更新, 表现为「点了完成没反应」。
+    因此勾选后的重绘改由本方做: rookie_sop_tick 重算整张卡再 edit,
+    同时用 rewrite_card_snapshot 保住 multi_use 快照(否则按钮全死)。
+    这样头部「已完成 N / M 项」也能跟着变 —— 框架只换被点的那一块, 不会重算头部。
     """
-    elements: list[dict[str, Any]] = [{"tag": "markdown", "content": left_markdown}]
+    element: dict[str, Any] = {"tag": "div", "text": {"tag": "lark_md", "content": left_markdown}}
     if action_value is not None:
-        elements.append(
-            {
-                "tag": "action",
-                "layout": "flow",
-                "actions": [
-                    {
-                        "tag": "button",
-                        # 按钮文字必须是条目名: 框架勾选后整块变成 f"● ~~{按钮文字}~~"
-                        "text": {"tag": "plain_text", "content": label or _BOX},
-                        "type": "primary",
-                        "size": "tiny",
-                        "value": action_value,
-                    }
-                ],
-            }
-        )
-    return elements
+        element["extra"] = {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": _BOX},
+            "type": "primary",
+            "size": "tiny",
+            "value": action_value,
+        }
+    return [element]
 
 
 def _rows_section(

@@ -1326,6 +1326,8 @@ def _role_callback(role: str, *, open_id: str = "ou_x") -> str:
             "action": {"value": {"action": action, "role": role}},
             "source": {"operator_open_id": open_id},
             "dispatch": {"handler": "rookie_sop_role_set", "matched": True},
+            # 原地更新这张卡要用 message_id(不再补发第二张)
+            "message_id": "om_role_card",
             "business_context": {
                 "type": "rookie_sop",
                 "open_id": open_id,
@@ -1393,20 +1395,13 @@ def test_role_set_surfaces_card_send_failure_as_not_ok(monkeypatch: Any) -> None
 
     rs._rt.load_state = _fake_load_state
 
-    async def _fake_send_card_fails(*args: Any, **kwargs: Any) -> str:
-        # send_card_impl 描述的"卡发出去了但快照没存下来"路径: ok=False 且
-        # callback_context_saved=False —— 按钮全是死的, 必须当失败处理。
+    async def _fake_edit_card_fails(*args: Any, **kwargs: Any) -> str:
+        # 现在是原地更新(不再补发第二张卡), 所以失败面是 edit_card 被拒。
         return json.dumps(
-            {
-                "ok": False,
-                "message": "Feishu card was sent, but its callback context could not be saved",
-                "sent": True,
-                "callback_context_saved": False,
-            },
-            ensure_ascii=False,
+            {"ok": False, "message": "Feishu rejected the card patch"}, ensure_ascii=False
         )
 
-    monkeypatch.setattr(rs, "feishu_message_send_card", _fake_send_card_fails)
+    monkeypatch.setattr(rs, "feishu_message_edit_card", _fake_edit_card_fails)
 
     out = json.loads(anyio.run(lambda: rs.rookie_sop_role_set(_role_callback("dev"))))
 
@@ -1435,22 +1430,15 @@ def test_role_set_switching_nondev_to_dev_revives_all_five_rows(monkeypatch: Any
 
     sent_cards: list[dict[str, Any]] = []
 
-    async def _fake_send_card_ok(
-        receive_id: str,
-        card_json: str,
-        receive_id_type: str = "chat_id",
-        user_key: str = "",
-        business_context_json: str = "{}",
-        action_handlers_json: str = "{}",
-        multi_use: bool = False,
-    ) -> str:
-        sent_cards.append({"card": json.loads(card_json), "handlers": json.loads(action_handlers_json)})
-        return json.dumps(
-            {"ok": True, "callback_context_saved": True, "message_id": "om_1", "thread_id": "", "chat_id": ""},
-            ensure_ascii=False,
-        )
+    async def _fake_send_card_ok(message_id: str, card_json: str, user_key: str = "") -> str:
+        # 现在是原地更新: edit_card(message_id, card_json) —— 不再补发第二张卡,
+        # 所以这里拿不到 action_handlers_json, 改从卡面数可点按钮。
+        card = json.loads(card_json)
+        clickable = sum(1 for e in card.get("elements", []) if isinstance(e, dict) and "extra" in e)
+        sent_cards.append({"card": card, "clickable": clickable})
+        return json.dumps({"ok": True}, ensure_ascii=False)
 
-    monkeypatch.setattr(rs, "feishu_message_send_card", _fake_send_card_ok)
+    monkeypatch.setattr(rs, "feishu_message_edit_card", _fake_send_card_ok)
 
     out = json.loads(anyio.run(lambda: rs.rookie_sop_role_set(_role_callback("dev"))))
 
@@ -1459,8 +1447,9 @@ def test_role_set_switching_nondev_to_dev_revives_all_five_rows(monkeypatch: Any
     # 复活写回: 五行 不适用 → 未完成 都要发生, 不是只改了 适用角色 标签
     revive_call = next(u for u in fake.updates if any(f["fields"].get("状态") == "未完成" for f in u["records"]))
     assert len(revive_call["records"]) == 5
-    # 新卡真的带着 5 个可点的 handlers, 不是零行死卡
-    assert len(sent_cards[0]["handlers"]) == 5
+    # 重绘后的卡真的带着 5 个可点的方框(不是零行死卡);
+    # role_confirmed 已完成、不出按钮, 所以正好 5 个。
+    assert sent_cards[0]["clickable"] == 5
 
 
 def test_decide_remind_stays_silent_when_nothing_is_due() -> None:
@@ -1645,14 +1634,13 @@ def test_card_template_takes_the_most_urgent_row() -> None:
     assert c._card_template([done], today) == "green"
 
 
-def test_row_renders_text_then_an_independent_action_block() -> None:
-    """一行 = markdown 文字 + 紧随其后的独立 action 块。
+def test_row_is_div_with_the_box_in_extra() -> None:
+    """一行 = div 左侧文字 + extra 右侧方框(飞书原生的「左文右控件」)。
 
-    刻意不用 div.extra 装按钮: 卡能发出去, 但框架勾选后要把 extra 换成
-    markdown「● ~~完成~~」, 而飞书的 div.extra 只接受
-    [img button select_static select_person overflow date_picker ...] ——
-    patch 被拒(230099 / ErrCode 11310), 卡面永远不更新, 表现为「点了没反应」。
-    也不用 column_set 装按钮: 整张卡会被拒收(230099 / ErrCode 200410)。
+    刻意不让框架去替换这个 extra: 飞书的 div.extra 只接受
+    [img button select_static select_person overflow date_picker ...], 不接受
+    markdown, 框架那次 patch 会被拒(230099 / ErrCode 11310), 卡面永不更新。
+    完成态改由 rookie_sop_tick 重绘整卡实现。
     """
     c = _load("_rookie_sop_card")
     p = _load("_rookie_sop_progress")
@@ -1665,22 +1653,19 @@ def test_row_renders_text_then_an_independent_action_block() -> None:
         _row("wifi", p.STATUS_DONE, date(2026, 8, 9), title="连上 WiFi"), today
     )
 
-    # 未完成: 文字块 + action 块
-    assert [e["tag"] for e in todo_elements] == ["markdown", "action"]
-    # 条目名写在按钮上, 上方文字块只放状态标记与验收标准 —— 勾选后框架把整个
-    # action 块换成「● ~~连上 WiFi~~」, 既看得出勾了哪项, 也不会上下重复。
-    assert "连上 WiFi" not in todo_elements[0]["content"]
-    assert "验收" in todo_elements[0]["content"]  # _row 助手的验收标准就是「验收」
-    button = todo_elements[1]["actions"][0]
-    assert button["text"]["content"] == "连上 WiFi"
-    assert button["value"]["action"] == "rookie_tick_wifi"
+    assert len(todo_elements) == 1
+    el = todo_elements[0]
+    assert el["tag"] == "div"
+    # 条目名留在左侧文字里(框和字挤在一个按钮内很难看), 方框只写一个符号
+    assert "连上 WiFi" in el["text"]["content"]
+    assert el["extra"]["tag"] == "button"
+    assert el["extra"]["text"]["content"] == c._BOX
+    assert el["extra"]["value"]["action"] == "rookie_tick_wifi"
     assert action == "rookie_tick_wifi"
-    # 按钮不得藏在 div.extra 或 column 里 —— 那两种飞书都不接受
-    assert all("extra" not in e for e in todo_elements)
-    assert all(e["tag"] != "column_set" for e in todo_elements)
-    # 已完成: 只剩划掉的文字, 没有 action 块
-    assert [e["tag"] for e in done_elements] == ["markdown"]
-    assert "~~连上 WiFi~~" in done_elements[0]["content"]
+    # 已完成行: 文字划掉, 没有 extra 按钮
+    done_el = done_elements[0]
+    assert "~~连上 WiFi~~" in done_el["text"]["content"]
+    assert "extra" not in done_el
     assert done_action == ""
 
 
@@ -1696,7 +1681,7 @@ def test_rows_section_is_compact_without_a_rule_between_rows() -> None:
     elements, handlers = c._rows_section(rows, date(2026, 8, 6))
 
     assert len(handlers) == 2
-    assert all(e["tag"] in ("markdown", "action") for e in elements)
+    assert all(e["tag"] == "div" for e in elements)
     assert not any(e["tag"] == "hr" for e in elements)
 
 
