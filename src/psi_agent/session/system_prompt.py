@@ -106,6 +106,15 @@ class SystemPrompt:
         checked — there is nothing to compare against, and refusing to start
         would break every workspace that predates these hooks.
 
+        Called from ``SessionAgent.create``, before any socket is bound or task
+        group opened, so raising here leaks nothing. Standalone
+        (``psi-agent session``) the error propagates out of ``Session.run()`` and
+        the process exits; under Gateway, ``SessionManager`` catches it per
+        Session — that Session is logged at ERROR and dropped from the registry
+        while its siblings keep running. Blast radius is deliberately one
+        Session: a broken agent package should not take down unrelated ones, and
+        the one it breaks must not go on serving a prompt that lies.
+
         Args:
             registered: Tool names ``ToolRegistry`` can actually dispatch.
             load_failures: File name → import error, from the registry.
@@ -124,7 +133,7 @@ class SystemPrompt:
             try:
                 advertised = await self._advertised_tools_fn()
             except Exception as e:
-                logger.error(f"advertised_tool_names() failed, skipping tool exposure check: {e!r}")
+                logger.warning(f"advertised_tool_names() failed, skipping tool exposure check: {e!r}")
             else:
                 problems += check_tool_exposure(
                     {str(name) for name in advertised},
@@ -136,9 +145,9 @@ class SystemPrompt:
             try:
                 entries = await self._indexed_skills_fn()
             except Exception as e:
-                logger.error(f"indexed_skill_entries() failed, skipping skill exposure check: {e!r}")
+                logger.warning(f"indexed_skill_entries() failed, skipping skill exposure check: {e!r}")
             else:
-                problems += check_skill_exposure(entries)
+                problems += await check_skill_exposure(entries)
 
         enforce(problems, context="Session startup")
         if not problems:

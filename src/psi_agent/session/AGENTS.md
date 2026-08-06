@@ -216,6 +216,11 @@ result = run.result   # 正常耗尽后非 None
 
 - `workspace/tools/*.py` 中的每个 `.py` 文件（不含 `_` 开头）
 - 文件中所有非 `_` 开头的 `async def` 函数都会被加载为 tool
+- **注册依据是 `dir(module)`，不是「本文件里 `async def` 了什么」**：`from _user_profile import get_profile`
+  这种**再导出**也会把 helper 里的 async 函数注册成模型可调用的工具。实测 haitun 有三个内部函数
+  就是这样漏出去的（`get_profile` / `send_card_impl` / `edit_card_impl`）。要么给不想暴露的
+  helper 名加 `_` 前缀，要么 `import _user_profile` 后用 `_user_profile.get_profile` 限定调用；
+  暴露一致性检查（下一节）会把这类名字算进「已宣告」，所以它不会静默通过
 - 内部以 per-file 结构存储（`FileEntry` dataclass），包含 `file_hash`、`tools`（ToolFunction dict）、`funcs`（callable dict）、`fresh`（是否本次导入）
 - `ToolRegistry.tools` 为 `@property`，展平所有 `FileEntry` 为 `dict[str, ToolFunction]`
 - 参数类型必须为 `str`、`int`、`float`、`bool`、`list[X]` 或 `X | None`（`Optional[X]`）
@@ -225,7 +230,13 @@ result = run.result   # 正常耗尽后非 None
 - 用 `inspect.signature()` 提取参数（类型注解 → JSON Schema 类型）
 - 用 `inspect.getdoc()` 提取描述（支持 Google-style 的 `Args:` 格式）
 - 跨文件同名 tool 以后加载者覆盖（`tools` property 展平时 `dict.update` 自然行为）
-- 加载期间 `tools/` 会被放到 `sys.path` 首位并在结束后移除，让 `from _helper import x` 这类**裸导入同目录 helper** 稳定可用。此前能否解析取决于 glob 顺序和前面文件有没有顺手 `sys.path.insert`，同一文件可能这次注册成功、下次 `ModuleNotFoundError`。两个已知代价：helper 以裸名进 `sys.modules`，同名 helper 跨 agent 包共用先加载的那份；helper 若与 stdlib 同名会遮蔽 stdlib（保持 `_` 前缀约定即可避免）
+- 加载期间 `tools/` 会被放到 `sys.path` 首位并在结束后移除（只移除本次插入的那一条），让 `from _helper import x` 这类**裸导入同目录 helper** 稳定可用。此前能否解析取决于 glob 顺序和前面文件有没有顺手 `sys.path.insert`，同一文件可能这次注册成功、下次 `ModuleNotFoundError`
+- **`_SYS_PATH_LOCK` 只锁「查了再插」这一瞬间，不锁整个扫描（刻意为之，勿"修"成锁全程）**：满载 haitun 262 个工具实测约 **2.7s**（`.mcp_cache` 未命中时 `@mcp` 还会在 import 期 spawn `npx`，更久），锁全程会让 N 个 Session 同时启动时排成 N x 2.7s。锁只保证同目录并发加载不会把同一条 entry 叠成两份；**没有**它也不会有谁被抽走 entry —— 每次退出各移除一份，`sys.path` 天然当了引用计数（已实测，非推断）
+- **摘除 entry 的 `finally` 里不能有 `await`（刻意为之）**：曾在 `finally` 里重新 `async with` 那把锁，
+  而 `await` 是取消检查点 —— 扫描被 cancel 时摘除整段跳过，entry **泄漏到进程结束**（实测复现后才修）。
+  改动列表本身在 GIL 下是原子的，不需要锁；需要锁的只有前面「查了再插」那一下
+- **真正的跨包风险在 `sys.modules` 而不在 `sys.path`，锁不掉**：helper 以**裸名**进 `sys.modules` 且加载后长驻，谁先 import `_fusion_memory_config` 谁赢，后来的同名 helper 静默拿到前者（bundled 示例 workspace 之间已有 5 个这样的重名）。串行化只改变「谁碰巧第一个」。诚实的边界是**一进程一个 agent 包安全；多个不同包共享重名 helper 不安全**，这种部署要拆进程
+- helper 若与 stdlib 同名会在 entry 位于首位期间遮蔽 stdlib（保持 `_` 前缀约定即可避免）
 - 导入失败的文件记进 `ToolRegistry.load_failures`（`文件名 → 错误 repr`），供启动一致性检查区分「缺依赖」和「名字根本不存在」
 
 ## 提示词/运行时暴露一致性检查（启动即断言）
@@ -242,11 +253,15 @@ result = run.result   # 正常耗尽后非 None
 - agent 包通过两个可选 async hook 参与：`advertised_tool_names()` 返回提示词侧自算的工具名，
   `indexed_skill_entries()` 返回 `(索引名, SKILL.md 路径)`。两个都没定义则跳过检查（向后兼容）
 - 技能检查断言索引名等于其所在目录名且文件存在
-- hook 自身抛异常只记 ERROR 跳过该项，不把「检查坏了」升级成比它要查的问题更严重的故障
+- hook 自身抛异常只记 WARNING 跳过该项（与 `system_before_turn` / `system_after_turn`
+  这类可选 workspace hook 同级），不把「检查坏了」升级成比它要查的问题更严重的故障
 - `PSI_ALLOW_EXPOSURE_MISMATCH=1` 把 raise 降级为 ERROR 日志继续启动；报错文案里写明该变量
 - hook 要**独立取数**才有意义：`advertised_tool_names()` 用 AST 静态解析（含 `@mcp` 的
   `.mcp_cache` 展开名、以及从 `_` helper 再导出的 async 函数），不是回头问注册表——
   两个输入同源的检查什么都证明不了
+- **成本是一次性的**：haitun 实测 `advertised_tool_names()` 约 315ms、`indexed_skill_entries()`
+  约 98ms，只在 `SessionAgent.create()` 跑一次，**不进每回合路径**（对照：满载 262 个工具约 2.7s、
+  整段提示词构建约 127ms）。别为了省这 0.4s 把检查挪到 lazy 或抽样——它的全部价值在于「启动就拦住」
 
 ## 动态重载
 

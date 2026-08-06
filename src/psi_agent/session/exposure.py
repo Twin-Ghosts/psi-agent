@@ -32,6 +32,7 @@ import os
 from collections.abc import Iterable
 from pathlib import Path
 
+import anyio
 from loguru import logger
 
 SkillEntries = Iterable[tuple[str, "str | Path"]]
@@ -105,7 +106,7 @@ def check_tool_exposure(
     return problems
 
 
-def check_skill_exposure(entries: SkillEntries) -> list[str]:
+async def check_skill_exposure(entries: SkillEntries) -> list[str]:
     """Verify each indexed skill name resolves to a readable ``SKILL.md``.
 
     *entries* is a sequence of ``(name, skill_md_path)`` pairs — the names the
@@ -126,9 +127,9 @@ def check_skill_exposure(entries: SkillEntries) -> list[str]:
     problems: list[str] = []
 
     for name, raw_path in entries:
-        path = Path(raw_path)
+        path = anyio.Path(str(raw_path))
 
-        if not path.is_file():
+        if not await path.is_file():
             problems.append(f"skill {name!r} is indexed but its SKILL.md is missing: {path}")
             continue
 

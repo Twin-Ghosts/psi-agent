@@ -1,5 +1,5 @@
 ---
-name: flow
+name: fusion-flow
 description: For authoring and running `@agent-flow/core` (Fuclaw) TypeScript multi-agent workflows. Use when the task involves `.flow.ts` files, an explicit mention of "agent-flow"/"Fuclaw"/"@agent-flow/core", or a request to coordinate multiple agents, run sub-tasks in parallel, build a multi-step pipeline, or inspect a prior workflow run. Not for `.prose` files. Activated by task intent, not by slash commands.
 metadata: { "openclaw": { "emoji": "🐾", "homepage": "https://github.com/fuclaw" } }
 ---

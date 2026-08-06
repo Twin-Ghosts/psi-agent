@@ -22,8 +22,8 @@ import re
 import sys
 import types
 import typing
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager, suppress
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -320,9 +320,13 @@ class FileEntry:
 # ── sys.path handling for helper imports ─────────────────────────────────────
 
 
-@contextmanager
-def _tools_dir_on_sys_path(tools_dir: Path) -> Iterator[None]:
-    """Put *tools_dir* at the front of ``sys.path`` for the duration of loading.
+_SYS_PATH_LOCK = anyio.Lock()
+"""Guards the read-then-insert on ``sys.path``; held only for that, never for a scan."""
+
+
+@asynccontextmanager
+async def _tools_dir_on_sys_path(entry: str) -> AsyncIterator[None]:
+    """Put *entry* at the front of ``sys.path`` for the duration of loading.
 
     Tool files import their private helpers by bare module name
     (``from _feishu_impl import ...``). Those helpers are siblings in ``tools/``,
@@ -333,27 +337,64 @@ def _tools_dir_on_sys_path(tools_dir: Path) -> Iterator[None]:
     happened to patch the path. The same file would register on one run and raise
     ``ModuleNotFoundError`` on the next.
 
-    Two consequences worth knowing, both inherent to bare sibling imports rather
-    than to this contextmanager:
+    **What the lock does and does not buy (刻意为之 — do not "fix" it into a
+    scan-wide lock):** it makes the read-then-insert atomic, so overlapping loads of
+    the *same* directory keep exactly one entry instead of stacking duplicates for
+    the overlap window. It does **not** give exclusive path access: two *different*
+    agent packages can be on ``sys.path`` simultaneously.
 
-    - Helpers are cached in ``sys.modules`` under their bare name, so two agent
-      packages with a same-named helper share whichever loaded first. Tool files
-      are compiled per-file with a hashed module name and are not affected;
-      helpers are.
-    - A helper whose name shadows a stdlib module wins over the stdlib for the
-      duration, because the entry goes at the *front*. Keeping the underscore
-      prefix convention for helpers avoids this in practice.
+    Note what is *not* broken without the guard: a duplicate self-corrects, because
+    each exit removes one copy — ``sys.path`` acts as a crude refcount, so no loader
+    is ever left without its entry (verified, not assumed). The guard buys a path
+    that stays honest to read and avoids paying for duplicate entries on every
+    import lookup; it is not preventing a stranding bug.
 
-    The entry is removed on exit — only the exact string this inserted, and only
-    if still present, so concurrent loads of other workspaces are left alone.
+    A scan-wide lock would cost far more than it fixes: a full load is ~2.7s for
+    haitun's 262 tools (longer on an ``.mcp_cache`` miss, where ``@mcp`` shells out
+    to ``npx`` during import), so N Sessions starting together would queue
+    N x 2.7s before any of them answered a request — and it would still not fix the
+    real cross-package hazard, which lives in ``sys.modules``, not ``sys.path``:
+
+    - Helpers are cached under their **bare** name and stay there after the load.
+      Whichever package imports ``_fusion_memory_config`` first wins for the life
+      of the process; a later package with a same-named helper silently gets the
+      first one. Five such names already exist across the bundled example
+      workspaces. Serializing the scans would not change this — it only changes
+      *which* load happens to be first.
+    - A helper whose name shadows a stdlib module wins over the stdlib while the
+      entry is in front. Keeping the underscore prefix convention avoids this.
+
+    So the honest boundary is: **one agent package per process is safe; several
+    distinct packages sharing helper names in one process is not**, and no locking
+    here can make it safe. Give such deployments separate processes.
+
+    *entry* must already be an absolute path string. It is normalized by the caller
+    rather than here: turning a relative path absolute reads the process CWD, which
+    is filesystem state, and doing that inside an async function is exactly what
+    ``ASYNC240`` exists to catch. In production the path arrives absolute anyway —
+    ``Session.run`` resolves it with ``await anyio.Path(...).resolve()``.
+
+    Only the exact string this inserted is removed, and only if this call is the
+    one that inserted it — so an entry a tool file added itself, or one an
+    overlapping load already put there, is left for its owner to remove.
     """
-    entry = str(tools_dir.resolve() if tools_dir.is_absolute() else tools_dir.absolute())
-    sys.path.insert(0, entry)
+    async with _SYS_PATH_LOCK:
+        # Already present (same agent pack loading concurrently, or a tool file
+        # inserted it itself): leave it alone and do not remove it on exit.
+        inserted = entry not in sys.path
+        if inserted:
+            sys.path.insert(0, entry)
     try:
         yield
     finally:
-        with suppress(ValueError):
-            sys.path.remove(entry)
+        # No ``await`` in this cleanup, 刻意为之: re-acquiring the lock here would be
+        # a cancellation checkpoint, and a cancelled scan would skip the removal and
+        # leak the entry for the life of the process (observed, then fixed). Mutating
+        # a list is atomic under the GIL and needs no lock; only the read-then-insert
+        # above does, and that is where the lock is.
+        if inserted:
+            with suppress(ValueError):
+                sys.path.remove(entry)
 
 
 # ── ToolRegistry — loading, state, incremental refresh ───────────────────────
@@ -496,6 +537,9 @@ class ToolRegistry:
 
         try:
             tools_dir_exists = await tools_anyio.is_dir()
+            # Absolutize here, not inside the sys.path helper: it reads the process
+            # CWD, and anyio.Path keeps that off the event loop thread.
+            sys_path_entry = str(await tools_anyio.absolute())
         except Exception as e:
             logger.warning(f"Cannot access tools directory {tools_dir!r}: {e!r}")
             return files
@@ -503,96 +547,83 @@ class ToolRegistry:
             logger.warning(f"Tools directory not found: {tools_dir!r}")
             return files
 
-        with _tools_dir_on_sys_path(tools_dir):
-            return await ToolRegistry._import_all(
-                tools_anyio,
-                session_id,
-                old_files,
-                files,
-                registered_modules,
-                load_failures,
-            )
-
-    @staticmethod
-    async def _import_all(
-        tools_anyio: anyio.Path,
-        session_id: str,
-        old_files: dict[str, FileEntry] | None,
-        files: dict[str, FileEntry],
-        registered_modules: list[str],
-        load_failures: dict[str, str] | None,
-    ) -> dict[str, FileEntry]:
-        """Import every non-underscore ``.py`` under *tools_anyio* into *files*."""
         try:
-            async for py_file in tools_anyio.glob("*.py"):
-                if py_file.name.startswith("_"):
-                    continue
-
-                module_name = None
-                try:
-                    file_bytes = await py_file.read_bytes()
-                    file_hash = hashlib.sha256(file_bytes).hexdigest()
-                    str_path = str(py_file)
-
-                    if old_files is not None and str_path in old_files and old_files[str_path].file_hash == file_hash:
-                        logger.debug(f"Skipping unchanged file: {py_file!r}")
-                        old = old_files[str_path]
-                        files[str_path] = FileEntry(
-                            file_hash=old.file_hash, tools=old.tools, funcs=old.funcs, fresh=False
-                        )
+            # ``tools/`` on sys.path for the whole scan: tool files import their
+            # siblings by bare name, and that must not depend on glob order.
+            async with _tools_dir_on_sys_path(sys_path_entry):
+                async for py_file in tools_anyio.glob("*.py"):
+                    if py_file.name.startswith("_"):
                         continue
 
-                    module_name = f"psi_tool_{py_file.stem}_{session_id}_{file_hash}"
+                    module_name = None
+                    try:
+                        file_bytes = await py_file.read_bytes()
+                        file_hash = hashlib.sha256(file_bytes).hexdigest()
+                        str_path = str(py_file)
 
-                    source = await py_file.read_text(encoding="utf-8")
-                    compiled = compile(source, str_path, "exec")
-
-                    module = types.ModuleType(module_name)
-                    module.__file__ = str_path
-                    sys.modules[module_name] = module
-                    registered_modules.append(module_name)
-
-                    exec(compiled, module.__dict__)
-
-                    attr_names = sorted(name for name in dir(module) if not name.startswith("_"))
-                    tools: dict[str, ToolFunction] = {}
-                    funcs: dict[str, Callable[..., Any]] = {}
-
-                    for name in attr_names:
-                        func = getattr(module, name, None)
-                        if not inspect.iscoroutinefunction(func):
+                        if (
+                            old_files is not None
+                            and str_path in old_files
+                            and old_files[str_path].file_hash == file_hash
+                        ):
+                            logger.debug(f"Skipping unchanged file: {py_file!r}")
+                            old = old_files[str_path]
+                            files[str_path] = FileEntry(
+                                file_hash=old.file_hash, tools=old.tools, funcs=old.funcs, fresh=False
+                            )
                             continue
 
-                        try:
-                            tool_func = ToolFunction.from_callable(func)
-                        except Exception as e:
-                            logger.error(f"Skipping tool {name!r} in {py_file!r}: {e!r}")
-                            continue
+                        module_name = f"psi_tool_{py_file.stem}_{session_id}_{file_hash}"
 
-                        tools[name] = tool_func
-                        funcs[name] = func
-                        logger.debug(f"Loaded tool: {name!r} from {py_file!r}")
+                        source = await py_file.read_text(encoding="utf-8")
+                        compiled = compile(source, str_path, "exec")
 
-                    files[str_path] = FileEntry(
-                        file_hash=file_hash,
-                        tools=tools,
-                        funcs=funcs,
-                        fresh=True,
-                    )
-                except Exception as e:
-                    if module_name is not None:
-                        sys.modules.pop(module_name, None)
-                        with suppress(ValueError):
-                            registered_modules.remove(module_name)
-                    logger.error(f"Failed to load tool file {py_file!r}: {e!r}")
-                    if load_failures is not None:
-                        load_failures[py_file.name] = repr(e)
-                    continue
+                        module = types.ModuleType(module_name)
+                        module.__file__ = str_path
+                        sys.modules[module_name] = module
+                        registered_modules.append(module_name)
+
+                        exec(compiled, module.__dict__)
+
+                        attr_names = sorted(name for name in dir(module) if not name.startswith("_"))
+                        tools: dict[str, ToolFunction] = {}
+                        funcs: dict[str, Callable[..., Any]] = {}
+
+                        for name in attr_names:
+                            func = getattr(module, name, None)
+                            if not inspect.iscoroutinefunction(func):
+                                continue
+
+                            try:
+                                tool_func = ToolFunction.from_callable(func)
+                            except Exception as e:
+                                logger.error(f"Skipping tool {name!r} in {py_file!r}: {e!r}")
+                                continue
+
+                            tools[name] = tool_func
+                            funcs[name] = func
+                            logger.debug(f"Loaded tool: {name!r} from {py_file!r}")
+
+                        files[str_path] = FileEntry(
+                            file_hash=file_hash,
+                            tools=tools,
+                            funcs=funcs,
+                            fresh=True,
+                        )
+                    except Exception as e:
+                        if module_name is not None:
+                            sys.modules.pop(module_name, None)
+                            with suppress(ValueError):
+                                registered_modules.remove(module_name)
+                        logger.error(f"Failed to load tool file {py_file!r}: {e!r}")
+                        if load_failures is not None:
+                            load_failures[py_file.name] = repr(e)
+                        continue
         except BaseException:
             for mn in registered_modules:
                 sys.modules.pop(mn, None)
             raise
 
         total_tools = sum(len(entry.tools) for entry in files.values())
-        logger.info(f"Loaded {total_tools} tool(s) from {len(files)} file(s) in {tools_anyio!r}")
+        logger.info(f"Loaded {total_tools} tool(s) from {len(files)} file(s) in {tools_dir!r}")
         return files

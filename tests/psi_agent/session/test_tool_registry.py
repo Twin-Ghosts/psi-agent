@@ -8,7 +8,7 @@ from typing import Annotated, Any, Literal
 import anyio
 import pytest
 
-from psi_agent.session.tool_registry import FileEntry, ToolFunction, ToolRegistry
+from psi_agent.session.tool_registry import FileEntry, ToolFunction, ToolRegistry, _tools_dir_on_sys_path
 
 # ── FileEntry ─────────────────────────────────────────────────────────────────
 
@@ -727,6 +727,77 @@ async def test_import_failure_is_recorded_with_its_reason(tmp_path: Path) -> Non
     assert set(tr.tools) == {"fine"}
     assert "broken.py" in tr.load_failures
     assert "definitely_not_installed" in tr.load_failures["broken.py"]
+
+
+@pytest.mark.anyio
+async def test_overlapping_loads_of_one_dir_do_not_duplicate_the_path_entry() -> None:
+    """Overlapping loaders on the same dir must not stack duplicate entries.
+
+    Two Sessions on one agent pack overlap routinely (Gateway starts them
+    together, and every ``await py_file.read_bytes()`` is a yield point). Inserting
+    unconditionally leaves the entry on ``sys.path`` twice for the overlap window.
+    That happens to self-correct — each exit removes one copy — so it is not a
+    stranding bug, but a growing path is still measurable import-time cost paid on
+    every lookup, and the duplicate makes ``sys.path`` misleading to read while
+    debugging. Overlap is forced with an explicit await inside the outer context.
+    """
+    entry = "/overlap-test-tools-dir"
+    before = list(sys.path)
+    counts_while_nested: list[int] = []
+
+    async def outer() -> None:
+        async with _tools_dir_on_sys_path(entry):
+            await anyio.sleep(0.05)
+
+    async def inner() -> None:
+        await anyio.sleep(0.01)  # enter after `outer` has inserted
+        async with _tools_dir_on_sys_path(entry):
+            counts_while_nested.append(sys.path.count(entry))
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(outer)
+        tg.start_soon(inner)
+
+    assert counts_while_nested == [1], "overlapping loads stacked duplicate sys.path entries"
+    assert sys.path == before, "entry outlived both loaders"
+
+
+@pytest.mark.anyio
+async def test_cancelled_load_still_removes_its_path_entry() -> None:
+    """Cancellation must not leak the entry for the life of the process.
+
+    Regression guard: an earlier version re-acquired the lock inside ``finally``.
+    That ``await`` is a cancellation checkpoint, so a cancelled scan skipped the
+    removal entirely and the entry stayed on ``sys.path`` forever. The cleanup must
+    stay ``await``-free.
+    """
+    entry = "/cancelled-load-tools-dir"
+    before = list(sys.path)
+
+    async def victim() -> None:
+        async with _tools_dir_on_sys_path(entry):
+            await anyio.sleep(10)
+
+    with anyio.move_on_after(0.05):
+        await victim()
+
+    assert entry not in sys.path, "cancelled load leaked its sys.path entry"
+    assert sys.path == before
+
+
+@pytest.mark.anyio
+async def test_load_leaves_a_preexisting_path_entry_alone(tmp_path: Path) -> None:
+    """An entry this load did not insert must survive the load, exactly once."""
+    tools_dir = tmp_path / "tools"
+    await anyio.Path(tools_dir).mkdir()
+    await anyio.Path(tools_dir / "t.py").write_text("async def t() -> str:\n    return 't'\n", encoding="utf-8")
+    entry = str(await anyio.Path(tools_dir).absolute())
+    sys.path.insert(0, entry)
+    try:
+        await ToolRegistry.load(tools_dir)
+        assert sys.path.count(entry) == 1, "load duplicated or removed a pre-existing entry"
+    finally:
+        sys.path.remove(entry)
 
 
 @pytest.mark.anyio

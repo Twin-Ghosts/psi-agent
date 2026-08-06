@@ -70,41 +70,46 @@ def test_long_lists_are_truncated_with_a_count() -> None:
 # ── check_skill_exposure ──────────────────────────────────────────────────────
 
 
-def test_skill_name_matching_its_directory_passes(tmp_path: Path) -> None:
+@pytest.mark.anyio
+async def test_skill_name_matching_its_directory_passes(tmp_path: Path) -> None:
     skill_md = tmp_path / "my-skill" / "SKILL.md"
     skill_md.parent.mkdir(parents=True)
     skill_md.write_text("# hi", encoding="utf-8")
 
-    assert check_skill_exposure([("my-skill", skill_md)]) == []
+    assert await check_skill_exposure([("my-skill", skill_md)]) == []
 
 
-def test_skill_name_disagreeing_with_directory_is_reported(tmp_path: Path) -> None:
+@pytest.mark.anyio
+async def test_skill_name_disagreeing_with_directory_is_reported(tmp_path: Path) -> None:
     skill_md = tmp_path / "fusion-flow-legacy" / "SKILL.md"
     skill_md.parent.mkdir(parents=True)
     skill_md.write_text("---\nname: flow\n---\n", encoding="utf-8")
 
-    problems = check_skill_exposure([("flow", skill_md)])
+    problems = await check_skill_exposure([("flow", skill_md)])
     assert len(problems) == 1
     assert "skills/flow/SKILL.md" in problems[0]
     assert "fusion-flow-legacy" in problems[0]
 
 
-def test_missing_skill_file_is_reported(tmp_path: Path) -> None:
-    problems = check_skill_exposure([("gone", tmp_path / "gone" / "SKILL.md")])
+@pytest.mark.anyio
+async def test_missing_skill_file_is_reported(tmp_path: Path) -> None:
+    problems = await check_skill_exposure([("gone", tmp_path / "gone" / "SKILL.md")])
     assert len(problems) == 1
     assert "missing" in problems[0]
 
 
-def test_string_paths_are_accepted(tmp_path: Path) -> None:
+@pytest.mark.anyio
+async def test_string_paths_are_accepted(tmp_path: Path) -> None:
     skill_md = tmp_path / "ok" / "SKILL.md"
     skill_md.parent.mkdir(parents=True)
     skill_md.write_text("x", encoding="utf-8")
 
-    assert check_skill_exposure([("ok", str(skill_md))]) == []
+    assert await check_skill_exposure([("ok", str(skill_md))]) == []
 
 
-def test_no_entries_is_fine() -> None:
-    assert check_skill_exposure([]) == []
+@pytest.mark.anyio
+async def test_no_entries_is_fine() -> None:
+    assert await check_skill_exposure([]) == []
 
 
 # ── enforce ───────────────────────────────────────────────────────────────────

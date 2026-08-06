@@ -928,12 +928,23 @@ async def _mcp_tool_names(tools_dir: anyio.Path) -> list[str]:
             continue
         try:
             payload = json.loads(await cache_file.read_text(encoding="utf-8"))
-            prefix = payload.get("prefix")
-            if prefix is None:
-                prefix = f"{cache_file.stem}_"
-            names += [f"{prefix}{name}" for name in payload.get("schemas", {})]
-        except (OSError, json.JSONDecodeError, AttributeError, TypeError) as exc:
+        except (OSError, json.JSONDecodeError) as exc:
             logger.warning("Cannot read MCP schema cache %s: %r", cache_file, exc)
+            continue
+        # On-disk cache is untrusted input: it may be any JSON shape.
+        if not isinstance(payload, dict):
+            logger.warning("MCP schema cache %s is not an object, ignoring", cache_file)
+            continue
+        schemas = payload.get("schemas")
+        if not isinstance(schemas, dict):
+            logger.warning("MCP schema cache %s has no schemas object, ignoring", cache_file)
+            continue
+        prefix = payload.get("prefix")
+        if not isinstance(prefix, str):
+            # ``None`` (or anything odd) means the declaration set no prefix, and
+            # ``_mcp.mcp`` then derives it from the declaring function's name.
+            prefix = f"{cache_file.stem}_"
+        names += [f"{prefix}{name}" for name in schemas]
     return names
 
 
