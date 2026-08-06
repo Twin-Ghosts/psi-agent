@@ -160,9 +160,33 @@ def _write_ok(raw: str) -> tuple[bool, str]:
     return False, str(payload.get("message") or payload.get("error") or "write failed")
 
 
+def _unwrap_text(value: Any) -> Any:
+    """文本字段(type 1)在飞书 search_records 里回来的是富文本片段数组
+    ``[{"text": ..., "type": "text"}, ...]``, 不是字符串 —— 按顺序拼接每段的
+    ``text`` 才是人看的值。单选(type 3)、日期(type 5)等标量字段不受影响,
+    原样返回, 免得把 状态/完成率 之类的整数也错拆一遍。
+
+    防御性地处理: 空列表 → 空串; 列表里混着裸字符串(没有 dict 包装的分段)
+    也按原样接上; 元素既不是 dict 也不是 str 的直接跳过(不拼进去, 不让一个
+    脏元素污染整段文本); None 或非列表标量原样放回, 不当成文本字段处理。
+    """
+    if not isinstance(value, list):
+        return value
+    parts: list[str] = []
+    for segment in value:
+        if isinstance(segment, dict):
+            parts.append(str(segment.get("text") or ""))
+        elif isinstance(segment, str):
+            parts.append(segment)
+        # 既不是 dict 也不是 str 的分段(比如 None 或数字)悄悄跳过, 不拼进去。
+    return "".join(parts)
+
+
 def _row_of(item: dict[str, Any]) -> dict[str, Any]:
     fields = item.get("fields")
     row: dict[str, Any] = dict(fields) if isinstance(fields, dict) else {}
+    for key, value in row.items():
+        row[key] = _unwrap_text(value)
     row["record_id"] = str(item.get("record_id") or "")
     for key in _DATE_KEYS:
         if key in row:

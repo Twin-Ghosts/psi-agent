@@ -474,8 +474,85 @@ class _FakeBitable:
         return json.dumps({"ok": True, "updated": updated, "count": len(updated)}, ensure_ascii=False)
 
 
-def _item(record_id: str, fields: dict[str, Any]) -> dict[str, Any]:
-    return {"record_id": record_id, "fields": fields}
+# 两张表里哪些字段是文本(type 1, search_records 回来是富文本片段数组), 哪些是
+# 单选/数字/日期(标量) —— 照抄 _rookie_sop_store.py 的 DETAIL_FIELDS/OVERVIEW_FIELDS
+# 类型声明。两表都有的字段里只有 状态 类型不同(明细表 3 单选, 总览表 1 文本),
+# 所以 _item() 必须按 table 分开查, 不能用一份合并的字段名集合。
+_DETAIL_TEXT_FIELDS = {"记录键", "姓名", "open_id", "模块", "项", "验收标准", "Mentor", "适用角色"}
+_OVERVIEW_TEXT_FIELDS = {"open_id", "姓名", "角色", "进度", "逾期项", "状态"}
+
+
+def _wrap_text(value: Any) -> Any:
+    """把一个文本字段的值包成飞书 search_records 真实吐出来的富文本片段数组形状。"""
+    if value is None:
+        return value
+    return [{"text": str(value), "type": "text"}]
+
+
+def _item(record_id: str, fields: dict[str, Any], *, table: str = "detail") -> dict[str, Any]:
+    """假造一条 search_records 记录 —— 文本字段(type 1)包成富文本片段数组,
+    单选/数字/日期字段保持标量, 照抄真实飞书表格观测到的形状(而不是让测试的假
+    数据比真实 API 更老实)。``table`` 选 "detail" 或 "overview" 决定用哪张表的
+    文本字段名单, 因为 状态 在两张表里的字段类型不同(明细表单选, 总览表文本)。
+    """
+    text_fields = _DETAIL_TEXT_FIELDS if table == "detail" else _OVERVIEW_TEXT_FIELDS
+    wrapped = {k: (_wrap_text(v) if k in text_fields else v) for k, v in fields.items()}
+    return {"record_id": record_id, "fields": wrapped}
+
+
+def test_row_of_unwraps_richtext_segments_from_a_realistic_record() -> None:
+    """回归测试: 直接照抄联调时在真实飞书表格上 search_records 观测到的形状 ——
+    文本字段(type 1)是富文本片段数组, 单选(状态, type 3)与日期(入职日/截止日,
+    type 5)是标量。撤掉 _row_of 里的 _unwrap_text 会让这条断言失败(见 richtext
+    修复报告), 这正是「明细表每个模块卡都是 0/0」那个线上 bug 的根源。
+    """
+    s = _load("_rookie_sop_store")
+    record = {
+        "record_id": "recLive1",
+        "fields": {
+            "模块": [{"text": "环境准备", "type": "text"}],
+            "记录键": [{"text": "ou_a6875df821ff538b9db67c2a5cd5f428:wifi", "type": "text"}],
+            # 多段文本必须按顺序拼接, 不是只取第一段
+            "项": [{"text": "连上 ", "type": "text"}, {"text": "WiFi", "type": "text"}],
+            "姓名": [{"text": "王炜博", "type": "text"}],
+            "open_id": [{"text": "ou_a6875df821ff538b9db67c2a5cd5f428", "type": "text"}],
+            "验收标准": [{"text": "能上网", "type": "text"}],
+            "适用角色": [{"text": "全员", "type": "text"}],
+            "状态": "未完成",  # 单选(type 3), 已经是纯字符串
+            "入职日": 1785945600000,  # 日期(type 5), 毫秒时间戳
+            "截止日": 1785945600000,
+        },
+    }
+
+    row = s._row_of(record)
+
+    assert row["模块"] == "环境准备"
+    assert row["记录键"] == "ou_a6875df821ff538b9db67c2a5cd5f428:wifi"
+    assert row["项"] == "连上 WiFi"
+    assert row["姓名"] == "王炜博"
+    assert row["open_id"] == "ou_a6875df821ff538b9db67c2a5cd5f428"
+    assert row["验收标准"] == "能上网"
+    assert row["适用角色"] == "全员"
+    # 单选字段本就是字符串, 不能被误当成富文本再拆一遍
+    assert row["状态"] == "未完成"
+    # 日期字段的 millis→date 转换不受影响
+    assert row["入职日"] == date(2026, 8, 6)
+    assert row["截止日"] == date(2026, 8, 6)
+    assert row["record_id"] == "recLive1"
+
+
+def test_row_of_unwrap_text_degrades_sensibly_on_edge_shapes() -> None:
+    """_unwrap_text 的防御性分支: 空列表、裸字符串分段、已经是纯字符串、
+    None、非列表标量都不能让 _row_of 抛异常, 且都要落到合理的值上。"""
+    s = _load("_rookie_sop_store")
+
+    assert s._unwrap_text([]) == ""
+    assert s._unwrap_text(["裸字符串", "分段"]) == "裸字符串分段"
+    assert s._unwrap_text("已经是纯字符串") == "已经是纯字符串"
+    assert s._unwrap_text(None) is None
+    assert s._unwrap_text(42) == 42
+    # 混杂 dict/裸字符串/脏元素(None)的分段: 按顺序拼接, 脏元素跳过不拼入
+    assert s._unwrap_text([{"text": "A", "type": "text"}, "B", None, {"text": "C", "type": "text"}]) == "ABC"
 
 
 def test_millis_roundtrip_preserves_the_date() -> None:
@@ -920,7 +997,7 @@ def test_recompute_overview_updates_the_existing_row_instead_of_adding_one() -> 
         },
     ]
     # 总览里已有该人一行 → 走 update 而不是 create
-    fake = _FakeBitable([[_item("recOv", {"open_id": "ou_x"})]])
+    fake = _FakeBitable([[_item("recOv", {"open_id": "ou_x"}, table="overview")]])
 
     out = anyio.run(
         lambda: s.recompute_overview(
@@ -970,7 +1047,7 @@ def test_recompute_overview_heals_a_corrupted_row() -> None:
         {"记录键": "ou_x:b", "状态": p.STATUS_DONE, "入职日": date(2026, 8, 5), "截止日": date(2026, 8, 5), "项": "b"},
     ]
     # 总览行被改成了荒谬的值
-    fake = _FakeBitable([[_item("recOv", {"open_id": "ou_x", "进度": "99/99", "逾期项数": 42})]])
+    fake = _FakeBitable([[_item("recOv", {"open_id": "ou_x", "进度": "99/99", "逾期项数": 42}, table="overview")]])
 
     anyio.run(
         lambda: s.recompute_overview(
@@ -1425,8 +1502,8 @@ def test_rookie_sop_digest_sends_nothing_on_empty_roster(monkeypatch: Any) -> No
 def test_rookie_sop_digest_follows_has_more_when_reading_the_overview_table(monkeypatch: Any) -> None:
     """总览表随人数增长会翻页 —— 日报和兜底对账都不能只读第一页。"""
     dg = _load("rookie_sop_digest")
-    page1 = _item("recOv1", {"open_id": "ou_x", "姓名": "张三", "状态": "进行中"})
-    page2 = _item("recOv2", {"open_id": "ou_y", "姓名": "李四", "状态": "进行中"})
+    page1 = _item("recOv1", {"open_id": "ou_x", "姓名": "张三", "状态": "进行中"}, table="overview")
+    page2 = _item("recOv2", {"open_id": "ou_y", "姓名": "李四", "状态": "进行中"}, table="overview")
     fake = _FakeBitable(
         [
             ([page1], True, "tok1"),  # 第一次读总览(对账前): 第一页
