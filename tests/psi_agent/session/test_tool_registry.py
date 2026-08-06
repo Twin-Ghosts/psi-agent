@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import textwrap
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -670,3 +671,87 @@ async def test_get_last_file_wins(tmp_path: Path) -> None:
     func = tr.get("echo")
     assert func is not None
     assert await func() in ("a", "b")  # glob order is filesystem-dependent
+
+
+# ── helper imports / sys.path ─────────────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_tool_can_import_a_sibling_helper(tmp_path: Path) -> None:
+    """Bare ``from _helper import x`` resolves because tools/ goes on sys.path.
+
+    Without it, whether this worked depended on glob order and on whether some
+    earlier tool file had patched ``sys.path`` as an import side effect — the same
+    file would register on one run and raise ModuleNotFoundError on the next.
+    """
+    tools_dir = tmp_path / "tools"
+    await anyio.Path(tools_dir).mkdir()
+    await anyio.Path(tools_dir / "_helper.py").write_text("VALUE = 'from helper'\n", encoding="utf-8")
+    await anyio.Path(tools_dir / "uses_helper.py").write_text(
+        "from _helper import VALUE\n\n\nasync def read_value() -> str:\n    return VALUE\n",
+        encoding="utf-8",
+    )
+
+    tr = await ToolRegistry.load(tools_dir)
+
+    assert set(tr.tools) == {"read_value"}
+    func = tr.get("read_value")
+    assert func is not None
+    assert await func() == "from helper"
+
+
+@pytest.mark.anyio
+async def test_sys_path_is_restored_after_loading(tmp_path: Path) -> None:
+    tools_dir = tmp_path / "tools"
+    await anyio.Path(tools_dir).mkdir()
+    await anyio.Path(tools_dir / "t.py").write_text("async def t() -> str:\n    return 't'\n", encoding="utf-8")
+    before = list(sys.path)
+
+    await ToolRegistry.load(tools_dir)
+
+    assert sys.path == before
+
+
+@pytest.mark.anyio
+async def test_import_failure_is_recorded_with_its_reason(tmp_path: Path) -> None:
+    tools_dir = tmp_path / "tools"
+    await anyio.Path(tools_dir).mkdir()
+    await anyio.Path(tools_dir / "broken.py").write_text(
+        "import definitely_not_installed\n\n\nasync def never() -> str:\n    return 'x'\n",
+        encoding="utf-8",
+    )
+    await anyio.Path(tools_dir / "fine.py").write_text("async def fine() -> str:\n    return 'ok'\n", encoding="utf-8")
+
+    tr = await ToolRegistry.load(tools_dir)
+
+    assert set(tr.tools) == {"fine"}
+    assert "broken.py" in tr.load_failures
+    assert "definitely_not_installed" in tr.load_failures["broken.py"]
+
+
+@pytest.mark.anyio
+async def test_load_failures_empty_when_everything_imports(tmp_path: Path) -> None:
+    tools_dir = tmp_path / "tools"
+    await anyio.Path(tools_dir).mkdir()
+    await anyio.Path(tools_dir / "ok.py").write_text("async def ok() -> str:\n    return 'ok'\n", encoding="utf-8")
+
+    tr = await ToolRegistry.load(tools_dir)
+
+    assert tr.load_failures == {}
+
+
+@pytest.mark.anyio
+async def test_refresh_recomputes_load_failures(tmp_path: Path) -> None:
+    """A fixed file must clear its failure, not leave a stale one behind."""
+    tools_dir = tmp_path / "tools"
+    await anyio.Path(tools_dir).mkdir()
+    broken = anyio.Path(tools_dir / "later_fixed.py")
+    await broken.write_text("import definitely_not_installed\n", encoding="utf-8")
+    tr = await ToolRegistry.load(tools_dir)
+    assert "later_fixed.py" in tr.load_failures
+
+    await broken.write_text("async def now_works() -> str:\n    return 'ok'\n", encoding="utf-8")
+    await tr.refresh()
+
+    assert tr.load_failures == {}
+    assert set(tr.tools) == {"now_works"}

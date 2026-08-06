@@ -34,6 +34,7 @@ _TOOLS_DIR = _os.path.join(_os.path.dirname(_THIS_DIR), "tools")
 if _TOOLS_DIR not in sys.path:
     sys.path.insert(0, _TOOLS_DIR)
 
+import ast
 import contextlib
 import hashlib
 import importlib
@@ -457,6 +458,26 @@ async def _collect_skill_dirs(skills_dir: anyio.Path) -> list[tuple[str, anyio.P
     return entries
 
 
+def _parse_frontmatter(content: str) -> dict[str, str]:
+    """Parse the leading ``---`` block into a flat ``key: value`` mapping."""
+    if not content.startswith("---"):
+        return {}
+    end = content.find("\n---", 3)
+    if end == -1:
+        return {}
+    fields: dict[str, str] = {}
+    for line in content[3:end].splitlines():
+        if ":" in line:
+            key, _, val = line.partition(":")
+            fields[key.strip()] = val.strip().strip('"').strip("'")
+    return fields
+
+
+def _skill_index_name(content: str, dir_name: str) -> str:
+    """The name the index shows for a skill: frontmatter ``name:`` else the dir."""
+    return _parse_frontmatter(content).get("name") or dir_name
+
+
 async def _build_skills_index(workspace_dir: anyio.Path) -> str:
     skills_dir = workspace_dir / "skills"
 
@@ -501,14 +522,7 @@ async def _build_skills_index(workspace_dir: anyio.Path) -> str:
         if not content:
             continue
         skill_info: dict[str, str] = {"name": name, "description": "", "category": ""}
-        if content.startswith("---"):
-            end = content.find("\n---", 3)
-            if end != -1:
-                fm = content[3:end]
-                for line in fm.splitlines():
-                    if ":" in line:
-                        key, _, val = line.partition(":")
-                        skill_info[key.strip()] = val.strip().strip('"').strip("'")
+        skill_info |= _parse_frontmatter(content)
         if not skill_info["description"]:
             body = _strip_frontmatter(content)
             for line in body.splitlines():
@@ -800,15 +814,156 @@ async def _build_volatile(workspace_dir: anyio.Path) -> str:
 
 
 async def _scan_tool_names(workspace_dir: anyio.Path) -> list[str]:
-    """Derive tool names from ``workspace/tools/*.py`` filenames (fallback)."""
+    """Derive tool names by parsing ``workspace/tools/*.py`` for ``async def``.
+
+    A tool's name is its **function** name, and one file may define several
+    (``browser.py`` defines 41). Deriving names from *filenames* produced a list
+    that looked plausible and was wrong in both directions: it advertised
+    ``browser``, which dispatches to nothing, and never mentioned
+    ``browser_click``, which does.
+
+    This is the fallback used when no name list is supplied — ``build_system_prompt``
+    prefers the registry's own list, which is authoritative because it comes from
+    the code that will execute the call. The AST here is a static parse, so it also
+    works when a tool's imports are unavailable, which is what makes it useful as
+    an *independent* second opinion for the startup exposure check.
+    """
     tools_dir = workspace_dir / "tools"
     if not await tools_dir.exists():
         return []
     names: list[str] = []
     async for entry in tools_dir.iterdir():
-        if await entry.is_file() and entry.suffix == ".py" and not entry.name.startswith("_"):
-            names.append(entry.stem)
-    return sorted(names)
+        if not (await entry.is_file() and entry.suffix == ".py" and not entry.name.startswith("_")):
+            continue
+        try:
+            source = await entry.read_text(encoding="utf-8", errors="replace")
+            tree = ast.parse(source, filename=str(entry))
+        except (OSError, SyntaxError, ValueError) as exc:
+            logger.warning("Cannot parse tool file %s for names: %r", entry, exc)
+            continue
+        local_names, reexport_candidates = _tool_names_in_module(tree)
+        names += local_names
+        names += await _async_reexports(tools_dir, reexport_candidates)
+    names += await _mcp_tool_names(tools_dir)
+    return sorted(set(names))
+
+
+def _tool_names_in_module(tree: ast.Module) -> tuple[list[str], dict[str, list[str]]]:
+    """Split one parsed tool module into local tool names and re-export candidates.
+
+    The loader registers whatever ``dir(module)`` reports as a coroutine function,
+    which is two things, not one: functions ``async def``-ed in the file, and async
+    functions the file *imported*. The second kind is easy to create by accident —
+    ``from _user_profile import get_profile`` publishes ``get_profile`` to the model
+    as a callable tool.
+
+    Imports cannot be classified from this file's syntax alone (an imported name may
+    be a class, a constant, or a coroutine), so they are returned as candidates
+    keyed by source module for the caller to resolve.
+
+    Returns:
+        ``(local async def names, {module name: imported names})``.
+    """
+    names: list[str] = []
+    candidates: dict[str, list[str]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.AsyncFunctionDef) and not node.name.startswith("_"):
+            names.append(node.name)
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            imported = [
+                (alias.asname or alias.name)
+                for alias in node.names
+                if alias.name != "*" and not (alias.asname or alias.name).startswith("_")
+            ]
+            if imported:
+                candidates.setdefault(node.module, []).extend(imported)
+    return names, candidates
+
+
+async def _async_reexports(tools_dir: anyio.Path, candidates: dict[str, list[str]]) -> list[str]:
+    """Of *candidates*, the names that are ``async def`` in a sibling tools module.
+
+    Only sibling modules are resolved — an import from ``pathlib`` or from an
+    installed package cannot become a registered tool by this route, because the
+    loader only registers coroutine functions and those are not it. Anything that
+    cannot be resolved statically is left out rather than guessed at: a false
+    "advertised" entry would turn the exposure check into noise.
+    """
+    found: list[str] = []
+    for module, imported in candidates.items():
+        sibling = tools_dir / f"{module}.py"
+        if not await sibling.exists():
+            continue
+        try:
+            tree = ast.parse(await sibling.read_text(encoding="utf-8", errors="replace"), filename=str(sibling))
+        except (OSError, SyntaxError, ValueError) as exc:
+            logger.warning("Cannot parse helper module %s: %r", sibling, exc)
+            continue
+        async_defs = {node.name for node in tree.body if isinstance(node, ast.AsyncFunctionDef)}
+        found += [name for name in imported if name in async_defs]
+    return found
+
+
+async def _mcp_tool_names(tools_dir: anyio.Path) -> list[str]:
+    """Tool names an ``@mcp`` file expands into, read from its schema cache.
+
+    ``browser.py`` is a single decorated function that becomes 41 tools once the
+    MCP server's schemas are loaded; ``canvas.py`` and ``search.py`` do the same.
+    None of those names exist in the source, so a parse cannot see them — the cache
+    under ``tools/.mcp_cache/`` is the only static record of what they expand to.
+    A missing or unreadable cache yields nothing, which surfaces as a mismatch
+    rather than as silent agreement.
+
+    The prefix rule mirrors ``_mcp.mcp``: a cached ``prefix`` of ``None`` means the
+    declaration did not set one, and the effective prefix is the declaring
+    function's name plus ``_`` (the cache file is named after it). ``browser``
+    stores ``""`` because Playwright MCP already names its tools ``browser_*``.
+    """
+    cache_dir = tools_dir / ".mcp_cache"
+    if not await cache_dir.exists():
+        return []
+    names: list[str] = []
+    async for cache_file in cache_dir.iterdir():
+        if cache_file.suffix != ".json":
+            continue
+        try:
+            payload = json.loads(await cache_file.read_text(encoding="utf-8"))
+            prefix = payload.get("prefix")
+            if prefix is None:
+                prefix = f"{cache_file.stem}_"
+            names += [f"{prefix}{name}" for name in payload.get("schemas", {})]
+        except (OSError, json.JSONDecodeError, AttributeError, TypeError) as exc:
+            logger.warning("Cannot read MCP schema cache %s: %r", cache_file, exc)
+    return names
+
+
+async def advertised_tool_names() -> list[str]:
+    """Tool names this workspace's prompt claims exist — the *prompt* side.
+
+    Read by the framework's startup exposure check and compared against what
+    ``ToolRegistry`` actually loaded. Deliberately derived by static parse rather
+    than by asking the registry: a check whose two inputs come from one source
+    proves nothing.
+    """
+    return await _scan_tool_names(anyio.Path(__file__).parent.parent)
+
+
+async def indexed_skill_entries() -> list[tuple[str, str]]:
+    """``(indexed name, SKILL.md path)`` for every skill the prompt lists.
+
+    The framework asserts each name resolves to ``skills/<name>/SKILL.md``, which
+    is the path the prompt tells the model to read. Frontmatter ``name:`` that
+    disagrees with the directory name breaks exactly that instruction.
+    """
+    agent_dir = anyio.Path(__file__).parent.parent
+    entries: list[tuple[str, str]] = []
+    for skills_root in (_GLOBAL_AGENT_SKILLS_DIR, agent_dir / "skills"):
+        for dir_name, skill_md in await _collect_skill_dirs(skills_root):
+            content = await _read_file_optional(skill_md)
+            if content is None:
+                continue
+            entries.append((_skill_index_name(content, dir_name), str(skill_md)))
+    return entries
 
 
 async def _build_dynamic_context_files(workspace_dir: anyio.Path) -> str:
@@ -1446,11 +1601,16 @@ async def system_prompt_builder(
     user_message: dict[str, Any] | None = None,
     *,
     workspace_raw: str = "",
+    tool_names: list[str] | None = None,
 ) -> str:
     """Module-level entry point used by the psi-agent session loader.
 
     The loader looks up an async ``system_prompt_builder`` attribute in this
     module and calls it with no arguments.
+
+    *tool_names* is injected by the loader from ``ToolRegistry`` — the same list
+    the agent loop will dispatch against. When absent (standalone prompt dumps),
+    the builder falls back to a static parse of ``tools/``.
 
     **Agent vs user workspace (三区)**: this file lives in the agent package, so
     ``__file__`` resolves the capability root. The user open-folder for file IO
@@ -1465,7 +1625,7 @@ async def system_prompt_builder(
     await _activate_fusion_memory(agent_dir)
     content = user_message.get("content") if isinstance(user_message, dict) else ""
     user_text = content if isinstance(content, str) else ""
-    prompt = await System(agent_dir, user_workspace=user_workspace).build_system_prompt()
+    prompt = await System(agent_dir, user_workspace=user_workspace).build_system_prompt(tool_names=tool_names)
     profile_text = ""
     policy_text = ""
     try:

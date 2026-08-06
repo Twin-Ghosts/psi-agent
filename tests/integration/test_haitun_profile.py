@@ -259,7 +259,7 @@ async def test_generated_prompt_has_one_profile_and_policy_section(
 ) -> None:
     module = _load_system_module(monkeypatch)
 
-    async def base_prompt(_self) -> str:
+    async def base_prompt(_self, tool_names: list[str] | None = None) -> str:
         return "stable<!-- HAITUN_CACHE_BOUNDARY -->dynamic"
 
     monkeypatch.setattr(module.System, "build_system_prompt", base_prompt)

@@ -50,6 +50,7 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 - AppData 路径助手在 ``psi_agent._appdata``（与 Gateway 共享；**禁止**经 ContextVar 传递 AppData 根）
 - System prompt 在首次 `run()` 调用时惰性构建（通过 `system_prompt_builder`）
 - `system_prompt_builder` 和 `system_prompt_rebuild_checker` 兼容旧的零参形式；如定义了位置参数，Session 会传入当前原始 `user_message`。这一显式参数只用于本轮动态 prompt，不会改变写入 history 的 `kind` 标记副本
+- `system_prompt_builder` 若声明了 `tool_names` 关键字参数（或 `**kwargs`），Session 会把 **`ToolRegistry` 的实际工具名**传进去；没声明的 builder 调用方式不变。提示词该按这份清单写工具名，而不是自己去数 `tools/*.py` 文件名——文件名不是工具名（`browser.py` 里有 41 个工具）
 - 后续请求可调用 `system_prompt_rebuild_checker()`（如果定义），返回 True 则用同一条当前 `user_message` 重建 system prompt
 - 可选 `system_after_turn(user_message, assistant_message)` 在 `finish_reason="stop"` 的最终 assistant 消息已 commit 后执行。它是可恢复的 workspace hook：普通异常记 WARNING，不回滚已成功交付的回合；取消信号仍向外传播。未定义时使用 no-op 默认值
 - 未整段重建时，提示词一字不改；若 agent 包定义了 `turn_context_builder()`，则每回合把易变块挂到**本回合 user 消息**上（见下方「每回合易变上下文」）
@@ -224,6 +225,28 @@ result = run.result   # 正常耗尽后非 None
 - 用 `inspect.signature()` 提取参数（类型注解 → JSON Schema 类型）
 - 用 `inspect.getdoc()` 提取描述（支持 Google-style 的 `Args:` 格式）
 - 跨文件同名 tool 以后加载者覆盖（`tools` property 展平时 `dict.update` 自然行为）
+- 加载期间 `tools/` 会被放到 `sys.path` 首位并在结束后移除，让 `from _helper import x` 这类**裸导入同目录 helper** 稳定可用。此前能否解析取决于 glob 顺序和前面文件有没有顺手 `sys.path.insert`，同一文件可能这次注册成功、下次 `ModuleNotFoundError`。两个已知代价：helper 以裸名进 `sys.modules`，同名 helper 跨 agent 包共用先加载的那份；helper 若与 stdlib 同名会遮蔽 stdlib（保持 `_` 前缀约定即可避免）
+- 导入失败的文件记进 `ToolRegistry.load_failures`（`文件名 → 错误 repr`），供启动一致性检查区分「缺依赖」和「名字根本不存在」
+
+## 提示词/运行时暴露一致性检查（启动即断言）
+
+工具名过去由两条独立管线各算一遍：提示词侧扫 `tools/` 自己拼 `## Tooling`，执行侧
+`ToolRegistry` 导入文件注册 `async def`。没有东西保证两边一致，实际也不一致——
+提示词列的是**文件名**（`browser`），执行侧注册的是**函数名**（`browser_click`），
+于是提示词既宣告了调不通的名字，又漏掉了能调的。技能侧同理：提示词让模型读
+`skills/<name>/SKILL.md`，而 `<name>` 取自 frontmatter，文件却在**目录名**下。
+
+- `SessionAgent.create()` 在 registry 与 system prompt 就绪后调
+  `SystemPrompt.check_exposure()`，两侧工具名集合必须**相等**，否则抛
+  `ExposureMismatchError` 中止启动——模型被告知了关于自身能力的假话，不该等三周后从日志里发现
+- agent 包通过两个可选 async hook 参与：`advertised_tool_names()` 返回提示词侧自算的工具名，
+  `indexed_skill_entries()` 返回 `(索引名, SKILL.md 路径)`。两个都没定义则跳过检查（向后兼容）
+- 技能检查断言索引名等于其所在目录名且文件存在
+- hook 自身抛异常只记 ERROR 跳过该项，不把「检查坏了」升级成比它要查的问题更严重的故障
+- `PSI_ALLOW_EXPOSURE_MISMATCH=1` 把 raise 降级为 ERROR 日志继续启动；报错文案里写明该变量
+- hook 要**独立取数**才有意义：`advertised_tool_names()` 用 AST 静态解析（含 `@mcp` 的
+  `.mcp_cache` 展开名、以及从 `_` helper 再导出的 async 函数），不是回头问注册表——
+  两个输入同源的检查什么都证明不了
 
 ## 动态重载
 

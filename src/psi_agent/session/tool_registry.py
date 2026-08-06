@@ -22,8 +22,8 @@ import re
 import sys
 import types
 import typing
-from collections.abc import Callable
-from contextlib import suppress
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -317,6 +317,45 @@ class FileEntry:
     fresh: bool = False
 
 
+# ── sys.path handling for helper imports ─────────────────────────────────────
+
+
+@contextmanager
+def _tools_dir_on_sys_path(tools_dir: Path) -> Iterator[None]:
+    """Put *tools_dir* at the front of ``sys.path`` for the duration of loading.
+
+    Tool files import their private helpers by bare module name
+    (``from _feishu_impl import ...``). Those helpers are siblings in ``tools/``,
+    not installed packages, so the import only resolves if ``tools/`` is on
+    ``sys.path``. Before this, it worked by accident: several tool files call
+    ``sys.path.insert`` themselves at import time, so whether a *later* file's
+    bare import resolved depended on ``glob`` order and on which earlier files
+    happened to patch the path. The same file would register on one run and raise
+    ``ModuleNotFoundError`` on the next.
+
+    Two consequences worth knowing, both inherent to bare sibling imports rather
+    than to this contextmanager:
+
+    - Helpers are cached in ``sys.modules`` under their bare name, so two agent
+      packages with a same-named helper share whichever loaded first. Tool files
+      are compiled per-file with a hashed module name and are not affected;
+      helpers are.
+    - A helper whose name shadows a stdlib module wins over the stdlib for the
+      duration, because the entry goes at the *front*. Keeping the underscore
+      prefix convention for helpers avoids this in practice.
+
+    The entry is removed on exit — only the exact string this inserted, and only
+    if still present, so concurrent loads of other workspaces are left alone.
+    """
+    entry = str(tools_dir.resolve() if tools_dir.is_absolute() else tools_dir.absolute())
+    sys.path.insert(0, entry)
+    try:
+        yield
+    finally:
+        with suppress(ValueError):
+            sys.path.remove(entry)
+
+
 # ── ToolRegistry — loading, state, incremental refresh ───────────────────────
 
 
@@ -334,10 +373,12 @@ class ToolRegistry:
         files: dict[str, FileEntry] | None = None,
         work_dir: Path | None = None,
         session_id: str = "",
+        load_failures: dict[str, str] | None = None,
     ) -> None:
         self._files: dict[str, FileEntry] = dict(files or {})
         self._work_dir = work_dir
         self._session_id = session_id
+        self._load_failures: dict[str, str] = dict(load_failures or {})
 
     @property
     def tools(self) -> dict[str, ToolFunction]:
@@ -346,6 +387,15 @@ class ToolRegistry:
         for entry in self._files.values():
             result.update(entry.tools)
         return result
+
+    @property
+    def load_failures(self) -> dict[str, str]:
+        """File name → why it failed to import, for files that registered nothing.
+
+        Kept so the startup exposure check can tell "this tool is missing because
+        its dependency isn't installed" apart from "this name never existed".
+        """
+        return dict(self._load_failures)
 
     def get(self, name: str) -> Callable[..., Any] | None:
         """Return the callable for *name*, or None if not registered."""
@@ -360,8 +410,9 @@ class ToolRegistry:
     @classmethod
     async def load(cls, tools_dir: Path, session_id: str = "") -> ToolRegistry:
         """Full initial load — scan *tools_dir* and import everything."""
-        files = await cls._load_from_dir(tools_dir, session_id)
-        return cls(files=files, work_dir=tools_dir, session_id=session_id)
+        failures: dict[str, str] = {}
+        files = await cls._load_from_dir(tools_dir, session_id, load_failures=failures)
+        return cls(files=files, work_dir=tools_dir, session_id=session_id, load_failures=failures)
 
     async def refresh(self) -> dict[str, str]:
         """Incremental reload — adds, updates, removes tools.
@@ -382,7 +433,9 @@ class ToolRegistry:
             return {}
 
         logger.debug("Starting tool refresh")
-        new_files = await self._load_from_dir(self._work_dir, self._session_id, self._files)
+        failures: dict[str, str] = {}
+        new_files = await self._load_from_dir(self._work_dir, self._session_id, self._files, load_failures=failures)
+        self._load_failures = failures
         result: dict[str, str] = {}
 
         # removed — files in old but not on disk any more
@@ -423,12 +476,17 @@ class ToolRegistry:
         tools_dir: Path,
         session_id: str,
         old_files: dict[str, FileEntry] | None = None,
+        *,
+        load_failures: dict[str, str] | None = None,
     ) -> dict[str, FileEntry]:
         """Scan and import all tool ``.py`` files.
 
         If *old_files* is provided, files whose hash matches the stored
         value are preserved (copied from *old_files* with ``fresh=False``)
         instead of re-imported.
+
+        *load_failures*, when given, is filled with ``file name → error text``
+        for every file that raised while importing.
 
         Returns ``{file_path: FileEntry}`` for all current ``.py`` files.
         """
@@ -445,6 +503,26 @@ class ToolRegistry:
             logger.warning(f"Tools directory not found: {tools_dir!r}")
             return files
 
+        with _tools_dir_on_sys_path(tools_dir):
+            return await ToolRegistry._import_all(
+                tools_anyio,
+                session_id,
+                old_files,
+                files,
+                registered_modules,
+                load_failures,
+            )
+
+    @staticmethod
+    async def _import_all(
+        tools_anyio: anyio.Path,
+        session_id: str,
+        old_files: dict[str, FileEntry] | None,
+        files: dict[str, FileEntry],
+        registered_modules: list[str],
+        load_failures: dict[str, str] | None,
+    ) -> dict[str, FileEntry]:
+        """Import every non-underscore ``.py`` under *tools_anyio* into *files*."""
         try:
             async for py_file in tools_anyio.glob("*.py"):
                 if py_file.name.startswith("_"):
@@ -507,6 +585,8 @@ class ToolRegistry:
                         with suppress(ValueError):
                             registered_modules.remove(module_name)
                     logger.error(f"Failed to load tool file {py_file!r}: {e!r}")
+                    if load_failures is not None:
+                        load_failures[py_file.name] = repr(e)
                     continue
         except BaseException:
             for mn in registered_modules:
@@ -514,5 +594,5 @@ class ToolRegistry:
             raise
 
         total_tools = sum(len(entry.tools) for entry in files.values())
-        logger.info(f"Loaded {total_tools} tool(s) from {len(files)} file(s) in {tools_dir!r}")
+        logger.info(f"Loaded {total_tools} tool(s) from {len(files)} file(s) in {tools_anyio!r}")
         return files
