@@ -99,11 +99,12 @@ def plan_module_cards(
                 sop_url=sop_url,
                 progress_text=f"{done}/{len(module_rows)}",
                 role_answered=False,
+                today=today,
             )
             plans.append({"module": module, "card": card, "handlers": handlers, "is_role_card": True})
             continue
         card, handlers = _card.module_card(
-            module, module_rows, f"{done}/{len(module_rows)}", due_text, sop_url
+            module, module_rows, f"{done}/{len(module_rows)}", due_text, sop_url, today=today
         )
         plans.append({"module": module, "card": card, "handlers": handlers, "is_role_card": False})
     return plans

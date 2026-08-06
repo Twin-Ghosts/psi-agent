@@ -10,6 +10,7 @@ from __future__ import annotations
 
 # ruff: noqa: E402, RUF001
 import sys
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,47 @@ _EMPTY = "□"
 _ROLE_CONFIRMED_ITEM = "role_confirmed"
 _FILLED = "■"
 
+# 未勾选的方框按钮文字。刻意用空心方框而非「标记完成」:
+# 文字在左、方框在右, 框架勾选后把这个按钮换成「● ~~□~~」——
+# 那个实心 ● 恰好就是「打上勾」的视觉反馈。
+_BOX = "□"
+
+# DDL 状态 → (emoji, 卡片主题色)。绿=还早, 黄=今天到期, 红=已逾期。
+_DUE_OK = "🟢"
+_DUE_TODAY = "🟡"
+_DUE_LATE = "🔴"
+_DONE_MARK = "✅"
+_NA_MARK = "⚪"
+
+
+def _due_state(row: dict[str, Any], today: date | None) -> str:
+    """一行的 DDL 状态标记 —— 已完成/不适用优先, 其余按截止日与今天比。"""
+    status = str(row.get("状态") or "")
+    if status == _p.STATUS_DONE:
+        return _DONE_MARK
+    if status == _p.STATUS_NA:
+        return _NA_MARK
+    due = row.get("截止日")
+    if today is None or not isinstance(due, date):
+        return _DUE_OK
+    if due < today:
+        return _DUE_LATE
+    if due == today:
+        return _DUE_TODAY
+    return _DUE_OK
+
+
+def _card_template(rows: list[dict[str, Any]], today: date | None) -> str:
+    """卡片主题色取该卡最紧急的一行: 有逾期→红, 有今天到期→黄, 全部做完→绿。"""
+    marks = {_due_state(r, today) for r in rows}
+    if _DUE_LATE in marks:
+        return "red"
+    if _DUE_TODAY in marks:
+        return "orange"
+    if marks and marks <= {_DONE_MARK, _NA_MARK}:
+        return "green"
+    return "blue"
+
 
 def _shell(title: str, elements: list[dict[str, Any]], template: str = "blue") -> dict[str, Any]:
     return {
@@ -45,50 +87,83 @@ def _item_id_of(row: dict[str, Any]) -> str:
     return key.rsplit(":", 1)[-1] if ":" in key else key
 
 
-def _row_elements(row: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
-    """一行的展示 + 按钮; 返回 (elements, action 名或空串)。"""
+def _row_elements(row: dict[str, Any], today: date | None = None) -> tuple[list[dict[str, Any]], str]:
+    """一行 = 左边文字、右边可点的方框, 用 column_set 排成紧凑一行。
+
+    刻意为之: 方框放右列、文字放左列。框架勾选后只替换被点的那一列
+    (实测: 左列原样保留, 右列变成「● ~~□~~"), 那个实心 ● 正好就是「打上勾」的
+    即时反馈; 完成态的删除线由下一次重绘时本函数自己渲染。
+    反之若把文字塞进按钮, 勾选后会变成「● ~~□ 连上 WiFi~~」两个标记并排。
+    """
     title = str(row.get("项") or "").strip()
     acceptance = str(row.get("验收标准") or "").strip()
-    done = str(row.get("状态") or "") == _p.STATUS_DONE
+    status = str(row.get("状态") or "")
+    mark = _due_state(row, today)
 
-    if done:
-        lines = [f"{_FILLED} ~~{title}~~"]
+    if status == _p.STATUS_DONE:
         finished = row.get("完成时间")
-        if finished is not None:
-            lines[0] += f"　✅ {finished}"
-        return [{"tag": "markdown", "content": "\n".join(lines)}], ""
+        tail = f"　<font color='grey'>{finished}</font>" if finished is not None else ""
+        return [_two_col(f"{mark} ~~{title}~~{tail}", None)], ""
+    if status == _p.STATUS_NA:
+        return [_two_col(f"{mark} <font color='grey'>~~{title}~~　不适用</font>", None)], ""
 
-    # 刻意为之: 按钮文字就是条目名本身, 不在文字里塞 □ ——
-    # 框架勾选后把被点按钮整体换成 f"● ~~{按钮文字}~~"(_card_action.py 的
-    # _consumed_card_content), 所以标记只能由框架那个 ● 提供; 自己再塞一个 □
-    # 会渲染成「● ~~□ 连上 WiFi~~」两个标记并排。按钮本身就是那个可点的方框,
-    # 文字写在框里, 于是「文字 + 可交互的框」是同一行而不是上下两块。
-    action = f"{ACTION_TICK_PREFIX}{_item_id_of(row)}"
-    elements: list[dict[str, Any]] = [
-        {
-            "tag": "action",
-            "actions": [
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": title},
-                    "type": "default",
-                    "value": {"action": action, "item_id": _item_id_of(row)},
-                }
-            ],
-        }
-    ]
+    left = f"{mark} **{title}**"
     if acceptance:
-        # 验收标准不能进按钮文字, 否则会一起被划掉; 放按钮下方的小字。
-        elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": f"验收：{acceptance}"}]})
-    return elements, action
+        left += f"\n<font color='grey'>{acceptance}</font>"
+    action = f"{ACTION_TICK_PREFIX}{_item_id_of(row)}"
+    return [_two_col(left, {"action": action, "item_id": _item_id_of(row)})], action
 
 
-def _rows_section(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, str]]:
+def _two_col(left_markdown: str, action_value: dict[str, Any] | None) -> dict[str, Any]:
+    """左文右框的一行。action_value 为 None 时右列留空(已完成/不适用行)。"""
+    right: list[dict[str, Any]] = []
+    if action_value is not None:
+        right = [
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": _BOX},
+                        "type": "default",
+                        "size": "tiny",
+                        "value": action_value,
+                    }
+                ],
+            }
+        ]
+    return {
+        "tag": "column_set",
+        "flex_mode": "none",
+        "background_style": "default",
+        "horizontal_spacing": "small",
+        "columns": [
+            {
+                "tag": "column",
+                "width": "weighted",
+                "weight": 1,
+                "vertical_align": "center",
+                "elements": [{"tag": "markdown", "content": left_markdown}],
+            },
+            {
+                "tag": "column",
+                "width": "auto",
+                "vertical_align": "center",
+                "elements": right,
+            },
+        ],
+    }
+
+
+def _rows_section(
+    rows: list[dict[str, Any]], today: date | None = None
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """紧凑排布: 行与行之间不再插 hr —— 每行本身已是一个 column_set,
+    分隔线会把卡片撑得很松散。只在段落之间用一条 hr。"""
     elements: list[dict[str, Any]] = []
     handlers: dict[str, str] = {}
     for row in rows:
-        elements.append({"tag": "hr"})
-        row_elements, action = _row_elements(row)
+        row_elements, action = _row_elements(row, today)
         elements.extend(row_elements)
         if action:
             handlers[action] = HANDLER_TICK
@@ -96,10 +171,24 @@ def _rows_section(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dic
 
 
 def _footer(sop_url: str) -> list[dict[str, Any]]:
-    text = "遇到问题先问 Haitun"
+    text = "💡 遇到问题先问 Haitun"
     if sop_url.strip():
         text += f" · [查看完整 SOP]({sop_url.strip()})"
-    return [{"tag": "hr"}, {"tag": "markdown", "content": text}]
+    return [{"tag": "hr"}, {"tag": "note", "elements": [{"tag": "plain_text", "content": text}]}]
+
+
+def _progress_bar(progress_text: str) -> str:
+    """把 "3/5" 画成一小条进度块, 比纯数字直观。"""
+    try:
+        done_s, total_s = progress_text.split("/", 1)
+        done, total = int(done_s), int(total_s)
+    except (ValueError, AttributeError):
+        return progress_text
+    if total <= 0:
+        return progress_text
+    slots = 10
+    filled = round(done * slots / total)
+    return f"{'▰' * filled}{'▱' * (slots - filled)} {done}/{total}"
 
 
 def module_card(
@@ -108,28 +197,19 @@ def module_card(
     progress_text: str,
     due_text: str,
     sop_url: str,
+    today: date | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
-    elements: list[dict[str, Any]] = [{"tag": "markdown", "content": f"{due_text} · 进度 {progress_text}"}]
-    rows_elements, handlers = _rows_section(rows)
+    head = f"<font color='grey'>{due_text}</font>\n{_progress_bar(progress_text)}"
+    elements: list[dict[str, Any]] = [{"tag": "markdown", "content": head}, {"tag": "hr"}]
+    rows_elements, handlers = _rows_section(rows, today)
     elements.extend(rows_elements)
     elements.extend(_footer(sop_url))
-    template = "green" if not handlers and rows else "blue"
-    return _shell(f"入职路线图 · {module}", elements, template), handlers
+    return _shell(f"入职路线图 · {module}", elements, _card_template(rows, today)), handlers
 
 
 def _role_button(label: str, action: str, role: str) -> dict[str, Any]:
-    """一个角色选项 = 一个独立的可点方框, 与条目行同样的形态。"""
-    return {
-        "tag": "action",
-        "actions": [
-            {
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": label},
-                "type": "default",
-                "value": {"action": action, "role": role},
-            }
-        ],
-    }
+    """一个角色选项 —— 与条目行同样的「左文右框」形态, 视觉上保持一致。"""
+    return _two_col(f"👤 **{label}**", {"action": action, "role": role})
 
 
 def role_card(
@@ -138,6 +218,7 @@ def role_card(
     sop_url: str = "",
     progress_text: str = "",
     role_answered: bool = False,
+    today: date | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """开发环境卡 —— 一张卡装完角色选择与 5 个开发项。
 
@@ -147,8 +228,10 @@ def role_card(
     Channel 按 action 名分发, 互不干扰。
     """
     rows = dev_rows or []
-    head = f"{due_text} · 进度 {progress_text}" if progress_text else due_text
-    elements: list[dict[str, Any]] = [{"tag": "markdown", "content": head}]
+    head = f"<font color='grey'>{due_text}</font>"
+    if progress_text:
+        head += f"\n{_progress_bar(progress_text)}"
+    elements: list[dict[str, Any]] = [{"tag": "markdown", "content": head}, {"tag": "hr"}]
     handlers: dict[str, str] = {}
 
     # role_confirmed 这一项就是「角色是否已答」本身。角色未答时它由下面那两个角色
@@ -158,10 +241,10 @@ def role_card(
     item_rows = [r for r in rows if _item_id_of(r) != _ROLE_CONFIRMED_ITEM]
 
     if not role_answered:
-        elements.append({"tag": "hr"})
-        elements.append({"tag": "markdown", "content": "**先确认你是不是技术人员**（点一下即可）："})
+        elements.append({"tag": "markdown", "content": "**你是不是技术人员？**"})
         elements.append(_role_button("研发人员", ACTION_ROLE_DEV, "dev"))
         elements.append(_role_button("非研发人员", ACTION_ROLE_NONDEV, "nondev"))
+        elements.append({"tag": "hr"})
         handlers[ACTION_ROLE_DEV] = HANDLER_ROLE
         handlers[ACTION_ROLE_NONDEV] = HANDLER_ROLE
         rows = item_rows
@@ -169,12 +252,12 @@ def role_card(
         # 答完角色: 已完成的 role_confirmed 行摆在最前, 让「这一勾已落地」可见。
         rows = role_rows + item_rows
 
-    rows_elements, rows_handlers = _rows_section(rows)
+    rows_elements, rows_handlers = _rows_section(rows, today)
     elements.extend(rows_elements)
     handlers.update(rows_handlers)
     elements.extend(_footer(sop_url))
 
-    template = "green" if rows and not rows_handlers and role_answered else "blue"
+    template = _card_template(rows, today) if role_answered else "blue"
     return _shell("入职路线图 · 开发环境", elements, template), handlers
 
 
@@ -184,6 +267,7 @@ def role_settled_card(
     due_text: str,
     sop_url: str,
     role_confirmed_row: dict[str, Any] | None = None,
+    today: date | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """角色已答后的开发环境卡。
 
@@ -199,8 +283,8 @@ def role_settled_card(
     if not is_dev:
         elements: list[dict[str, Any]] = []
         for row in lead_rows:
-            row_elements, _action = _row_elements(row)
-            elements.extend([{"tag": "hr"}, *row_elements])
+            row_elements, _action = _row_elements(row, today)
+            elements.extend(row_elements)
         elements.append({"tag": "hr"})
         elements.append({"tag": "markdown", "content": "你选择了「非研发人员」，这部分不需要完成。"})
         return _shell("入职路线图 · 开发环境 ✅ 不适用", elements, "grey"), {}
@@ -212,6 +296,7 @@ def role_settled_card(
         sop_url=sop_url,
         progress_text=f"{done}/{len(all_rows)}",
         role_answered=True,
+        today=today,
     )
 
 
@@ -220,6 +305,7 @@ def remind_card(
     day_index: int,
     progress: Any,
     sop_url: str,
+    today: date | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     header = f"入职第 {day_index} 天 · 进度 {progress.done}/{progress.total}"
     elements: list[dict[str, Any]] = [{"tag": "markdown", "content": header}]
@@ -231,7 +317,7 @@ def remind_card(
         elements.append({"tag": "hr"})
         elements.append({"tag": "markdown", "content": f"**{label} {len(rows)} 项**"})
         for row in rows:
-            row_elements, action = _row_elements(row)
+            row_elements, action = _row_elements(row, today)
             elements.extend(row_elements)
             if action:
                 handlers[action] = HANDLER_TICK

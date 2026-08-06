@@ -1611,3 +1611,92 @@ def test_agents_md_documents_the_new_tools() -> None:
     text = (HAITUN / "AGENTS.md").read_text(encoding="utf-8")
     assert "rookie_sop_card_send" in text
     assert "feishu-rookie-onboarding" in text
+
+
+def test_due_state_marks_late_today_and_future_differently() -> None:
+    """DDL 状态标记: 逾期红、当天黄、未来绿; 已完成与不适用有各自的标记。"""
+    c = _load("_rookie_sop_card")
+    today = date(2026, 8, 6)
+
+    def mark(due: date, status: str = "未完成") -> str:
+        return c._due_state({"记录键": "ou_x:a", "项": "某项", "状态": status, "截止日": due}, today)
+
+    assert mark(date(2026, 8, 5)) == "🔴"  # 已逾期
+    assert mark(date(2026, 8, 6)) == "🟡"  # 今天到期
+    assert mark(date(2026, 8, 9)) == "🟢"  # 还早
+    assert mark(date(2026, 8, 5), "已完成") == "✅"  # 完成优先于逾期
+    assert mark(date(2026, 8, 5), "不适用") == "⚪"
+
+
+def test_card_template_takes_the_most_urgent_row() -> None:
+    """卡片主题色取最紧急的一行: 有逾期→红, 否则有当天→橙, 全部结束→绿。"""
+    c = _load("_rookie_sop_card")
+    p = _load("_rookie_sop_progress")
+    today = date(2026, 8, 6)
+
+    late = _row("a", p.STATUS_TODO, date(2026, 8, 5))
+    due_today = _row("b", p.STATUS_TODO, date(2026, 8, 6))
+    future = _row("c", p.STATUS_TODO, date(2026, 8, 9))
+    done = _row("d", p.STATUS_DONE, date(2026, 8, 5))
+
+    assert c._card_template([late, due_today, future], today) == "red"
+    assert c._card_template([due_today, future], today) == "orange"
+    assert c._card_template([future], today) == "blue"
+    assert c._card_template([done], today) == "green"
+
+
+def test_row_is_two_columns_with_the_box_on_the_right() -> None:
+    """一行 = 左文字、右方框, 排成一个 column_set(紧凑的一行, 不是上下两块)。
+
+    未完成行右列有可点按钮; 已完成行右列为空(按钮消失)。
+    """
+    c = _load("_rookie_sop_card")
+    p = _load("_rookie_sop_progress")
+    today = date(2026, 8, 6)
+
+    todo_elements, action = c._row_elements(
+        _row("wifi", p.STATUS_TODO, date(2026, 8, 9), title="连上 WiFi"), today
+    )
+    done_elements, done_action = c._row_elements(
+        _row("wifi", p.STATUS_DONE, date(2026, 8, 9), title="连上 WiFi"), today
+    )
+
+    assert len(todo_elements) == 1
+    cs = todo_elements[0]
+    assert cs["tag"] == "column_set"
+    # 左列是文字, 右列是那个可点的方框
+    assert "连上 WiFi" in cs["columns"][0]["elements"][0]["content"]
+    button = cs["columns"][1]["elements"][0]["actions"][0]
+    assert button["text"]["content"] == c._BOX
+    assert action == "rookie_tick_wifi"
+    # 已完成行: 文字划掉, 右列没有按钮
+    done_cs = done_elements[0]
+    assert "~~连上 WiFi~~" in done_cs["columns"][0]["elements"][0]["content"]
+    assert done_cs["columns"][1]["elements"] == []
+    assert done_action == ""
+
+
+def test_rows_section_is_compact_without_a_rule_between_rows() -> None:
+    """行与行之间不插 hr —— 每行本身已是 column_set, 分隔线会把卡片撑散。"""
+    c = _load("_rookie_sop_card")
+    p = _load("_rookie_sop_progress")
+    rows = [
+        _row("a", p.STATUS_TODO, date(2026, 8, 9), title="甲"),
+        _row("b", p.STATUS_TODO, date(2026, 8, 9), title="乙"),
+    ]
+
+    elements, handlers = c._rows_section(rows, date(2026, 8, 6))
+
+    assert len(handlers) == 2
+    assert all(e["tag"] == "column_set" for e in elements)
+
+
+def test_progress_bar_renders_a_bar_and_degrades_safely() -> None:
+    c = _load("_rookie_sop_card")
+
+    assert c._progress_bar("0/5") == "▱▱▱▱▱▱▱▱▱▱ 0/5"
+    assert c._progress_bar("5/5") == "▰▰▰▰▰▰▰▰▰▰ 5/5"
+    assert "3/5" in c._progress_bar("3/5")
+    # 非法输入原样返回, 不抛异常
+    assert c._progress_bar("0/0") == "0/0"
+    assert c._progress_bar("坏数据") == "坏数据"
