@@ -174,7 +174,312 @@ async def test_assignment_feedback_sends_and_binds_one_blocking_card(monkeypatch
     assert len(feishu.sent_cards) == 1
     assert "请确认权限范围" in feishu.sent_cards[0]["card_json"]
     assert "仅 Agent 可见" not in feishu.sent_cards[0]["card_json"]
-    assert [call[1]["action"] for call in memory.calls] == ["create", "bind_card"]
+    assert [call[1]["action"] for call in memory.calls if call[0] == "assignment_feedback"] == ["create", "bind_card"]
+
+
+async def test_assignment_feedback_card_names_author_and_uses_authoritative_title(monkeypatch):
+    assignment = {
+        **_assignment(),
+        "assigner": {"display_name": "王安排", "feishu_open_id": "ou_assigner"},
+        "recipients": [{"display_name": "李接收", "feishu_open_id": "ou_recipient"}],
+    }
+    memory = _MemoryStub(
+        assignment_get=[{"ok": True, "result": assignment}],
+        assignment_feedback=[
+            {
+                "ok": True,
+                "result": _feedback_thread(entries=[_feedback_entry(author_open_id="ou_recipient")]),
+            },
+            {"ok": True, "result": _feedback_thread(card_id="om_feedback")},
+        ],
+    )
+    feishu = _FeishuStub()
+    module = _import_assignment_module(
+        "assignment_feedback",
+        memory,
+        monkeypatch,
+        feishu=feishu,
+        session_id="feishu-ou_recipient",
+    )
+
+    result = json.loads(await module.assignment_feedback("ou_assigner", "wa-1", "create", _blocking_payload_json()))
+
+    assert result["ok"] is True
+    card_json = feishu.sent_cards[0]["card_json"]
+    # The card names the real feedback author instead of only the bare role label.
+    assert "v1 李接收 (接收者): 如果大量人不回复怎么办?" in card_json
+    # The visible task line uses the authoritative assignment title, never the placeholder.
+    assert "所属任务: 整理会议结论" in card_json
+    assert "当前工作安排" not in card_json
+    written = next(call[1]["payload"] for call in memory.calls if call[0] == "assignment_feedback")
+    assert "author_display_name" not in written
+    assert "author_open_id" not in written
+    assert written["assignment_title"] == "整理会议结论"
+
+
+async def test_assignment_feedback_uses_entry_open_id_for_multi_recipient_author(monkeypatch):
+    assignment = {
+        **_assignment(),
+        "assigner": {"display_name": "安排人员", "feishu_open_id": "ou_assigner"},
+        "recipients": [
+            {"display_name": "第一接收人", "feishu_open_id": "ou_recipient_one"},
+            {"display_name": "第二接收人", "feishu_open_id": "ou_recipient_two"},
+        ],
+    }
+    memory = _MemoryStub(
+        assignment_get=[{"ok": True, "result": assignment}],
+        assignment_feedback=[
+            {
+                "ok": True,
+                "result": _feedback_thread(
+                    entries=[
+                        _feedback_entry(
+                            author_open_id="ou_recipient_two",
+                            author_display_name="伪造姓名",
+                        )
+                    ]
+                ),
+            },
+            {"ok": True, "result": _feedback_thread(card_id="om_feedback")},
+        ],
+    )
+    feishu = _FeishuStub()
+    module = _import_assignment_module(
+        "assignment_feedback",
+        memory,
+        monkeypatch,
+        feishu=feishu,
+        session_id="feishu-ou_recipient_two",
+    )
+    payload = json.loads(_blocking_payload_json())
+    payload["author_display_name"] = "另一个伪造姓名"
+    payload["author_open_id"] = "ou_recipient_one"
+
+    result = json.loads(
+        await module.assignment_feedback(
+            "ou_assigner",
+            "wa-1",
+            "create",
+            json.dumps(payload, ensure_ascii=False),
+        )
+    )
+
+    assert result["ok"] is True
+    card_json = feishu.sent_cards[0]["card_json"]
+    assert "v1 第二接收人 (接收者): 如果大量人不回复怎么办?" in card_json
+    assert "第一接收人" not in card_json
+    assert "伪造姓名" not in card_json
+    written = next(call[1]["payload"] for call in memory.calls if call[0] == "assignment_feedback")
+    assert "author_display_name" not in written
+    assert "author_open_id" not in written
+
+
+async def test_assignment_feedback_does_not_guess_legacy_multi_recipient_author(monkeypatch):
+    assignment = {
+        **_assignment(),
+        "recipients": [
+            {"display_name": "第一接收人", "feishu_open_id": "ou_recipient_one"},
+            {"display_name": "第二接收人", "feishu_open_id": "ou_recipient_two"},
+        ],
+    }
+    memory = _MemoryStub(
+        assignment_get=[{"ok": True, "result": assignment}],
+        assignment_feedback=[
+            {"ok": True, "result": _feedback_thread(entries=[_feedback_entry()])},
+            {"ok": True, "result": _feedback_thread(card_id="om_feedback")},
+        ],
+    )
+    feishu = _FeishuStub()
+    module = _import_assignment_module(
+        "assignment_feedback",
+        memory,
+        monkeypatch,
+        feishu=feishu,
+        session_id="feishu-ou_recipient_two",
+    )
+
+    result = json.loads(await module.assignment_feedback("ou_assigner", "wa-1", "create", _blocking_payload_json()))
+
+    assert result["ok"] is True
+    card_json = feishu.sent_cards[0]["card_json"]
+    assert "v1 接收者: 如果大量人不回复怎么办?" in card_json
+    assert "第一接收人" not in card_json
+    assert "第二接收人" not in card_json
+
+
+async def test_assignment_feedback_falls_back_when_assignment_record_is_unavailable(monkeypatch):
+    memory = _MemoryStub(
+        assignment_feedback=[
+            {"ok": True, "result": _feedback_thread(entries=[_feedback_entry()])},
+            {"ok": True, "result": _feedback_thread(card_id="om_feedback")},
+        ],
+    )
+    feishu = _FeishuStub()
+    module = _import_assignment_module(
+        "assignment_feedback",
+        memory,
+        monkeypatch,
+        feishu=feishu,
+        session_id="feishu-ou_recipient",
+    )
+
+    payload = json.loads(_blocking_payload_json())
+    payload["assignment_title"] = "未经核实的任务标题"
+    result = json.loads(
+        await module.assignment_feedback(
+            "ou_assigner",
+            "wa-1",
+            "create",
+            json.dumps(payload, ensure_ascii=False),
+        )
+    )
+
+    # An unreadable assignment record must never block the feedback thread or its card.
+    assert result["ok"] is True
+    card_json = feishu.sent_cards[0]["card_json"]
+    assert "v1 接收者: 如果大量人不回复怎么办?" in card_json
+    assert "所属任务: 当前工作安排" in card_json
+    assert "未经核实的任务标题" not in card_json
+
+
+async def test_assignment_feedback_callback_names_the_replying_assigner(monkeypatch):
+    assignment = {
+        **_assignment(),
+        "assigner": {"display_name": "王安排", "feishu_open_id": "ou_assigner"},
+        "recipients": [{"display_name": "李接收", "feishu_open_id": "ou_recipient"}],
+    }
+    replied = _feedback_thread(
+        card_id="om_feedback",
+        entries=[
+            _feedback_entry(author_open_id="ou_recipient"),
+            _feedback_entry(
+                author_role="assigner",
+                author_open_id="ou_assigner",
+                entry_type="reply",
+                raw_content="继续私信",
+                version=2,
+            ),
+        ],
+    )
+    replied["state"] = "updated_waiting_recipient_confirmation"
+    memory = _MemoryStub(
+        assignment_get=[{"ok": True, "result": assignment}],
+        assignment_feedback=[{"ok": True, "result": replied}],
+    )
+    feishu = _FeishuStub()
+    module = _import_assignment_module(
+        "assignment_feedback",
+        memory,
+        monkeypatch,
+        feishu=feishu,
+        session_id="feishu-ou_assigner",
+    )
+
+    result = json.loads(
+        await module.assignment_feedback(
+            card_action_json=json.dumps(
+                {
+                    "message_id": "om_feedback",
+                    "dispatch": {"matched": True, "handler": "assignment_feedback"},
+                    "action": {
+                        "value": {
+                            "action": "assignment_feedback_reply",
+                            "arrangement_id": "wa-1",
+                            "feedback_action": "assigner_reply",
+                            "selected_label": "继续私信",
+                            "selected_value": "keep_dm",
+                        }
+                    },
+                    "source": {"operator_open_id": "ou_assigner", "sender_open_id": "ou_recipient"},
+                    "business_context": {
+                        "arrangement_id": "wa-1",
+                        "reply_target_open_id": "ou_assigner",
+                        "projection": {"assignment_title": "当前工作安排"},
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+    )
+
+    assert result["ok"] is True
+    # Each entry keeps its own author; the reply must not inherit the original author's name.
+    for card_json in [edit["card_json"] for edit in feishu.edits] + [card["card_json"] for card in feishu.sent_cards]:
+        assert "v1 李接收 (接收者): 如果大量人不回复怎么办?" in card_json
+        assert "v2 王安排 (安排者): 继续私信" in card_json
+        # A stale placeholder carried in the callback projection must not survive.
+        assert "当前工作安排" not in card_json
+        assert "所属任务: 整理会议结论" in card_json
+
+
+async def test_assignment_feedback_never_attributes_agent_entries_to_a_person(monkeypatch):
+    assignment = {
+        **_assignment(),
+        "assigner": {"display_name": "王安排", "feishu_open_id": "ou_assigner"},
+        "recipients": [{"display_name": "李接收", "feishu_open_id": "ou_recipient"}],
+    }
+    memory = _MemoryStub(
+        assignment_get=[{"ok": True, "result": assignment}],
+        assignment_feedback=[
+            {
+                "ok": True,
+                "result": _feedback_thread(
+                    card_id="om_feedback",
+                    entries=[_feedback_entry(author_role="agent", raw_content="已核查方案原文", version=1)],
+                ),
+            }
+        ],
+    )
+    feishu = _FeishuStub()
+    module = _import_assignment_module(
+        "assignment_feedback",
+        memory,
+        monkeypatch,
+        feishu=feishu,
+        session_id="feishu-ou_recipient",
+    )
+
+    result = json.loads(
+        await module.assignment_feedback(
+            "ou_assigner",
+            "wa-1",
+            "append",
+            json.dumps(
+                {
+                    "raw_content": "已核查方案原文",
+                    "author_role": "agent",
+                    "entry_type": "question",
+                    "notification_strategy": "record_only",
+                },
+                ensure_ascii=False,
+            ),
+        )
+    )
+
+    assert result["ok"] is True
+    written = next(call[1]["payload"] for call in memory.calls if call[0] == "assignment_feedback")
+    assert "author_display_name" not in written
+    assert "author_open_id" not in written
+    card_json = feishu.edits[0]["card_json"]
+    assert "v1 Agent: 已核查方案原文" in card_json
+    assert "李接收" not in card_json
+
+
+def _blocking_payload_json() -> str:
+    return json.dumps(
+        {
+            "raw_content": "如果大量人不回复怎么办?",
+            "author_role": "recipient",
+            "entry_type": "question",
+            "notification_strategy": "blocking",
+            "attempts": ["核查任务原文"],
+            "options": [
+                {"label": "继续私信", "value": "keep_dm", "recommended": True},
+                {"label": "改走公开渠道", "value": "public_channel"},
+            ],
+        },
+        ensure_ascii=False,
+    )
 
 
 async def test_assignment_send_card_claims_before_each_external_send(monkeypatch):
@@ -493,14 +798,24 @@ def _assignment() -> dict[str, Any]:
     }
 
 
-def _feedback_thread(card_id: str | None = None) -> dict[str, Any]:
+def _feedback_thread(card_id: str | None = None, entries: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     return {
         "thread_id": "feedback-1",
         "arrangement_id": "wa-1",
         "state": "open",
         "version": 1,
         "card_id": card_id,
-        "entries": [],
+        "entries": entries if entries is not None else [],
+    }
+
+
+def _feedback_entry(**overrides: Any) -> dict[str, Any]:
+    return {
+        "author_role": "recipient",
+        "entry_type": "question",
+        "raw_content": "如果大量人不回复怎么办?",
+        "version": 1,
+        **overrides,
     }
 
 

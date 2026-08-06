@@ -51,7 +51,7 @@ category: productivity
 10. 当前最新消息是 `<feishu_card_action>` 且 `dispatch.handler` 为 `assignment_feedback` 时，只调用一次 `assignment_feedback`，把标签内的完整 `card_action_json` 原样传入。工具会校验操作者并把快捷选项或 `form_value.custom_reply` 写成 `assigner_reply`；禁止调用 `tool_describe`、`tool_search_code`、`read` 或 `bash` 查找 action、schema 或工具源码。
 11. `assignment_feedback` 返回 `ok=true` 且 `assistant_reply_required=false` 时成功后静默结束；不能再调用 `feishu_message_send`、重复解释卡片内容或向接收者另发普通确认消息。工具已经更新安排者卡、写入 Memory，并在需要时投递接收者结果卡。
 12. 安排者答复后，原反馈卡片只读展示“已更新、待接收者确认”，不能在这张发给安排者且已经消费的卡片上生成接收者确认按钮。接收者从自己的 HaiTun 会话收到结果卡，核对更新后的理解并确认；确认后工具把同一反馈线程推进到可执行状态并原位更新双方卡片。
-13. 反馈卡片可见正文使用任务标题，不显示 `arrangement_id`、`task_id` 等内部原始 ID；这些 ID 只保留在隐藏的回调关联字段中。调用工具时尽量通过 `assignment_title` 提供稳定、简短的任务标题。
+13. 反馈卡片可见正文使用任务标题，不显示 `arrangement_id`、`task_id` 等内部原始 ID；这些 ID 只保留在隐藏的回调关联字段中。任务标题和反馈者姓名由工具按 `arrangement_id` 从权威安排记录中解析，不需要也不应该由对话提供或推测；读不到真实标题时显示“当前工作安排”。卡片上的每条反馈会标注可确认的姓名与角色；身份无法唯一确认时只显示角色，不要在 `raw_content` 里再手写“接收者：”这类前缀。
 
 接收者缺口询问：如果当前会话的接收者在已有安排上下文中询问截止时间、任务范围、交付格式、验收标准、资源或权限，且这些信息无法从安排、项目资料或组织资料确定，应把问题写入同一 `arrangement_id` 的 `assignment_feedback`，不能代接收者给安排者发普通消息或手工发卡。反馈工具负责通知安排者；当前回合立即告知接收者“已提交反馈，等待安排者处理”，不得等待真人回复或阻塞会话。工具返回校验错误时只修正同一工具的参数并重试一次，不能改用 `feishu_user_get`、`feishu_message_send`、`feishu_message_send_card` 或 `feishu_message_reply` 绕过反馈线程。
 

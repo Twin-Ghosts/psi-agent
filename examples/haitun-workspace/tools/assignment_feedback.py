@@ -27,6 +27,13 @@ _PROJECTION_TEXT_FIELDS = (
     "updated_understanding",
     "plan_delta",
 )
+_ROLE_LABELS = {
+    "assigner": "安排者",
+    "recipient": "接收者",
+    "agent": "Agent",
+    "system": "系统",
+}
+_HUMAN_AUTHOR_ROLES = {"assigner", "recipient"}
 _SESSION_PREFIX = "feishu-"
 _OPEN_ID_RE = re.compile(r"ou_[A-Za-z0-9_]+")
 
@@ -68,7 +75,9 @@ async def assignment_feedback(
        the card always provides a separate custom-reply input. Each option has the
        shape ``"options": [{"label": "选项 A", "value": "option_a", "recommended": true}]``.
        The tool rejects
-       unknown actions or malformed payloads before contacting Memory.
+       unknown actions or malformed payloads before contacting Memory. The card's
+       task title and each entry's author name are resolved from the authoritative
+       assignment record behind ``arrangement_id``; do not guess or pass them.
     2. Feishu card callback: when the latest user message contains
        ``<feishu_card_action>`` with ``dispatch.handler="assignment_feedback"``,
        pass the entire JSON object as ``card_action_json`` and omit every other
@@ -118,6 +127,14 @@ async def assignment_feedback(
         and not 2 <= _concrete_option_count(payload) <= 3
     ):
         return invalid_argument("blocking feedback requires 2-3 concrete options")
+
+    directory = await _assignment_directory(normalized_arrangement_id)
+    for field in ("author_display_name", "author_name", "author_open_id"):
+        payload.pop(field, None)
+    if title := _required_text(directory.get("assignment_title")):
+        payload["assignment_title"] = title
+    else:
+        payload.pop("assignment_title", None)
 
     managed = await CLIENT.call_tool(
         "assignment_feedback",
@@ -176,6 +193,7 @@ async def assignment_feedback(
             arrangement_id=normalized_arrangement_id,
             thread=thread,
             payload=payload,
+            directory=directory,
         ),
         ensure_ascii=False,
     )
@@ -241,6 +259,7 @@ async def assignment_feedback(
                         arrangement_id=normalized_arrangement_id,
                         thread=thread,
                         payload=payload,
+                        directory=directory,
                         recipient_view=True,
                     ),
                     ensure_ascii=False,
@@ -401,14 +420,11 @@ def _build_feedback_card(
     arrangement_id: str,
     thread: dict[str, Any],
     payload: dict[str, Any],
+    directory: dict[str, Any] | None = None,
     recipient_view: bool = False,
 ) -> dict[str, Any]:
     state = _required_text(thread.get("state")) or "open"
-    assignment_title = (
-        _required_text(payload.get("assignment_title"))
-        or _required_text(thread.get("assignment_title"))
-        or "当前工作安排"
-    )
+    assignment_title = _required_text(_dict_value(directory).get("assignment_title")) or "当前工作安排"
     elements: list[dict[str, Any]] = [
         _plain_text_element(
             "\n".join(
@@ -422,7 +438,7 @@ def _build_feedback_card(
             )
         )
     ]
-    shared_entries = _shared_entry_lines(thread)
+    shared_entries = _shared_entry_lines(thread, directory=directory)
     if not shared_entries:
         raw_content = _required_text(payload.get("raw_content"))
         if raw_content is not None:
@@ -782,6 +798,67 @@ def _dict_value(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+async def _assignment_directory(arrangement_id: str) -> dict[str, Any]:
+    """Best-effort identity/title lookup for one arrangement.
+
+    The feedback thread itself is authoritative for feedback state, but it does not carry the
+    assignment title or participant names. Read those from the assignment record so the card can
+    name a real person and a real task. A failed or malformed read must never block feedback, so
+    every error degrades to an empty directory and the card falls back to role-only labels.
+    """
+    fetched = await CLIENT.call_tool("assignment_get", {"assignment_id": arrangement_id}, retryable=True)
+    assignment = fetched.get("result")
+    if not fetched.get("ok") or not isinstance(assignment, dict):
+        return {}
+    names_by_open_id: dict[str, str] = {}
+    unique_names_by_role: dict[str, str] = {}
+    for role, value in (("assigner", assignment.get("assigner")), ("recipient", assignment.get("recipients"))):
+        participants = [
+            participant
+            for participant in (value if isinstance(value, list) else [value])
+            if isinstance(participant, dict)
+        ]
+        for participant in participants:
+            name = _participant_name(participant)
+            if name is None:
+                continue
+            for open_id in _participant_open_ids(participant):
+                names_by_open_id.setdefault(open_id, name)
+        if len(participants) == 1 and (name := _participant_name(participants[0])):
+            unique_names_by_role[role] = name
+    directory: dict[str, Any] = {}
+    if title := _required_text(assignment.get("title")):
+        directory["assignment_title"] = title
+    if names_by_open_id:
+        directory["names_by_open_id"] = names_by_open_id
+    if unique_names_by_role:
+        directory["unique_names_by_role"] = unique_names_by_role
+    return directory
+
+
+def _participant_name(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    for field in ("display_name", "name", "user_name"):
+        if text := _required_text(value.get(field)):
+            return text
+    return None
+
+
+def _participant_open_ids(value: Any) -> set[str]:
+    if not isinstance(value, dict):
+        return set()
+    open_ids: set[str] = set()
+    for field in ("feishu_open_id", "open_id", "delivery_open_id"):
+        if text := _required_text(value.get(field)):
+            open_ids.add(text)
+    for field in ("feishu_open_ids", "open_ids"):
+        aliases = value.get(field)
+        if isinstance(aliases, list):
+            open_ids.update(text for item in aliases if (text := _required_text(item)))
+    return open_ids
+
+
 def _feedback_projection(payload: dict[str, Any]) -> dict[str, Any]:
     projection: dict[str, Any] = {
         field: value for field in _PROJECTION_TEXT_FIELDS if (value := _required_text(payload.get(field))) is not None
@@ -795,7 +872,11 @@ def _feedback_projection(payload: dict[str, Any]) -> dict[str, Any]:
     return projection
 
 
-def _shared_entry_lines(thread: dict[str, Any]) -> list[str]:
+def _shared_entry_lines(
+    thread: dict[str, Any],
+    *,
+    directory: dict[str, Any] | None = None,
+) -> list[str]:
     entries = thread.get("entries")
     if not isinstance(entries, list):
         return []
@@ -806,16 +887,39 @@ def _shared_entry_lines(thread: dict[str, Any]) -> list[str]:
         content = _required_text(entry.get("raw_content"))
         if content is None:
             continue
-        role = {
-            "assigner": "安排者",
-            "recipient": "接收者",
-            "agent": "Agent",
-            "system": "系统",
-        }.get(entry.get("author_role"), "参与者")
+        author = _entry_author_label(entry, directory=directory)
         version = entry.get("version")
-        prefix = f"v{version} {role}" if isinstance(version, int) else role
+        prefix = f"v{version} {author}" if isinstance(version, int) else author
         lines.append(f"{prefix}: {content}")
     return lines
+
+
+def _entry_author_label(
+    entry: dict[str, Any],
+    *,
+    directory: dict[str, Any] | None,
+) -> str:
+    role = entry.get("author_role")
+    role_label = _ROLE_LABELS.get(role, "参与者")
+    name = _entry_author_name(entry, directory=directory, role=role)
+    return f"{name} ({role_label})" if name is not None and name != role_label else role_label
+
+
+def _entry_author_name(
+    entry: dict[str, Any],
+    *,
+    directory: dict[str, Any] | None,
+    role: Any,
+) -> str | None:
+    """Resolve a human author only from trusted Memory identity and assignment data."""
+    if role not in _HUMAN_AUTHOR_ROLES:
+        return None
+    directory = _dict_value(directory)
+    names_by_open_id = _dict_value(directory.get("names_by_open_id"))
+    author_open_id = _required_text(entry.get("author_open_id"))
+    if author_open_id is not None and (name := _required_text(names_by_open_id.get(author_open_id))):
+        return name
+    return _required_text(_dict_value(directory.get("unique_names_by_role")).get(role))
 
 
 def _state_label(state: str) -> str:
