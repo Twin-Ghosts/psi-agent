@@ -5,14 +5,85 @@ import importlib
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import anyio
+from loguru import logger
 
 sys.path.insert(0, str(Path(__file__).parent))
 try:
     from _mcp import mcp
 finally:
     sys.path.pop(0)
+
+
+def _install_lowlevel_decorator_shim() -> bool:
+    """Restore the ``Server.list_tools()`` / ``Server.call_tool()`` decorators that
+    ``mcp`` 2.0 removed, translating them onto the replacement API.
+
+    ``serper-mcp-server`` 0.0.10 — the latest release, still declaring
+    ``mcp[cli]>=1.6.0`` with no fixed version upstream — applies both decorators at
+    **module import time**. Under ``mcp`` 2.0, which replaced them with
+    ``Server.add_request_handler(method, params_type, handler)``, merely importing
+    the package raises ``AttributeError: 'Server' object has no attribute
+    'list_tools'``, and the broken ``__init__`` takes ``core`` down with it. Because
+    :func:`_transport` imports the package in-process, every search then fails
+    before a request is ever sent — and an agent that cannot search tends to fall
+    back to scraping search-engine HTML, which returns plausible-looking garbage
+    rather than an honest error.
+
+    Shimming here keeps the fix in the repository instead of in a patched
+    ``site-packages`` (twice now, a hand-patched deployment has been silently
+    reverted by a redeploy) and avoids pinning ``mcp<2.0.0``, which ``psi_agent``
+    itself depends on.
+
+    Returns whether the shim was installed. It is idempotent and guarded on
+    ``hasattr``, so it is a no-op on ``mcp`` 1.x and becomes one automatically once
+    upstream supports 2.0.
+    """
+    from mcp.server.lowlevel.server import Server  # noqa: PLC0415
+
+    if hasattr(Server, "list_tools") and hasattr(Server, "call_tool"):
+        return False  # mcp 1.x, or upstream grew 2.0 support.
+
+    import mcp.types as types  # noqa: PLC0415
+
+    def list_tools(self: Any) -> Any:
+        """Register a ``() -> list[Tool]`` coroutine as the ``tools/list`` handler."""
+
+        def decorator(func: Any) -> Any:
+            async def handler(_ctx: Any, _params: Any) -> types.ListToolsResult:
+                return types.ListToolsResult(tools=list(await func()))
+
+            # ``PaginatedRequestParams`` is all-optional, so a request carrying no
+            # ``params`` member still reaches the handler with defaults.
+            self.add_request_handler("tools/list", types.PaginatedRequestParams, handler)
+            return func
+
+        return decorator
+
+    def call_tool(self: Any, *_args: Any, **_kwargs: Any) -> Any:
+        """Register a ``(name, arguments) -> Sequence[ContentBlock]`` coroutine as
+        the ``tools/call`` handler.
+
+        Extra arguments are accepted and ignored: the 1.x decorator grew keyword
+        options over time, and a caller passing one must not crash the shim.
+        """
+
+        def decorator(func: Any) -> Any:
+            async def handler(_ctx: Any, params: Any) -> types.CallToolResult:
+                content = await func(params.name, params.arguments or {})
+                return types.CallToolResult(content=list(content))
+
+            self.add_request_handler("tools/call", types.CallToolRequestParams, handler)
+            return func
+
+        return decorator
+
+    Server.list_tools = list_tools  # ty: ignore
+    Server.call_tool = call_tool  # ty: ignore
+    logger.debug("Installed mcp 1.x lowlevel decorator shim (list_tools/call_tool) for serper-mcp-server")
+    return True
 
 
 def _load_env(path: Path) -> None:
@@ -54,12 +125,14 @@ def _sync_api_key() -> str:
     """
     _load_env(Path(__file__).parent.parent / ".env")
     key = os.getenv("SERPER_API_KEY", "").strip()
+    _install_lowlevel_decorator_shim()  # Must precede any serper import.
     for mod_name in ("serper_mcp_server.core", "serper_mcp_server.server"):
         vars(importlib.import_module(mod_name))["SERPER_API_KEY"] = key
     return key
 
 
 def _transport():
+    _install_lowlevel_decorator_shim()  # Must precede any serper import.
     mod = importlib.import_module("serper_mcp_server.server")
     server = mod.server
 
@@ -93,7 +166,12 @@ def _transport():
     keep=("serper_google_search",),
 )
 def serper() -> dict[str, object]:
-    """Uses a deployment-wide ``SERPER_API_KEY`` (gateway process env, or workspace ``.env``)."""
+    """Uses a deployment-wide ``SERPER_API_KEY`` (gateway process env, or workspace ``.env``).
+
+    Pass ``num`` as a *string*: serper's schema types it as one, and an int fails
+    pydantic validation with the complaint wrapped in a non-error text block, which
+    reads like an empty result rather than a bad argument.
+    """
     _sync_api_key()
     return {
         "type": "coroutine",
