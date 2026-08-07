@@ -214,6 +214,135 @@ async def test_organization_router_rechecks_cached_member_before_memory_access(m
     assert tool_calls == []
 
 
+async def test_memory_router_reregisters_once_after_unauthorized(monkeypatch):
+    mcp_module = importlib.import_module("_fusion_memory_mcp")
+    config = SimpleNamespace(auto_register_feishu=True)
+    router = mcp_module.MemoryMcpRouter(config)
+    stale = SimpleNamespace(token="stale-token")
+    fresh = SimpleNamespace(token="fresh-token")
+    calls: list[tuple[str, str]] = []
+
+    class Client:
+        def __init__(self, token: str) -> None:
+            self.token = token
+
+        async def call_tool(self, name: str, _arguments: dict[str, Any], *, retryable: bool):
+            del retryable
+            calls.append((self.token, name))
+            if self.token == "stale-token":
+                return mcp_module._TransportAuthRejectedResult(
+                    {"ok": False, "error": {"code": "unauthorized", "retryable": False}}
+                )
+            return {"ok": True, "result": {"status": "ok"}}
+
+    async def resolve(_session_id: str, _config: Any):
+        return stale
+
+    refresh_calls: list[str] = []
+
+    async def refresh(session_id: str, _config: Any):
+        refresh_calls.append(session_id)
+        return fresh
+
+    def client_for(_session_id: str, resolved: Any):
+        return Client(resolved.token), None
+
+    monkeypatch.setattr(mcp_module, "resolve_memory_config", resolve)
+    monkeypatch.setattr(mcp_module, "refresh_feishu_registration", refresh)
+    monkeypatch.setattr(router, "_client_for", client_for)
+
+    result = await router.call_tool_for_session("feishu-ou_a", "memory_health", {}, retryable=True)
+
+    assert result == {"ok": True, "result": {"status": "ok"}}
+    assert refresh_calls == ["feishu-ou_a"]
+    assert calls == [("stale-token", "memory_health"), ("fresh-token", "memory_health")]
+
+
+async def test_memory_client_marks_http_auth_rejection_out_of_band():
+    mcp_module = importlib.import_module("_fusion_memory_mcp")
+    client = mcp_module.MemoryMcpClient("https://memory.example.invalid/mcp", "stale-token")
+    request = mcp_module._Request("memory_add", {"content": "one"}, False)
+
+    class Session:
+        async def call_tool(self, _name: str, _arguments: dict[str, Any]):
+            http_request = httpx.Request("POST", "https://memory.example.invalid/mcp")
+            response = httpx.Response(401, request=http_request)
+            raise httpx.HTTPStatusError("unauthorized", request=http_request, response=response)
+
+    async def connect():
+        return Session()
+
+    async def disconnect():
+        return None
+
+    result = await client._execute(request, connect, disconnect)
+
+    assert isinstance(result, mcp_module._TransportAuthRejectedResult)
+    assert result == {
+        "ok": False,
+        "error": {"code": "unauthorized", "message": "Fusion Memory authentication failed", "retryable": False},
+    }
+
+
+async def test_memory_router_does_not_replay_tool_level_unauthorized(monkeypatch):
+    mcp_module = importlib.import_module("_fusion_memory_mcp")
+    config = SimpleNamespace(auto_register_feishu=True)
+    router = mcp_module.MemoryMcpRouter(config)
+    resolved = SimpleNamespace(token="current-token")
+    calls: list[str] = []
+
+    class Client:
+        async def call_tool(self, name: str, _arguments: dict[str, Any], *, retryable: bool):
+            del retryable
+            calls.append(name)
+            return {
+                "ok": False,
+                "error": {"code": "unauthorized", "retryable": False},
+                "_fusion_memory_transport_auth_rejected": True,
+            }
+
+    async def resolve(_session_id: str, _config: Any):
+        return resolved
+
+    async def unexpected_refresh(_session_id: str, _config: Any):
+        raise AssertionError("tool-level unauthorized must not refresh credentials")
+
+    monkeypatch.setattr(mcp_module, "resolve_memory_config", resolve)
+    monkeypatch.setattr(mcp_module, "refresh_feishu_registration", unexpected_refresh)
+    monkeypatch.setattr(router, "_client_for", lambda _session_id, _resolved: (Client(), None))
+
+    result = await router.call_tool_for_session("feishu-ou_a", "memory_add", {"content": "one"}, retryable=False)
+
+    assert result == {
+        "ok": False,
+        "error": {"code": "unauthorized", "retryable": False},
+        "_fusion_memory_transport_auth_rejected": True,
+    }
+    assert calls == ["memory_add"]
+
+
+async def test_memory_activation_logs_safe_configuration_error(monkeypatch):
+    mcp_module = importlib.import_module("_fusion_memory_mcp")
+    router = mcp_module.MemoryMcpRouter(SimpleNamespace())
+    warnings: list[tuple[object, ...]] = []
+
+    async def reject(_session_id: str, _config: Any):
+        raise mcp_module.MemoryConfigError(
+            "registration_credentials_incomplete",
+            "secret-value must never be logged",
+        )
+
+    monkeypatch.setattr(mcp_module, "resolve_memory_config", reject)
+    monkeypatch.setattr(mcp_module, "get_session_id", lambda: "feishu-ou_a")
+    monkeypatch.setattr(mcp_module.logger, "warning", lambda *args: warnings.append(args))
+
+    result = await router.activate_current_session(WORKSPACE_ROOT)
+
+    assert result["error"]["code"] == "registration_credentials_incomplete"
+    assert warnings == [("Fusion Memory activation skipped: {}", "registration_credentials_incomplete")]
+    assert "secret-value" not in json.dumps(warnings)
+
+
 async def test_membership_assertion_reflects_group_roster(monkeypatch):
     impl = types.ModuleType("_feishu_impl")
 

@@ -37,8 +37,8 @@ user profile, and bootstrap files all live at the workspace root:
 ## Remote Fusion Memory configuration
 
 These process-start settings connect Haitun to an operator-provisioned remote Fusion Memory MCP
-Streamable HTTP service. For multi-user Feishu routing, the starter manually configures one token
-map outside the workspace. The bearer token is the only source of server-side user identity: the
+Streamable HTTP service. For multi-user Feishu routing, the starter may configure one token map
+outside the workspace; automatic registration otherwise creates it under AppData. The bearer token is the only source of server-side user identity: the
 same token shares memory across Sessions, while different tokens are isolated. Workspace and
 Session IDs are provenance only. Keep tokens in deployment-managed secrets; never commit or log
 them. Haitun consumes this MCP service only and must not use legacy REST routes.
@@ -46,8 +46,8 @@ them. Haitun consumes this MCP service only and must not use legacy REST routes.
 | Variable | Purpose |
 |---|---|
 | `FUSION_MEMORY_MCP_URL` | Remote Fusion Memory MCP Streamable HTTP endpoint; TLS is terminated by its reverse proxy. |
-| `FUSION_MEMORY_TOKEN_MAP_FILE` | Absolute path to the operator-owned JSON map keyed by Feishu `open_id`; each entry requires `token`, while empty or omitted `workspace_id` defaults to `haitun`. |
-| `FUSION_MEMORY_AUTO_REGISTER_FEISHU` | Optional first-use Feishu private-chat registration. When true and a `feishu-<open_id>` Session is missing from the token map, the workspace signs a short-lived registration assertion with the Feishu app secret, asks Memory to register that `open_id`, and writes the returned bearer token into the token map. |
+| `FUSION_MEMORY_TOKEN_MAP_FILE` | Optional absolute path to the operator-owned JSON map keyed by Feishu `open_id`; when automatic registration is enabled and this is absent, `{AppData}/fusion-memory/tokens.json` is created with mode `0600`. Each entry requires `token`, while empty or omitted `workspace_id` defaults to `haitun`. |
+| `FUSION_MEMORY_AUTO_REGISTER_FEISHU` | Optional first-use Feishu private-chat registration. When true and a `feishu-<open_id>` Session is missing from the token map, the workspace signs a short-lived registration assertion with the Feishu app secret, asks Memory to register that `open_id`, and writes the returned bearer token into the token map. A rejected stored token is re-registered once before the failed MCP operation is retried. |
 | `FUSION_MEMORY_ORGANIZATION_ID` | Required whenever organization memory or automatic registration is enabled; identifies the organization selected for this deployment. |
 | `FUSION_MEMORY_FEISHU_ORGANIZATION_CHAT_ID` | Required for organization memory; identifies the Feishu group whose current roster may access shared facts. Organization operations refresh a signed membership record without exposing the group or assertion to the model. |
 | `FUSION_MEMORY_TOKEN` | Legacy single-user bearer token, used only when no token-map path is configured. |
@@ -65,7 +65,7 @@ stops that Session's watcher and closes its cached client. Passive persistence a
 ordinary chat turns, excludes schedule/heartbeat/compaction rows, and skips unchanged history files.
 Validated maps are cached by file signature. Each active turn renews a five-minute watcher lease;
 idle watcher/client resources are reclaimed and restart on the next message. Server provisioning
-and token creation remain operator actions.
+remains an operator action; first-use token creation is automatic when enabled.
 
 Organization memory also requires the Gateway/Session process to receive
 `PSI_FEISHU_APP_ID` and `PSI_FEISHU_APP_SECRET` for the same Feishu application
@@ -319,14 +319,16 @@ service tools:
   distinct authorization cohort.
 
 - **Fusion Memory**: Haitun only consumes an operator-provisioned remote MCP
-  Streamable HTTP service. The process starter supplies the token-map path; the
-  bearer token defines user identity, while workspace/Session values are only
-  provenance. The operator creates tokens, terminates TLS at the reverse proxy,
-  and supervises MCP/model services with `systemd` for SSH-disconnect resilience
-  and restart after failure. The workspace itself starts one passive writer per
-  mapped Session and retries outages without blocking chat. Never commit or log
-  a token or token map; do not authenticate from `<feishu_context>`, create a
-  local memory service, or use another public memory transport.
+  Streamable HTTP service. The process starter either supplies the token-map
+  path or enables Feishu registration, which creates the map under AppData and
+  asks Memory to issue per-user tokens. The bearer token defines user identity,
+  while workspace/Session values are only provenance. The operator terminates
+  TLS at the reverse proxy and supervises MCP/model services with `systemd` for
+  SSH-disconnect resilience and restart after failure. The workspace itself
+  starts one passive writer per mapped Session and retries outages without
+  blocking chat. Never commit or log a token or token map; do not authenticate
+  from `<feishu_context>`, create a local memory service, or use another public
+  memory transport.
 
 - **Workflow**: bundled Python parser/compiler and executor; no separate setup.
 - **Fusion Flow Legacy**: Node.js / `npm` / `npx`. First use:

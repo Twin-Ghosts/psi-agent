@@ -11,22 +11,26 @@ start, configure, or create tokens for a local memory service.
 
 ## Required Configuration
 
-For multi-user Feishu deployments, the process starter manually sets these
-values before starting Haitun:
+For multi-user Feishu deployments, the process starter sets these values before
+starting Haitun. The token-map path is optional when automatic registration is enabled:
 
 ```bash
 export FUSION_MEMORY_MCP_URL="https://memory.example.com/mcp"
-export FUSION_MEMORY_TOKEN_MAP_FILE="/absolute/path/to/memory_tokens.json"
+export FUSION_MEMORY_AUTO_REGISTER_FEISHU=1
 export FUSION_MEMORY_ORGANIZATION_ID="<organization>"
 export FUSION_MEMORY_FEISHU_ORGANIZATION_CHAT_ID="<organization-chat>"
+# Optional override; default: {AppData}/fusion-memory/tokens.json
+export FUSION_MEMORY_TOKEN_MAP_FILE="/absolute/path/to/memory_tokens.json"
 ```
 
 - `FUSION_MEMORY_MCP_URL` is the remote MCP Streamable HTTP endpoint. TLS is
   terminated by the service's reverse proxy.
-- `FUSION_MEMORY_TOKEN_MAP_FILE` points to an operator-owned JSON object keyed
+- `FUSION_MEMORY_TOKEN_MAP_FILE` optionally points to an operator-owned JSON object keyed
   by Feishu `open_id`. Each entry requires a non-empty `token`; `workspace_id`
   is optional provenance and defaults to `haitun` when empty or omitted. Keep
-  the file outside the workspace and source control.
+  the file outside the workspace and source control. If omitted while automatic
+  registration is enabled, Haitun creates `{AppData}/fusion-memory/tokens.json`
+  with mode `0600`.
 - `FUSION_MEMORY_ORGANIZATION_ID` and
   `FUSION_MEMORY_FEISHU_ORGANIZATION_CHAT_ID` bind shared memory to the
   configured organization and its current Feishu group roster. Both are
@@ -48,11 +52,13 @@ history persistence for the trusted `feishu-<open_id>` Session. The bearer
 token, not model-visible `<feishu_context>`, determines user identity. The same
 token shares memory across Sessions; different tokens remain isolated.
 
-Users absent from the map can continue chatting but receive no bearer token,
-connector, passive writer, checkpoint, or durable memory. In map mode there is
-no fallback to `FUSION_MEMORY_TOKEN`; duplicate token assignments reject the
-map, and removing an entry stops that Session's watcher and client. When the
-map variable is absent, the legacy single-user token/workspace/session
+When automatic registration is enabled, a missing private-chat user is added
+to the map on first use. Otherwise, users absent from the map can continue
+chatting but receive no bearer token, connector, passive writer, checkpoint, or
+durable memory. In map mode there is no fallback to `FUSION_MEMORY_TOKEN`;
+duplicate token assignments reject the map, and removing an entry stops that
+Session's watcher and client. When neither the map variable nor automatic
+registration is configured, the legacy single-user token/workspace/session
 variables remain compatible.
 
 Passive persistence accepts only completed ordinary chat turns and skips
