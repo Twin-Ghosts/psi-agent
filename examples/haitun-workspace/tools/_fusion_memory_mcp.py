@@ -434,12 +434,39 @@ class MemoryMcpRouter:
         result = await self.call_tool_for_session(session_id, name, arguments, retryable=retryable)
         error = result.get("error")
         error_code = error.get("code") if isinstance(error, dict) else None
-        if error_code != "organization_membership_stale":
+        if error_code == "organization_membership_stale":
+            membership = await sync_current_membership(self._config, open_id, force=True)
+            if membership.get("ok") is not True:
+                return membership
+            result = await self.call_tool_for_session(session_id, name, arguments, retryable=retryable)
+            error = result.get("error")
+            error_code = error.get("code") if isinstance(error, dict) else None
+        if error_code != "organization_required" or not self._config.auto_register_feishu:
             return result
-        membership = await sync_current_membership(self._config, open_id, force=True)
-        if membership.get("ok") is not True:
-            return membership
-        return await self.call_tool_for_session(session_id, name, arguments, retryable=retryable)
+        return await self._call_with_refreshed_registration(
+            session_id,
+            name,
+            arguments,
+            retryable=retryable,
+        )
+
+    async def _call_with_refreshed_registration(
+        self,
+        session_id: str,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        retryable: bool,
+    ) -> dict[str, Any]:
+        try:
+            refreshed = await refresh_feishu_registration(session_id, self._config)
+        except MemoryConfigError as exc:
+            return _error(exc.code, str(exc), exc.retryable)
+        client, stale_client = self._client_for(session_id, refreshed)
+        if stale_client is not None:
+            stale_client.request_close()
+        result = await client.call_tool(name, arguments, retryable=retryable)
+        return dict(result) if isinstance(result, _TransportAuthRejectedResult) else result
 
     async def call_tool_for_session(
         self,
@@ -464,15 +491,12 @@ class MemoryMcpRouter:
             return dict(result)
         # HTTP authentication rejects the request before MCP dispatch, so one
         # replay with the replacement token cannot duplicate a tool write.
-        try:
-            refreshed = await refresh_feishu_registration(session_id, self._config)
-        except MemoryConfigError as exc:
-            return _error(exc.code, str(exc), exc.retryable)
-        client, stale_client = self._client_for(session_id, refreshed)
-        if stale_client is not None:
-            stale_client.request_close()
-        result = await client.call_tool(name, arguments, retryable=retryable)
-        return dict(result) if isinstance(result, _TransportAuthRejectedResult) else result
+        return await self._call_with_refreshed_registration(
+            session_id,
+            name,
+            arguments,
+            retryable=retryable,
+        )
 
     async def activate_current_session(self, workspace_root: Any) -> dict[str, Any]:
         session_id = get_session_id().strip()

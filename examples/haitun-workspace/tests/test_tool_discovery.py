@@ -20,6 +20,7 @@ from typing import Any
 
 import anyio
 import httpx
+import pytest
 
 from psi_agent.session.tool_registry import ToolFunction, ToolRegistry
 
@@ -212,6 +213,74 @@ async def test_organization_router_rechecks_cached_member_before_memory_access(m
 
     assert result["error"]["code"] == "organization_access_denied"
     assert tool_calls == []
+
+
+@pytest.mark.parametrize(
+    ("auto_register", "replay_result", "expected_replays"),
+    [
+        (True, {"ok": True, "result": {"status": "ok"}}, 1),
+        (True, {"ok": False, "error": {"code": "organization_required", "retryable": False}}, 1),
+        (False, {"ok": True}, 0),
+    ],
+)
+async def test_organization_router_reregisters_at_most_once(
+    monkeypatch,
+    auto_register,
+    replay_result,
+    expected_replays,
+):
+    mcp_module = importlib.import_module("_fusion_memory_mcp")
+    router = mcp_module.MemoryMcpRouter(SimpleNamespace(auto_register_feishu=auto_register))
+    required = {"ok": False, "error": {"code": "organization_required", "retryable": False}}
+    replay_calls: list[str] = []
+
+    async def sync_membership(_config, _open_id: str, *, force: bool = False):
+        assert force is True
+        return {"ok": True}
+
+    async def call_for_session(_session_id: str, _name: str, _arguments: dict[str, Any], *, retryable: bool):
+        del retryable
+        return required
+
+    async def replay(session_id: str, _name: str, _arguments: dict[str, Any], *, retryable: bool):
+        del retryable
+        replay_calls.append(session_id)
+        return replay_result
+
+    monkeypatch.setattr(mcp_module, "sync_current_membership", sync_membership)
+    monkeypatch.setattr(router, "call_tool_for_session", call_for_session)
+    monkeypatch.setattr(router, "_call_with_refreshed_registration", replay)
+    monkeypatch.setattr(mcp_module, "get_session_id", lambda: "feishu-ou_member1")
+
+    result = await router.call_organization_tool("memory_search", {"query": "project"}, retryable=True)
+
+    assert result == (replay_result if expected_replays else required)
+    assert replay_calls == ["feishu-ou_member1"] * expected_replays
+
+
+async def test_registration_refresh_returns_safe_configuration_error(monkeypatch):
+    mcp_module = importlib.import_module("_fusion_memory_mcp")
+    router = mcp_module.MemoryMcpRouter(SimpleNamespace(auto_register_feishu=True))
+
+    async def reject_refresh(_session_id: str, _config: Any):
+        raise mcp_module.MemoryConfigError(
+            "registration_failed",
+            "Fusion Memory registration failed",
+            retryable=True,
+        )
+
+    monkeypatch.setattr(mcp_module, "refresh_feishu_registration", reject_refresh)
+
+    result = await router._call_with_refreshed_registration("feishu-ou_member1", "memory_search", {}, retryable=True)
+
+    assert result == {
+        "ok": False,
+        "error": {
+            "code": "registration_failed",
+            "message": "Fusion Memory registration failed",
+            "retryable": True,
+        },
+    }
 
 
 async def test_memory_router_reregisters_once_after_unauthorized(monkeypatch):
