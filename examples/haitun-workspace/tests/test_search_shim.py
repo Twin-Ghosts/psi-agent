@@ -36,7 +36,15 @@ search: Any = importlib.import_module("search")
 
 
 class _StubServer:
-    """Mimics the ``mcp`` 2.0 lowlevel ``Server``: registrar present, decorators gone."""
+    """Mimics the ``mcp`` 2.0 lowlevel ``Server``: registrar present, decorators gone.
+
+    ``list_tools`` / ``call_tool`` are *bare annotations*: they declare what the shim
+    installs so a type checker can see the attributes, while creating nothing at
+    runtime — so ``hasattr`` still reports them absent and the shim still installs.
+    """
+
+    list_tools: Any
+    call_tool: Any
 
     def __init__(self) -> None:
         self.handlers: dict[str, tuple[type, Any]] = {}

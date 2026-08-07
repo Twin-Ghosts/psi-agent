@@ -81,8 +81,8 @@ def _install_lowlevel_decorator_shim() -> bool:
 
         return decorator
 
-    Server.list_tools = list_tools  # ty: ignore
-    Server.call_tool = call_tool  # ty: ignore
+    Server.list_tools = list_tools
+    Server.call_tool = call_tool
     logger.debug("Installed mcp 1.x lowlevel decorator shim (list_tools/call_tool) for serper-mcp-server")
     return True
 
