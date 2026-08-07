@@ -5,10 +5,14 @@
 favour of ``Server.add_request_handler``. Without the shim, importing serper raises
 ``AttributeError`` and every search fails before a request is sent.
 
+The ``mcp>=1.28.1,<2.0.0`` pin is the primary fix; the shim covers an environment
+that resolved to 2.x anyway, which is how the incident happened (``pip install -e
+.`` ignores ``uv.lock`` and re-resolved).
+
 These tests never call the Serper API. They pin the shim's translation against a
-stub ``Server`` that mimics the 2.0 surface, so the behaviour is asserted on either
-installed ``mcp`` version — the shim is a no-op under 1.x, where the real class
-still has the decorators.
+stub ``Server`` that mimics the 2.0 surface, so the behaviour is asserted under the
+pinned 1.x too — where the real class still has the decorators and the shim is a
+no-op.
 """
 
 from __future__ import annotations

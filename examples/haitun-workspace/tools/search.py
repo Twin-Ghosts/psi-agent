@@ -21,6 +21,12 @@ def _install_lowlevel_decorator_shim() -> bool:
     """Restore the ``Server.list_tools()`` / ``Server.call_tool()`` decorators that
     ``mcp`` 2.0 removed, translating them onto the replacement API.
 
+    The primary fix for this incompatibility is the ``mcp>=1.28.1,<2.0.0`` pin in
+    ``pyproject.toml``; this shim is a safety net for an environment that resolved
+    to 2.x anyway. That is not hypothetical — it is how the incident happened: the
+    image installs with ``pip install -e .``, which ignores ``uv.lock`` and
+    re-resolves, so a then-unbounded ``mcp>=1.28.1`` picked up 2.0.0 on a rebuild.
+
     ``serper-mcp-server`` 0.0.10 — the latest release, still declaring
     ``mcp[cli]>=1.6.0`` with no fixed version upstream — applies both decorators at
     **module import time**. Under ``mcp`` 2.0, which replaced them with
@@ -32,14 +38,9 @@ def _install_lowlevel_decorator_shim() -> bool:
     back to scraping search-engine HTML, which returns plausible-looking garbage
     rather than an honest error.
 
-    Shimming here keeps the fix in the repository instead of in a patched
-    ``site-packages`` (twice now, a hand-patched deployment has been silently
-    reverted by a redeploy) and avoids pinning ``mcp<2.0.0``, which ``psi_agent``
-    itself depends on.
-
     Returns whether the shim was installed. It is idempotent and guarded on
-    ``hasattr``, so it is a no-op on ``mcp`` 1.x and becomes one automatically once
-    upstream supports 2.0.
+    ``hasattr``, so it is a no-op under the pinned 1.x — where the real class still
+    has the decorators — and becomes one automatically once upstream supports 2.0.
     """
     from mcp.server.lowlevel.server import Server  # noqa: PLC0415
 
