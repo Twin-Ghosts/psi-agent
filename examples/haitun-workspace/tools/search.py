@@ -85,7 +85,13 @@ def _transport():
     return connect
 
 
-@mcp
+@mcp(
+    dispatch=True,
+    # ``serper_google_search`` is the plain web search and the only one with
+    # meaningful recorded traffic; the other twelve verticals (images, maps,
+    # scholar, patents, ...) are reachable through ``serper_call``.
+    keep=("serper_google_search",),
+)
 def serper() -> dict[str, object]:
     """Uses a deployment-wide ``SERPER_API_KEY`` (gateway process env, or workspace ``.env``)."""
     _sync_api_key()
