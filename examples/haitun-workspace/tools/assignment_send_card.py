@@ -9,6 +9,7 @@ from _assignment_delivery import parse_tool_result, progress_card
 from _assignment_display import readable_name
 from _assignment_display import resolve_feishu_display_names as _resolve_feishu_display_names
 from _assignment_tool_common import CLIENT, dumps_result, invalid_argument
+from _assignment_tool_common import result_object as _result_object
 from _feishu_impl import get_users_batch_impl as _get_users_batch_impl
 from feishu_message import feishu_message_send_card as _feishu_message_send_card
 
@@ -53,8 +54,8 @@ async def assignment_send_card(
     )
     if not fetched.get("ok"):
         return dumps_result(fetched)
-    assignment = fetched.get("result")
-    if not isinstance(assignment, dict):
+    assignment = _result_object(fetched)
+    if assignment is None:
         return invalid_argument("Fusion Memory returned an invalid assignment")
     if assignment.get("state") not in _DELIVERABLE_STATES:
         return dumps_result(
@@ -501,11 +502,6 @@ def _error(code: str, message: str, *, sent: bool = False) -> str:
             "error": {"code": code, "message": message, "retryable": False},
         }
     )
-
-
-def _result_object(result: dict[str, Any]) -> dict[str, Any] | None:
-    payload = result.get("result")
-    return payload if isinstance(payload, dict) else None
 
 
 def _result_object_field(value: dict[str, Any], field: str) -> dict[str, Any] | None:

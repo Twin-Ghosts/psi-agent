@@ -5,7 +5,13 @@ import re
 from typing import Any
 
 from _assignment_display import resolve_feishu_display_name as _resolve_feishu_display_name
-from _assignment_tool_common import CLIENT, dumps_result, invalid_argument, parse_json_object
+from _assignment_tool_common import (
+    CLIENT,
+    dumps_result,
+    invalid_argument,
+    parse_json_object,
+    result_object,
+)
 from _feishu_impl import edit_card_impl as _edit_card_impl
 from _feishu_impl import get_users_batch_impl as _get_users_batch_impl
 from _feishu_impl import send_card_impl as _send_card_impl
@@ -810,8 +816,8 @@ async def _assignment_directory(arrangement_id: str) -> dict[str, Any]:
     every error degrades to an empty directory and the card falls back to role-only labels.
     """
     fetched = await CLIENT.call_tool("assignment_get", {"assignment_id": arrangement_id}, retryable=True)
-    assignment = fetched.get("result")
-    if not fetched.get("ok") or not isinstance(assignment, dict):
+    assignment = result_object(fetched) if fetched.get("ok") else None
+    if assignment is None:
         return {}
     names_by_open_id: dict[str, str] = {}
     unique_names_by_role: dict[str, str] = {}
