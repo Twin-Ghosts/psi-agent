@@ -292,7 +292,9 @@ async def pop_card_snapshot(
     await path.parent.chmod(0o700)
     consumed = path.parent / f"{message_id}.consumed"
     if await consumed.exists():
-        return CardSnapshotClaim(status="already_consumed")
+        # Counted on the single-use path too, not just per-action: the caller needs to tell a
+        # first rejection (worth telling the clicker about) from the repeats behind it.
+        return CardSnapshotClaim(status="already_consumed", rejected_count=_record_rejection(message_id))
 
     if action_id is not None:
         peeked = await _peek_snapshot(path)
@@ -320,7 +322,7 @@ async def pop_card_snapshot(
         try:
             await consumed.touch(mode=0o600, exist_ok=False)
         except FileExistsError:
-            return CardSnapshotClaim(status="already_consumed")
+            return CardSnapshotClaim(status="already_consumed", rejected_count=_record_rejection(message_id))
         await _write_consumed_marker(consumed, "not_found")
         return CardSnapshotClaim(status="not_found")
 

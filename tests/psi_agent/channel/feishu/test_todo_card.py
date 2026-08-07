@@ -13,6 +13,7 @@ from psi_agent.channel.feishu._card_action import (
     CardActionBatcher,
     _batched_card_context,
     _consumed_card_content,
+    handle_card_action,
 )
 from psi_agent.channel.feishu._card_store import (
     card_claim_guard,
@@ -45,6 +46,28 @@ def _todo_card() -> dict:
     elements.extend(_row(0, "写周报"))
     elements.extend(_row(1, "改文档"))
     return {"config": {"wide_screen_mode": True}, "elements": elements}
+
+
+class _Operator:
+    def __init__(self, open_id: str) -> None:
+        self.open_id = open_id
+
+
+class _Action:
+    def __init__(self, value: dict) -> None:
+        self.value = value
+
+
+class _CardEvent:
+    def __init__(self, message_id: str, chat_id: str, open_id: str, value: dict) -> None:
+        self.message_id = message_id
+        self.chat_id = chat_id
+        self.operator = _Operator(open_id)
+        self.action = _Action(value)
+
+
+def _card_event(message_id: str, *, chat_id: str = "oc_chat", open_id: str = "ou_clicker") -> _CardEvent:
+    return _CardEvent(message_id, chat_id, open_id, {"action": "todo_tick_0", "todo_title": "写周报"})
 
 
 def _button_values(card: dict) -> list[dict]:
@@ -309,6 +332,99 @@ async def test_rejected_claims_are_counted_for_diagnostics(tmp_path) -> None:
     assert second.rejected_action_id == "todo_tick_0"
     assert second.rejected_count >= 1
     assert rejected_claim_count("om_count") >= 1
+
+
+@pytest.mark.anyio
+async def test_single_use_rejection_is_counted_too(tmp_path) -> None:
+    """单用卡的拒绝也要计数, 否则调用方分不出「第一次被拒」和后面的连点。"""
+    appdata = str(tmp_path)
+    await save_card_snapshot("om_single_count", _todo_card(), appdata=appdata)
+
+    assert (await pop_card_snapshot("om_single_count", appdata)).status == "claimed"
+    second = await pop_card_snapshot("om_single_count", appdata)
+    assert second.status == "already_consumed"
+    assert second.rejected_count == 1
+    third = await pop_card_snapshot("om_single_count", appdata)
+    assert third.rejected_count == 2
+
+
+@pytest.mark.anyio
+async def test_spent_card_click_tells_the_user_once(tmp_path) -> None:
+    """点到已消费的卡必须说一句: 静默返回和按钮坏掉在用户眼里完全一样。
+
+    连点只说一次, 否则一串点击会把会话刷满。
+    """
+    appdata = str(tmp_path)
+    await save_card_snapshot("om_spent", _todo_card(), appdata=appdata)
+    assert (await pop_card_snapshot("om_spent", appdata)).status == "claimed"
+
+    sent: list[dict] = []
+
+    class _Channel:
+        async def send(self, chat_id: str, payload: dict) -> None:
+            sent.append({"chat_id": chat_id, "payload": payload})
+
+        async def fetch_message(self, message_id: str) -> dict:
+            raise AssertionError("被墓碑拒掉之后不该再去回捞卡片")
+
+        async def update_card(self, message_id: str, card: dict) -> object:
+            raise AssertionError("被墓碑拒掉之后不该重画卡片")
+
+    async def _stream_reply(*args: object, **kwargs: object) -> None:
+        raise AssertionError("被墓碑拒掉之后不该再跑一轮 agent")
+
+    async def _resolve_core(open_id: str | None) -> object:
+        raise AssertionError("被墓碑拒掉之后不该解析 session")
+
+    channel = _Channel()
+    for _ in range(3):
+        await handle_card_action(
+            channel,
+            _resolve_core,
+            None,
+            lambda key: True,
+            _stream_reply,
+            _card_event("om_spent"),
+            appdata,
+        )
+
+    assert len(sent) == 1, "连点只提示一次"
+    assert sent[0]["chat_id"] == "oc_chat"
+    assert "已经处理过" in sent[0]["payload"]["text"]
+
+
+@pytest.mark.anyio
+async def test_spent_card_notice_failure_does_not_replay_the_click(tmp_path) -> None:
+    """提示发失败也不能把这次点击当成「快照读失败」再走一遍完整处理。"""
+    appdata = str(tmp_path)
+    await save_card_snapshot("om_spent_boom", _todo_card(), appdata=appdata)
+    assert (await pop_card_snapshot("om_spent_boom", appdata)).status == "claimed"
+
+    class _Channel:
+        async def send(self, chat_id: str, payload: dict) -> None:
+            raise RuntimeError("网络抖了")
+
+        async def fetch_message(self, message_id: str) -> dict:
+            raise AssertionError("不该回捞卡片")
+
+        async def update_card(self, message_id: str, card: dict) -> object:
+            raise AssertionError("不该重画卡片")
+
+    async def _stream_reply(*args: object, **kwargs: object) -> None:
+        raise AssertionError("不该再跑一轮 agent")
+
+    async def _resolve_core(open_id: str | None) -> object:
+        raise AssertionError("不该解析 session")
+
+    await handle_card_action(
+        _Channel(),
+        _resolve_core,
+        None,
+        lambda key: True,
+        _stream_reply,
+        _card_event("om_spent_boom"),
+        appdata,
+    )
 
 
 def test_rejection_counts_stay_bounded(monkeypatch) -> None:
