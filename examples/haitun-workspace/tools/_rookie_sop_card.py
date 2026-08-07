@@ -178,6 +178,76 @@ def _progress_bar(progress_text: str) -> str:
     return f"**已完成 {done} / {total} 项**{tail}"
 
 
+def entry_card(
+    name: str,
+    rows: list[dict[str, Any]],
+    doc_url: str,
+    today: date | None = None,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """入口卡 —— 一条消息交代全貌, 详情在文档里勾。
+
+    刻意为之: 不再一次性发 7 张模块卡(用户反馈观感太糟), 改成一张入口卡 +
+    一个跳转到本人清单文档的按钮。卡上只做两件事: 报总进度、按模块列出各自欠项,
+    让新人一眼知道还差什么; 真正的勾选在文档里做, 那里一屏能装完 33 项。
+
+    返回的 handlers 恒为空 —— 卡上只有一个 URL 跳转按钮, 没有回调动作。
+    进度靠文档变更事件驱动同步后重绘, 不靠卡上的按钮。
+    """
+    progress = _p.summarize(rows, today)
+    head = f"👋 **{name}**，这是你的入职清单\n{_progress_bar(f'{progress.done}/{progress.total}')}"
+    elements: list[dict[str, Any]] = [{"tag": "markdown", "content": head}, {"tag": "hr"}]
+
+    modules: list[str] = []
+    for row in rows:
+        module = str(row.get("模块") or "")
+        if module and module not in modules:
+            modules.append(module)
+
+    lines: list[str] = []
+    for module in modules:
+        module_rows = [r for r in rows if str(r.get("模块") or "") == module]
+        applicable = [r for r in module_rows if str(r.get("状态") or "") != _p.STATUS_NA]
+        if not applicable:
+            lines.append(f"{_NA_MARK} <font color='grey'>{module}　不适用</font>")
+            continue
+        done_n = sum(1 for r in applicable if str(r.get("状态") or "") == _p.STATUS_DONE)
+        # 模块的状态标记取该模块最紧急的一行 —— 与卡片主题色同一套判据
+        mark = _DONE_MARK if done_n == len(applicable) else _card_module_mark(applicable, today)
+        lines.append(f"{mark} **{module}**　{done_n}/{len(applicable)}")
+    elements.append({"tag": "markdown", "content": "\n".join(lines) if lines else "清单还在准备中。"})
+
+    if doc_url.strip():
+        elements.append({"tag": "hr"})
+        elements.append(
+            {
+                "tag": "action",
+                "layout": "flow",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "打开我的入职清单"},
+                        "type": "primary",
+                        "url": doc_url.strip(),
+                    }
+                ],
+            }
+        )
+    elements.append(
+        {"tag": "note", "elements": [{"tag": "plain_text", "content": "💡 在清单里逐项打勾即可，进度会自动同步"}]}
+    )
+    return _shell("入职路线图", elements, _card_template(rows, today)), {}
+
+
+def _card_module_mark(rows: list[dict[str, Any]], today: date | None) -> str:
+    """一个模块的状态标记: 有逾期→红, 有当天到期→黄, 否则绿。"""
+    marks = {_due_state(r, today) for r in rows}
+    if _DUE_LATE in marks:
+        return _DUE_LATE
+    if _DUE_TODAY in marks:
+        return _DUE_TODAY
+    return _DUE_OK
+
+
 def module_card(
     module: str,
     rows: list[dict[str, Any]],

@@ -1909,3 +1909,107 @@ def test_sync_doc_refuses_without_a_document_id() -> None:
 
     assert out["ok"] is False
     assert "document_id" in out["error"]
+
+
+def test_entry_card_is_one_card_with_a_doc_link_and_no_callbacks() -> None:
+    """入口卡: 一条消息交代全貌, 只有一个跳转按钮, 没有回调动作。
+
+    需求变更的核心 —— 原先一次发 7 张模块卡观感太糟。
+    """
+    c = _load("_rookie_sop_card")
+    p = _load("_rookie_sop_progress")
+    rows = [
+        _row("wifi", p.STATUS_DONE, date(2026, 8, 9), title="连上 WiFi"),
+        _row("desk", p.STATUS_TODO, date(2026, 8, 9), title="找到工位"),
+        _row("attendance", p.STATUS_TODO, date(2026, 8, 9), title="了解考勤", module="核心制度"),
+    ]
+
+    card, handlers = c.entry_card("王炜博", rows, "https://feishu.cn/docx/doc123", date(2026, 8, 6))
+
+    # 没有任何回调 —— 勾选在文档里做, 不在卡上
+    assert handlers == {}
+    rendered = _dump(card)
+    assert "王炜博" in rendered
+    assert "已完成 1 / 3 项" in rendered
+    # 按模块列出各自欠项
+    assert "环境准备" in rendered and "核心制度" in rendered
+    # 跳转按钮用 url, 不是 value/callback
+    button = next(
+        e["actions"][0] for e in card["elements"] if e.get("tag") == "action"
+    )
+    assert button["url"] == "https://feishu.cn/docx/doc123"
+    assert "value" not in button
+
+
+def test_entry_card_marks_a_fully_done_module_and_an_na_module() -> None:
+    c = _load("_rookie_sop_card")
+    p = _load("_rookie_sop_progress")
+    rows = [
+        _row("wifi", p.STATUS_DONE, date(2026, 8, 9), title="连上 WiFi"),
+        _row("git_workflow", p.STATUS_NA, date(2026, 8, 12), title="Git 工作流", module="开发环境"),
+    ]
+
+    card, _handlers = c.entry_card("张三", rows, "https://feishu.cn/docx/d", date(2026, 8, 6))
+
+    rendered = _dump(card)
+    assert "✅" in rendered  # 环境准备 1/1 全完成
+    assert "不适用" in rendered  # 开发环境整模块不适用
+
+
+def test_entry_card_without_a_doc_url_omits_the_button() -> None:
+    """文档还没建好时不该给一个空按钮。"""
+    c = _load("_rookie_sop_card")
+    p = _load("_rookie_sop_progress")
+    rows = [_row("wifi", p.STATUS_TODO, date(2026, 8, 9), title="连上 WiFi")]
+
+    card, handlers = c.entry_card("张三", rows, "", date(2026, 8, 6))
+
+    assert handlers == {}
+    assert not [e for e in card["elements"] if e.get("tag") == "action"]
+
+
+def test_doc_edited_event_and_sync_trigger_are_registered() -> None:
+    """文档变更事件与同步触发器都要在位, 否则勾选永远同步不回来。"""
+    ev = HAITUN / "channel_events" / "feishu" / "rookie_doc_edited"
+    trigger = HAITUN / "triggers" / "rookie-doc-sync" / "TRIGGER.md"
+    assert (ev / "EVENT.yaml").is_file()
+    assert (ev / "map.py").is_file()
+    assert trigger.is_file()
+
+    yaml_text = (ev / "EVENT.yaml").read_text(encoding="utf-8")
+    assert "haitun.rookie.doc_edited" in yaml_text
+    assert "drive.file.edit_v1" in yaml_text
+    assert "platform_map" in yaml_text
+
+    trigger_text = trigger.read_text(encoding="utf-8")
+    assert "event: haitun.rookie.doc_edited" in trigger_text
+    assert "fire: tool" in trigger_text
+    assert "tool: rookie_sop_sync_doc" in trigger_text
+
+
+def test_doc_edited_mapper_extracts_the_token_and_skips_other_file_types() -> None:
+    """映射器: 认出文档 token, 忽略非文档的文件变更, 认不出就不产出信封。"""
+    path = HAITUN / "channel_events" / "feishu" / "rookie_doc_edited" / "map.py"
+    spec = importlib.util.spec_from_file_location("rookie_doc_edited_map", path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+
+    # 正常的文档编辑事件
+    out = mod.map_event(
+        {
+            "header": {"event_id": "evt1"},
+            "event": {"file_token": "doc123", "file_type": "docx", "operator_id": {"open_id": "ou_x"}},
+        }
+    )
+    assert len(out) == 1
+    assert out[0]["event"] == "haitun.rookie.doc_edited"
+    assert out[0]["payload"]["document_id"] == "doc123"
+    assert out[0]["payload"]["operator_open_id"] == "ou_x"
+    assert out[0]["idempotency_key"] == "feishu:rookie_doc_edited:evt1"
+
+    # 非文档类型(比如表格) —— 不该产出
+    assert mod.map_event({"event": {"file_token": "sht1", "file_type": "sheet"}}) == []
+    # 认不出 token —— 不该产出空 token 的信封让下游去读一个不存在的文档
+    assert mod.map_event({"event": {"file_type": "docx"}}) == []

@@ -17,9 +17,12 @@ TOOLS_DIR = Path(__file__).resolve().parent
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
+import _rookie_sop_card as _card
 import _rookie_sop_config as _cfg
+import _rookie_sop_docapi as _docapi
 import _rookie_sop_runtime as _rt
 import _rookie_sop_store as _store
+from feishu_api import feishu_api
 from feishu_message import feishu_message_send_card
 from schedule_manage import schedule_manage
 
@@ -131,43 +134,65 @@ async def rookie_sop_card_send(
         )
 
     sop_url = str(cfg.get("sop_doc_url") or "")
+
+    # 详情页: 为这个新人建一份自己的清单文档, 只授权他本人, 并订阅其变更。
+    # 刻意为之: 原先一次性发 7 张模块卡, 用户反馈观感太糟 —— 改成一张入口卡 +
+    # 一个跳转按钮。33 项在文档里一屏勾完, 勾选由文档变更事件同步回明细表。
+    # 文档权限能精确到「单文档 + 单人」(bitable 最细只到 base 级, 做不到),
+    # 所以每人只看得到自己那一份。
+    doc = await _docapi.provision_doc(
+        feishu_api,
+        open_id=resolved_open_id,
+        name=resolved_name,
+        rows=rows,
+        sop_url=sop_url,
+    )
+    if not doc.get("document_id"):
+        return json.dumps({"ok": False, "error": f"provision doc failed: {doc.get('error')}"}, ensure_ascii=False)
+    doc_url = str(doc.get("url") or "")
+
+    # 文档索引: 变更事件只带文档 token, 同步工具要靠它反查是谁的清单。
+    state_docs = state.get("docs")
+    state_docs = dict(state_docs) if isinstance(state_docs, dict) else {}
+    state_docs[str(doc["document_id"])] = resolved_open_id
+    state["docs"] = state_docs
+    await _rt.save_state(state)
+
+    # 入口卡: 一条消息交代全貌, 没有回调动作(勾选在文档里做)。
+    card, handlers = _card.entry_card(resolved_name, rows, doc_url, today)
+    business = {
+        "type": "rookie_sop",
+        "open_id": resolved_open_id,
+        "name": resolved_name,
+        "module": "入口",
+        "app_token": app_token,
+        "detail_table_id": detail_table,
+        "overview_table_id": overview_table,
+        "document_id": doc["document_id"],
+    }
+    # 发卡结果不能丢: 飞书会因卡片 JSON 不合规整张拒收(实测踩过 200410/11310),
+    # 吞掉返回值就会把「卡被拒」报成「已发送」, 新人什么都没收到而工具说成功了。
+    sent_raw = await feishu_message_send_card(
+        resolved_open_id,
+        json.dumps(card, ensure_ascii=False),
+        "open_id",
+        "",
+        json.dumps(business, ensure_ascii=False),
+        json.dumps(handlers, ensure_ascii=False),
+        False,
+    )
+    sent_result = _store._parse_result(sent_raw)
     sent: list[str] = []
     failed: list[dict[str, str]] = []
-    for plan in _rt.plan_module_cards(items, rows, onboard, today, sop_url):
-        business = {
-            "type": "rookie_sop",
-            "open_id": resolved_open_id,
-            "name": resolved_name,
-            "module": plan["module"],
-            "app_token": app_token,
-            "detail_table_id": detail_table,
-            "overview_table_id": overview_table,
-        }
-        # 发卡结果不能丢。飞书会因卡片 JSON 不合规整张拒收(例如把 action 组件放进
-        # column 会返回 230099/200410), 此时消息根本没发出去; 吞掉返回值就会把
-        # 「7 张卡全部被拒」报成「已发送」—— 实测踩过这个坑, 新人一张都没收到,
-        # 而工具和模型都说发好了。
-        sent_raw = await feishu_message_send_card(
-            resolved_open_id,
-            json.dumps(plan["card"], ensure_ascii=False),
-            "open_id",
-            "",
-            json.dumps(business, ensure_ascii=False),
-            json.dumps(plan["handlers"], ensure_ascii=False),
-            True,
+    if sent_result.get("ok") is not True:
+        failed.append(
+            {
+                "module": "入口卡",
+                "error": str(sent_result.get("message") or sent_result.get("error") or "send_card failed"),
+            }
         )
-        sent_result = _store._parse_result(sent_raw)
-        if sent_result.get("ok") is not True or sent_result.get("callback_context_saved") is False:
-            failed.append(
-                {
-                    "module": str(plan["module"]),
-                    "error": str(
-                        sent_result.get("message") or sent_result.get("error") or "feishu_message_send_card failed"
-                    ),
-                }
-            )
-            continue
-        sent.append(plan["module"])
+    else:
+        sent.append("入口卡")
 
     # 每人一份催办定时任务, 落在这个新人自己的 Session workspace 里。结果不能丢:
     # schedule_manage 失败时返回 "[Error] ..." 字符串而不是抛异常, 吞掉它就等于
