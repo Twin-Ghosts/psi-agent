@@ -8,6 +8,7 @@ from typing import Any
 from _assignment_delivery import parse_tool_result, progress_card
 from _assignment_tool_common import CLIENT, dumps_result, invalid_argument
 from _assignment_tool_common import result_object as _result_object
+from _assignment_tool_common import result_object_or_reason as _result_object_or_reason
 from feishu_message import feishu_message_send_card as _feishu_message_send_card
 
 from psi_agent.session.runtime_context import get_session_id
@@ -51,9 +52,9 @@ async def assignment_send_card(
     )
     if not fetched.get("ok"):
         return dumps_result(fetched)
-    assignment = _result_object(fetched)
+    assignment, reason = _result_object_or_reason(fetched)
     if assignment is None:
-        return invalid_argument("Fusion Memory returned an invalid assignment")
+        return invalid_argument(f"Fusion Memory returned an invalid assignment — {reason}")
     if assignment.get("state") not in _DELIVERABLE_STATES:
         return dumps_result(
             {

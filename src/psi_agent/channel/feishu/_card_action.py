@@ -294,6 +294,22 @@ def _card_action_context(
     return f"<feishu_card_action>\n{body}\n</feishu_card_action>"
 
 
+async def _notify_already_consumed(channel: Any, chat_id: str, message_id: str) -> None:
+    """Tell the clicker their click landed on a spent card, never raising.
+
+    The caller runs inside the snapshot ``try`` that falls back to re-fetching the card
+    from Feishu, so an exception escaping here would be read as a snapshot failure and
+    the whole callback would be handled a second time.
+    """
+    try:
+        await channel.send(
+            chat_id,
+            {"text": "这张卡片已经处理过了, 按钮不会再生效。需要重来的话我可以发一张新卡片。"},
+        )
+    except Exception as e:
+        logger.warning(f"failed to notify spent card {message_id} — {e!r}")
+
+
 def _action_id_of(action_value: Any) -> str | None:
     """The canonical action id inside a callback value, or ``None``."""
     normalized = _normalize_card_action_value(action_value)
@@ -379,6 +395,12 @@ async def handle_card_action(
                         f"action={claim.rejected_action_id or action_id} operator={operator_open_id} "
                         f"multi_use={multi_use} rejected_so_far={claim.rejected_count}"
                     )
+                    # Rejecting in silence is indistinguishable from a broken button: the card
+                    # keeps its clickable look, nothing is said, and the user clicks again. Say
+                    # it once — repeats stay quiet so an impatient tick storm cannot spam the
+                    # chat, and cross-process redelivery is already filtered by ``mark_seen``.
+                    if claim.rejected_count == 1:
+                        await _notify_already_consumed(channel, chat_id, message_id)
                     return
                 snapshot_status = claim.status
                 snapshot = claim.snapshot

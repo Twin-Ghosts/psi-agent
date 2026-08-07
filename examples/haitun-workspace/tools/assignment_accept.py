@@ -9,6 +9,7 @@ from _assignment_delivery import advance_delivery as _advance_delivery
 from _assignment_delivery import sync_progress_card as _sync_progress_card
 from _assignment_tool_common import CLIENT, dumps_result, invalid_argument
 from _assignment_tool_common import result_object as _result_object
+from _assignment_tool_common import result_object_or_reason as _result_object_or_reason
 from feishu_task import _feishu_task_create_once
 
 from psi_agent.session.runtime_context import get_session_id
@@ -44,9 +45,9 @@ async def assignment_accept(assignment_id: str) -> str:
     )
     if not fetched.get("ok"):
         return dumps_result(fetched)
-    assignment = _result_object(fetched)
+    assignment, reason = _result_object_or_reason(fetched)
     if assignment is None:
-        return _error("assignment_invalid", "Fusion Memory returned an invalid assignment")
+        return _error("assignment_invalid", f"Fusion Memory returned an invalid assignment — {reason}")
     title = _text(assignment.get("title")) or "工作安排"
 
     recipients = assignment.get("recipients")
@@ -84,9 +85,12 @@ async def assignment_accept(assignment_id: str) -> str:
             )
         if not accepted.get("ok"):
             return dumps_result(accepted)
-        accepted_assignment = _result_object(accepted)
+        accepted_assignment, reason = _result_object_or_reason(accepted)
         if accepted_assignment is None:
-            return _error("assignment_invalid", "Fusion Memory returned an invalid accepted assignment")
+            return _error(
+                "assignment_invalid",
+                f"Fusion Memory returned an invalid accepted assignment — {reason}",
+            )
         if accepted_assignment.get("state") not in _RECEIVED_STATES:
             return _error(
                 "assignment_state_invalid",
@@ -134,12 +138,12 @@ async def assignment_accept(assignment_id: str) -> str:
             error_message,
             retryable=retryable,
         )
-    claim_result = _result_object(claim)
+    claim_result, reason = _result_object_or_reason(claim)
     if claim_result is None:
         return _accepted_publication_error(
             normalized_assignment_id,
             "assignment_publication_invalid",
-            "Fusion Memory returned an invalid publication claim",
+            f"Fusion Memory returned an invalid publication claim — {reason}",
         )
     publication = claim_result.get("publication")
     if not isinstance(publication, dict):

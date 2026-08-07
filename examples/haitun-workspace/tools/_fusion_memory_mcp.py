@@ -378,11 +378,28 @@ def _normalize_result(result: Any) -> dict[str, Any]:
         text = getattr(block, "text", None)
         if text:
             content.append(text)
-    payload: Any = "\n".join(content)
-    if len(content) == 1:
+    joined = "\n".join(content)
+    payload: Any = joined
+    # Parse the joined text rather than only a lone block: a reply split across blocks
+    # is still one JSON document, and refusing to parse it degraded the payload to a
+    # *string*. Callers then saw ``{"ok": True, "result": "<text>"}`` — a success
+    # envelope wrapping unusable data — and reported it as malformed remote data
+    # instead of the error the server actually sent.
+    if content:
         with suppress(json.JSONDecodeError):
-            payload = json.loads(content[0])
-    return {"ok": not bool(getattr(result, "isError", False)), "result": payload}
+            payload = json.loads(joined)
+    ok = not bool(getattr(result, "isError", False))
+    if ok and isinstance(payload, dict) and payload.get("ok") is False:
+        # A tool that reports its own failure inside a successful transport response
+        # must not be announced as ``ok``: every caller checks the outer flag first, so
+        # the inner error would be dropped and the payload mistaken for data.
+        return {
+            "ok": False,
+            "error": payload.get("error")
+            or {"code": "remote_error", "message": "Fusion Memory tool returned an error", "retryable": True},
+            "result": payload,
+        }
+    return {"ok": ok, "result": payload}
 
 
 def _error(code: str, message: str, retryable: bool) -> dict[str, Any]:
