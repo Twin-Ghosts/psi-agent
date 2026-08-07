@@ -1695,3 +1695,98 @@ def test_progress_text_is_plain_numbers_and_degrades_safely() -> None:
     # 非法输入原样返回, 不抛异常
     assert c._progress_bar("0/0") == "0/0"
     assert c._progress_bar("坏数据") == "坏数据"
+
+
+def _doc_row(
+    item_id: str, title: str, status: str, module: str = "环境准备", acceptance: str = "验收"
+) -> dict[str, Any]:
+    return {
+        "记录键": f"ou_x:{item_id}",
+        "项": title,
+        "验收标准": acceptance,
+        "模块": module,
+        "状态": status,
+        "入职日": date(2026, 8, 5),
+        "截止日": date(2026, 8, 9),
+    }
+
+
+def test_build_doc_blocks_renders_a_todo_per_item_with_done_from_the_table() -> None:
+    """文档是明细表的投影: 表里已完成的项, 文档里就是勾上的。"""
+    d = _load("_rookie_sop_doc")
+    rows = [
+        _doc_row("wifi", "连上 WiFi", "已完成", acceptance="能上网"),
+        _doc_row("desk", "找到工位", "未完成"),
+    ]
+
+    blocks = d.build_doc_blocks(rows, name="张三")
+
+    todos = [b for b in blocks if b["block_type"] == d.BLOCK_TODO]
+    assert len(todos) == 2
+    assert todos[0]["todo"]["style"]["done"] is True
+    assert todos[1]["todo"]["style"]["done"] is False
+    first = todos[0]["todo"]["elements"][0]["text_run"]["content"]
+    assert "连上 WiFi" in first and "能上网" in first
+    # 每行带 item_id 标记, 同步时靠它认回条目(不靠块顺序)
+    assert d.item_marker("wifi") in first
+
+
+def test_build_doc_blocks_gives_na_items_no_checkbox() -> None:
+    """不适用的项不给 todo 框 —— 勾它没有意义。"""
+    d = _load("_rookie_sop_doc")
+    rows = [_doc_row("git_workflow", "Git 工作流", "不适用", module="开发环境")]
+
+    blocks = d.build_doc_blocks(rows, name="张三")
+
+    assert not [b for b in blocks if b["block_type"] == d.BLOCK_TODO]
+    assert any("不适用" in str(b) for b in blocks)
+
+
+def test_read_doc_state_matches_by_marker_not_by_order() -> None:
+    """新人可能自己加行/删行/重排, 所以按标记匹配, 不按块顺序。"""
+    d = _load("_rookie_sop_doc")
+    def todo(text: str, done: bool) -> dict[str, Any]:
+        return {
+            "block_type": d.BLOCK_TODO,
+            "todo": {"elements": [{"text_run": {"content": text}}], "style": {"done": done}},
+        }
+
+    blocks = [
+        # 新人自己加的一条笔记(无标记) —— 必须被忽略, 不能顶掉真条目
+        todo("我自己的备忘", True),
+        todo(f"找到工位　{d.item_marker('desk')}", True),
+        todo(f"连上 WiFi　{d.item_marker('wifi')}", False),
+    ]
+
+    state = d.read_doc_state(blocks)
+
+    assert state == {"desk": True, "wifi": False}
+
+
+def test_diff_state_only_reports_newly_ticked_items() -> None:
+    """只认「未完成 → 勾上」一个方向。
+
+    反向不撤销: 让新人取消勾选就能抹掉已完成记录, 会让 HR 日报不可信。
+    """
+    d = _load("_rookie_sop_doc")
+    rows = [
+        _doc_row("wifi", "连上 WiFi", "已完成"),
+        _doc_row("desk", "找到工位", "未完成"),
+        _doc_row("campus_card", "领取校园卡", "未完成"),
+    ]
+    doc_state = {
+        "wifi": False,        # 文档里被取消勾选 —— 不撤销
+        "desk": True,         # 新勾上的 —— 要同步
+        "campus_card": False, # 没动
+        "unknown": True,      # 表里没有这个条目 —— 忽略
+    }
+
+    assert d.diff_state(doc_state, rows) == ["desk"]
+
+
+def test_parse_item_id_handles_absent_or_malformed_markers() -> None:
+    d = _load("_rookie_sop_doc")
+
+    assert d.parse_item_id(f"连上 WiFi　{d.item_marker('wifi')}") == "wifi"
+    assert d.parse_item_id("没有标记的一行") == ""
+    assert d.parse_item_id(d._ID_OPEN + "wifi") == ""  # 只有半个标记, 认不出
