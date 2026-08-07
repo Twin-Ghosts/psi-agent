@@ -1790,3 +1790,122 @@ def test_parse_item_id_handles_absent_or_malformed_markers() -> None:
     assert d.parse_item_id(f"连上 WiFi　{d.item_marker('wifi')}") == "wifi"
     assert d.parse_item_id("没有标记的一行") == ""
     assert d.parse_item_id(d._ID_OPEN + "wifi") == ""  # 只有半个标记, 认不出
+
+
+class _FakeDocApi:
+    """假的 feishu_api: 记录调用并按脚本返回, 不碰飞书。"""
+
+    def __init__(self, *, fail: str = "") -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.fail = fail
+        self.children: list[dict[str, Any]] = []
+
+    async def __call__(self, method: str, path: str, **kwargs: Any) -> str:
+        self.calls.append((method, path))
+        if self.fail and self.fail in path:
+            return json.dumps({"ok": False, "msg": f"boom at {self.fail}"}, ensure_ascii=False)
+        if path == "/open-apis/docx/v1/documents" and method == "POST":
+            return json.dumps({"ok": True, "data": {"document": {"document_id": "doc123"}}}, ensure_ascii=False)
+        if "/children" in path:
+            self.children.append(json.loads(kwargs.get("body_json") or "{}"))
+            return json.dumps({"ok": True}, ensure_ascii=False)
+        if path.endswith("/blocks"):
+            return json.dumps({"ok": True, "data": {"items": [], "has_more": False}}, ensure_ascii=False)
+        return json.dumps({"ok": True}, ensure_ascii=False)
+
+
+def test_provision_doc_creates_writes_grants_and_subscribes() -> None:
+    """一人一份详情页的四步: 建文档 → 写清单 → 授权给他 → 订阅变更。"""
+    da = _load("_rookie_sop_docapi")
+    api = _FakeDocApi()
+    rows = [_doc_row("wifi", "连上 WiFi", "未完成"), _doc_row("desk", "找到工位", "未完成")]
+
+    out = anyio.run(lambda: da.provision_doc(api, open_id="ou_x", name="张三", rows=rows))
+
+    assert out["ok"] is True
+    assert out["document_id"] == "doc123"
+    assert out["url"] == "https://feishu.cn/docx/doc123"
+    assert out["granted"] is True and out["subscribed"] is True
+    paths = [p for _, p in api.calls]
+    assert "/open-apis/docx/v1/documents" in paths
+    assert any("/children" in p for p in paths)
+    assert any("/permissions/doc123/members" in p for p in paths)
+    assert any("/files/doc123/subscribe" in p for p in paths)
+
+
+def test_provision_doc_reports_grant_failure_instead_of_claiming_success() -> None:
+    """授权失败意味着新人打不开自己的清单 —— 不能报成功。"""
+    da = _load("_rookie_sop_docapi")
+    api = _FakeDocApi(fail="/permissions/")
+    rows = [_doc_row("wifi", "连上 WiFi", "未完成")]
+
+    out = anyio.run(lambda: da.provision_doc(api, open_id="ou_x", name="张三", rows=rows))
+
+    assert out["ok"] is False
+    assert out["granted"] is False
+    assert "boom" in out["grant_error"]
+
+
+def test_provision_doc_reports_subscribe_failure() -> None:
+    """订阅失败意味着他勾了没人知道 —— 同样不能报成功。"""
+    da = _load("_rookie_sop_docapi")
+    api = _FakeDocApi(fail="/subscribe")
+    rows = [_doc_row("wifi", "连上 WiFi", "未完成")]
+
+    out = anyio.run(lambda: da.provision_doc(api, open_id="ou_x", name="张三", rows=rows))
+
+    assert out["ok"] is False
+    assert out["subscribed"] is False
+
+
+def test_append_blocks_chunks_large_payloads() -> None:
+    """飞书对单次子块数有上限, 33 项 + 分节标题会超, 必须分批。"""
+    da = _load("_rookie_sop_docapi")
+    api = _FakeDocApi()
+    blocks = [{"block_type": 17, "todo": {"elements": [], "style": {}}} for _ in range(120)]
+
+    out = anyio.run(lambda: da.append_blocks(api, "doc123", blocks))
+
+    assert out["ok"] is True and out["written"] == 120
+    assert len(api.children) == 3  # 50 + 50 + 20
+
+
+def test_read_blocks_stops_on_a_repeated_page_token() -> None:
+    """服务端若一直回 has_more=true, 不能无限转 —— fire=tool 的同步会挂死整个回合。"""
+    da = _load("_rookie_sop_docapi")
+
+    class _Pathological:
+        def __init__(self) -> None:
+            self.n = 0
+
+        async def __call__(self, method: str, path: str, **kwargs: Any) -> str:
+            self.n += 1
+            return json.dumps(
+                {"ok": True, "data": {"items": [], "has_more": True, "page_token": "same"}}, ensure_ascii=False
+            )
+
+    api = _Pathological()
+    out = anyio.run(lambda: da.read_blocks(api, "doc123"))
+
+    assert out["ok"] is True
+    assert api.n <= 3  # 同一个 token 立刻停, 不是转满 50 页
+
+
+def test_sync_doc_id_resolves_from_several_payload_shapes() -> None:
+    """事件可能把文档 token 放在 file_token 或 document_id, 两种都认; 认不出返回空串。"""
+    s = _load("rookie_sop_sync_doc")
+
+    assert s._doc_id_of({"document_id": "doc1"}) == "doc1"
+    assert s._doc_id_of({"file_token": "doc2"}) == "doc2"
+    assert s._doc_id_of({"token": "doc3"}) == "doc3"
+    assert s._doc_id_of({"other": "x"}) == ""
+    assert s._doc_id_of({"document_id": "   "}) == ""
+
+
+def test_sync_doc_refuses_without_a_document_id() -> None:
+    s = _load("rookie_sop_sync_doc")
+
+    out = json.loads(anyio.run(lambda: s.rookie_sop_sync_doc()))
+
+    assert out["ok"] is False
+    assert "document_id" in out["error"]
