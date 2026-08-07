@@ -94,7 +94,7 @@ async def sync_current_membership(config: Any, open_id: str, *, force: bool = Fa
             "Organization membership proof was rejected",
             False,
         )
-    except (httpx.RequestError, OSError, TimeoutError):
+    except httpx.RequestError, OSError, TimeoutError:
         return _error(
             "organization_membership_unverified",
             "Organization membership could not be verified",

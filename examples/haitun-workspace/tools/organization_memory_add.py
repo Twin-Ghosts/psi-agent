@@ -57,8 +57,7 @@ async def organization_memory_add(
     if not isinstance(source_ref, str) or not source_ref.strip():
         return _invalid("source_ref is required")
     if tags is not None and (
-        not isinstance(tags, list)
-        or any(not isinstance(tag, str) or not tag.strip() for tag in tags)
+        not isinstance(tags, list) or any(not isinstance(tag, str) or not tag.strip() for tag in tags)
     ):
         return _invalid("tags must be non-empty strings")
     result = await CLIENT.call_organization_tool(

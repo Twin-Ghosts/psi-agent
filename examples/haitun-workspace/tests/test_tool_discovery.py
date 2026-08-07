@@ -220,7 +220,7 @@ async def test_membership_assertion_reflects_group_roster(monkeypatch):
     async def list_members(_chat_id: str):
         return {"ok": True, "members": [{"id": "ou_member1", "name": "Member One"}]}
 
-    impl.list_chat_members_impl = list_members
+    impl.__dict__["list_chat_members_impl"] = list_members
     monkeypatch.setitem(sys.modules, "_feishu_impl", impl)
     sys.modules.pop("_fusion_memory_membership", None)
     membership = importlib.import_module("_fusion_memory_membership")
@@ -250,7 +250,7 @@ async def test_membership_sync_posts_once_until_refresh(monkeypatch):
         roster_calls.append(chat_id)
         return {"ok": True, "members": [{"id": "ou_member1"}]}
 
-    impl.list_chat_members_impl = list_members
+    impl.__dict__["list_chat_members_impl"] = list_members
     monkeypatch.setitem(sys.modules, "_feishu_impl", impl)
     sys.modules.pop("_fusion_memory_membership", None)
     membership = importlib.import_module("_fusion_memory_membership")
@@ -288,7 +288,7 @@ async def test_membership_sync_records_revocation_and_denies_access(monkeypatch)
     async def list_members(_chat_id: str):
         return {"ok": True, "members": []}
 
-    impl.list_chat_members_impl = list_members
+    impl.__dict__["list_chat_members_impl"] = list_members
     monkeypatch.setitem(sys.modules, "_feishu_impl", impl)
     sys.modules.pop("_fusion_memory_membership", None)
     membership = importlib.import_module("_fusion_memory_membership")
@@ -322,7 +322,7 @@ async def test_membership_sync_hides_unexpected_feishu_failure(monkeypatch):
     async def list_members(_chat_id: str):
         raise RuntimeError("transport internals and secret-value")
 
-    impl.list_chat_members_impl = list_members
+    impl.__dict__["list_chat_members_impl"] = list_members
     monkeypatch.setitem(sys.modules, "_feishu_impl", impl)
     sys.modules.pop("_fusion_memory_membership", None)
     membership = importlib.import_module("_fusion_memory_membership")
@@ -352,7 +352,7 @@ async def test_membership_sync_classifies_remote_http_status(monkeypatch):
     async def list_members(_chat_id: str):
         return {"ok": True, "members": [{"id": "ou_member1"}]}
 
-    impl.list_chat_members_impl = list_members
+    impl.__dict__["list_chat_members_impl"] = list_members
     monkeypatch.setitem(sys.modules, "_feishu_impl", impl)
     sys.modules.pop("_fusion_memory_membership", None)
     membership = importlib.import_module("_fusion_memory_membership")
@@ -720,9 +720,7 @@ class _MemoryStub:
             "error": {"code": "not_configured", "message": f"no response for {name}", "retryable": False},
         }
 
-    async def call_organization_tool(
-        self, name: str, arguments: dict[str, Any], *, retryable: bool
-    ) -> dict[str, Any]:
+    async def call_organization_tool(self, name: str, arguments: dict[str, Any], *, retryable: bool) -> dict[str, Any]:
         self.organization_calls.append((name, arguments, retryable))
         queue = self.responses.get(name)
         if queue:
