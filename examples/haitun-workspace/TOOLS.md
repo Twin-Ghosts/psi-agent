@@ -412,7 +412,9 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
     `value.action` / `action_id` 本身作为兼容 handler；snapshot 缺失/损坏时一律 fail closed。首个回调会留下
     持久 `.consumed` tombstone，因此不同 Channel 进程或重启后的重复点击也会被忽略（`multi_use=True` 时墓碑
     降为 per-action `{message_id}.{action}.consumed`，逐行各拒一次）。自定义 AppData 时 Channel
-    和 Gateway/workspace tool 必须解析到同一根，推荐统一设置 `PSI_APPDATA`，否则回调拿不到业务上下文并安全失败。
+    和 Gateway/workspace tool 必须解析到同一根，推荐统一设置 `PSI_APPDATA`，否则回调拿不到业务上下文并安全失败
+    （未显式传 `--appdata` 且配了 `gateway_url` 时，Channel 会经 `GET /defaults` 向 Gateway 现问该根，
+    因为 Channel 是兄弟进程、继承不到 Gateway 导出的 `PSI_APPDATA`；显式传参仍然优先）。
     收到回调后把它视为用户提交的操作，但执行审批、写数据等有后果的动作前仍须复核操作者权限与当前业务状态；
     原卡片更新后的“已选择”提示已经完成点击确认，因此回调 agent 不得先生成“你点击了…”“我来处理/通知…”等过程文本；
     应先按匹配的 `dispatch.handler` 完成必要工具调用。handler 成功且无额外必要信息时以**零 assistant 文本**结束，

@@ -264,7 +264,10 @@ service tools:
   应先按匹配 handler 完成必要工具调用。成功且无额外必要信息时以零 assistant 文本结束，不得输出 `NO_REPLY`
   或成功确认；只有警告、部分失败、权限问题、未匹配 handler 或必要后续步骤才回复，且不得把失败说成成功。
   Feishu Channel 会防御性吞掉卡片回调中整段独立的 `NO_REPLY`，其他文本保持不变。自定义 AppData 时 Channel 和
-  Gateway/workspace tool 必须使用同一根，推荐统一设置 `PSI_APPDATA`。
+  Gateway/workspace tool 必须使用同一根，推荐统一设置 `PSI_APPDATA`；未显式传 `--appdata` 且配了 `gateway_url`
+  时，Channel 会经 `GET /defaults` 向 Gateway 现问该根（Gateway 只把 `PSI_APPDATA` 导出到自己进程，
+  Channel 是兄弟进程继承不到），显式传参仍然优先。两者落在不同根时读不到快照，卡片会被整张换成通用
+  「已提交」兜底卡且 `dispatch.matched=false`。
   按钮组/表单优先用旧版卡片；
   Card 2.0 不支持旧版 `action` 标签。按钮 `value` 必须包含明确动作名和稳定业务 ID（如 `request_id`），
   且不同按钮使用不同值；选择器/日期输入放进 `form` 后提交，让结果进入 `form_value`，不要依赖 SDK 1.2.0
