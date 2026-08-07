@@ -4,8 +4,11 @@ import json
 import re
 from typing import Any
 
+from _assignment_display import resolve_feishu_display_name as _resolve_feishu_display_name
 from _assignment_tool_common import CLIENT, dumps_result, invalid_argument, parse_json_object
-from _feishu_impl import edit_card_impl, send_card_impl
+from _feishu_impl import edit_card_impl as _edit_card_impl
+from _feishu_impl import get_users_batch_impl as _get_users_batch_impl
+from _feishu_impl import send_card_impl as _send_card_impl
 
 from psi_agent.session.runtime_context import get_session_id
 
@@ -198,7 +201,7 @@ async def assignment_feedback(
         ensure_ascii=False,
     )
     if card_id is not None:
-        edited = await edit_card_impl(card_id, card_json, user_key)
+        edited = await _edit_card_impl(card_id, card_json, user_key)
         if not edited.get("ok"):
             return dumps_result(
                 {
@@ -239,7 +242,7 @@ async def assignment_feedback(
             if isinstance(bound_thread, dict):
                 thread = bound_thread
         if recipient_confirmation and callback_card_id is not None and callback_card_id != card_id:
-            recipient_edited = await edit_card_impl(callback_card_id, card_json, user_key)
+            recipient_edited = await _edit_card_impl(callback_card_id, card_json, user_key)
             if not recipient_edited.get("ok"):
                 return dumps_result(
                     {
@@ -264,7 +267,7 @@ async def assignment_feedback(
                     ),
                     ensure_ascii=False,
                 )
-                recipient_sent = await send_card_impl(
+                recipient_sent = await _send_card_impl(
                     recipient_open_id,
                     recipient_card_json,
                     "open_id",
@@ -333,7 +336,7 @@ async def assignment_feedback(
             )
         )
 
-    sent = await send_card_impl(
+    sent = await _send_card_impl(
         normalized_receive_id,
         card_json,
         receive_id_type,
@@ -442,12 +445,12 @@ def _build_feedback_card(
     if not shared_entries:
         raw_content = _required_text(payload.get("raw_content"))
         if raw_content is not None:
-            shared_entries = [raw_content]
+            shared_entries = [f"1. {raw_content}"]
     if shared_entries:
         elements.extend(
             [
                 _heading_element("共享反馈记录 (原文, 未改写)"),
-                _plain_text_element("\n".join(shared_entries)),
+                _plain_text_element("\n\n".join(shared_entries)),
             ]
         )
 
@@ -818,13 +821,15 @@ async def _assignment_directory(arrangement_id: str) -> dict[str, Any]:
             for participant in (value if isinstance(value, list) else [value])
             if isinstance(participant, dict)
         ]
+        resolved_names: list[str | None] = []
         for participant in participants:
-            name = _participant_name(participant)
+            name = await _resolved_participant_name(participant)
+            resolved_names.append(name)
             if name is None:
                 continue
             for open_id in _participant_open_ids(participant):
                 names_by_open_id.setdefault(open_id, name)
-        if len(participants) == 1 and (name := _participant_name(participants[0])):
+        if len(resolved_names) == 1 and (name := resolved_names[0]):
             unique_names_by_role[role] = name
     directory: dict[str, Any] = {}
     if title := _required_text(assignment.get("title")):
@@ -836,12 +841,10 @@ async def _assignment_directory(arrangement_id: str) -> dict[str, Any]:
     return directory
 
 
-def _participant_name(value: Any) -> str | None:
-    if not isinstance(value, dict):
-        return None
-    for field in ("display_name", "name", "user_name"):
-        if text := _required_text(value.get(field)):
-            return text
+async def _resolved_participant_name(value: dict[str, Any]) -> str | None:
+    for open_id in sorted(_participant_open_ids(value)):
+        if name := await _resolve_feishu_display_name(open_id, _get_users_batch_impl):
+            return name
     return None
 
 
@@ -890,7 +893,7 @@ def _shared_entry_lines(
         author = _entry_author_label(entry, directory=directory)
         version = entry.get("version")
         prefix = f"v{version} {author}" if isinstance(version, int) else author
-        lines.append(f"{prefix}: {content}")
+        lines.append(f"{len(lines) + 1}. {prefix}: {content}")
     return lines
 
 
