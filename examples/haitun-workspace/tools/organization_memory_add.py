@@ -60,7 +60,7 @@ async def organization_memory_add(
         not isinstance(tags, list) or any(not isinstance(tag, str) or not tag.strip() for tag in tags)
     ):
         return _invalid("tags must be non-empty strings")
-    result = await CLIENT.call_organization_tool(
+    result = await CLIENT.call_organization_write_tool(
         "organization_memory_add",
         {
             "content": content.strip(),

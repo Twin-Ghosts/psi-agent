@@ -411,7 +411,30 @@ class MemoryMcpRouter:
     async def call_tool(self, name: str, arguments: dict[str, Any], *, retryable: bool) -> dict[str, Any]:
         return await self.call_tool_for_session(get_session_id(), name, arguments, retryable=retryable)
 
-    async def call_organization_tool(
+    async def call_organization_read_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        retryable: bool,
+    ) -> dict[str, Any]:
+        session_id = get_session_id().strip()
+        if _open_id_from_session(session_id) is None:
+            return _error(
+                "memory_user_not_configured",
+                "Organization memory requires a trusted Feishu Session",
+                False,
+            )
+        result = await self.call_tool_for_session(session_id, name, arguments, retryable=retryable)
+        return await self._retry_organization_binding(
+            session_id,
+            name,
+            arguments,
+            result,
+            retryable=retryable,
+        )
+
+    async def call_organization_write_tool(
         self,
         name: str,
         arguments: dict[str, Any],
@@ -439,8 +462,25 @@ class MemoryMcpRouter:
             if membership.get("ok") is not True:
                 return membership
             result = await self.call_tool_for_session(session_id, name, arguments, retryable=retryable)
-            error = result.get("error")
-            error_code = error.get("code") if isinstance(error, dict) else None
+        return await self._retry_organization_binding(
+            session_id,
+            name,
+            arguments,
+            result,
+            retryable=retryable,
+        )
+
+    async def _retry_organization_binding(
+        self,
+        session_id: str,
+        name: str,
+        arguments: dict[str, Any],
+        result: dict[str, Any],
+        *,
+        retryable: bool,
+    ) -> dict[str, Any]:
+        error = result.get("error")
+        error_code = error.get("code") if isinstance(error, dict) else None
         if error_code != "organization_required" or not self._config.auto_register_feishu:
             return result
         return await self._call_with_refreshed_registration(

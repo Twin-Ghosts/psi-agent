@@ -48,7 +48,7 @@ async def memory_search(
             },
             ensure_ascii=False,
         )
-    caller = CLIENT.call_organization_tool if normalized_visibility == "organization" else CLIENT.call_tool
+    caller = CLIENT.call_organization_read_tool if normalized_visibility == "organization" else CLIENT.call_tool
     result = await caller(
         "memory_search",
         {"query": query, "limit": bounded_limit, "visibility": normalized_visibility},
