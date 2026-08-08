@@ -9,6 +9,8 @@ from aiohttp import web
 from any_llm.api import ChatCompletionChunk, acompletion
 from loguru import logger
 
+from psi_agent.protocol import make_compaction_signal, make_error_chunk
+
 
 async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
     logger.info("Received chat completion request")
@@ -101,15 +103,10 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
             await response.write(f"data: {data}\n\n".encode())
         if compaction_needed:
             signal = json.dumps(
-                {
-                    "id": "compaction",
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": "compaction_needed"}],
-                    "psi_compaction": {
-                        "needed": True,
-                        "prompt_tokens": compaction_usage.get("prompt_tokens", 0),
-                        "threshold": max_context_tokens,
-                    },
-                }
+                make_compaction_signal(
+                    prompt_tokens=compaction_usage.get("prompt_tokens", 0),
+                    threshold=max_context_tokens,
+                )
             )
             logger.debug(f"SSE compaction signal: {signal[:500]}")
             await response.write(f"data: {signal}\n\n".encode())
@@ -121,12 +118,7 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
     except Exception as e:
         upstream_error = True
         logger.error(f"Error forwarding to upstream (provider={provider!r}, model={model!r}): {e!r}")
-        err_chunk = json.dumps(
-            {
-                "id": "error",
-                "choices": [{"index": 0, "delta": {"content": f"[Upstream Error]: {e}"}, "finish_reason": "error"}],
-            }
-        )
+        err_chunk = json.dumps(make_error_chunk(f"[Upstream Error]: {e}"))
         logger.debug(f"SSE error chunk: {err_chunk[:1000]}")
         try:
             await response.write(f"data: {err_chunk}\n\n".encode())
