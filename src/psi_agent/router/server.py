@@ -12,6 +12,7 @@ from aiohttp import web
 from loguru import logger
 
 from psi_agent._sockets import create_site
+from psi_agent.protocol import make_error_chunk
 
 from .errors import InvalidRouterRequestError, RouterError
 from .request import routing_scope_from_body
@@ -143,16 +144,7 @@ async def _write_event(*, response: web.StreamResponse, event: dict[str, Any]) -
 
 
 async def _write_sse_error(*, response: web.StreamResponse, error: Exception) -> None:
-    event = {
-        "id": "error",
-        "choices": [
-            {
-                "index": 0,
-                "delta": {"content": f"[Router Error]: {error}"},
-                "finish_reason": "error",
-            }
-        ],
-    }
+    event = make_error_chunk(f"[Router Error]: {error}")
     try:
         await _write_event(response=response, event=event)
     except Exception as write_error:

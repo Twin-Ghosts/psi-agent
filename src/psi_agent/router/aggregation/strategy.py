@@ -10,6 +10,8 @@ from typing import Any, Protocol, cast
 import anyio
 from loguru import logger
 
+from psi_agent.protocol import FINISH_REASON_STOP, FINISH_REASON_TOOL_CALLS, is_terminal_finish
+
 from ..errors import RouterUpstreamError
 from ..models import CompletionResult, RouterTarget
 from ..privacy import redact_private_sockets
@@ -94,7 +96,8 @@ class AggregationStrategy:
         if not any(item.status == "success" for item in feedback):
             raise AggregationError("All aggregation upstreams failed")
         if self.config.require_all_targets and any(
-            item.status != "success" or item.finish_reason not in {"stop", "tool_calls"} for item in feedback
+            item.status != "success" or item.finish_reason not in {FINISH_REASON_STOP, FINISH_REASON_TOOL_CALLS}
+            for item in feedback
         ):
             raise AggregationError("Strict aggregation requires every target to complete successfully")
 
@@ -126,7 +129,7 @@ class AggregationStrategy:
                     tool_calls = delta.get("tool_calls") if isinstance(delta, dict) else None
                     if (isinstance(content, str) and content) or (isinstance(tool_calls, list) and tool_calls):
                         saw_usable = True
-                    if isinstance(current_finish, str) and current_finish != "compaction_needed":
+                    if isinstance(current_finish, str) and is_terminal_finish(current_finish):
                         finish_reason = current_finish
                     yield event
         except AggregationError:
