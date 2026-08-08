@@ -13,6 +13,7 @@ from typing import Any, Protocol
 from aiohttp import web
 from loguru import logger
 
+from psi_agent.protocol import FINISH_REASON_ERROR
 from psi_agent.session.protocol import AgentChunk, AgentError, ChatCompletionChunk, DeltaMessage, StreamChoice
 
 
@@ -109,7 +110,7 @@ class ChannelAdapter:
                 StreamChoice(
                     index=0,
                     delta=DeltaMessage(content=message),
-                    finish_reason="error",
+                    finish_reason=FINISH_REASON_ERROR,
                 )
             ],
         )

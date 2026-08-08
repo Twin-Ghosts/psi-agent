@@ -12,6 +12,11 @@ import aiohttp
 from loguru import logger
 
 from psi_agent._sockets import resolve_connector_and_endpoint
+from psi_agent.protocol import (
+    FINISH_REASON_ERROR,
+    SSE_DONE,
+    parse_sse_data,
+)
 from psi_agent.session.protocol import AiDelta
 
 
@@ -52,16 +57,16 @@ class AiClient:
             if resp.status != 200:
                 error_text = await resp.text()
                 logger.error(f"AI error from {self.ai_socket!r}: {error_text[:1000]!r}")
-                yield AiDelta(finish_reason="error", content=f"[AI Error: {resp.status}]")
+                yield AiDelta(finish_reason=FINISH_REASON_ERROR, content=f"[AI Error: {resp.status}]")
                 return
 
             logger.debug("Starting to consume SSE stream")
             async for raw_line in resp.content:
                 line = raw_line.decode().strip()
-                if not line or not line.startswith("data: "):
+                data_str = parse_sse_data(line)
+                if data_str is None:
                     continue
-                data_str = line[6:]
-                if data_str == "[DONE]":
+                if data_str == SSE_DONE:
                     continue
 
                 try:
@@ -77,7 +82,8 @@ class AiClient:
                 if len(choices_data) > 1:
                     logger.warning(f"Expected 1 choice, got {len(choices_data)}, yielding error")
                     yield AiDelta(
-                        finish_reason="error", content=f"[AI Error: expected 1 choice, got {len(choices_data)}]"
+                        finish_reason=FINISH_REASON_ERROR,
+                        content=f"[AI Error: expected 1 choice, got {len(choices_data)}]",
                     )
                     return
                 if not choices_data:
