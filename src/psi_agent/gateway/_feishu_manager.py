@@ -139,6 +139,20 @@ class FeishuManager:
             return _private_space.private_dir(root, _sanitize_open_id(key))
         return os.path.join(root, _sanitize_open_id(key).replace("-", "_"))
 
+    def is_external(self, open_id: str, *, chat_id: str = "", chat_type: str = "") -> bool:
+        """该会话是否由**别的容器**里的 Session 托管 (``PSI_FEISHU_EXTERNAL_SESSIONS`` 命中)。
+
+        供 ``/feishu/route`` 如实告诉 channel: 外部容器有自己的文件系统, 本进程下载的附件
+        那边根本看不见 (实测 channel 把文件存到主容器的 ``~/Downloads/.psi/<date>/``, 而
+        专用容器里该目录不存在 → agent 报「没收到简历」)。channel 据此改为透传 file_key,
+        由真正处理消息的容器自己下载。
+
+        判定只读环境变量, 与 ``route`` 用的是同一份 ``external_sessions()``, 不会出现
+        「route 走外部、这里说本地」的分歧。
+        """
+        key = self._route_key(open_id, chat_id, chat_type)
+        return bool(key) and key in external_sessions()
+
     async def route(
         self,
         open_id: str,

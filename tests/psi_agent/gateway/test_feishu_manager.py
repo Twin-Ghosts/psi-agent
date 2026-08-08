@@ -441,3 +441,28 @@ async def test_route_others_unaffected_by_external(tmp_path: str, monkeypatch: p
     finally:
         await _drain(sm, am)
         await tg.__aexit__(None, None, None)
+
+
+def test_is_external_matches_route_key(tmp_path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """谓词与 ``route`` 用同一份登记表: 私聊按 open_id, 群聊按 ``chat:<chat_id>``。"""
+    monkeypatch.setenv(
+        "PSI_FEISHU_EXTERNAL_SESSIONS",
+        "ou_secret=http://psi-luolin:8081,chat:oc_secret=http://psi-luolin:8081",
+    )
+    fm = FeishuManager(_sm=None, _ai_id="ai1", _workspace_root=str(tmp_path))
+
+    assert fm.is_external("ou_secret") is True
+    assert fm.is_external("ou_plain") is False
+    assert fm.is_external("ou_plain", chat_id="oc_secret", chat_type="group") is True
+    assert fm.is_external("ou_secret", chat_id="oc_plain", chat_type="group") is False
+    # 群聊缺 chat_id 时 route 回落到 open_id, 谓词必须跟着回落, 否则两者会打架。
+    assert fm.is_external("ou_secret", chat_type="group") is True
+
+
+def test_is_external_false_when_unset(tmp_path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """未配置外部会话 → 恒 False, 附件照旧本进程下载。"""
+    monkeypatch.delenv("PSI_FEISHU_EXTERNAL_SESSIONS", raising=False)
+    fm = FeishuManager(_sm=None, _ai_id="ai1", _workspace_root=str(tmp_path))
+
+    assert fm.is_external("ou_secret") is False
+    assert fm.is_external("") is False
