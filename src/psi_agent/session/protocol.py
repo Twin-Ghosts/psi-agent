@@ -1,95 +1,53 @@
-"""Types shared across the session layer — data models and serialisation."""
+"""Types shared across the session layer — data models and serialisation.
+
+The wire-format types and every shared protocol constant now live in
+``psi_agent.protocol`` (the cross-component owner) and are re-exported here so
+existing ``psi_agent.session.protocol`` imports keep working.  Prefer importing
+shared names from ``psi_agent.protocol`` in new code; this module's own
+contribution is the Session-only types below.
+"""
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-# Provenance for ``delta.reasoning`` / ``AgentChunk.reasoning`` (UI whitelist).
-# Thinking + tool progress stay in one ``reasoning`` slot (Session↔AI shape
-# isomorphism); ``kind`` discriminates render / filter without splitting the slot.
-REASONING_KIND_THINKING = "thinking"
-REASONING_KIND_TOOL_CALL = "tool_call"
-REASONING_KIND_TOOL_RESULT = "tool_result"
+from psi_agent.protocol import (
+    FINISH_REASON_COMPACTION_NEEDED,
+    FINISH_REASON_ERROR,
+    FINISH_REASON_STOP,
+    FINISH_REASON_TOOL_CALLS,
+    REASONING_KIND_THINKING,
+    REASONING_KIND_TOOL_CALL,
+    REASONING_KIND_TOOL_RESULT,
+    ChatCompletionChunk,
+    DeltaMessage,
+    StreamChoice,
+    is_auxiliary_finish,
+    is_terminal_finish,
+)
 
-
-@dataclass
-class DeltaMessage:
-    """One SSE delta fragment — OpenAI Chat Completion Chunk format.
-
-    Channel-side only.  ``ChannelAdapter.to_chat_completion_chunk()`` maps an
-    ``AgentChunk`` into a ``DeltaMessage``, then wraps it in a
-    ``ChatCompletionChunk`` for SSE serialisation.
-
-    The AI side uses ``AiDelta`` instead — ``DeltaMessage`` never appears in the
-    agent loop.
-    """
-
-    content: str | None = None
-    role: str | None = None
-    reasoning: str | None = None
-    kind: str | None = None
-    tool_calls: list[dict[str, Any]] | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {}
-        if self.content is not None:
-            d["content"] = self.content
-        if self.role is not None:
-            d["role"] = self.role
-        if self.reasoning is not None:
-            d["reasoning"] = self.reasoning
-        if self.kind is not None:
-            d["kind"] = self.kind
-        if self.tool_calls is not None:
-            d["tool_calls"] = self.tool_calls
-        return d
-
-
-@dataclass
-class StreamChoice:
-    """A single choice in a streaming Chat Completion Chunk.
-
-    Channel-side only.  Holds one ``DeltaMessage`` and an optional
-    ``finish_reason``.
-    """
-
-    index: int = 0
-    delta: DeltaMessage = field(default_factory=DeltaMessage)
-    finish_reason: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {"index": self.index, "delta": self.delta.to_dict()}
-        if self.finish_reason is not None:
-            d["finish_reason"] = self.finish_reason
-        return d
-
-
-@dataclass
-class ChatCompletionChunk:
-    """OpenAI-compatible streaming Chat Completion Chunk.
-
-    Channel-side only.  ``ChannelAdapter`` constructs these from ``AgentChunk``
-    and serialises them as SSE ``data:`` lines via ``to_sse()``.
-    """
-
-    id: str = "chatcmpl-unknown"
-    object: str = "chat.completion.chunk"
-    created: int = 0
-    choices: list[StreamChoice] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "object": self.object,
-            "created": self.created,
-            "choices": [c.to_dict() for c in self.choices],
-        }
-
-    def to_sse(self) -> str:
-        return f"data: {json.dumps(self.to_dict(), ensure_ascii=False)}\n\n"
+__all__ = [
+    "FINISH_REASON_COMPACTION_NEEDED",
+    "FINISH_REASON_ERROR",
+    "FINISH_REASON_STOP",
+    "FINISH_REASON_TOOL_CALLS",
+    "REASONING_KIND_THINKING",
+    "REASONING_KIND_TOOL_CALL",
+    "REASONING_KIND_TOOL_RESULT",
+    "AgentChunk",
+    "AgentError",
+    "AgentRunResult",
+    "AgentRunStatus",
+    "AgentStopCause",
+    "AiDelta",
+    "ChatCompletionChunk",
+    "DeltaMessage",
+    "StreamChoice",
+    "is_auxiliary_finish",
+    "is_terminal_finish",
+]
 
 
 class AgentError(Exception):
