@@ -151,7 +151,7 @@ __all__ = [...]
 ## `psi_agent/_feishu_routing.py` 内容
 
 ```python
-_GROUP_CHAT_TYPES = frozenset({"group", "topic"})
+GROUP_CHAT_TYPES = frozenset({"group", "topic"})
 
 
 def is_group_chat(chat_id: str, chat_type: str) -> bool:
@@ -160,7 +160,7 @@ def is_group_chat(chat_id: str, chat_type: str) -> bool:
     ``chat_id`` 缺失时不能按群路由（否则会建出 ``feishu-chat-`` 这种无主
     session），故退回按发送者 open_id——宁可不隔离，也不建垃圾 session。
     """
-    return chat_type in _GROUP_CHAT_TYPES and bool(chat_id)
+    return chat_type in GROUP_CHAT_TYPES and bool(chat_id)
 
 
 def route_key(open_id: str, chat_id: str, chat_type: str) -> str:
