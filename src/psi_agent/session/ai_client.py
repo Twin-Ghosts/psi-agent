@@ -64,9 +64,10 @@ class AiClient:
             async for raw_line in resp.content:
                 line = raw_line.decode().strip()
                 data_str = parse_sse_data(line)
-                if data_str is None:
-                    continue
-                if data_str == SSE_DONE:
+                # Empty payloads are heartbeats on some OpenAI-compatible
+                # servers; skip them silently rather than letting them reach
+                # ``json.loads`` and log a warning per beat.
+                if not data_str or data_str == SSE_DONE:
                     continue
 
                 try:
