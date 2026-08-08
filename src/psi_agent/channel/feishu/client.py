@@ -290,8 +290,17 @@ def _attachment_handoff(sources: list[Any]) -> str:
     所以这里只给出 ``message_id`` + ``file_key`` + 文件名: 对端 agent 用 ``feishu_image_get``
     即可自取 (它有 tenant token, 走 REST 不需要 WS)。刻意不编成 ``[RECV:]`` —— 那个标记的
     契约是"路径在本地可读", 跨容器时不成立, 混用只会让下游把不可读的路径当真。
+
+    块自带取件说明: 对端只看得见这段文本, 没有别处会告诉它该调哪个工具、存到哪
+    (``feishu_image_get`` 的 ``save_path`` 是必填、无默认)。少了这句, agent 只能猜, 而
+    "猜不到就跟用户说没收到"正是本函数要消灭的故障。
     """
-    lines: list[str] = ["<feishu_attachments>"]
+    lines: list[str] = [
+        "<feishu_attachments>",
+        "<!-- 附件未下载: 你与飞书通道在不同容器, 它下的文件你读不到。用 "
+        "feishu_image_get(message_id=..., file_key=..., save_path=..., resource_type=...) "
+        "自取, save_path 建议 inbox/<今天日期>/<name>。取到后再 read_pdf / describe_image。 -->",
+    ]
     for src in sources:
         src_id = getattr(src, "message_id", "") or ""
         for r in getattr(src, "resources", None) or []:

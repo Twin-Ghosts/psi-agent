@@ -1178,6 +1178,23 @@ async def test_build_chunks_external_hands_off_instead_of_downloading(monkeypatc
     assert not (tmp_path / ".psi").exists()
 
 
+def test_attachment_handoff_carries_pickup_instructions():
+    """块必须自带取件说明 —— 对端没有别的地方能知道该怎么取。
+
+    实测缺口: 对端 workspace 的 AGENTS.md / TOOLS.md 里没有一处提到
+    ``<feishu_attachments>``, 而 ``feishu_image_get`` 的 ``save_path`` 是必填无默认。
+    只发裸 XML, agent 就得猜工具名和落盘位置; 猜不中就又变成「跟用户说没收到」。
+    """
+    handoff = client._attachment_handoff([_file_source("om_1", "fk_1", "简历.pdf")])
+
+    assert "feishu_image_get" in handoff, "得点名工具, 别让对端猜"
+    assert "save_path" in handoff, "save_path 必填无默认, 必须给出落盘约定"
+    # 说明得解释「为什么没有文件」, 否则 agent 会先去找不存在的路径。
+    assert "不同容器" in handoff or "另一个容器" in handoff
+    # 说明是注释, 不能污染 file 条目的解析。
+    assert handoff.count("<file ") == 1
+
+
 @pytest.mark.anyio
 async def test_build_chunks_external_skips_audio_download(monkeypatch, tmp_path):
     """语音同理: 不在本容器抓, 只把 audio key 交过去。"""
