@@ -37,6 +37,11 @@ def _text_run(content: str, bold: bool = False) -> dict[str, Any]:
     return {"text_run": {"content": content, "text_element_style": style}}
 
 
+def _link_run(url: str) -> dict[str, Any]:
+    """一段可点的链接。飞书文档的 text_run 用 text_element_style.link.url 承载超链接。"""
+    return {"text_run": {"content": url, "text_element_style": {"link": {"url": url}}}}
+
+
 def item_marker(item_id: str) -> str:
     """条目在文档里的可识别标记。同步时按它匹配, 不依赖块顺序。"""
     return f"{_ID_OPEN}{item_id}{_ID_CLOSE}"
@@ -114,6 +119,34 @@ def build_doc_blocks(
                         "text": {
                             "elements": [_text_run(f"（不适用）{title}")],
                             "style": {},
+                        },
+                    }
+                )
+                continue
+            url = str(row.get("必读链接") or "").strip()
+            if url:
+                # 必读材料: 先给一行可点的链接, 再给一个「我已阅读并理解」的勾选框。
+                # 刻意不用笼统的「完成」—— 阅读类的验收就是「读过并理解」, 说清楚
+                # 要确认的是什么, 比让人对着一个「完成」猜要好。
+                blocks.append(
+                    {
+                        "block_type": BLOCK_TEXT,
+                        "text": {
+                            "elements": [
+                                _text_run(f"📖 {title}", bold=True),
+                                _text_run("　"),
+                                _link_run(url),
+                            ],
+                            "style": {},
+                        },
+                    }
+                )
+                blocks.append(
+                    {
+                        "block_type": BLOCK_TODO,
+                        "todo": {
+                            "elements": [_text_run(f"我已阅读并理解　{item_marker(item_id)}")],
+                            "style": {"done": status == "已完成"},
                         },
                     }
                 )

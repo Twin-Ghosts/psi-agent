@@ -36,6 +36,9 @@ DETAIL_FIELDS: list[dict[str, Any]] = [
     {"field_name": "模块", "type": 1},
     {"field_name": "项", "type": 1},
     {"field_name": "验收标准", "type": 1},
+    # 必读材料的链接。填了它的行在详情页渲染成「链接 + 我已阅读并理解」,
+    # 而不是笼统的「完成」勾选框。
+    {"field_name": "必读链接", "type": 1},
     {
         "field_name": "状态",
         "type": 3,
@@ -121,6 +124,7 @@ def detail_row_fields(
         "模块": item.module,
         "项": item.title,
         "验收标准": item.acceptance,
+        "必读链接": item.url,
         "状态": status,
         "入职日": to_millis(onboard),
         "截止日": to_millis(_cfg.due_date(onboard, item.window_days)),

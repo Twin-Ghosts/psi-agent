@@ -701,20 +701,20 @@ def _real_rows(items: Any, onboard: date, *, done_ids: set[str] = frozenset()) -
     return rows
 
 
-def test_real_config_has_28_general_items_and_5_dev_only_items() -> None:
-    """先钉死真实 yaml 的数字: 27 个通用项 + role_confirmed + 5 个 dev_only —— 与需求里
-    的 28/33 目标对齐, 后面的分母测试都建立在这个前提上。"""
+def test_real_config_has_23_general_items_and_5_dev_only_items() -> None:
+    """钉死 V3 的数字: 22 个通用项 + role_confirmed + 5 个 dev_only = 28。
+    非研发分母 23, 研发分母 28。后面的分母测试都建立在这个前提上。"""
     items = _real_items()
     non_dev_only = [i for i in items if not i.dev_only]
     dev_only = [i for i in items if i.dev_only]
 
-    assert len(items) == 33
-    assert len(non_dev_only) == 28
+    assert len(items) == 28
+    assert len(non_dev_only) == 23
     assert len(dev_only) == 5
     assert any(i.item_id == "role_confirmed" for i in non_dev_only)
 
 
-def test_day_one_denominator_with_real_config_is_33_because_dev_items_are_tickable() -> None:
+def test_day_one_denominator_with_real_config_is_28_because_dev_items_are_tickable() -> None:
     """Day 1, 角色未答: 分母是 33 —— 5 个开发项与角色选择同在一张卡上、立即可点,
     所以从落地起就计入分母; role_confirmed 也未完成且计入。
     选「非研发人员」后那 5 项才被标不适用、分母降到 28。
@@ -726,12 +726,12 @@ def test_day_one_denominator_with_real_config_is_33_because_dev_items_are_tickab
 
     got = p.summarize(rows, onboard)
 
-    assert got.total == 33
+    assert got.total == 28
     assert got.done == 0
     assert got.all_done is False
 
 
-def test_applicable_total_after_nondev_is_28_with_role_confirmed_done() -> None:
+def test_applicable_total_after_nondev_is_23_with_role_confirmed_done() -> None:
     """选「非研发」后: 5 个开发项标不适用(退出分母), role_confirmed 已完成 ——
     分母仍是 28(27 通用 + role_confirmed), 但分子里包含 role_confirmed 这一项。"""
     p = _load("_rookie_sop_progress")
@@ -746,13 +746,13 @@ def test_applicable_total_after_nondev_is_28_with_role_confirmed_done() -> None:
     got = p.summarize(rows, onboard)
     applicable_ids = {i.item_id for i in cfg.applicable_items(items, "nondev")}
 
-    assert got.total == 28
+    assert got.total == 23
     assert got.done == 1
     assert "role_confirmed" in applicable_ids
-    assert len(applicable_ids) == 28
+    assert len(applicable_ids) == 23
 
 
-def test_applicable_total_after_dev_is_33_with_all_five_dev_items_live() -> None:
+def test_applicable_total_after_dev_is_28_with_all_five_dev_items_live() -> None:
     """选「研发」后: 5 个开发项复活成未完成(不再是不适用), role_confirmed 已完成 ——
     分母变成 33(27 通用 + role_confirmed + 5 开发项), 全都参与催办/进度计算。"""
     p = _load("_rookie_sop_progress")
@@ -769,9 +769,9 @@ def test_applicable_total_after_dev_is_33_with_all_five_dev_items_live() -> None
     got = p.summarize(rows, onboard)
     applicable_ids = {i.item_id for i in cfg.applicable_items(items, "dev")}
 
-    assert got.total == 33
+    assert got.total == 28
     assert got.done == 1
-    assert len(applicable_ids) == 33
+    assert len(applicable_ids) == 28
     assert all(i.item_id in applicable_ids for i in items if i.dev_only)
 
 
@@ -784,16 +784,16 @@ def test_unanswered_role_card_cannot_graduate_even_with_every_general_item_done(
     items = _real_items()
     onboard = date(2026, 8, 5)
     general_done_ids = {i.item_id for i in items if not i.dev_only and i.item_id != "role_confirmed"}
-    assert len(general_done_ids) == 27  # 确保真的是「其余全做完」, 不是漏了几项
+    assert len(general_done_ids) == 22  # 确保真的是「其余全做完」, 不是漏了几项
 
     rows = _real_rows(items, onboard, done_ids=general_done_ids)
 
     got = p.summarize(rows, onboard)
 
-    # 分母 33 = 27 通用 + role_confirmed + 5 开发项; 做完 27 个通用项后
+    # 分母 28 = 22 通用 + role_confirmed + 5 开发项; 做完 22 个通用项后
     # 仍差 role_confirmed 与 5 个开发项, 所以 all_done 必须是 False。
-    assert got.total == 33
-    assert got.done == 27
+    assert got.total == 28
+    assert got.done == 22
     assert got.all_done is False
 
 
@@ -2013,3 +2013,87 @@ def test_doc_edited_mapper_extracts_the_token_and_skips_other_file_types() -> No
     assert mod.map_event({"event": {"file_token": "sht1", "file_type": "sheet"}}) == []
     # 认不出 token —— 不该产出空 token 的信封让下游去读一个不存在的文档
     assert mod.map_event({"event": {"file_type": "docx"}}) == []
+
+
+def _link_row(item_id: str, title: str, url: str, status: str = "未完成") -> dict[str, Any]:
+    return {
+        "记录键": f"ou_x:{item_id}",
+        "项": title,
+        "验收标准": "",
+        "必读链接": url,
+        "模块": "必读材料",
+        "状态": status,
+        "入职日": date(2026, 8, 5),
+        "截止日": date(2026, 8, 7),
+    }
+
+
+def test_link_items_render_as_a_link_plus_read_and_understood() -> None:
+    """必读材料给「可点链接 + 我已阅读并理解」, 而不是笼统的「完成」。
+
+    阅读类的验收就是「读过并理解」—— 说清楚要确认什么, 比让人对着一个
+    「完成」猜要好。
+    """
+    d = _load("_rookie_sop_doc")
+    url = "https://genuineknowledge.feishu.cn/wiki/JyCLwr60lineYBkkJmQcZf0PnTb"
+    rows = [_link_row("read_culture", "企业文化总则", url)]
+
+    blocks = d.build_doc_blocks(rows, name="张三")
+
+    # 链接那一行是普通文本块, 里面带可点的 link
+    text_blocks = [b for b in blocks if b["block_type"] == d.BLOCK_TEXT]
+    linked = [b for b in text_blocks if any("link" in str(e) for e in b["text"]["elements"])]
+    assert linked, "必读项应渲染出一行可点链接"
+    assert url in str(linked[0])
+    assert "企业文化总则" in str(linked[0])
+
+    # 勾选框的文字是「我已阅读并理解」, 且带 item 标记以便同步
+    todos = [b for b in blocks if b["block_type"] == d.BLOCK_TODO]
+    assert len(todos) == 1
+    label = todos[0]["todo"]["elements"][0]["text_run"]["content"]
+    assert "我已阅读并理解" in label
+    assert d.item_marker("read_culture") in label
+    # 不该出现笼统的「完成」字样
+    assert "完成" not in label.replace("我已阅读并理解", "")
+
+
+def test_link_item_done_state_comes_from_the_table() -> None:
+    """已读过的必读项, 重建文档时勾选框仍是勾上的。"""
+    d = _load("_rookie_sop_doc")
+    rows = [_link_row("read_culture", "企业文化总则", "https://x.example", status="已完成")]
+
+    blocks = d.build_doc_blocks(rows, name="张三")
+
+    todos = [b for b in blocks if b["block_type"] == d.BLOCK_TODO]
+    assert todos[0]["todo"]["style"]["done"] is True
+
+
+def test_link_item_sync_reads_back_like_any_other_item() -> None:
+    """必读项的勾选状态走同一套同步 —— 靠标记匹配, 与普通项无差别。"""
+    d = _load("_rookie_sop_doc")
+    blocks = [
+        {
+            "block_type": d.BLOCK_TODO,
+            "todo": {
+                "elements": [{"text_run": {"content": f"我已阅读并理解　{d.item_marker('read_culture')}"}}],
+                "style": {"done": True},
+            },
+        }
+    ]
+
+    assert d.read_doc_state(blocks) == {"read_culture": True}
+
+
+def test_real_config_v3_has_the_three_required_readings() -> None:
+    """钉死 V3 的真实数字: 28 项、3 个必读链接、5 个 dev_only。"""
+    items = _real_items()
+    links = [i for i in items if i.url]
+    dev_only = [i for i in items if i.dev_only]
+
+    assert len(items) == 28
+    assert {i.item_id for i in links} == {"read_culture", "read_todo_spec", "read_dev_spec"}
+    assert len(dev_only) == 5
+    # 每个必读项都得有真链接, 不能留空
+    assert all(i.url.startswith("https://") for i in links)
+    # role_confirmed 仍是全员项(非 dev_only), 否则不答角色就能毕业
+    assert any(i.item_id == "role_confirmed" and not i.dev_only for i in items)

@@ -23,6 +23,9 @@ class SopItem:
     acceptance: str
     window_days: int
     dev_only: bool
+    # 填了 url 的是必读材料: 详情页渲染成链接 + 单个「我已阅读并理解」勾选框,
+    # 而不是笼统的「完成」—— 阅读类的验收就是「读过并理解」。
+    url: str = ""
 
 
 def load_sop(cfg: dict[str, Any]) -> list[SopItem]:
@@ -54,6 +57,7 @@ def load_sop(cfg: dict[str, Any]) -> list[SopItem]:
                     acceptance=str(raw.get("acceptance") or "").strip(),
                     window_days=window,
                     dev_only=bool(raw.get("dev_only")),
+                    url=str(raw.get("url") or "").strip(),
                 )
             )
     return items
