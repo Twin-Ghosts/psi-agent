@@ -63,10 +63,6 @@ class FeishuManager:
     _routes: dict[str, str] = field(default_factory=dict)
     _lock: anyio.Lock = field(default_factory=anyio.Lock)
 
-    def _route_key(self, open_id: str, chat_id: str, chat_type: str) -> str:
-        """路由表/派生用的键 —— 判定与 Channel 侧共用 ``psi_agent._feishu_routing``。"""
-        return route_key(open_id, chat_id, chat_type)
-
     def _session_id(self, key: str) -> str:
         """派生确定性 session_id, 加 ``feishu-`` 前缀与 SPA 手建 session 命名空间隔离。
 
@@ -105,7 +101,7 @@ class FeishuManager:
         Session; 之后命中缓存或 adopt 已存在 Session。``ai_id`` 最终为空时抛 ``ValueError``
         (由 handler 转 400); 私聊而 ``open_id`` 为空时同样抛 ``ValueError`` (群聊不要求)。
         """
-        key = self._route_key(open_id, chat_id, chat_type)
+        key = route_key(open_id, chat_id, chat_type)
         if not key:
             raise ValueError("open_id must not be empty")
         sid = self._session_id(key)
