@@ -36,8 +36,6 @@ BLOCK_TEXT = 2
 BLOCK_HEADING2 = 4
 BLOCK_TODO = 17
 BLOCK_DIVIDER = 22
-BLOCK_TABLE = 31
-BLOCK_TABLE_CELL = 32
 
 # 普通条目只有一个 todo, 勾上即完成。
 ROLE_DONE = "done"
@@ -84,18 +82,6 @@ def _todo(elements: list[dict[str, Any]], done: bool) -> dict[str, Any]:
 
 def module_emoji(module: str) -> str:
     return _MODULE_EMOJI.get(module, "▸")
-
-
-def understanding_todos() -> tuple[dict[str, Any], dict[str, Any]]:
-    """阅读类条目那两个并排理解勾选的 todo 块 —— (已完全理解, 未完全理解)。
-
-    调用方(_rookie_sop_docapi.provision_doc)把这两个分别塞进表格读回后发现的
-    两个格子里, 而不是塞进文档根节点, 所以这里只给块本身, 不掺和「往哪追加」。
-    """
-    return (
-        _todo([_text_run("💡 已完全理解")], False),
-        _todo([_text_run("❓ 未完全理解（会找人问清楚）")], False),
-    )
 
 
 def build_doc_blocks(
@@ -199,12 +185,14 @@ def build_doc_blocks(
                         },
                     }
                 )
-                # 1 行 2 列的空表 —— 两个理解勾选并排一行。表格自己的 block_id
-                # 用不上(role 留空, 见函数说明), 格子里的 todo 要等读回文档才建。
-                blocks.append(
-                    {"block_type": BLOCK_TABLE, "table": {"property": {"row_size": 1, "column_size": 2}}}
-                )
-                slots.append((item_id, ""))
+                # 两个理解勾选竖排。刻意不再用表格容器: 表格能把两个框摆进同一行
+                # (实测可行), 但表格线让阅读区显得很脏; 分栏(grid)虽无边框, 观感仍
+                # 不如直接竖排。竖排还免掉「建表 → 读回格子 id → 往格里写」这三步
+                # 往返, 建文档快得多。
+                blocks.append(_todo([_text_run("💡 已完全理解")], done))
+                slots.append((item_id, ROLE_GOT_IT))
+                blocks.append(_todo([_text_run("❓ 未完全理解（会找人问清楚）")], False))
+                slots.append((item_id, ROLE_UNCLEAR))
                 continue
 
             elements = [_text_run(title, bold=True)]

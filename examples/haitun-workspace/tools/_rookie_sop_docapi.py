@@ -74,7 +74,6 @@ async def append_blocks(
     # 飞书在返回体里给出每个新建块的 block_id —— 收集 todo/表格块的 id, 用来建
     # block_id → item_id 映射, 于是文档正文不必写任何 item 标记(见 _rookie_sop_doc)。
     todo_block_ids: list[str] = []
-    table_block_ids: list[str] = []
     all_children: list[dict[str, Any]] = []  # 保序的原始 children, 供按位配对用(见 provision_doc)
     for start in range(0, len(blocks), _MAX_BLOCKS_PER_CALL):
         chunk = blocks[start : start + _MAX_BLOCKS_PER_CALL]
@@ -91,7 +90,6 @@ async def append_blocks(
                 "error": str(res.get("msg") or res.get("message") or "append blocks failed"),
                 "written": written,
                 "todo_block_ids": todo_block_ids,
-                "table_block_ids": table_block_ids,
                 "children": all_children,
             }
         children = (_data(res).get("children") or res.get("children") or [])
@@ -104,14 +102,11 @@ async def append_blocks(
             all_children.append(child)
             if child.get("block_type") == _doc.BLOCK_TODO:
                 todo_block_ids.append(bid)
-            elif child.get("block_type") == _doc.BLOCK_TABLE:
-                table_block_ids.append(bid)
         written += len(chunk)
     return {
         "ok": True,
         "written": written,
         "todo_block_ids": todo_block_ids,
-        "table_block_ids": table_block_ids,
         "children": all_children,
     }
 
@@ -205,7 +200,7 @@ def _tracked_children(children: list[dict[str, Any]]) -> list[tuple[int, str]]:
             continue
         block_type = child.get("block_type")
         bid = str(child.get("block_id") or "")
-        if bid and block_type in (_doc.BLOCK_TODO, _doc.BLOCK_TABLE):
+        if bid and block_type == _doc.BLOCK_TODO:
             out.append((block_type, bid))
     return out
 
@@ -254,45 +249,17 @@ async def provision_doc(
             "document_id": document_id,
         }
 
+    # 每个 slot 都对应一个 todo 块(阅读项已回退为竖排两个 todo, 不再用表格容器),
+    # 所以按顺序直接配对。类型不符就报错而不是硬配 —— 映射错位会把勾选写到别的条目上。
     block_map: dict[str, str] = {}
-    pending_tables: list[tuple[str, str]] = []  # (table_block_id, item_id) —— 阅读类条目待发现格子
     for (block_type, bid), (item_id, role) in zip(tracked, slots, strict=True):
-        if role:
-            if block_type != _doc.BLOCK_TODO:
-                return {
-                    "ok": False,
-                    "error": f"expected a todo block for {item_id}:{role}, got block_type {block_type}",
-                    "document_id": document_id,
-                }
-            block_map[bid] = f"{item_id}:{role}"
-        else:
-            if block_type != _doc.BLOCK_TABLE:
-                return {
-                    "ok": False,
-                    "error": f"expected a table block for {item_id}, got block_type {block_type}",
-                    "document_id": document_id,
-                }
-            pending_tables.append((bid, item_id))
-
-    if pending_tables:
-        cell_map = await _resolve_table_cells(api, document_id, [t for t, _ in pending_tables])
-        if cell_map.get("ok") is not True:
-            return {"ok": False, "error": f"table cells: {cell_map.get('error')}", "document_id": document_id}
-        cells_of = cell_map["cells"]
-        for table_id, item_id in pending_tables:
-            cells = cells_of.get(table_id) or []
-            if len(cells) != 2:
-                return {
-                    "ok": False,
-                    "error": f"table for {item_id} has {len(cells)} cells, expected 2",
-                    "document_id": document_id,
-                }
-            got_it_todo, unclear_todo = _doc.understanding_todos()
-            filled = await _fill_understanding_cells(api, document_id, cells[0], cells[1], got_it_todo, unclear_todo)
-            if filled.get("ok") is not True:
-                return {"ok": False, "error": f"cells for {item_id}: {filled.get('error')}", "document_id": document_id}
-            block_map[filled["got_it_block_id"]] = f"{item_id}:{_doc.ROLE_GOT_IT}"
-            block_map[filled["unclear_block_id"]] = f"{item_id}:{_doc.ROLE_UNCLEAR}"
+        if block_type != _doc.BLOCK_TODO:
+            return {
+                "ok": False,
+                "error": f"expected a todo block for {item_id}:{role}, got block_type {block_type}",
+                "document_id": document_id,
+            }
+        block_map[bid] = f"{item_id}:{role}"
 
     granted = await grant_edit(api, document_id, open_id)
     subscribed = await subscribe_changes(api, document_id)
@@ -309,62 +276,3 @@ async def provision_doc(
     }
 
 
-async def _resolve_table_cells(
-    api: Any, document_id: str, table_ids: list[str]
-) -> dict[str, Any]:
-    """读回整份文档一次, 找出每张表各自的两个格子 block_id。
-
-    共享一次 read_blocks 调用给所有待发现的表, 不管有几张表 —— 这是「批量/最小化
-    调用」的落点: 3 个阅读类条目也只多这一次读回, 不是三次。
-
-    格子归属用 parent_id 认(飞书读块列表时每个块都带 parent_id, 见 _feishu_impl.py
-    的 list_doc_blocks_impl), 不用「表格后面紧跟的几个块」这种位置猜测 —— parent_id
-    是确认可用的字段, 位置顺序不是。同一个 parent_id 下按列表原有顺序取两个格子,
-    第一个是「已完全理解」格, 第二个是「未完全理解」格(与 build_doc_blocks 里
-    row_size=1, column_size=2 的建表顺序一致)。
-    """
-    read = await read_blocks(api, document_id)
-    if read.get("ok") is not True:
-        return {"ok": False, "error": read.get("error") or "read blocks failed"}
-    wanted = set(table_ids)
-    cells: dict[str, list[str]] = {tid: [] for tid in wanted}
-    for block in read.get("blocks") or []:
-        if not isinstance(block, dict):
-            continue
-        if block.get("block_type") != _doc.BLOCK_TABLE_CELL:
-            continue
-        parent = str(block.get("parent_id") or "")
-        if parent in wanted:
-            bid = str(block.get("block_id") or "")
-            if bid:
-                cells[parent].append(bid)
-    return {"ok": True, "cells": cells}
-
-
-async def _fill_understanding_cells(
-    api: Any,
-    document_id: str,
-    got_it_cell: str,
-    unclear_cell: str,
-    got_it_todo: dict[str, Any],
-    unclear_todo: dict[str, Any],
-) -> dict[str, Any]:
-    """往两个格子各追加一个 todo —— 两个格子是两个不同的父块, 没法合并成一次调用。"""
-    got_it_appended = await append_blocks(api, document_id, [got_it_todo], parent_block_id=got_it_cell)
-    if got_it_appended.get("ok") is not True:
-        return {"ok": False, "error": f"got_it cell: {got_it_appended.get('error')}"}
-    got_it_tracked = _tracked_children(got_it_appended.get("children") or [])
-    got_it_ids = [bid for (bt, bid) in got_it_tracked if bt == _doc.BLOCK_TODO]
-    if len(got_it_ids) != 1:
-        return {"ok": False, "error": f"got_it cell: expected 1 todo, got {len(got_it_ids)}"}
-
-    unclear_appended = await append_blocks(api, document_id, [unclear_todo], parent_block_id=unclear_cell)
-    if unclear_appended.get("ok") is not True:
-        return {"ok": False, "error": f"unclear cell: {unclear_appended.get('error')}"}
-    unclear_ids = [
-        bid for (bt, bid) in _tracked_children(unclear_appended.get("children") or []) if bt == _doc.BLOCK_TODO
-    ]
-    if len(unclear_ids) != 1:
-        return {"ok": False, "error": f"unclear cell: expected 1 todo, got {len(unclear_ids)}"}
-
-    return {"ok": True, "got_it_block_id": got_it_ids[0], "unclear_block_id": unclear_ids[0]}

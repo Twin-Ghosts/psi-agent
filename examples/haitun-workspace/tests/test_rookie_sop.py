@@ -1843,22 +1843,31 @@ def test_due_state_marks_late_today_and_future_differently() -> None:
     assert mark(date(2026, 8, 5), "不适用") == "⚪"
 
 
-def test_card_template_takes_the_most_urgent_row() -> None:
-    """卡片主题色取最紧急的一行: 有逾期→红, 否则有当天→橙, 全部结束→绿。"""
+def test_card_template_is_green_on_day_one_and_red_on_day_two() -> None:
+    """入职卡只用红绿两色, 按**入职第几天**定, 不按每行 DDL。
+
+    Day 1 绿(还早)、Day 2 起红(最后一天/已超期)。全部做完一律绿。
+    刻意不再用橙/蓝: 需求就是红绿两色, 多一种颜色就多一层要解释的语义。
+    """
     c = _load("_rookie_sop_card")
     p = _load("_rookie_sop_progress")
-    today = date(2026, 8, 6)
+    onboard = date(2026, 8, 10)
 
-    late = _row("a", p.STATUS_TODO, date(2026, 8, 5))
-    due_today = _row("b", p.STATUS_TODO, date(2026, 8, 6))
-    future = _row("c", p.STATUS_TODO, date(2026, 8, 9))
-    done = _row("d", p.STATUS_DONE, date(2026, 8, 5))
+    def rows(status: str = p.STATUS_TODO) -> list[dict[str, Any]]:
+        return [
+            {
+                "记录键": "ou_x:a",
+                "项": "某项",
+                "状态": status,
+                "入职日": onboard,
+                "截止日": date(2026, 8, 20),
+            }
+        ]
 
-    assert c._card_template([late, due_today, future], today) == "red"
-    assert c._card_template([due_today, future], today) == "orange"
-    assert c._card_template([future], today) == "blue"
-    assert c._card_template([done], today) == "green"
-
+    assert c._card_template(rows(), onboard) == "green"                      # Day 1
+    assert c._card_template(rows(), date(2026, 8, 11)) == "red"              # Day 2
+    assert c._card_template(rows(), date(2026, 8, 12)) == "red"              # Day 3 仍红
+    assert c._card_template(rows(p.STATUS_DONE), date(2026, 8, 11)) == "green"  # 做完了就不紧迫
 
 def test_row_is_div_with_the_box_in_extra() -> None:
     """一行 = div 左侧文字 + extra 右侧方框(飞书原生的「左文右控件」)。
@@ -2134,31 +2143,6 @@ def _read_row(item_id: str, title: str, url: str, status: str = "未完成") -> 
         "入职日": date(2026, 8, 5),
         "截止日": date(2026, 8, 7),
     }
-
-
-def test_provision_doc_fills_reading_item_table_cells() -> None:
-    """阅读类条目: 建表 → 读回发现两个格子 → 各塞一个理解 todo, 全程按 block_id 配对。
-
-    没有位置猜测 —— 格子归属靠 parent_id, 塞进哪个格子靠读回的顺序, 最终
-    block_map 里这两个 todo 各自映射到正确的 item_id:role, 不会错配。
-    """
-    da = _load("_rookie_sop_docapi")
-    api = _FakeDocApi()
-    rows = [_read_row("read_culture", "企业文化总则", "https://x.example")]
-
-    out = anyio.run(lambda: da.provision_doc(api, open_id="ou_x", name="张三", rows=rows))
-
-    assert out["ok"] is True
-    block_map = out["block_map"]
-    d = _load("_rookie_sop_doc")
-    got_it_ids = [bid for bid, mapped in block_map.items() if mapped == f"read_culture:{d.ROLE_GOT_IT}"]
-    unclear_ids = [bid for bid, mapped in block_map.items() if mapped == f"read_culture:{d.ROLE_UNCLEAR}"]
-    assert len(got_it_ids) == 1
-    assert len(unclear_ids) == 1
-    # 恰好读回一次(不管几个阅读类条目都只读一次) —— 批量/最小化调用的落点
-    assert sum(1 for _, p in api.calls if p.endswith("/blocks")) == 1
-
-
 def test_provision_doc_mixes_plain_and_reading_items_without_cross_mapping() -> None:
     """普通条目和阅读类条目混在一份文档里, 各自的 block_id 不会串到对方身上。"""
     da = _load("_rookie_sop_docapi")
@@ -2177,38 +2161,6 @@ def test_provision_doc_mixes_plain_and_reading_items_without_cross_mapping() -> 
     assert f"read_culture:{d.ROLE_GOT_IT}" in mapped_values
     assert f"read_culture:{d.ROLE_UNCLEAR}" in mapped_values
     assert len(out["block_map"]) == 3
-
-
-def test_provision_doc_refuses_when_table_has_the_wrong_cell_count() -> None:
-    """表格格子数不是 2 就拒绝配对 —— 宁可报错也不要把勾错记到别的条目上。"""
-    da = _load("_rookie_sop_docapi")
-    rows = [_read_row("read_culture", "企业文化总则", "https://x.example")]
-
-    class _OneCellDocApi(_FakeDocApi):
-        """建表后读回时只报一个格子, 模拟飞书返回异常/表格结构被破坏的情形。"""
-
-        async def __call__(self, method: str, path: str, **kwargs: Any) -> str:
-            res = await super().__call__(method, path, **kwargs)
-            if path.endswith("/blocks"):
-                table_ids = {b["block_id"] for b in self.all_blocks if b["block_type"] == 31}
-                kept = []
-                dropped_one_cell_for: set[str] = set()
-                for b in self.all_blocks:
-                    is_first_cell = b["block_type"] == 32 and b["parent_id"] in table_ids
-                    if is_first_cell and b["parent_id"] not in dropped_one_cell_for:
-                        dropped_one_cell_for.add(b["parent_id"])
-                        continue  # 丢掉这张表的第一个格子
-                    kept.append(b)
-                return json.dumps({"ok": True, "data": {"items": kept, "has_more": False}}, ensure_ascii=False)
-            return res
-
-    api = _OneCellDocApi()
-    out = anyio.run(lambda: da.provision_doc(api, open_id="ou_x", name="张三", rows=rows))
-
-    assert out["ok"] is False
-    assert "2" in out["error"]
-
-
 def test_provision_doc_refuses_when_root_append_count_mismatches_slots() -> None:
     """根节点追加返回的块数和 slots 数不一致就拒绝配对 —— 不猜, 直接报错。"""
     da = _load("_rookie_sop_docapi")
@@ -2404,7 +2356,7 @@ def _link_row(item_id: str, title: str, url: str, status: str = "未完成") -> 
     }
 
 
-def test_link_items_render_as_linked_title_plus_a_two_column_table() -> None:
+def test_link_items_render_as_linked_title_plus_two_stacked_todos() -> None:
     """必读材料: 超链接挂在**标题文字**上(不单独罗列 URL), 理解勾选并排一行。
 
         📖 企业文化总则          ← 标题本身可点
@@ -2430,44 +2382,31 @@ def test_link_items_render_as_linked_title_plus_a_two_column_table() -> None:
     # 裸 URL 不该作为独立文字出现
     assert not any(e.get("text_run", {}).get("content") == url for e in title_block["text"]["elements"])
 
-    # 没有直接堆叠的 todo —— 理解勾选留给 provision_doc 读回表格后再塞
-    assert not [b for b in blocks if b["block_type"] == d.BLOCK_TODO]
-    tables = [b for b in blocks if b["block_type"] == d.BLOCK_TABLE]
-    assert len(tables) == 1
-    assert tables[0]["table"]["property"] == {"row_size": 1, "column_size": 2}
-    assert slots == [("read_culture", "")]
-
-
-def test_understanding_todos_are_got_it_and_unclear_labels() -> None:
-    """两个理解勾选的文案: 表格格子里塞的就是这两个, 顺序固定(先懂后不懂)。"""
+    # 回退为竖排: 两个理解勾选各占一行, 不再用表格容器(表格线让阅读区显脏)
+    todos = [b for b in blocks if b["block_type"] == d.BLOCK_TODO]
+    labels = ["".join(e["text_run"]["content"] for e in b["todo"]["elements"]) for b in todos]
+    assert len(todos) == 2
+    assert "已完全理解" in labels[0]
+    assert "未完全理解" in labels[1]
+    # 正文里不出现英文 item id
+    assert all("read_culture" not in lab for lab in labels)
+    assert slots == [("read_culture", d.ROLE_GOT_IT), ("read_culture", d.ROLE_UNCLEAR)]
+def _understanding_blocks(
+    item_id: str, *, got_it: bool, unclear: bool
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """造一个阅读项读回来的样子: 两个竖排的理解勾选 + 对应 block_map。"""
     d = _load("_rookie_sop_doc")
-    got_it, unclear = d.understanding_todos()
-    assert got_it["block_type"] == d.BLOCK_TODO
-    assert unclear["block_type"] == d.BLOCK_TODO
-    got_it_label = "".join(e["text_run"]["content"] for e in got_it["todo"]["elements"])
-    unclear_label = "".join(e["text_run"]["content"] for e in unclear["todo"]["elements"])
-    assert "已完全理解" in got_it_label
-    assert "未完全理解" in unclear_label
-
-
-def _understanding_blocks(item_id: str, *, got_it: bool, unclear: bool) -> tuple[list[dict[str, Any]], dict[str, str]]:
-    """模拟表格两个格子里各塞了一个理解 todo、读回文档后拍平成的样子。
-
-    read_doc_state 只看 block_type==BLOCK_TODO 的块和 block_map, 对块是不是嵌在
-    表格格子里并不敏感(它读的是拍平后的整份块列表), 所以这里不必真的建表格 ——
-    直接构造两个 todo 块 + 对应的 block_map 就足以验证互斥裁决逻辑。
-    """
-    d = _load("_rookie_sop_doc")
-    got_it_todo, unclear_todo = d.understanding_todos()
     blocks = [
-        {**got_it_todo, "block_id": "blk_got_it", "todo": {**got_it_todo["todo"], "style": {"done": got_it}}},
-        {**unclear_todo, "block_id": "blk_unclear", "todo": {**unclear_todo["todo"], "style": {"done": unclear}}},
+        {"block_type": 17, "block_id": "blk_ok", "todo": {"elements": [], "style": {"done": got_it}}},
+        {"block_type": 17, "block_id": "blk_unclear", "todo": {"elements": [], "style": {"done": unclear}}},
     ]
     block_map = {
-        "blk_got_it": f"{item_id}:{d.ROLE_GOT_IT}",
+        "blk_ok": f"{item_id}:{d.ROLE_GOT_IT}",
         "blk_unclear": f"{item_id}:{d.ROLE_UNCLEAR}",
     }
     return blocks, block_map
+
+
 
 
 def test_link_item_counts_as_done_only_when_understood() -> None:

@@ -62,15 +62,25 @@ def _due_state(row: dict[str, Any], today: date | None) -> str:
 
 
 def _card_template(rows: list[dict[str, Any]], today: date | None) -> str:
-    """卡片主题色取该卡最紧急的一行: 有逾期→红, 有今天到期→黄, 全部做完→绿。"""
+    """入职卡只用红绿两色, 按**入职第几天**定, 不按每行的 DDL。
+
+    Day 1 绿(还早)、Day 2 红(最后一天)。全部做完一律绿 —— 做完了就没有紧迫可言。
+    刻意不再用橙/蓝: 需求就是红绿两色, 多一种颜色就多一层要解释的语义。
+    """
     marks = {_due_state(r, today) for r in rows}
-    if _DUE_LATE in marks:
-        return "red"
-    if _DUE_TODAY in marks:
-        return "orange"
     if marks and marks <= {_DONE_MARK, _NA_MARK}:
         return "green"
-    return "blue"
+    return "red" if _day_index(rows, today) >= 2 else "green"
+
+
+def _day_index(rows: list[dict[str, Any]], today: date | None) -> int:
+    """入职第几天(第一天 = 1)。取不到入职日时按第 1 天算, 宁可显绿也不误报红。"""
+    if today is None:
+        return 1
+    onboard = next((r["入职日"] for r in rows if isinstance(r.get("入职日"), date)), None)
+    if onboard is None:
+        return 1
+    return max(1, (today - onboard).days + 1)
 
 
 def _shell(title: str, elements: list[dict[str, Any]], template: str = "blue") -> dict[str, Any]:
