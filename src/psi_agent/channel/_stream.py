@@ -20,22 +20,28 @@ from typing import Any
 from loguru import logger
 
 from psi_agent.channel._errors import ChannelError
+from psi_agent.protocol import FINISH_REASON_ERROR, SSE_DONE, parse_sse_data
 
 
 async def iter_sse_events(lines: AsyncIterable[bytes]) -> AsyncGenerator[dict[str, Any]]:
     """Parse a raw SSE byte-line stream into validated per-choice ``delta`` dicts.
 
-    Skips blank/non-``data:`` lines, malformed JSON and zero-choice heartbeats;
-    stops at ``[DONE]``; raises on multi-choice chunks and ``finish_reason=error``.
-    Non-list ``choices`` and non-dict ``choice`` are skipped; a missing or ``null``
-    ``delta`` is coerced to ``{}`` so the caller always receives a dict.
+    Skips blank/non-``data:`` lines, empty-payload ``data:`` frames, malformed
+    JSON and zero-choice heartbeats; stops at ``[DONE]``; raises on multi-choice
+    chunks and ``finish_reason=error``. Non-list ``choices`` and non-dict
+    ``choice`` are skipped; a missing or ``null`` ``delta`` is coerced to ``{}``
+    so the caller always receives a dict.
     """
     async for raw_line in lines:
         line = raw_line.decode().strip()
-        if not line or not line.startswith("data: "):
+        data_str = parse_sse_data(line)
+        # Empty payload is a heartbeat frame some OpenAI-compatible services
+        # send; skip it silently rather than let it hit json.loads and log a
+        # warning on every beat (the old startswith("data: ") guard also
+        # dropped these silently, so this preserves that logging behaviour).
+        if not data_str:
             continue
-        data_str = line[6:]
-        if data_str == "[DONE]":
+        if data_str == SSE_DONE:
             logger.debug("SSE stream ended [DONE]")
             return
 
@@ -65,7 +71,7 @@ async def iter_sse_events(lines: AsyncIterable[bytes]) -> AsyncGenerator[dict[st
         if not isinstance(delta, dict):
             delta = {}
 
-        if choice.get("finish_reason") == "error":
+        if choice.get("finish_reason") == FINISH_REASON_ERROR:
             msg = delta.get("content", "Session error")
             logger.warning(f"finish_reason=error: {msg!r}")
             raise ChannelError(msg)
