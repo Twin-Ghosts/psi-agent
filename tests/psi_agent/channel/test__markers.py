@@ -100,3 +100,14 @@ def test_iter_send_paths_yields_path_and_match_end():
 def test_iter_send_paths_skips_empty_and_keeps_order():
     paths = [path for path, _ in iter_send_paths("[SEND:/a] [SEND:] [SEND:/b]")]
     assert paths == ["/a", "/b"]
+
+
+def test_iter_send_paths_unclosed_marker_does_not_swallow_next_line():
+    """An unclosed ``[SEND:`` must not eat the real marker on a later line.
+
+    The path class excludes ``\\n`` for this reason: with a newline-permissive
+    class the first (unclosed) marker matches all the way to the ``]`` below,
+    losing ``/tmp/report.pdf`` and handing ``_send_file`` a multi-line string.
+    """
+    text = "结果如下 [SEND: 写错了\n真正的文件是 [SEND:/tmp/report.pdf]"
+    assert [path for path, _ in iter_send_paths(text)] == ["/tmp/report.pdf"]

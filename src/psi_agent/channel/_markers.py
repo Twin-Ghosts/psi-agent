@@ -20,7 +20,12 @@ RECV_MARKER = "[RECV:{path}]"
 # empty ``[SEND:]`` -- the latter is filtered by ``iter_send_paths`` rather than
 # by the pattern, so both the Channel decoder and the Gateway projection share
 # one rule instead of each encoding it in its own regex.
-SEND_RE = re.compile(r"\[\s*SEND\s*:\s*([^\]]*?)\s*\]", re.IGNORECASE)
+#
+# The path class excludes newlines as well as ``]``: a newline is never valid in
+# a path, and allowing it would let an *unclosed* ``[SEND:`` swallow everything
+# up to the next ``]`` several lines down -- losing the real path that follows
+# and handing ``_send_file`` a multi-line string to upload.
+SEND_RE = re.compile(r"\[\s*SEND\s*:\s*([^\]\n]*?)\s*\]", re.IGNORECASE)
 
 
 def iter_send_paths(text: str) -> Iterator[tuple[str, int]]:
