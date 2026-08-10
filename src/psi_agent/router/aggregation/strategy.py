@@ -10,7 +10,7 @@ from typing import Any, Protocol, cast
 import anyio
 from loguru import logger
 
-from psi_agent.protocol import FINISH_REASON_STOP, FINISH_REASON_TOOL_CALLS, is_terminal_finish
+from psi_agent.protocol import FINISH_REASON_ERROR, FINISH_REASON_STOP, FINISH_REASON_TOOL_CALLS, is_terminal_finish
 
 from ..errors import RouterUpstreamError
 from ..models import CompletionResult, RouterTarget
@@ -122,7 +122,7 @@ class AggregationStrategy:
                 async for event in events:
                     choice = event["choices"][0]
                     current_finish = choice.get("finish_reason")
-                    if current_finish == "error":
+                    if current_finish == FINISH_REASON_ERROR:
                         raise AggregationError("Aggregator reported an error")
                     delta = choice.get("delta", {})
                     content = delta.get("content") if isinstance(delta, dict) else None
