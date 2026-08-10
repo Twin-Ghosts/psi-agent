@@ -1711,24 +1711,46 @@ def _doc_row(
     }
 
 
+def _slots_map(slots: list[tuple[str, str]]) -> dict[str, str]:
+    """模拟建文档后拿到的 block_id → "item_id:role" 映射(按 todo 出现顺序配对)。"""
+    return {f"blk{n}": f"{item_id}:{role}" for n, (item_id, role) in enumerate(slots)}
+
+
+def _with_block_ids(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """给 todo 块补上 block_id, 模拟从飞书读回来的样子。"""
+    out: list[dict[str, Any]] = []
+    n = 0
+    for b in blocks:
+        if b.get("block_type") == 17:
+            out.append({**b, "block_id": f"blk{n}"})
+            n += 1
+        else:
+            out.append(b)
+    return out
+
+
 def test_build_doc_blocks_renders_a_todo_per_item_with_done_from_the_table() -> None:
-    """文档是明细表的投影: 表里已完成的项, 文档里就是勾上的。"""
+    """文档是明细表的投影: 表里已完成的项, 文档里就是勾上的。
+
+    条目身份靠 block_id 映射而不是正文里的标记 —— 新人看不到任何英文 id。
+    """
     d = _load("_rookie_sop_doc")
     rows = [
         _doc_row("wifi", "连上 WiFi", "已完成", acceptance="能上网"),
         _doc_row("desk", "找到工位", "未完成"),
     ]
 
-    blocks = d.build_doc_blocks(rows, name="张三")
+    blocks, slots = d.build_doc_blocks(rows, name="张三")
 
     todos = [b for b in blocks if b["block_type"] == d.BLOCK_TODO]
     assert len(todos) == 2
     assert todos[0]["todo"]["style"]["done"] is True
     assert todos[1]["todo"]["style"]["done"] is False
-    first = todos[0]["todo"]["elements"][0]["text_run"]["content"]
+    first = "".join(e["text_run"]["content"] for e in todos[0]["todo"]["elements"])
     assert "连上 WiFi" in first and "能上网" in first
-    # 每行带 item_id 标记, 同步时靠它认回条目(不靠块顺序)
-    assert d.item_marker("wifi") in first
+    # 正文里不出现 item_id 这类英文标记
+    assert "wifi" not in first
+    assert slots == [("wifi", d.ROLE_READ), ("desk", d.ROLE_READ)]
 
 
 def test_build_doc_blocks_gives_na_items_no_checkbox() -> None:
@@ -1736,35 +1758,35 @@ def test_build_doc_blocks_gives_na_items_no_checkbox() -> None:
     d = _load("_rookie_sop_doc")
     rows = [_doc_row("git_workflow", "Git 工作流", "不适用", module="开发环境")]
 
-    blocks = d.build_doc_blocks(rows, name="张三")
+    blocks, slots = d.build_doc_blocks(rows, name="张三")
 
     assert not [b for b in blocks if b["block_type"] == d.BLOCK_TODO]
+    assert slots == []
     assert any("不适用" in str(b) for b in blocks)
 
 
-def test_read_doc_state_matches_by_marker_not_by_order() -> None:
-    """新人可能自己加行/删行/重排, 所以按标记匹配, 不按块顺序。"""
+def test_read_doc_state_matches_by_block_id_not_by_order() -> None:
+    """靠 block_id 映射认条目 —— 新人自己加的块不在映射里, 自然被忽略。"""
     d = _load("_rookie_sop_doc")
-    def todo(text: str, done: bool) -> dict[str, Any]:
-        return {
-            "block_type": d.BLOCK_TODO,
-            "todo": {"elements": [{"text_run": {"content": text}}], "style": {"done": done}},
-        }
+    rows = [_doc_row("wifi", "连上 WiFi", "未完成"), _doc_row("desk", "找到工位", "未完成")]
+    blocks, slots = d.build_doc_blocks(rows, name="张三")
+    stored = _slots_map(slots)
+    read_back = _with_block_ids(blocks)
+    # 新人自己加了一条笔记 —— 不在映射里
+    read_back.append({"block_type": 17, "block_id": "blk_own_note", "todo": {"elements": [], "style": {"done": True}}})
+    # 把「找到工位」勾上
+    for b in read_back:
+        if b.get("block_id") == "blk1":
+            b["todo"]["style"]["done"] = True
 
-    blocks = [
-        # 新人自己加的一条笔记(无标记) —— 必须被忽略, 不能顶掉真条目
-        todo("我自己的备忘", True),
-        todo(f"找到工位　{d.item_marker('desk')}", True),
-        todo(f"连上 WiFi　{d.item_marker('wifi')}", False),
-    ]
+    state, unclear = d.read_doc_state(read_back, stored)
 
-    state = d.read_doc_state(blocks)
-
-    assert state == {"desk": True, "wifi": False}
+    assert state == {"wifi": False, "desk": True}
+    assert unclear == []
 
 
 def test_diff_state_only_reports_newly_ticked_items() -> None:
-    """只认「未完成 → 勾上」一个方向。
+    """只认「未完成 → 完成」一个方向。
 
     反向不撤销: 让新人取消勾选就能抹掉已完成记录, 会让 HR 日报不可信。
     """
@@ -1784,14 +1806,6 @@ def test_diff_state_only_reports_newly_ticked_items() -> None:
     assert d.diff_state(doc_state, rows) == ["desk"]
 
 
-def test_parse_item_id_handles_absent_or_malformed_markers() -> None:
-    d = _load("_rookie_sop_doc")
-
-    assert d.parse_item_id(f"连上 WiFi　{d.item_marker('wifi')}") == "wifi"
-    assert d.parse_item_id("没有标记的一行") == ""
-    assert d.parse_item_id(d._ID_OPEN + "wifi") == ""  # 只有半个标记, 认不出
-
-
 class _FakeDocApi:
     """假的 feishu_api: 记录调用并按脚本返回, 不碰飞书。"""
 
@@ -1799,6 +1813,7 @@ class _FakeDocApi:
         self.calls: list[tuple[str, str]] = []
         self.fail = fail
         self.children: list[dict[str, Any]] = []
+        self._n = 0
 
     async def __call__(self, method: str, path: str, **kwargs: Any) -> str:
         self.calls.append((method, path))
@@ -1807,8 +1822,15 @@ class _FakeDocApi:
         if path == "/open-apis/docx/v1/documents" and method == "POST":
             return json.dumps({"ok": True, "data": {"document": {"document_id": "doc123"}}}, ensure_ascii=False)
         if "/children" in path:
-            self.children.append(json.loads(kwargs.get("body_json") or "{}"))
-            return json.dumps({"ok": True}, ensure_ascii=False)
+            body = json.loads(kwargs.get("body_json") or "{}")
+            self.children.append(body)
+            # 飞书会在返回体里给出每个新建块的 block_id —— provision_doc 靠它建
+            # block_id → item_id 映射, 所以 fake 必须照样给。
+            kids = []
+            for child in body.get("children") or []:
+                self._n += 1
+                kids.append({"block_id": f"blk{self._n}", "block_type": child.get("block_type")})
+            return json.dumps({"ok": True, "data": {"children": kids}}, ensure_ascii=False)
         if path.endswith("/blocks"):
             return json.dumps({"ok": True, "data": {"items": [], "has_more": False}}, ensure_ascii=False)
         return json.dumps({"ok": True}, ensure_ascii=False)
@@ -2028,60 +2050,85 @@ def _link_row(item_id: str, title: str, url: str, status: str = "未完成") -> 
     }
 
 
-def test_link_items_render_as_a_link_plus_read_and_understood() -> None:
-    """必读材料给「可点链接 + 我已阅读并理解」, 而不是笼统的「完成」。
+def test_link_items_render_as_linked_title_plus_two_checkbox_groups() -> None:
+    """必读材料: 超链接挂在**标题文字**上(不单独罗列 URL), 勾选拆成两组。
 
-    阅读类的验收就是「读过并理解」—— 说清楚要确认什么, 比让人对着一个
-    「完成」猜要好。
+        📖 企业文化总则          ← 标题本身可点
+        ☐ 已阅读
+        ☐ 已完全理解   ☐ 未完全理解（会找人问清楚）
+
+    第二组语义互斥, 但飞书 todo 块之间没有互斥机制, 所以互斥由 read_doc_state 裁决。
     """
     d = _load("_rookie_sop_doc")
     url = "https://genuineknowledge.feishu.cn/wiki/JyCLwr60lineYBkkJmQcZf0PnTb"
     rows = [_link_row("read_culture", "企业文化总则", url)]
 
-    blocks = d.build_doc_blocks(rows, name="张三")
+    blocks, slots = d.build_doc_blocks(rows, name="张三")
 
-    # 链接那一行是普通文本块, 里面带可点的 link
-    text_blocks = [b for b in blocks if b["block_type"] == d.BLOCK_TEXT]
-    linked = [b for b in text_blocks if any("link" in str(e) for e in b["text"]["elements"])]
-    assert linked, "必读项应渲染出一行可点链接"
-    assert url in str(linked[0])
-    assert "企业文化总则" in str(linked[0])
+    # 标题那一行: 链接挂在文字上, 正文里看不到裸 URL
+    title_block = next(b for b in blocks if b["block_type"] == d.BLOCK_TEXT and "企业文化总则" in str(b))
+    linked = [e for e in title_block["text"]["elements"] if "link" in str(e.get("text_run", {}))]
+    assert linked, "标题应带超链接"
+    assert linked[0]["text_run"]["content"] == "企业文化总则"
+    assert linked[0]["text_run"]["text_element_style"]["link"]["url"] == url
+    # 裸 URL 不该作为独立文字出现
+    assert not any(e.get("text_run", {}).get("content") == url for e in title_block["text"]["elements"])
 
-    # 勾选框的文字是「我已阅读并理解」, 且带 item 标记以便同步
+    # 三个勾选框, 各有角色; 正文里没有英文 item id
     todos = [b for b in blocks if b["block_type"] == d.BLOCK_TODO]
-    assert len(todos) == 1
-    label = todos[0]["todo"]["elements"][0]["text_run"]["content"]
-    assert "我已阅读并理解" in label
-    assert d.item_marker("read_culture") in label
-    # 不该出现笼统的「完成」字样
-    assert "完成" not in label.replace("我已阅读并理解", "")
-
-
-def test_link_item_done_state_comes_from_the_table() -> None:
-    """已读过的必读项, 重建文档时勾选框仍是勾上的。"""
-    d = _load("_rookie_sop_doc")
-    rows = [_link_row("read_culture", "企业文化总则", "https://x.example", status="已完成")]
-
-    blocks = d.build_doc_blocks(rows, name="张三")
-
-    todos = [b for b in blocks if b["block_type"] == d.BLOCK_TODO]
-    assert todos[0]["todo"]["style"]["done"] is True
-
-
-def test_link_item_sync_reads_back_like_any_other_item() -> None:
-    """必读项的勾选状态走同一套同步 —— 靠标记匹配, 与普通项无差别。"""
-    d = _load("_rookie_sop_doc")
-    blocks = [
-        {
-            "block_type": d.BLOCK_TODO,
-            "todo": {
-                "elements": [{"text_run": {"content": f"我已阅读并理解　{d.item_marker('read_culture')}"}}],
-                "style": {"done": True},
-            },
-        }
+    labels = ["".join(e["text_run"]["content"] for e in b["todo"]["elements"]) for b in todos]
+    assert len(todos) == 3
+    assert "已阅读" in labels[0]
+    assert "已完全理解" in labels[1]
+    assert "未完全理解" in labels[2]
+    assert all("read_culture" not in lab for lab in labels)
+    assert slots == [
+        ("read_culture", d.ROLE_READ),
+        ("read_culture", d.ROLE_GOT_IT),
+        ("read_culture", d.ROLE_UNCLEAR),
     ]
 
-    assert d.read_doc_state(blocks) == {"read_culture": True}
+
+def test_link_item_counts_as_done_only_when_read_and_understood() -> None:
+    """阅读类要「读过 + 明确表示理解」才算完成 —— 只勾已阅读不算。"""
+    d = _load("_rookie_sop_doc")
+    rows = [_link_row("read_culture", "企业文化总则", "https://x.example")]
+    blocks, slots = d.build_doc_blocks(rows, name="张三")
+    stored = _slots_map(slots)
+
+    def state_for(read: bool, got_it: bool, unclear: bool) -> tuple[dict[str, bool], list[str]]:
+        got = _with_block_ids(blocks)
+        flags = {d.ROLE_READ: read, d.ROLE_GOT_IT: got_it, d.ROLE_UNCLEAR: unclear}
+        for b in got:
+            if b.get("block_type") != 17:
+                continue
+            _item, role = stored[b["block_id"]].rsplit(":", 1)
+            b["todo"]["style"]["done"] = flags[role]
+        return d.read_doc_state(got, stored)
+
+    assert state_for(True, True, False)[0] == {"read_culture": True}
+    assert state_for(True, False, False)[0] == {"read_culture": False}  # 读了但没表态
+    assert state_for(False, True, False)[0] == {"read_culture": False}  # 没读却说懂了
+
+
+def test_link_item_unclear_wins_over_got_it_and_is_reported() -> None:
+    """两个都勾时以「未完全理解」为准, 并上报给 HR。
+
+    宁可让 HR 多看一眼, 也不要把「没懂」误记成「懂了」。
+    """
+    d = _load("_rookie_sop_doc")
+    rows = [_link_row("read_culture", "企业文化总则", "https://x.example")]
+    blocks, slots = d.build_doc_blocks(rows, name="张三")
+    stored = _slots_map(slots)
+    got = _with_block_ids(blocks)
+    for b in got:
+        if b.get("block_type") == 17:
+            b["todo"]["style"]["done"] = True  # 三个框全勾上
+
+    state, unclear = d.read_doc_state(got, stored)
+
+    assert state == {"read_culture": False}
+    assert unclear == ["read_culture"]
 
 
 def test_real_config_v3_has_the_three_required_readings() -> None:

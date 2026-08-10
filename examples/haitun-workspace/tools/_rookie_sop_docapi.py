@@ -60,8 +60,11 @@ def doc_url(document_id: str) -> str:
 async def append_blocks(api: Any, document_id: str, blocks: list[dict[str, Any]]) -> dict[str, Any]:
     """把块追加到文档根节点。飞书对单次子块数有上限, 故分批。"""
     if not blocks:
-        return {"ok": True, "written": 0}
+        return {"ok": True, "written": 0, "todo_block_ids": []}
     written = 0
+    # 飞书在返回体里给出每个新建块的 block_id —— 收集 todo 块的 id, 用来建
+    # block_id → item_id 映射, 于是文档正文不必写任何 item 标记(见 _rookie_sop_doc)。
+    todo_block_ids: list[str] = []
     for start in range(0, len(blocks), _MAX_BLOCKS_PER_CALL):
         chunk = blocks[start : start + _MAX_BLOCKS_PER_CALL]
         res = _parsed(
@@ -76,9 +79,16 @@ async def append_blocks(api: Any, document_id: str, blocks: list[dict[str, Any]]
                 "ok": False,
                 "error": str(res.get("msg") or res.get("message") or "append blocks failed"),
                 "written": written,
+                "todo_block_ids": todo_block_ids,
             }
+        children = (_data(res).get("children") or res.get("children") or [])
+        for child in children:
+            if isinstance(child, dict) and child.get("block_type") == _doc.BLOCK_TODO:
+                bid = str(child.get("block_id") or "")
+                if bid:
+                    todo_block_ids.append(bid)
         written += len(chunk)
-    return {"ok": True, "written": written}
+    return {"ok": True, "written": written, "todo_block_ids": todo_block_ids}
 
 
 async def read_blocks(api: Any, document_id: str) -> dict[str, Any]:
@@ -176,10 +186,21 @@ async def provision_doc(
         return created
     document_id = str(created["document_id"])
 
-    blocks = _doc.build_doc_blocks(rows, name=name, sop_url=sop_url)
+    blocks, slots = _doc.build_doc_blocks(rows, name=name, sop_url=sop_url)
     appended = await append_blocks(api, document_id, blocks)
     if appended.get("ok") is not True:
         return {"ok": False, "error": f"blocks: {appended.get('error')}", "document_id": document_id}
+
+    # 按顺序配对: slots[i] 对应第 i 个 todo 块。数量不等说明飞书少建/多建了块,
+    # 这时映射会错位, 宁可报错也不要把状态同步到错误的条目上。
+    todo_ids = appended.get("todo_block_ids") or []
+    if len(todo_ids) != len(slots):
+        return {
+            "ok": False,
+            "error": f"todo block count mismatch: got {len(todo_ids)}, expected {len(slots)}",
+            "document_id": document_id,
+        }
+    block_map = {bid: f"{item_id}:{role}" for bid, (item_id, role) in zip(todo_ids, slots, strict=True)}
 
     granted = await grant_edit(api, document_id, open_id)
     subscribed = await subscribe_changes(api, document_id)
@@ -188,6 +209,7 @@ async def provision_doc(
         "document_id": document_id,
         "url": doc_url(document_id),
         "blocks_written": appended.get("written"),
+        "block_map": block_map,
         "granted": granted.get("ok") is True,
         "grant_error": granted.get("error", ""),
         "subscribed": subscribed.get("ok") is True,

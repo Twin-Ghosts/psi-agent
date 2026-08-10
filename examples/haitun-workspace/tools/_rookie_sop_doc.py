@@ -9,13 +9,18 @@
     (实测 POST /drive/v1/permissions/:doc/members 授 edit 返回 ok=True)。
     一人一份文档、只授权他本人, 隔离天然成立。
 
+条目身份不写进正文, 而是靠 **block_id → item_id 的映射**: 建文档时飞书会在返回体里
+给出每个新建块的 block_id(实测确认)。早先在行尾写「〔item_id〕」标记, 新人会看到一串
+英文, 观感差; 零宽字符也只能藏分隔符、藏不住 id 本身。映射存进 state 文件, 于是文档
+正文一个多余字符都没有。
+
 数据仍然以明细表为唯一事实来源: 文档只是新人勾选的界面, 勾完由
 rookie_sop_sync_doc 把 done 状态同步回表, 所以 HR 日报的数据源完全不用改。
 """
 
 from __future__ import annotations
 
-# ruff: noqa: RUF001, RUF003
+# ruff: noqa: RUF001, RUF002
 from datetime import date
 from typing import Any
 
@@ -25,35 +30,49 @@ BLOCK_HEADING2 = 4
 BLOCK_TODO = 17
 BLOCK_DIVIDER = 22
 
-# 文档里每个 todo 块的文字前缀 —— 同步时靠它把块认回条目。
-# 刻意用不可见的分隔思路: 条目名后跟一个「〔item_id〕」标记, 新人看得见但不碍事,
-# 因为 done 状态是按块顺序对不上的(新人可能自己加行、删行、重排)。
-_ID_OPEN = "〔"
-_ID_CLOSE = "〕"
+# 阅读类条目拆成两组勾选(见 build_doc_blocks), 三个框各有自己的角色。
+ROLE_READ = "read"
+ROLE_GOT_IT = "ok"
+ROLE_UNCLEAR = "unclear"
+
+_MODULE_EMOJI = {
+    "到岗准备": "🏢",
+    "必读材料": "📚",
+    "搞清楚谁是谁": "🤝",
+    "每天怎么干活": "📅",
+    "制度知晓": "📋",
+    "开发环境": "💻",
+}
 
 
-def _text_run(content: str, bold: bool = False) -> dict[str, Any]:
-    style: dict[str, Any] = {"bold": True} if bold else {}
+def _text_run(content: str, bold: bool = False, grey: bool = False) -> dict[str, Any]:
+    style: dict[str, Any] = {}
+    if bold:
+        style["bold"] = True
+    if grey:
+        style["text_color"] = 5  # 飞书字色枚举: 5 = 灰
     return {"text_run": {"content": content, "text_element_style": style}}
 
 
-def _link_run(url: str) -> dict[str, Any]:
-    """一段可点的链接。飞书文档的 text_run 用 text_element_style.link.url 承载超链接。"""
-    return {"text_run": {"content": url, "text_element_style": {"link": {"url": url}}}}
+def _linked_run(content: str, url: str, bold: bool = False) -> dict[str, Any]:
+    """超链接挂在**原文字**上, 不单独占一行罗列 URL —— 排版更干净。"""
+    style: dict[str, Any] = {"link": {"url": url}}
+    if bold:
+        style["bold"] = True
+    return {"text_run": {"content": content, "text_element_style": style}}
 
 
-def item_marker(item_id: str) -> str:
-    """条目在文档里的可识别标记。同步时按它匹配, 不依赖块顺序。"""
-    return f"{_ID_OPEN}{item_id}{_ID_CLOSE}"
+def _item_id_of(row: dict[str, Any]) -> str:
+    key = str(row.get("记录键") or "")
+    return key.rsplit(":", 1)[-1] if ":" in key else key
 
 
-def parse_item_id(text: str) -> str:
-    """从一行 todo 文字里取回 item_id; 认不出返回空串。"""
-    if _ID_OPEN not in text or _ID_CLOSE not in text:
-        return ""
-    start = text.rindex(_ID_OPEN) + len(_ID_OPEN)
-    end = text.rindex(_ID_CLOSE)
-    return text[start:end].strip() if end > start else ""
+def _todo(elements: list[dict[str, Any]], done: bool) -> dict[str, Any]:
+    return {"block_type": BLOCK_TODO, "todo": {"elements": elements, "style": {"done": done}}}
+
+
+def module_emoji(module: str) -> str:
+    return _MODULE_EMOJI.get(module, "▸")
 
 
 def build_doc_blocks(
@@ -62,31 +81,42 @@ def build_doc_blocks(
     name: str,
     today: date | None = None,
     sop_url: str = "",
-) -> list[dict[str, Any]]:
-    """把明细行渲染成文档块: 按模块分节, 每项一个 todo 块。
+) -> tuple[list[dict[str, Any]], list[tuple[str, str]]]:
+    """渲染文档块, 并给出「第 N 个 todo 块对应哪个条目」的顺序表。
 
-    done 状态直接来自明细表 —— 文档是表的投影, 重建文档时已完成的项照旧是勾上的。
+    返回 (blocks, slots): slots 与 blocks 里 todo 块的出现顺序一一对应, 每项是
+    (item_id, role)。调用方拿到飞书返回的 block_id 后按顺序配对存映射 —— 所以文档
+    正文不需要任何 item 标记。
+
+    阅读类条目(有必读链接)排成两组:
+        ☐ 已阅读
+        ☐ 已完全理解        ☐ 未完全理解（会找人问清楚）
+    第二组语义互斥, 但飞书的 todo 块之间**没有互斥机制**(勾一个不会自动取消另一个),
+    所以互斥由 read_doc_state 裁决: 两个都勾时以「未完全理解」为准 —— 宁可让 HR
+    多看一眼, 也不要把「没懂」误记成「懂了」。
     """
     blocks: list[dict[str, Any]] = [
         {
             "block_type": BLOCK_TEXT,
+            "text": {"elements": [_text_run(f"👋 {name}，这是你的入职清单", bold=True)], "style": {}},
+        },
+        {
+            "block_type": BLOCK_TEXT,
             "text": {
-                "elements": [
-                    _text_run(f"{name} 的入职清单", bold=True),
-                    _text_run("　逐项打勾即可，勾完会自动同步给 HR，无需另行提交。"),
-                ],
+                "elements": [_text_run("逐项打勾即可，进度会自动同步给 HR，无需另行提交。", grey=True)],
                 "style": {},
             },
-        }
+        },
     ]
     if sop_url.strip():
         blocks.append(
             {
                 "block_type": BLOCK_TEXT,
-                "text": {"elements": [_text_run(f"完整 SOP: {sop_url.strip()}")], "style": {}},
+                "text": {"elements": [_linked_run("📘 完整 SOP 原文", sop_url.strip())], "style": {}},
             }
         )
 
+    slots: list[tuple[str, str]] = []
     modules: list[str] = []
     for row in rows:
         module = str(row.get("模块") or "")
@@ -101,7 +131,10 @@ def build_doc_blocks(
             {
                 "block_type": BLOCK_HEADING2,
                 "heading2": {
-                    "elements": [_text_run(f"{module}　{done_n}/{len(module_rows)}")],
+                    "elements": [
+                        _text_run(f"{module_emoji(module)} {module}"),
+                        _text_run(f"　{done_n}/{len(module_rows)}", grey=True),
+                    ],
                     "style": {},
                 },
             }
@@ -111,99 +144,92 @@ def build_doc_blocks(
             title = str(row.get("项") or "").strip()
             acceptance = str(row.get("验收标准") or "").strip()
             status = str(row.get("状态") or "")
-            # 不适用的项不给 todo 框 —— 勾它没有意义
+            url = str(row.get("必读链接") or "").strip()
+            done = status == "已完成"
+
             if status == "不适用":
                 blocks.append(
                     {
                         "block_type": BLOCK_TEXT,
-                        "text": {
-                            "elements": [_text_run(f"（不适用）{title}")],
-                            "style": {},
-                        },
+                        "text": {"elements": [_text_run(f"⚪ {title}　不适用", grey=True)], "style": {}},
                     }
                 )
                 continue
-            url = str(row.get("必读链接") or "").strip()
+
             if url:
-                # 必读材料: 先给一行可点的链接, 再给一个「我已阅读并理解」的勾选框。
-                # 刻意不用笼统的「完成」—— 阅读类的验收就是「读过并理解」, 说清楚
-                # 要确认的是什么, 比让人对着一个「完成」猜要好。
+                # 标题本身就是超链接, 不再单独占一行放 URL
                 blocks.append(
                     {
                         "block_type": BLOCK_TEXT,
                         "text": {
-                            "elements": [
-                                _text_run(f"📖 {title}", bold=True),
-                                _text_run("　"),
-                                _link_run(url),
-                            ],
+                            "elements": [_text_run("📖 "), _linked_run(title, url, bold=True)],
                             "style": {},
                         },
                     }
                 )
-                blocks.append(
-                    {
-                        "block_type": BLOCK_TODO,
-                        "todo": {
-                            "elements": [_text_run(f"我已阅读并理解　{item_marker(item_id)}")],
-                            "style": {"done": status == "已完成"},
-                        },
-                    }
-                )
+                blocks.append(_todo([_text_run("✅ 已阅读")], done))
+                slots.append((item_id, ROLE_READ))
+                blocks.append(_todo([_text_run("💡 已完全理解")], done))
+                slots.append((item_id, ROLE_GOT_IT))
+                blocks.append(_todo([_text_run("❓ 未完全理解（会找人问清楚）")], False))
+                slots.append((item_id, ROLE_UNCLEAR))
                 continue
-            label = title
+
+            elements = [_text_run(title, bold=True)]
             if acceptance:
-                label += f"　—　{acceptance}"
-            label += f"　{item_marker(item_id)}"
-            blocks.append(
-                {
-                    "block_type": BLOCK_TODO,
-                    "todo": {
-                        "elements": [_text_run(label)],
-                        "style": {"done": status == "已完成"},
-                    },
-                }
-            )
-    return blocks
+                elements.append(_text_run(f"　{acceptance}", grey=True))
+            blocks.append(_todo(elements, done))
+            slots.append((item_id, ROLE_READ))
+    return blocks, slots
 
 
-def _item_id_of(row: dict[str, Any]) -> str:
-    key = str(row.get("记录键") or "")
-    return key.rsplit(":", 1)[-1] if ":" in key else key
+def read_doc_state(
+    blocks: list[dict[str, Any]], block_map: dict[str, str]
+) -> tuple[dict[str, bool], list[str]]:
+    """从文档块读回 ({item_id: 是否完成}, [勾了「未完全理解」的 item_id])。
 
+    ``block_map`` 是 {block_id: "item_id:role"} —— 建文档时存下的映射。靠它而不是
+    文字标记认条目, 所以文档正文没有多余字符; 新人自己新增的块不在映射里, 自然被
+    忽略(当作他自己的笔记)。
 
-def read_doc_state(blocks: list[dict[str, Any]]) -> dict[str, bool]:
-    """从文档块读回 {item_id: 是否勾上}。
-
-    按 item_marker 匹配而不是按块顺序 —— 新人可能自己在文档里加行、删行、重排,
-    靠顺序对齐会把状态写到错误的条目上。认不出 item_id 的块直接忽略
-    (可能是新人自己加的笔记)。
+    互斥裁决在这里: 阅读类条目若「已完全理解」与「未完全理解」都勾了, 以后者为准 ——
+    宁可让 HR 多看一眼, 也不要把「没懂」误记成「懂了」。
     """
-    state: dict[str, bool] = {}
+    ticked: dict[str, dict[str, bool]] = {}
     for block in blocks:
         if not isinstance(block, dict) or block.get("block_type") != BLOCK_TODO:
             continue
+        mapped = block_map.get(str(block.get("block_id") or ""))
+        if not mapped or ":" not in mapped:
+            continue
+        item_id, role = mapped.rsplit(":", 1)
         todo = block.get("todo")
-        if not isinstance(todo, dict):
-            continue
-        text = "".join(
-            str((e.get("text_run") or {}).get("content") or "")
-            for e in (todo.get("elements") or [])
-            if isinstance(e, dict)
-        )
-        item_id = parse_item_id(text)
-        if not item_id:
-            continue
-        state[item_id] = bool((todo.get("style") or {}).get("done"))
-    return state
+        done = bool((todo or {}).get("style", {}).get("done")) if isinstance(todo, dict) else False
+        ticked.setdefault(item_id, {})[role] = done
+
+    state: dict[str, bool] = {}
+    unclear: list[str] = []
+    for item_id, roles in ticked.items():
+        if roles.get(ROLE_UNCLEAR):
+            unclear.append(item_id)
+        if ROLE_GOT_IT in roles or ROLE_UNCLEAR in roles:
+            # 阅读类: 读过 + 明确表示理解才算完成; 勾了「未完全理解」就不算
+            state[item_id] = (
+                bool(roles.get(ROLE_READ))
+                and bool(roles.get(ROLE_GOT_IT))
+                and not roles.get(ROLE_UNCLEAR)
+            )
+        else:
+            state[item_id] = bool(roles.get(ROLE_READ))
+    return state, unclear
 
 
 def diff_state(doc_state: dict[str, bool], rows: list[dict[str, Any]]) -> list[str]:
-    """文档里勾上、而表里还没记完成的 item_id。
+    """文档里已完成、而表里还没记完成的 item_id。
 
-    刻意为之: 只认「未完成 → 勾上」这一个方向。反向(表里已完成、文档里被取消勾选)
-    不做撤销 —— 已完成是既成事实, 让新人在文档里取消勾选就能抹掉记录, 会让 HR 日报
-    的数据变得不可信; 真要撤销应当由人工改表。
+    刻意为之: 只认「未完成 → 完成」这一个方向。反向(表里已完成、文档里被取消勾选)
+    不做撤销 —— 已完成是既成事实, 让新人取消勾选就能抹掉记录, 会让 HR 日报的数据
+    变得不可信; 真要撤销应当由人工改表。
     """
     by_id = {_item_id_of(r): r for r in rows}
     out: list[str] = []

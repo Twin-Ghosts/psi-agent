@@ -83,7 +83,18 @@ async def rookie_sop_sync_doc(document_id: str = "", event_payload_json: str = "
     if read.get("ok") is not True:
         return json.dumps({"ok": False, "error": f"read doc failed: {read.get('error')}"}, ensure_ascii=False)
 
-    doc_state = _doc.read_doc_state(read.get("blocks") or [])
+    # block_map 是建文档时存下的 {block_id: "item_id:role"} —— 靠它认条目, 所以
+    # 文档正文里没有 item 标记。缺映射就无从对齐, 报错而不是瞎猜。
+    maps = state.get("doc_block_maps")
+    maps = maps if isinstance(maps, dict) else {}
+    block_map = maps.get(doc_id)
+    if not isinstance(block_map, dict) or not block_map:
+        return json.dumps(
+            {"ok": False, "error": f"no block map for document {doc_id}; re-send the card to rebuild it"},
+            ensure_ascii=False,
+        )
+
+    doc_state, unclear = _doc.read_doc_state(read.get("blocks") or [], block_map)
     bitable = _rt.bitable_adapter()
     rows, truncated = await _store.fetch_detail(bitable, app_token, detail_table, target)
     newly_ticked = _doc.diff_state(doc_state, rows)
@@ -130,6 +141,10 @@ async def rookie_sop_sync_doc(document_id: str = "", event_payload_json: str = "
         "progress": f"{progress.done}/{progress.total}",
         "overview_updated": overview_updated,
     }
+    if unclear:
+        # 勾了「未完全理解」的项要让 HR 看见 —— 这正是拆两组勾选的目的:
+        # 「读过」与「读懂了」不是一回事。
+        result["unclear"] = unclear
     if failures:
         result["failures"] = failures
     if truncated or read.get("truncated"):

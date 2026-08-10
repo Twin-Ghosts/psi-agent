@@ -156,6 +156,12 @@ async def rookie_sop_card_send(
     state_docs = dict(state_docs) if isinstance(state_docs, dict) else {}
     state_docs[str(doc["document_id"])] = resolved_open_id
     state["docs"] = state_docs
+    # block_id → "item_id:role" 映射: 同步时靠它认条目, 所以文档正文里不写 item 标记。
+    # 没有它同步就无从对齐, 所以与 docs 索引一起存。
+    block_maps = state.get("doc_block_maps")
+    block_maps = dict(block_maps) if isinstance(block_maps, dict) else {}
+    block_maps[str(doc["document_id"])] = doc.get("block_map") or {}
+    state["doc_block_maps"] = block_maps
     await _rt.save_state(state)
 
     # 入口卡: 一条消息交代全貌, 没有回调动作(勾选在文档里做)。
