@@ -16,6 +16,9 @@ from psi_agent.protocol import (
     FINISH_REASON_ERROR,
     FINISH_REASON_STOP,
     FINISH_REASON_TOOL_CALLS,
+    REASONING_KIND_THINKING,
+    REASONING_KIND_TOOL_CALL,
+    REASONING_KIND_TOOL_RESULT,
 )
 from psi_agent.session.ai_client import AiClient
 from psi_agent.session.channel_adapter import ChannelAdapter
@@ -29,9 +32,6 @@ from psi_agent.session.history_display import (
     with_kind,
 )
 from psi_agent.session.protocol import (
-    REASONING_KIND_THINKING,
-    REASONING_KIND_TOOL_CALL,
-    REASONING_KIND_TOOL_RESULT,
     AgentChunk,
     AgentError,
     AgentRunResult,
