@@ -79,8 +79,17 @@ open_id；同名或查不到时向 HR 确认，不要猜。参考 `skills/feishu
 ### 定时任务
 
 - 催办：每人一份 `rookie-remind-<open_id 后 8 位>`，`cron="30 9 * * *"`、`fire=tool`、
-  `tool="rookie_sop_remind"`、`tool_args={"open_id": "ou_…"}`。由 `rookie_sop_card_send` 自动建。
-  新人出新手村后工具会删掉自己这一份。
+  `tool="rookie_sop_remind"`、`tool_args={"open_id": "ou_…"}`。由 `rookie_sop_card_send` 自动建，
+  到点不经过 LLM（`fire=tool`）。
+  - 只推两天，不是「没做完就一直催」：入职第 1 天发绿卡，第 2 天发红卡，第 3 天起
+    即便清单仍未做完也**不再发卡**（`rookie_sop_remind.decide_remind` 的四分支决策）。
+  - 第 2 天若清单仍未完成，除了给新人的红卡，还会**顺带给 HR 发一张反馈卡**——
+    前提是 `config/rookie_sop.yaml` 里 `hr_notify_id` 已配置；留空时（联调期间的
+    安全默认）明确跳过并在返回值里写清原因，不猜收件人、不悄悄不发。
+  - 不论哪种情形（毕业、还是第 3 天起停推），工具都会删掉自己这份定时，而不是
+    继续到点转、天天返回"无事可做"——全部做完随时可以毕业（不看第几天）；
+    没做完但到了第 3 天则直接停推，是否继续跟进变成 HR 反馈卡（第 2 天那张）
+    该管的事，不再靠天天骚扰新人来兜底。
 - HR 日报：全局一份 `rookie-digest-daily`，落在 HR 自己的 Session，`cron="30 18 * * *"`、
   **`fire=prompt`**（内容要现算聚合，`fire=tool` 到点不经 LLM 只能传固定参数），
   TASK 正文写「调用 rookie_sop_digest」。

@@ -6,7 +6,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1452,31 +1452,43 @@ def test_role_set_switching_nondev_to_dev_revives_all_five_rows(monkeypatch: Any
     assert sent_cards[0]["clickable"] == 5
 
 
-def test_decide_remind_stays_silent_when_nothing_is_due() -> None:
+def test_decide_remind_pushes_on_day_1_regardless_of_due_dates() -> None:
+    """第 1 天无条件推一次(绿), 不看有没有逾期/今日到期 —— 只推两天, 不看欠项。"""
     rm = _load("rookie_sop_remind")
     p = _load("_rookie_sop_progress")
-    rows = [
-        _row("wifi", p.STATUS_DONE, date(2026, 8, 5)),
-        _row("attendance", p.STATUS_TODO, date(2026, 8, 20)),  # 还早
-    ]
+    rows = [_row("attendance", p.STATUS_TODO, date(2026, 8, 20))]  # 还早, 不逾期也不今日到期
 
-    got = rm.decide_remind(rows, date(2026, 8, 7))
+    got = rm.decide_remind(rows, date(2026, 8, 5), day_index=1)
 
-    assert got["kind"] == "silent"
+    assert got["kind"] == "remind"
+    assert got["notify_hr"] is False
 
 
-def test_decide_remind_fires_when_overdue_or_due_today() -> None:
+def test_decide_remind_pushes_on_day_2_and_flags_hr_notify() -> None:
+    """第 2 天同样推一次(红), 且标记「这次值得让 HR 知道」。"""
     rm = _load("rookie_sop_remind")
     p = _load("_rookie_sop_progress")
+    rows = [_row("wifi", p.STATUS_TODO, date(2026, 8, 6))]
 
-    overdue = [_row("wifi", p.STATUS_TODO, date(2026, 8, 5))]
-    assert rm.decide_remind(overdue, date(2026, 8, 7))["kind"] == "remind"
+    got = rm.decide_remind(rows, date(2026, 8, 6), day_index=2)
 
-    due_today = [_row("desk", p.STATUS_TODO, date(2026, 8, 7))]
-    assert rm.decide_remind(due_today, date(2026, 8, 7))["kind"] == "remind"
+    assert got["kind"] == "remind"
+    assert got["notify_hr"] is True
+
+
+def test_decide_remind_stops_from_day_3_even_if_incomplete() -> None:
+    """第 3 天起不再推 —— 即便还有未完成项, 也不是「一直催到做完」。"""
+    rm = _load("rookie_sop_remind")
+    p = _load("_rookie_sop_progress")
+    rows = [_row("wifi", p.STATUS_TODO, date(2026, 8, 20))]
+
+    got = rm.decide_remind(rows, date(2026, 8, 7), day_index=3)
+
+    assert got["kind"] == "stop"
 
 
 def test_decide_remind_graduates_when_all_applicable_items_are_done() -> None:
+    """毕业不看第几天 —— 做完了随时可以毕业, 哪怕是第 5 天。"""
     rm = _load("rookie_sop_remind")
     p = _load("_rookie_sop_progress")
     rows = [
@@ -1484,17 +1496,231 @@ def test_decide_remind_graduates_when_all_applicable_items_are_done() -> None:
         _row("git_workflow", p.STATUS_NA, date(2026, 8, 11), module="开发环境"),
     ]
 
-    got = rm.decide_remind(rows, date(2026, 8, 7))
+    got = rm.decide_remind(rows, date(2026, 8, 7), day_index=5)
 
     assert got["kind"] == "graduate"
     assert got["progress"].total == 1
 
 
-def test_decide_remind_on_empty_rows_is_silent_not_graduate() -> None:
+def test_decide_remind_on_empty_rows_is_not_graduate() -> None:
     rm = _load("rookie_sop_remind")
 
-    # 明细还没建好时不能误报毕业
-    assert rm.decide_remind([], date(2026, 8, 7))["kind"] == "silent"
+    # 明细还没建好时不能误报毕业(空清单不该被 total==0 判成「全部完成」)
+    got = rm.decide_remind([], date(2026, 8, 7), day_index=1)
+    assert got["kind"] != "graduate"
+
+
+def _remind_detail_item(
+    record_id: str,
+    item_id: str,
+    status: str,
+    onboard: date,
+    due: date,
+    *,
+    open_id: str = "ou_x",
+    name: str = "张三",
+) -> dict[str, Any]:
+    """造一条 fetch_detail 会读到的原始明细记录(经 _item 包成真实飞书返回形状),
+    供 rookie_sop_remind 端到端测试直连 fetch_detail 而不是绕过它手造 rows。"""
+    s = _load("_rookie_sop_store")
+    return _item(
+        record_id,
+        {
+            "记录键": f"{open_id}:{item_id}",
+            "姓名": name,
+            "open_id": open_id,
+            "模块": "环境准备",
+            "项": item_id,
+            "状态": status,
+            "入职日": s.to_millis(onboard),
+            "截止日": s.to_millis(due),
+        },
+    )
+
+
+def test_rookie_sop_remind_day1_sends_green_card_without_hr_feedback(monkeypatch: Any) -> None:
+    """入职第 1 天: 只给新人发一张卡(颜色由 remind_card 内部决定), 不打扰 HR。"""
+    rm = _load("rookie_sop_remind")
+    p = _load("_rookie_sop_progress")
+    today = date.today()
+    fake = _FakeBitable([[_remind_detail_item("rec1", "wifi", p.STATUS_TODO, today, today)]])
+
+    async def _fake_load_state() -> dict[str, Any]:
+        return {"app_token": "app1", "detail_table_id": "tblDetail", "overview_table_id": "tblOverview"}
+
+    rm._rt.bitable_adapter = lambda: fake
+    rm._rt.load_state = _fake_load_state
+
+    sent: list[tuple[Any, ...]] = []
+
+    async def _fake_send_card_ok(*args: Any, **kwargs: Any) -> str:
+        sent.append(args)
+        return json.dumps({"ok": True, "callback_context_saved": True}, ensure_ascii=False)
+
+    monkeypatch.setattr(rm, "feishu_message_send_card", _fake_send_card_ok)
+
+    out = json.loads(anyio.run(lambda: rm.rookie_sop_remind("ou_x")))
+
+    assert out["ok"] is True
+    assert out["kind"] == "remind"
+    # 只发了一张卡(给新人), 没有第二张 HR 反馈卡
+    assert len(sent) == 1
+    assert sent[0][0] == "ou_x"
+    assert "hr_feedback" not in out
+
+
+def test_rookie_sop_remind_day2_notifies_hr_when_hr_notify_id_is_configured(monkeypatch: Any) -> None:
+    """入职第 2 天仍未完成、且 hr_notify_id 已配置: 新人卡照发, 外加一张 HR 反馈卡。"""
+    rm = _load("rookie_sop_remind")
+    p = _load("_rookie_sop_progress")
+    today = date.today()
+    onboard = today - timedelta(days=1)  # day_index == 2
+    fake = _FakeBitable([[_remind_detail_item("rec1", "wifi", p.STATUS_TODO, onboard, onboard)]])
+
+    async def _fake_load_state() -> dict[str, Any]:
+        return {"app_token": "app1", "detail_table_id": "tblDetail", "overview_table_id": "tblOverview"}
+
+    rm._rt.bitable_adapter = lambda: fake
+    rm._rt.load_state = _fake_load_state
+
+    async def _fake_load_config_with_hr() -> dict[str, Any]:
+        return {"hr_notify_id": "ou_hr", "sop_doc_url": "https://sop.example"}
+
+    monkeypatch.setattr(rm._store, "load_config", _fake_load_config_with_hr)
+
+    sent: list[tuple[Any, ...]] = []
+
+    async def _fake_send_card_ok(*args: Any, **kwargs: Any) -> str:
+        sent.append(args)
+        return json.dumps({"ok": True, "callback_context_saved": True}, ensure_ascii=False)
+
+    monkeypatch.setattr(rm, "feishu_message_send_card", _fake_send_card_ok)
+
+    out = json.loads(anyio.run(lambda: rm.rookie_sop_remind("ou_x")))
+
+    assert out["ok"] is True
+    assert out["kind"] == "remind"
+    # 两张卡都发了: 先新人, 后 HR
+    assert len(sent) == 2
+    assert sent[0][0] == "ou_x"
+    assert sent[1][0] == "ou_hr"
+    assert out["hr_feedback"] == {"ok": True, "sent": True}
+
+
+def test_rookie_sop_remind_day2_skips_hr_feedback_when_hr_notify_id_is_empty(monkeypatch: Any) -> None:
+    """入职第 2 天仍未完成、但 hr_notify_id 留空(联调期间的安全默认): 新人卡照发,
+    HR 反馈卡必须明确跳过并说明原因 —— 不能悄悄不发, 也不能猜一个收件人。"""
+    rm = _load("rookie_sop_remind")
+    p = _load("_rookie_sop_progress")
+    today = date.today()
+    onboard = today - timedelta(days=1)  # day_index == 2
+    fake = _FakeBitable([[_remind_detail_item("rec1", "wifi", p.STATUS_TODO, onboard, onboard)]])
+
+    async def _fake_load_state() -> dict[str, Any]:
+        return {"app_token": "app1", "detail_table_id": "tblDetail", "overview_table_id": "tblOverview"}
+
+    rm._rt.bitable_adapter = lambda: fake
+    rm._rt.load_state = _fake_load_state
+
+    async def _fake_load_config_no_hr() -> dict[str, Any]:
+        return {"hr_notify_id": "", "sop_doc_url": "https://sop.example"}
+
+    monkeypatch.setattr(rm._store, "load_config", _fake_load_config_no_hr)
+
+    sent: list[tuple[Any, ...]] = []
+
+    async def _fake_send_card_ok(*args: Any, **kwargs: Any) -> str:
+        sent.append(args)
+        return json.dumps({"ok": True, "callback_context_saved": True}, ensure_ascii=False)
+
+    monkeypatch.setattr(rm, "feishu_message_send_card", _fake_send_card_ok)
+
+    out = json.loads(anyio.run(lambda: rm.rookie_sop_remind("ou_x")))
+
+    assert out["ok"] is True
+    assert out["kind"] == "remind"
+    # 只发了给新人的那一张, 没有猜收件人补发 HR 卡
+    assert len(sent) == 1
+    assert sent[0][0] == "ou_x"
+    expected_reason = "hr_notify_id is empty in config/rookie_sop.yaml"
+    assert out["hr_feedback"] == {"ok": False, "sent": False, "reason": expected_reason}
+
+
+def test_rookie_sop_remind_stops_and_self_deletes_from_day_3(monkeypatch: Any) -> None:
+    """入职第 3 天起: 不发卡(哪怕还有未完成项), 而是删掉自己这份定时。"""
+    rm = _load("rookie_sop_remind")
+    p = _load("_rookie_sop_progress")
+    today = date.today()
+    onboard = today - timedelta(days=2)  # day_index == 3
+    fake = _FakeBitable([[_remind_detail_item("rec1", "wifi", p.STATUS_TODO, onboard, onboard)]])
+
+    async def _fake_load_state() -> dict[str, Any]:
+        return {"app_token": "app1", "detail_table_id": "tblDetail", "overview_table_id": "tblOverview"}
+
+    rm._rt.bitable_adapter = lambda: fake
+    rm._rt.load_state = _fake_load_state
+
+    async def _fail_if_called(*args: Any, **kwargs: Any) -> str:
+        raise AssertionError("feishu_message_send_card must not be called from day 3 onward")
+
+    monkeypatch.setattr(rm, "feishu_message_send_card", _fail_if_called)
+
+    schedule_calls: list[dict[str, Any]] = []
+
+    async def _fake_schedule_manage(**kwargs: Any) -> str:
+        schedule_calls.append(kwargs)
+        return f"Schedule deleted: {kwargs.get('schedule_name')!r}"
+
+    monkeypatch.setattr(rm, "schedule_manage", _fake_schedule_manage)
+
+    out = json.loads(anyio.run(lambda: rm.rookie_sop_remind("ou_x")))
+
+    assert out == {
+        "ok": True,
+        "sent": False,
+        "kind": "stop",
+        "reason": "past day 2, no more pushes; schedule self-deleted",
+        "schedule": "Schedule deleted: 'rookie-remind-ou_x'",
+    }
+    assert schedule_calls == [{"action": "delete", "schedule_name": "rookie-remind-ou_x"}]
+
+
+def test_rookie_sop_remind_graduates_and_self_deletes_regardless_of_day(monkeypatch: Any) -> None:
+    """回归: 全部完成时随时(哪怕第 5 天)发毕业卡并删自己的定时 —— 天数改造没弄坏这条老路径。"""
+    rm = _load("rookie_sop_remind")
+    p = _load("_rookie_sop_progress")
+    today = date.today()
+    onboard = today - timedelta(days=4)  # day_index == 5
+    fake = _FakeBitable([[_remind_detail_item("rec1", "wifi", p.STATUS_DONE, onboard, onboard)]])
+
+    async def _fake_load_state() -> dict[str, Any]:
+        return {"app_token": "app1", "detail_table_id": "tblDetail", "overview_table_id": "tblOverview"}
+
+    rm._rt.bitable_adapter = lambda: fake
+    rm._rt.load_state = _fake_load_state
+
+    sent: list[tuple[Any, ...]] = []
+
+    async def _fake_send_card_ok(*args: Any, **kwargs: Any) -> str:
+        sent.append(args)
+        return json.dumps({"ok": True, "callback_context_saved": True}, ensure_ascii=False)
+
+    monkeypatch.setattr(rm, "feishu_message_send_card", _fake_send_card_ok)
+
+    schedule_calls: list[dict[str, Any]] = []
+
+    async def _fake_schedule_manage(**kwargs: Any) -> str:
+        schedule_calls.append(kwargs)
+        return f"Schedule deleted: {kwargs.get('schedule_name')!r}"
+
+    monkeypatch.setattr(rm, "schedule_manage", _fake_schedule_manage)
+
+    out = json.loads(anyio.run(lambda: rm.rookie_sop_remind("ou_x")))
+
+    assert out["ok"] is True
+    assert out["kind"] == "graduate"
+    assert len(sent) == 1
+    assert schedule_calls == [{"action": "delete", "schedule_name": "rookie-remind-ou_x"}]
 
 
 def test_active_rookies_keeps_in_progress_and_todays_graduates() -> None:

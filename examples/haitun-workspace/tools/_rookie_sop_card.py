@@ -364,8 +364,22 @@ def remind_card(
     sop_url: str,
     today: date | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
-    header = f"入职第 {day_index} 天 · 进度 {progress.done}/{progress.total}"
-    elements: list[dict[str, Any]] = [{"tag": "markdown", "content": header}]
+    """入职提醒卡 —— 只在第 1、2 天发(见 rookie_sop_remind.decide_remind), 颜色带出紧迫度:
+    第 1 天绿、第 2 天(及以后, 若被调用)红。「已完成 N / M 项」下面加一行提醒文案,
+    第 2 天的文案更急一些, 但不在卡面上声称「已通知 HR」——那是否属实取决于
+    hr_notify_id 是否配置, 卡片本身不该替调用方担保一件它不知道结果的事。
+    """
+    is_day1 = day_index <= 1
+    header = f"入职第 {day_index} 天\n{_progress_bar(f'{progress.done}/{progress.total}')}"
+    urgency = (
+        "🟢 今天是入职第一天，抽空把清单上的事项过一遍～"
+        if is_day1
+        else "🔴 入职已经第二天了，清单还没完成，请尽快处理。"
+    )
+    elements: list[dict[str, Any]] = [
+        {"tag": "markdown", "content": header},
+        {"tag": "markdown", "content": urgency},
+    ]
     handlers: dict[str, str] = {}
 
     for label, rows in (("⚠️ 已逾期", progress.overdue), ("📌 今天到期", progress.due_today)):
@@ -389,7 +403,24 @@ def remind_card(
             }
         )
     elements.extend(_footer(sop_url))
-    return _shell("入职提醒", elements, "orange" if progress.overdue else "blue"), handlers
+    return _shell("入职卡 · 提醒", elements, "green" if is_day1 else "red"), handlers
+
+
+def hr_feedback_card(name: str, progress: Any, sop_url: str = "") -> tuple[dict[str, Any], dict[str, str]]:
+    """入职第 2 天仍未完成时, 单独给 HR 的一张即时反馈卡。
+
+    与每日 18:30 的汇总日报(digest_card)不同: 那份要等到当天收尾才发, 覆盖全体在途
+    新人; 这张是「这个人到第二天还没完成」的单点及时提醒, 只读, 不挂任何回调。
+    """
+    remaining = max(progress.total - progress.done, 0)
+    lines = [f"⚠️ **{name}** 入职第二天了，还有 {remaining}/{progress.total} 项未完成。"]
+    for label, rows in (("已逾期", progress.overdue), ("今天到期", progress.due_today)):
+        if rows:
+            titles = "、".join(str(r.get("项") or "") for r in rows)
+            lines.append(f"**{label}**：{titles}")
+    elements: list[dict[str, Any]] = [{"tag": "markdown", "content": "\n".join(lines)}]
+    elements.extend(_footer(sop_url))
+    return _shell("入职卡 · 进度提醒", elements, "orange"), {}
 
 
 def graduation_card(name: str, total: int) -> tuple[dict[str, Any], dict[str, str]]:
