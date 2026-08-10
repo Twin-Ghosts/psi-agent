@@ -1,7 +1,11 @@
-"""新人入职: 建明细/总览行 + 发全部模块卡 + 建每日催办定时任务。
+"""新人入职: 建明细/总览行 + 发入职卡 + 建每日催办定时任务。
 
-由 feishu.hr.user_created 触发器 fire=tool 调用(Session 注入 event_payload_json),
-也可手动传 open_id 联调。
+主路径是 HR 对 agent 说「给某人发入职卡」——由 agent 把姓名解析成 open_id 后直接调
+本工具(见 skills/feishu-rookie-onboarding/SKILL.md)。也支持从
+feishu.hr.user_created 触发器 fire=tool 调用(Session 注入 event_payload_json),
+这条路默认对真实新人不生效, 只是次要/兜底(见
+triggers/rookie-sop-welcome/TRIGGER.md)。两种入口共享同一套 open_id/name 参数,
+工具本身不关心调用方是 agent 还是触发器。
 """
 
 from __future__ import annotations
@@ -34,14 +38,17 @@ async def rookie_sop_card_send(
     onboard_date: str = "",
     force_resend: bool = False,
 ) -> str:
-    """Send a new hire the full onboarding SOP as per-module tickable cards.
+    """Send a new hire the 入职卡 (entry card + per-person doc checklist).
 
-    Prefer calling with empty ``open_id``/``name`` from a ``feishu.hr.user_created``
-    trigger — Session injects ``event_payload_json``. Partially idempotent: a
-    repeat call for the same person never re-seeds detail rows and never re-sends
-    cards or re-creates the reminder schedule (both are skipped once detail rows
+    Primary caller: the agent, after resolving a name HR gave it (e.g. "给张三发
+    入职卡") to an ``open_id``. Also callable with empty ``open_id``/``name`` from
+    a ``feishu.hr.user_created`` trigger — Session injects ``event_payload_json``
+    in that case — though that trigger path is secondary/fallback by default (see
+    ``triggers/rookie-sop-welcome/TRIGGER.md``). Partially idempotent: a repeat
+    call for the same person never re-seeds detail rows and never re-sends cards
+    or re-creates the reminder schedule (both are skipped once detail rows
     already exist) — it only recomputes the overview row so it stays accurate.
-    Pass ``force_resend=True`` to deliberately re-send every module card and
+    Pass ``force_resend=True`` to deliberately re-send the entry card and
     re-create the reminder schedule anyway (e.g. manual troubleshooting).
 
     Args:

@@ -1,18 +1,25 @@
 ---
 name: feishu-rookie-onboarding
-description: "Use when a new hire joins (feishu.hr.user_created), when sending or re-sending the onboarding SOP cards, or when handling a <feishu_card_action> whose handler is rookie_sop_tick / rookie_sop_role_set. Covers per-module tickable cards, the 研发/非研发 role choice, daily 9:30 reminders, and the 18:30 HR digest with its overview-table link."
+description: "Use when HR asks the agent to send someone an onboarding card (e.g. \"给某人发入职卡\"), when a new hire joins (feishu.hr.user_created, secondary/fallback path), or when handling a <feishu_card_action> whose handler is rookie_sop_tick / rookie_sop_role_set. Covers the entry card + per-person doc checklist, the 研发/非研发 role choice, daily 9:30 reminders (day 1/day 2 only), and the 18:30 HR digest with its overview-table link."
 category: productivity
 agent_editable: true
 ---
 
-# 新人入职 SOP 卡片闭环
+# 新人入职卡闭环
 
-新人入职后：按 SOP 模块发**逐行可勾选**的卡（multi_use，勾一行只结那一行）→ 新人自己勾 →
-写明细表并重算总览行 → 每日 9:30 按截止日催办 → 每日 18:30 给 HR 发汇总卡 + 总览表链接。
+HR 对 agent 说「给<某人>发入职卡」→ agent 解析出对方 open_id → 发**入职卡**（一条消息 +
+跳转到本人清单文档的按钮）→ 新人在文档里逐项打勾 → 同步回明细表并重算总览行 →
+入职第 1/2 天按截止日催办（第 1 天绿卡、第 2 天红卡，之后不再推送）→
+每日 18:30 给 HR 发汇总卡 + 总览表链接。
 
 ## When to use
 
-- 通讯录新建员工（`feishu.hr.user_created`），或用户要求「给某人发入职 SOP 卡」。
+- **主路径**：HR（或任何有权限的人）在飞书里对 agent 说「给<某人>发入职卡」/
+  「给<某人>发个入职 SOP」之类的话。agent 需要先把「某人」解析成 open_id
+  （通讯录按姓名查，见下方"解析姓名"），再调 `rookie_sop_card_send`。
+- **次要/兜底路径**：通讯录新建员工事件（`feishu.hr.user_created`）。这条路默认
+  对真实新人**不生效**（见 `triggers/rookie-sop-welcome/TRIGGER.md` 里的 filter
+  收窄说明）——建号和「HR 决定要发卡」不是同一时刻，让 HR 显式说一句更可靠。
 - 收到 `<feishu_card_action>`，且 `dispatch.handler` 为 `rookie_sop_tick` 或 `rookie_sop_role_set`。
 
 ## When not to use
@@ -23,10 +30,20 @@ agent_editable: true
 
 ## Instructions
 
+### 解析姓名（HR 主动发卡时）
+
+HR 说的是姓名，`rookie_sop_card_send` 要的是 `open_id`——这一步由 agent 做，工具本身
+不认姓名。用 HR 自己当前会话的身份去查（`<feishu_context>` 里的 `sender_open_id`
+作为 `user_key`），调 `GET /open-apis/search/v1/user`（按姓名搜通讯录）拿到目标人的
+open_id；同名或查不到时向 HR 确认，不要猜。参考 `skills/feishu-contact/SKILL.md`
+里对通讯录接口鉴权方式的说明（那个 skill 本身按手机号/邮箱匹配，不按姓名，
+姓名搜索要另外调 `/search/v1/user`）。
+
 ### 发卡
 
-1. 调 `rookie_sop_card_send`。触发器场景参数留空，靠 Session 注入的 `event_payload_json`。
-2. 手工联调传 `open_id`（必填）、可选 `name` 与 `onboard_date`（`YYYY-MM-DD`，默认今天）。
+1. 姓名解析出 open_id 后，调 `rookie_sop_card_send`（`open_id` 必填，`name` 建议一并传，
+   `event_payload_json`/`onboard_date` 留空即可，工具自己处理默认值）。
+2. 通讯录事件触发时同样调这个工具，但场景参数留空，靠 Session 注入的 `event_payload_json`。
 3. 幂等：同一人重复调用复用已有明细行，不会写出两套，也不会重复建定时任务。
 4. 工具成功后卡片已可见：本轮**零 assistant 文本**（不要说「卡片已发送」）。
    「零文本」= 这一轮**什么都不输出**。**不要输出 `NO_REPLY`** —— 本工具自己发卡，

@@ -2,14 +2,15 @@
 #
 # window_days: SOP 的 Day 窗口天数（「Day 1-3」= 3）；截止日 = 入职日 + window_days - 1
 # dev_only:    true 表示仅研发适用（新人在入口卡上自选角色后生效）
-# url:         填了 url 的条目是**必读材料**，详情页渲染成链接 + 单个「我已阅读并理解」
-#              勾选框，而不是笼统的「完成」——阅读类的验收就是「读过并理解」。
+# url:         填了 url 的条目是**必读材料**，详情页渲染成链接 + 并排两个理解勾选
+#              （已完全理解 / 未完全理解），而不是笼统的「完成」——
+#              阅读类的验收是「读过并明确表示理解」，不是「已阅读」。
 #
 # 粒度取「混合」：第 0/1/2 件事是要动手做的，逐行为细拆；第 3-8 件事是制度类、
 # 只需知晓，每章一项「已阅读理解」。这样既漏不掉要办的事，清单也不至于太长。
 
 company_name: 真知
-card_title_prefix: 入职路线图
+card_title_prefix: 入职卡
 sop_doc_url: https://genuineknowledge.feishu.cn/docx/BFs4dmCxkohnMVxP47vc7Exonxf
 hr_notify_id: ""         # 罗霖的 open_id，空则日报不发
 hr_notify_id_type: open_id

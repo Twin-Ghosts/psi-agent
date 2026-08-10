@@ -194,7 +194,7 @@ def entry_card(
     进度靠文档变更事件驱动同步后重绘, 不靠卡上的按钮。
     """
     progress = _p.summarize(rows, today)
-    head = f"👋 **{name}**，这是你的入职清单\n{_progress_bar(f'{progress.done}/{progress.total}')}"
+    head = f"👋 **{name}**，这是你的入职卡\n{_progress_bar(f'{progress.done}/{progress.total}')}"
     elements: list[dict[str, Any]] = [{"tag": "markdown", "content": head}, {"tag": "hr"}]
 
     modules: list[str] = []
@@ -225,7 +225,7 @@ def entry_card(
                 "actions": [
                     {
                         "tag": "button",
-                        "text": {"tag": "plain_text", "content": "打开我的入职清单"},
+                        "text": {"tag": "plain_text", "content": "打开我的入职卡"},
                         "type": "primary",
                         "url": doc_url.strip(),
                     }
@@ -235,7 +235,7 @@ def entry_card(
     elements.append(
         {"tag": "note", "elements": [{"tag": "plain_text", "content": "💡 在清单里逐项打勾即可，进度会自动同步"}]}
     )
-    return _shell("入职路线图", elements, _card_template(rows, today)), {}
+    return _shell("入职卡", elements, _card_template(rows, today)), {}
 
 
 def _card_module_mark(rows: list[dict[str, Any]], today: date | None) -> str:
@@ -261,7 +261,7 @@ def module_card(
     rows_elements, handlers = _rows_section(rows, today)
     elements.extend(rows_elements)
     elements.extend(_footer(sop_url))
-    return _shell(f"入职路线图 · {module}", elements, _card_template(rows, today)), handlers
+    return _shell(f"入职卡 · {module}", elements, _card_template(rows, today)), handlers
 
 
 def _role_button(label: str, action: str, role: str) -> list[dict[str, Any]]:
@@ -315,7 +315,7 @@ def role_card(
     elements.extend(_footer(sop_url))
 
     template = _card_template(rows, today) if role_answered else "blue"
-    return _shell("入职路线图 · 开发环境", elements, template), handlers
+    return _shell("入职卡 · 开发环境", elements, template), handlers
 
 
 def role_settled_card(
@@ -344,7 +344,7 @@ def role_settled_card(
             elements.extend(row_elements)
         elements.append({"tag": "hr"})
         elements.append({"tag": "markdown", "content": "你选择了「非研发人员」，这部分不需要完成。"})
-        return _shell("入职路线图 · 开发环境 ✅ 不适用", elements, "grey"), {}
+        return _shell("入职卡 · 开发环境 ✅ 不适用", elements, "grey"), {}
     all_rows = lead_rows + rows
     done = sum(1 for r in all_rows if str(r.get("状态") or "") == _p.STATUS_DONE)
     return role_card(

@@ -14,6 +14,13 @@
 英文, 观感差; 零宽字符也只能藏分隔符、藏不住 id 本身。映射存进 state 文件, 于是文档
 正文一个多余字符都没有。
 
+阅读类条目的两个理解勾选框(已完全理解/未完全理解)要挤在同一行 —— todo 块是块级元素,
+彼此之间没有「同行并排」的排布方式, 硬摆会各占一行。飞书文档的表格(block_type 31)
+是唯一能把两个块级元素摆进同一行的容器: 建一张 1 行 2 列的空表, 飞书会自动生成 2 个
+格子块(block_type 32), 每个格子各塞一个 todo。这样两个勾选框视觉上就在同一行,
+互不占行。表格与格子的 block_id 同样不在建表的返回体里给全, 要读回文档才能拿到
+(见 _rookie_sop_docapi.provision_doc), 所以阅读类条目比普通条目多两轮网络往返。
+
 数据仍然以明细表为唯一事实来源: 文档只是新人勾选的界面, 勾完由
 rookie_sop_sync_doc 把 done 状态同步回表, 所以 HR 日报的数据源完全不用改。
 """
@@ -29,9 +36,13 @@ BLOCK_TEXT = 2
 BLOCK_HEADING2 = 4
 BLOCK_TODO = 17
 BLOCK_DIVIDER = 22
+BLOCK_TABLE = 31
+BLOCK_TABLE_CELL = 32
 
-# 阅读类条目拆成两组勾选(见 build_doc_blocks), 三个框各有自己的角色。
-ROLE_READ = "read"
+# 普通条目只有一个 todo, 勾上即完成。
+ROLE_DONE = "done"
+# 阅读类条目拆成两个理解勾选(见 build_doc_blocks), 各有自己的角色;
+# 「已阅读」已去掉 —— 读没读不重要, 重要的是懂没懂。
 ROLE_GOT_IT = "ok"
 ROLE_UNCLEAR = "unclear"
 
@@ -75,6 +86,18 @@ def module_emoji(module: str) -> str:
     return _MODULE_EMOJI.get(module, "▸")
 
 
+def understanding_todos() -> tuple[dict[str, Any], dict[str, Any]]:
+    """阅读类条目那两个并排理解勾选的 todo 块 —— (已完全理解, 未完全理解)。
+
+    调用方(_rookie_sop_docapi.provision_doc)把这两个分别塞进表格读回后发现的
+    两个格子里, 而不是塞进文档根节点, 所以这里只给块本身, 不掺和「往哪追加」。
+    """
+    return (
+        _todo([_text_run("💡 已完全理解")], False),
+        _todo([_text_run("❓ 未完全理解（会找人问清楚）")], False),
+    )
+
+
 def build_doc_blocks(
     rows: list[dict[str, Any]],
     *,
@@ -82,23 +105,32 @@ def build_doc_blocks(
     today: date | None = None,
     sop_url: str = "",
 ) -> tuple[list[dict[str, Any]], list[tuple[str, str]]]:
-    """渲染文档块, 并给出「第 N 个 todo 块对应哪个条目」的顺序表。
+    """渲染文档根节点的块, 并给出「第 N 个可追踪块对应哪个条目」的顺序表。
 
-    返回 (blocks, slots): slots 与 blocks 里 todo 块的出现顺序一一对应, 每项是
-    (item_id, role)。调用方拿到飞书返回的 block_id 后按顺序配对存映射 —— 所以文档
-    正文不需要任何 item 标记。
+    返回 (blocks, slots): slots 与 blocks 里**可追踪块**(todo 或表格)的出现顺序
+    一一对应。每项是 (item_id, role):
+      - role 非空 —— 这一个块就是 todo, 直接按 role 存进 block_map。
+      - role == "" —— 这一个块是表格(阅读类条目的理解勾选放在表格的两个格子里,
+        见下), 建表的返回体不会给出格子 block_id, 要等 provision_doc 读回文档、
+        发现两个格子后, 再往各自格子里追加一个 todo, 那两个新 todo 才是真正要存
+        进 block_map 的对象。table 本身的 block_id 用完即弃。
 
-    阅读类条目(有必读链接)排成两组:
-        ☐ 已阅读
+    普通条目只有一个 todo(role=ROLE_DONE), 勾上即完成。
+
+    阅读类条目(有必读链接)排两个理解勾选, 并排在同一行:
+        📖 标题(超链接)
         ☐ 已完全理解        ☐ 未完全理解（会找人问清楚）
-    第二组语义互斥, 但飞书的 todo 块之间**没有互斥机制**(勾一个不会自动取消另一个),
+    「已阅读」已去掉 —— 读没读不重要, 重要的是懂没懂。todo 块是块级元素, 彼此没有
+    「同行并排」的排布方式, 所以用一张 1 行 2 列的表格(block_type 31)当容器,
+    两个理解勾选各占一个格子(block_type 32), 视觉上就在同一行。
+    两者语义互斥, 但飞书的 todo 块之间**没有互斥机制**(勾一个不会自动取消另一个),
     所以互斥由 read_doc_state 裁决: 两个都勾时以「未完全理解」为准 —— 宁可让 HR
     多看一眼, 也不要把「没懂」误记成「懂了」。
     """
     blocks: list[dict[str, Any]] = [
         {
             "block_type": BLOCK_TEXT,
-            "text": {"elements": [_text_run(f"👋 {name}，这是你的入职清单", bold=True)], "style": {}},
+            "text": {"elements": [_text_run(f"👋 {name}，这是你的入职卡", bold=True)], "style": {}},
         },
         {
             "block_type": BLOCK_TEXT,
@@ -167,19 +199,19 @@ def build_doc_blocks(
                         },
                     }
                 )
-                blocks.append(_todo([_text_run("✅ 已阅读")], done))
-                slots.append((item_id, ROLE_READ))
-                blocks.append(_todo([_text_run("💡 已完全理解")], done))
-                slots.append((item_id, ROLE_GOT_IT))
-                blocks.append(_todo([_text_run("❓ 未完全理解（会找人问清楚）")], False))
-                slots.append((item_id, ROLE_UNCLEAR))
+                # 1 行 2 列的空表 —— 两个理解勾选并排一行。表格自己的 block_id
+                # 用不上(role 留空, 见函数说明), 格子里的 todo 要等读回文档才建。
+                blocks.append(
+                    {"block_type": BLOCK_TABLE, "table": {"property": {"row_size": 1, "column_size": 2}}}
+                )
+                slots.append((item_id, ""))
                 continue
 
             elements = [_text_run(title, bold=True)]
             if acceptance:
                 elements.append(_text_run(f"　{acceptance}", grey=True))
             blocks.append(_todo(elements, done))
-            slots.append((item_id, ROLE_READ))
+            slots.append((item_id, ROLE_DONE))
     return blocks, slots
 
 
@@ -193,7 +225,8 @@ def read_doc_state(
     忽略(当作他自己的笔记)。
 
     互斥裁决在这里: 阅读类条目若「已完全理解」与「未完全理解」都勾了, 以后者为准 ——
-    宁可让 HR 多看一眼, 也不要把「没懂」误记成「懂了」。
+    宁可让 HR 多看一眼, 也不要把「没懂」误记成「懂了」。普通条目(role=ROLE_DONE)
+    只有一个 todo, 勾上即完成, 不受这条裁决影响。
     """
     ticked: dict[str, dict[str, bool]] = {}
     for block in blocks:
@@ -213,14 +246,10 @@ def read_doc_state(
         if roles.get(ROLE_UNCLEAR):
             unclear.append(item_id)
         if ROLE_GOT_IT in roles or ROLE_UNCLEAR in roles:
-            # 阅读类: 读过 + 明确表示理解才算完成; 勾了「未完全理解」就不算
-            state[item_id] = (
-                bool(roles.get(ROLE_READ))
-                and bool(roles.get(ROLE_GOT_IT))
-                and not roles.get(ROLE_UNCLEAR)
-            )
+            # 阅读类: 勾了「已完全理解」且没勾「未完全理解」才算完成
+            state[item_id] = bool(roles.get(ROLE_GOT_IT)) and not roles.get(ROLE_UNCLEAR)
         else:
-            state[item_id] = bool(roles.get(ROLE_READ))
+            state[item_id] = bool(roles.get(ROLE_DONE))
     return state, unclear
 
 
