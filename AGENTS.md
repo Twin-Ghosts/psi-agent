@@ -75,6 +75,7 @@ src/
     ├── _appdata.py             # AppData 路径助手（todos/history/state；Session↔Gateway 共享）
     ├── protocol.py             # 跨组件 SSE 协议归属（线格式类型 + finish_reason 常量 + 辅助帧/终止帧规则）
     ├── _feishu_routing.py      # 飞书群聊/私聊判定与路由键（Gateway↔Channel 共享）
+    ├── _send_markers.py        # [SEND:] 解码：正则 + 空路径过滤（Channel↔Session 共享）
     ├── _run.py                 # YAML 配置批量启动（psi-agent run config.yml）
     ├── _logging.py              # loguru 配置，verbose→DEBUG
     ├── ai/
@@ -106,7 +107,7 @@ src/
     │   ├── __init__.py              # package marker
     │   ├── _types.py               # FileChunk, TextChunk, ReasoningChunk, InputChunk, OutputChunk
     │   ├── _errors.py              # ChannelError 异常基类
-    │   ├── _markers.py             # [RECV:]/[SEND:] 标记协议（纯函数 encode_input + 有状态扫描器 SendMarkerScanner）
+    │   ├── _markers.py             # [RECV:] 标记 + encode_input + 有状态扫描器 SendMarkerScanner（[SEND:] 解码重导出自 `_send_markers`）
     │   ├── _stream.py              # SSE 解析 iter_sse_events + interval 缓冲 StreamBuffer（与传输解耦）
     │   ├── _core.py                # ChannelCore — 连接管理 + post() 编排
     │   ├── repl/                   # 交互式 REPL thin client

@@ -8,41 +8,17 @@ definition and can be unit-tested without any HTTP/SSE machinery.
 
 from __future__ import annotations
 
-import re
-from collections.abc import Iterator
-
 from loguru import logger
 
+from psi_agent._send_markers import SEND_RE, iter_send_paths
 from psi_agent.channel._types import FileChunk, InputChunk, TextChunk
 
+# ``SEND_RE`` / ``iter_send_paths`` 的定义在 ``psi_agent._send_markers`` —— Session
+# 侧的 Gateway 投影也要用, 放在本模块会让 Session import Channel 的私有模块。此处
+# 重导出以保持既有 import 路径有效。
+__all__ = ["RECV_MARKER", "SEND_RE", "SendMarkerScanner", "encode_input", "iter_send_paths"]
+
 RECV_MARKER = "[RECV:{path}]"
-# Matches the space-padded variant ``[ SEND:path ]`` some models emit, and an
-# empty ``[SEND:]`` -- the latter is filtered by ``iter_send_paths`` rather than
-# by the pattern, so both the Channel decoder and the Gateway projection share
-# one rule instead of each encoding it in its own regex.
-#
-# The path class excludes newlines as well as ``]``: a newline is never valid in
-# a path, and allowing it would let an *unclosed* ``[SEND:`` swallow everything
-# up to the next ``]`` several lines down -- losing the real path that follows
-# and handing ``_send_file`` a multi-line string to upload.
-SEND_RE = re.compile(r"\[\s*SEND\s*:\s*([^\]\n]*?)\s*\]", re.IGNORECASE)
-
-
-def iter_send_paths(text: str) -> Iterator[tuple[str, int]]:
-    """Yield ``(path, match_end)`` for each ``[SEND:…]`` carrying a real path.
-
-    Empty / whitespace-only paths are skipped: a bare ``[SEND:]`` is a model
-    slip, not a transfer request.  Forwarding one would make the Channel attempt
-    an upload with an empty source path (neither ``_send_file`` implementation
-    guards against it), and would make the Gateway projection emit a blank entry.
-
-    ``match_end`` is the offset just past the marker, so a streaming caller can
-    advance its scan pointer without re-deriving the match.
-    """
-    for match in SEND_RE.finditer(text):
-        path = match.group(1).strip()
-        if path:
-            yield path, match.end()
 
 
 def encode_input(chunks: list[InputChunk]) -> str:

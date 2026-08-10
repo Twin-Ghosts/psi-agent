@@ -6,7 +6,7 @@
 channel/
 ├── _types.py          # FileChunk, TextChunk, ReasoningChunk, InputChunk, OutputChunk
 ├── _errors.py         # ChannelError 基类（传输/协议/session/附件下载错误统一抛出）
-├── _markers.py        # [RECV:]/[SEND:] 标记协议唯一定义（encode_input + iter_send_paths + 有状态扫描器 SendMarkerScanner）
+├── _markers.py        # [RECV:] 标记 + encode_input + 有状态扫描器 SendMarkerScanner；[SEND:] 解码重导出自 `psi_agent/_send_markers.py`
 ├── _stream.py         # SSE 解析 iter_sse_events + interval 缓冲 StreamBuffer（与传输解耦）
 ├── _core.py           # ChannelCore — 连接管理 + post() 编排
 ├── _event_defs.py     # 加载 agent 包 channel_events/<channel>/（EVENT.yaml + map.py|produce.py）+ 变更指纹
@@ -36,7 +36,7 @@ ChannelCore 是所有 Channel（CLI、REPL、Telegram）共享的公共部件：
 - async context manager，管理 aiohttp ClientSession
 - `post(list[InputChunk]) -> AsyncIterator[OutputChunk]`：InputChunk → 字符串 → POST → SSE → OutputChunk
 - 将输入中的 FileChunk 转换为 `[RECV:/path]` 标记（session 端负责读文件）
-- 检测输出中的 `[SEND:/path]` 标记并产生 FileChunk。解码走 `iter_send_paths()`——它同时承载正则与**空路径过滤**：裸 `[SEND:]` 是模型笔误而非传输请求，放过去会让 `_send_file` 拿空 source path 发起上传。`session/history_display.py` 的 Gateway 投影复用同一函数，两侧不会再对"什么算路径"产生分歧
+- 检测输出中的 `[SEND:/path]` 标记并产生 FileChunk。解码走 `iter_send_paths()`——它同时承载正则与**空路径过滤**：裸 `[SEND:]` 是模型笔误而非传输请求，放过去会让 `_send_file` 拿空 source path 发起上传。该函数定义在顶层 `psi_agent/_send_markers.py`（本模块重导出）：`session/history_display.py` 的 Gateway 投影复用同一函数，放在本层会让 Session import Channel 的私有模块
 - 将 SSE 的 `delta.reasoning` 流切分为 `ReasoningChunk`（透传可选 `delta.kind`），与 `content`（`TextChunk`）按到达顺序交错产出；同槽不同 `kind` 在 buffer 内视为不同活动类型（不合并）；`[SEND:...]` 仅扫描 content
 - SSE 内容在 interval 窗口内缓冲合并为单个 TextChunk（默认 1s，可配置）
 - 终端通道（CLI/REPL）设置 interval=0 无需缓冲

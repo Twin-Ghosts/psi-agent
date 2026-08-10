@@ -28,7 +28,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from psi_agent.channel._markers import iter_send_paths
+from psi_agent._send_markers import iter_send_paths
 
 KIND_CHAT = "chat"
 KIND_SCHEDULE_SILENT = "schedule.silent"
@@ -243,8 +243,8 @@ def strip_transfer_markers(text: str) -> str:
 def extract_send_paths(text: str) -> list[str]:
     """Return ``[SEND:…]`` paths in order (stripped); empty / whitespace skipped.
 
-    Decoding lives in ``channel._markers`` so the Channel transport and this
-    Gateway projection cannot drift apart on what counts as a path.
+    Decoding lives in ``psi_agent._send_markers`` so the Channel transport and
+    this Gateway projection cannot drift apart on what counts as a path.
     """
     if not isinstance(text, str) or not text:
         return []
