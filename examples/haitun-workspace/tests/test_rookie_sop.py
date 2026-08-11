@@ -2470,3 +2470,65 @@ def test_real_config_v3_has_the_three_required_readings() -> None:
     assert all(i.url.startswith("https://") for i in links)
     # role_confirmed 仍是全员项(非 dev_only), 否则不答角色就能毕业
     assert any(i.item_id == "role_confirmed" and not i.dev_only for i in items)
+
+
+def test_remind_syncs_the_doc_before_deciding(monkeypatch: Any) -> None:
+    """催办前必须先同步详情页文档 —— 否则会拿着过期进度催人。
+
+    新人昨天在文档里勾完了, 今早却收到「你还有 5 项未完成」, 这比不催更糟。
+    同步失败不阻断催办(顶多进度偏旧), 但要记进 doc_sync 让人看见, 不能静默。
+    """
+    rm = _load("rookie_sop_remind")
+    calls: list[dict[str, str]] = []
+
+    async def _fake_sync(document_id: str = "", event_payload_json: str = "", open_id: str = "") -> str:
+        calls.append({"document_id": document_id, "open_id": open_id})
+        return json.dumps({"ok": True, "newly_synced": ["wifi"]}, ensure_ascii=False)
+
+    monkeypatch.setattr(rm._sync, "rookie_sop_sync_doc", _fake_sync)
+
+    # state 里有这个人的文档映射, 催办就该先同步它
+    async def _fake_state() -> dict[str, Any]:
+        return {
+            "app_token": "app1",
+            "detail_table_id": "tbl1",
+            "overview_table_id": "tbl2",
+            "docs": {"doc_of_x": "ou_x", "doc_of_other": "ou_other"},
+        }
+
+    monkeypatch.setattr(rm._rt, "load_state", _fake_state)
+    monkeypatch.setattr(rm._rt, "bitable_adapter", lambda: _FakeBitable([]))
+
+    json.loads(anyio.run(lambda: rm.rookie_sop_remind("ou_x")))
+
+    # 只同步这个人的文档, 不碰别人的
+    assert calls == [{"document_id": "doc_of_x", "open_id": "ou_x"}]
+
+
+def test_remind_survives_a_doc_sync_failure_instead_of_aborting(monkeypatch: Any) -> None:
+    """同步失败不阻断催办 —— 顶多进度偏旧, 不该因此完全不催。
+
+    (失败原因会记进返回值的 doc_sync 字段; 这里只钉死「不中断」这一条, 因为
+    本用例在无飞书凭据的环境下会更早从发卡处返回, 走不到那个字段。)
+    """
+    rm = _load("rookie_sop_remind")
+    called = False
+
+    async def _boom(document_id: str = "", event_payload_json: str = "", open_id: str = "") -> str:
+        nonlocal called
+        called = True
+        return json.dumps({"ok": False, "error": "read doc failed"}, ensure_ascii=False)
+
+    monkeypatch.setattr(rm._sync, "rookie_sop_sync_doc", _boom)
+
+    async def _fake_state() -> dict[str, Any]:
+        return {"app_token": "app1", "detail_table_id": "tbl1", "docs": {"doc1": "ou_x"}}
+
+    monkeypatch.setattr(rm._rt, "load_state", _fake_state)
+    monkeypatch.setattr(rm._rt, "bitable_adapter", lambda: _FakeBitable([]))
+
+    out = json.loads(anyio.run(lambda: rm.rookie_sop_remind("ou_x")))
+
+    # 同步被调用过, 且流程继续走到了后面的判定(kind 已产出), 没有因异常中断
+    assert called is True
+    assert "kind" in out

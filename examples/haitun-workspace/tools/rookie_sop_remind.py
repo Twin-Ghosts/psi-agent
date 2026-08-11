@@ -22,6 +22,7 @@ import _rookie_sop_config as _cfg
 import _rookie_sop_progress as _p
 import _rookie_sop_runtime as _rt
 import _rookie_sop_store as _store
+import rookie_sop_sync_doc as _sync
 from feishu_message import feishu_message_send_card
 from schedule_manage import schedule_manage
 
@@ -81,6 +82,23 @@ async def rookie_sop_remind(open_id: str = "") -> str:
         return json.dumps({"ok": False, "error": "rookie SOP base is not initialised"}, ensure_ascii=False)
 
     bitable = _rt.bitable_adapter()
+
+    # 催办前先把详情页文档里勾的项同步进来 —— 否则会拿着过期进度催人:
+    # 新人昨天在文档里勾完了, 今早却收到「你还有 5 项未完成」。
+    # 刻意放在 fetch_detail 之前, 让下面的判定读到同步后的行。
+    # 同步失败不阻断催办(顶多进度偏旧), 但要记进返回值, 不能静默。
+    doc_sync = ""
+    docs = state.get("docs")
+    if isinstance(docs, dict):
+        doc_id = next((d for d, owner in docs.items() if str(owner) == target), "")
+        if doc_id:
+            try:
+                synced = _store._parse_result(await _sync.rookie_sop_sync_doc(document_id=doc_id, open_id=target))
+                if synced.get("ok") is not True:
+                    doc_sync = f"doc sync failed: {synced.get('error')}"
+            except Exception as exc:
+                doc_sync = f"doc sync raised: {exc!r}"
+
     rows, truncated = await _store.fetch_detail(bitable, app_token, detail_table, target)
     today = date.today()
     onboard = next((r["入职日"] for r in rows if isinstance(r.get("入职日"), date)), today)
@@ -174,6 +192,8 @@ async def rookie_sop_remind(open_id: str = "") -> str:
         "overdue": len(progress.overdue),
         "due_today": len(progress.due_today),
     }
+    if doc_sync:
+        result["doc_sync"] = doc_sync
     if schedule_result:
         result["schedule"] = schedule_result
     if hr_feedback:
