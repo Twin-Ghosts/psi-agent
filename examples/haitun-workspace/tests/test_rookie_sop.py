@@ -2532,3 +2532,54 @@ def test_remind_survives_a_doc_sync_failure_instead_of_aborting(monkeypatch: Any
     # 同步被调用过, 且流程继续走到了后面的判定(kind 已产出), 没有因异常中断
     assert called is True
     assert "kind" in out
+
+
+def test_sync_doc_resolves_the_document_from_open_id_alone(monkeypatch: Any) -> None:
+    """只给 open_id 也要能同步 —— 催办前的那次同步走的正是这条路。
+
+    催办手里只有人、没有文档 token。原先代码在读 state 之前就因「没有
+    document_id」返回, 于是催办永远同步不到任何东西 —— 单测当时没覆盖这条路径,
+    是真实端到端跑一次才暴露的。
+    """
+    s = _load("rookie_sop_sync_doc")
+
+    async def _fake_state() -> dict[str, Any]:
+        return {
+            "app_token": "app1",
+            "detail_table_id": "tbl1",
+            "docs": {"doc_of_x": "ou_x", "doc_of_other": "ou_other"},
+            # 建文档时存下的 {block_id: "item_id:role"} 映射 —— 没有它同步无从下手
+            "doc_block_maps": {"doc_of_x": {"blk1": "wifi:done"}},
+        }
+
+    monkeypatch.setattr(s._rt, "load_state", _fake_state)
+
+    read_calls: list[str] = []
+
+    async def _fake_read(api: Any, document_id: str) -> dict[str, Any]:
+        read_calls.append(document_id)
+        return {"ok": True, "blocks": []}
+
+    monkeypatch.setattr(s._docapi, "read_blocks", _fake_read)
+    monkeypatch.setattr(s._rt, "bitable_adapter", lambda: _FakeBitable([]))
+
+    out = json.loads(anyio.run(lambda: s.rookie_sop_sync_doc(open_id="ou_x")))
+
+    # 反查到了这个人自己的文档, 不是别人的
+    assert read_calls == ["doc_of_x"]
+    assert out["document_id"] == "doc_of_x"
+
+
+def test_sync_doc_refuses_when_open_id_is_not_in_the_index(monkeypatch: Any) -> None:
+    """open_id 不在索引里就明确报错, 不要静默当成功。"""
+    s = _load("rookie_sop_sync_doc")
+
+    async def _fake_state() -> dict[str, Any]:
+        return {"app_token": "app1", "detail_table_id": "tbl1", "docs": {"doc1": "ou_someone_else"}}
+
+    monkeypatch.setattr(s._rt, "load_state", _fake_state)
+
+    out = json.loads(anyio.run(lambda: s.rookie_sop_sync_doc(open_id="ou_x")))
+
+    assert out["ok"] is False
+    assert "doc index" in out["error"]

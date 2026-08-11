@@ -59,10 +59,22 @@ async def rookie_sop_sync_doc(document_id: str = "", event_payload_json: str = "
     """
     payload = _store._parse_result(event_payload_json) if event_payload_json else {}
     doc_id = (document_id or "").strip() or _doc_id_of(payload)
-    if not doc_id:
-        return json.dumps({"ok": False, "error": "no document_id in args or event payload"}, ensure_ascii=False)
 
     state = await _rt.load_state()
+    if not doc_id:
+        # 只给了 open_id 时按 docs 索引反查 —— 催办前的同步就是这条路径:
+        # 它手里只有人, 没有文档 token。原先在读 state 之前就返回, 于是催办
+        # 永远同步不到东西(单测没覆盖到这条路, 是端到端验证才发现的)。
+        target_hint = (open_id or "").strip()
+        docs_index = state.get("docs")
+        if target_hint and isinstance(docs_index, dict):
+            doc_id = next((d for d, owner in docs_index.items() if str(owner) == target_hint), "")
+    if not doc_id:
+        return json.dumps(
+            {"ok": False, "error": "no document_id in args/event payload, and open_id is not in the doc index"},
+            ensure_ascii=False,
+        )
+
     app_token = str(state.get("app_token") or "")
     detail_table = str(state.get("detail_table_id") or "")
     overview_table = str(state.get("overview_table_id") or "")
