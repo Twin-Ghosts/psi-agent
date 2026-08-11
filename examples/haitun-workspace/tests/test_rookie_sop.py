@@ -2628,3 +2628,97 @@ def test_doc_url_falls_back_when_feishu_cannot_be_asked() -> None:
     url = anyio.run(lambda: da.fetch_doc_url(_MetaFails(), "doc123"))
 
     assert url == "https://feishu.cn/docx/doc123"
+
+
+def test_sync_doc_deletes_its_own_high_frequency_schedule_after_day_one(monkeypatch: Any) -> None:
+    """入职当天之后, 高频同步定时要自删 —— 否则就是每 10 分钟一次的永久空轮询。
+
+    定时任务是发卡时建的, 没人会记得回收; 留着它一年就是五万次无意义调用。
+    删除用的名字必须与创建时一致(rookie-docsync-<后8位>), 否则删的是不存在的
+    名字, 任务永远留着。
+    """
+    s = _load("rookie_sop_sync_doc")
+    deleted: list[dict[str, str]] = []
+
+    async def _fake_schedule(**kwargs: Any) -> str:
+        deleted.append({"action": kwargs.get("action", ""), "name": kwargs.get("schedule_name", "")})
+        return "Schedule deleted"
+
+    monkeypatch.setattr(s, "schedule_manage", _fake_schedule)
+
+    async def _fake_state() -> dict[str, Any]:
+        return {
+            "app_token": "app1",
+            "detail_table_id": "tbl1",
+            "docs": {"doc1": "ou_x"},
+            "doc_block_maps": {"doc1": {"blk1": "wifi:done"}},
+        }
+
+    monkeypatch.setattr(s._rt, "load_state", _fake_state)
+
+    async def _fake_read(api: Any, document_id: str) -> dict[str, Any]:
+        return {"ok": True, "blocks": []}
+
+    monkeypatch.setattr(s._docapi, "read_blocks", _fake_read)
+    # 入职日是昨天 → 已过当天, 该自删
+    yesterday = date.today() - timedelta(days=1)
+    rows = [{"记录键": "ou_x:wifi", "项": "连上 WiFi", "状态": "未完成", "入职日": yesterday, "截止日": yesterday}]
+    monkeypatch.setattr(s._rt, "bitable_adapter", lambda: _FakeBitable(rows))
+
+    async def _fake_fetch(*args: Any, **kwargs: Any) -> tuple[list[dict[str, Any]], bool]:
+        return rows, False
+
+    monkeypatch.setattr(s._store, "fetch_detail", _fake_fetch)
+
+    out = json.loads(anyio.run(lambda: s.rookie_sop_sync_doc(open_id="ou_x")))
+
+    assert len(deleted) == 1
+    assert deleted[0]["action"] == "delete"
+    assert deleted[0]["name"] == "rookie-docsync-ou_x"  # open_id 只 4 字符时后 8 位就是它本身
+    assert "docsync_schedule" in out
+
+
+def test_sync_doc_keeps_the_schedule_on_the_onboarding_day(monkeypatch: Any) -> None:
+    """入职当天不能删 —— 那正是需要高频对齐的那一天。"""
+    s = _load("rookie_sop_sync_doc")
+    calls: list[str] = []
+
+    async def _fake_schedule(**kwargs: Any) -> str:
+        calls.append(kwargs.get("action", ""))
+        return "ok"
+
+    monkeypatch.setattr(s, "schedule_manage", _fake_schedule)
+
+    async def _fake_state() -> dict[str, Any]:
+        return {
+            "app_token": "app1",
+            "detail_table_id": "tbl1",
+            "docs": {"doc1": "ou_x"},
+            "doc_block_maps": {"doc1": {"blk1": "wifi:done"}},
+        }
+
+    monkeypatch.setattr(s._rt, "load_state", _fake_state)
+
+    async def _fake_read(api: Any, document_id: str) -> dict[str, Any]:
+        return {"ok": True, "blocks": []}
+
+    monkeypatch.setattr(s._docapi, "read_blocks", _fake_read)
+    today_rows = [
+        {
+            "记录键": "ou_x:wifi",
+            "项": "连上 WiFi",
+            "状态": "未完成",
+            "入职日": date.today(),
+            "截止日": date.today(),
+        }
+    ]
+    monkeypatch.setattr(s._rt, "bitable_adapter", lambda: _FakeBitable(today_rows))
+
+    async def _fake_fetch(*args: Any, **kwargs: Any) -> tuple[list[dict[str, Any]], bool]:
+        return today_rows, False
+
+    monkeypatch.setattr(s._store, "fetch_detail", _fake_fetch)
+
+    anyio.run(lambda: s.rookie_sop_sync_doc(open_id="ou_x"))
+
+    assert calls == []  # 当天一次都不该碰定时

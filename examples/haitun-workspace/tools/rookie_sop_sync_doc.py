@@ -27,6 +27,7 @@ import _rookie_sop_progress as _p
 import _rookie_sop_runtime as _rt
 import _rookie_sop_store as _store
 from feishu_api import feishu_api
+from schedule_manage import schedule_manage
 
 
 def _doc_id_of(payload: dict[str, Any]) -> str:
@@ -143,6 +144,19 @@ async def rookie_sop_sync_doc(document_id: str = "", event_payload_json: str = "
         )
         overview_updated = recomputed.get("ok") is True
 
+    # 高频同步只在**入职当天**跑: 那天新人最活跃, 值得每 10 分钟对齐一次。
+    # 过了当天就把这个定时删掉 —— 之后靠每日 9:00 催办前那次同步兜底。
+    # 刻意让工具自己删而不是靠外部清理: 定时任务是发卡时建的, 没人会记得回收它;
+    # 留着它就是每 10 分钟一次的空轮询, 一年下来五万次。
+    # (与 rookie_sop_remind._delete_own_schedule 同一套约定, 名字必须对上, 否则
+    #  删的是个不存在的名字, 任务永远留着。)
+    onboard = next((r["入职日"] for r in rows if isinstance(r.get("入职日"), date)), None)
+    schedule_note = ""
+    if onboard is not None and today > onboard:
+        schedule_note = await schedule_manage(
+            action="delete", schedule_name=f"rookie-docsync-{target[-8:]}"
+        )
+
     progress = _p.summarize(rows, today)
     result: dict[str, Any] = {
         "ok": not failures,
@@ -157,6 +171,8 @@ async def rookie_sop_sync_doc(document_id: str = "", event_payload_json: str = "
         # 勾了「未完全理解」的项要让 HR 看见 —— 这正是拆两组勾选的目的:
         # 「读过」与「读懂了」不是一回事。
         result["unclear"] = unclear
+    if schedule_note:
+        result["docsync_schedule"] = schedule_note
     if failures:
         result["failures"] = failures
     if truncated or read.get("truncated"):

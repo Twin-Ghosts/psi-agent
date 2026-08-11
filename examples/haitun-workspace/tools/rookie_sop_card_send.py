@@ -10,7 +10,7 @@ triggers/rookie-sop-welcome/TRIGGER.md)。两种入口共享同一套 open_id/na
 
 from __future__ import annotations
 
-# ruff: noqa: E402
+# ruff: noqa: E402, RUF001
 import json
 import sys
 from datetime import date, datetime
@@ -223,14 +223,37 @@ async def rookie_sop_card_send(
     )
     schedule_failed = schedule_result.startswith("[Error]") and "already exists" not in schedule_result
 
+    # 入职当天每 10 分钟把详情页文档的勾选同步进表, 让进度接近实时。
+    #
+    # 为什么不靠事件: 文档变更事件走不通, 而且是权限模型的死结, 不是配置问题 ——
+    # 实测机器人**只能订阅自己拥有的**文档(靠 owner 身份; 把它加成协作者也没用,
+    # subscribe 依然 forbidden), 而它自己拥有的文档, 编辑事件又不推给它。
+    # 能订阅的收不到, 收得到的订不上, 所以只能拉取。
+    #
+    # 为什么只在当天高频: 入职当天新人最活跃, 值得每 10 分钟对齐; 过了当天,
+    # rookie_sop_sync_doc 会把这个定时自删, 之后靠 9:00 催办前那次同步兜底 ——
+    # 高频窗口因此限制在一天内, 不是长期空轮询。
+    sync_schedule = await schedule_manage(
+        action="create",
+        schedule_name=f"rookie-docsync-{resolved_open_id[-8:]}",
+        cron="*/10 * * * *",
+        fire="tool",
+        tool="rookie_sop_sync_doc",
+        tool_args=json.dumps({"open_id": resolved_open_id}, ensure_ascii=False),
+        visibility="silent",
+        description=f"{resolved_name} 入职清单同步（当天每 10 分钟，之后自删）",
+    )
+    sync_failed = sync_schedule.startswith("[Error]") and "already exists" not in sync_schedule
+
     result: dict[str, Any] = {
         # 有任何一张卡没发出去就不能报 ok —— 否则模型会告诉新人「卡片已送达」,
         # 而对方一张都没收到。
-        "ok": not schedule_failed and not failed,
+        "ok": not schedule_failed and not sync_failed and not failed,
         "open_id": resolved_open_id,
         "items": len(items),
         "cards_sent": sent,
         "schedule": schedule_result,
+        "sync_schedule": sync_schedule,
     }
     if failed:
         result["cards_failed"] = failed
