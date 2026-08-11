@@ -50,11 +50,41 @@ async def create_doc(api: Any, title: str) -> dict[str, Any]:
     document_id = str((doc or {}).get("document_id") or "")
     if not document_id:
         return {"ok": False, "error": f"no document_id in response: {res}"}
-    return {"ok": True, "document_id": document_id, "url": doc_url(document_id)}
+    return {"ok": True, "document_id": document_id, "url": await fetch_doc_url(api, document_id)}
 
 
 def doc_url(document_id: str) -> str:
+    """回退用的通用链接。
+
+    刻意为之: 正式链接要用 fetch_doc_url() 从飞书查, 因为每个租户有自己的域名
+    (本租户是 genuineknowledge.feishu.cn)。硬编码 feishu.cn 生成的链接新人点开
+    是「页面不存在」—— 实测踩过。这里只作为查询失败时的兜底。
+    """
     return f"https://feishu.cn/docx/{document_id}"
+
+
+async def fetch_doc_url(api: Any, document_id: str) -> str:
+    """问飞书要这份文档的真实链接(带租户域名); 查不到时回退到通用链接。"""
+    try:
+        res = _parsed(
+            await api(
+                "POST",
+                "/open-apis/drive/v1/metas/batch_query",
+                body_json=json.dumps(
+                    {"request_docs": [{"doc_token": document_id, "doc_type": "docx"}], "with_url": True},
+                    ensure_ascii=False,
+                ),
+            )
+        )
+        metas = _data(res).get("metas") or res.get("metas") or []
+        for meta in metas:
+            if isinstance(meta, dict):
+                url = str(meta.get("url") or "").strip()
+                if url:
+                    return url
+    except Exception:  # 查链接失败不该让整次发卡失败
+        pass
+    return doc_url(document_id)
 
 
 async def append_blocks(
@@ -266,7 +296,8 @@ async def provision_doc(
     return {
         "ok": granted.get("ok") is True and subscribed.get("ok") is True,
         "document_id": document_id,
-        "url": doc_url(document_id),
+        # 用飞书给的真实链接(带租户域名), 不用硬编码的通用域名
+        "url": await fetch_doc_url(api, document_id),
         "blocks_written": appended.get("written"),
         "block_map": block_map,
         "granted": granted.get("ok") is True,

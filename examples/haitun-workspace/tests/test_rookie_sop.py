@@ -2583,3 +2583,48 @@ def test_sync_doc_refuses_when_open_id_is_not_in_the_index(monkeypatch: Any) -> 
 
     assert out["ok"] is False
     assert "doc index" in out["error"]
+
+
+def test_provision_doc_uses_the_tenant_url_feishu_returns() -> None:
+    """文档链接必须用飞书返回的真实 URL, 不能硬编码 feishu.cn。
+
+    每个租户有自己的域名(本租户是 genuineknowledge.feishu.cn)。硬编码通用域名
+    生成的链接, 新人点开是「页面不存在」—— 实测踩过, 所以钉死这条。
+    """
+    da = _load("_rookie_sop_docapi")
+
+    class _ApiWithTenantUrl(_FakeDocApi):
+        async def __call__(self, method: str, path: str, **kwargs: Any) -> str:
+            if "metas/batch_query" in path:
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "data": {
+                            "metas": [{"url": "https://genuineknowledge.feishu.cn/docx/doc123"}]
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+            return await super().__call__(method, path, **kwargs)
+
+    api = _ApiWithTenantUrl()
+    rows = [_doc_row("wifi", "连上 WiFi", "未完成")]
+
+    out = anyio.run(lambda: da.provision_doc(api, open_id="ou_x", name="张三", rows=rows))
+
+    assert out["url"] == "https://genuineknowledge.feishu.cn/docx/doc123"
+
+
+def test_doc_url_falls_back_when_feishu_cannot_be_asked() -> None:
+    """查不到真实链接时回退到通用链接, 而不是整次发卡失败。"""
+    da = _load("_rookie_sop_docapi")
+
+    class _MetaFails(_FakeDocApi):
+        async def __call__(self, method: str, path: str, **kwargs: Any) -> str:
+            if "metas/batch_query" in path:
+                return json.dumps({"ok": False, "msg": "boom"}, ensure_ascii=False)
+            return await super().__call__(method, path, **kwargs)
+
+    url = anyio.run(lambda: da.fetch_doc_url(_MetaFails(), "doc123"))
+
+    assert url == "https://feishu.cn/docx/doc123"
