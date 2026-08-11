@@ -1,6 +1,6 @@
 ---
 name: feishu-rookie-onboarding
-description: "Use when HR asks the agent to send someone an onboarding card (e.g. \"给某人发入职卡\"), when a new hire joins (feishu.hr.user_created, secondary/fallback path), or when handling a <feishu_card_action> whose handler is rookie_sop_tick / rookie_sop_role_set. Covers the entry card + per-person doc checklist, the 研发/非研发 role choice, daily 9:30 reminders (day 1/day 2 only), and the 18:30 HR digest with its overview-table link."
+description: "Use when HR asks the agent to send someone an onboarding card (e.g. \"给某人发入职卡\"), when a new hire joins (feishu.hr.user_created, secondary/fallback path), or when handling a <feishu_card_action> whose handler is rookie_sop_tick / rookie_sop_role_set. Covers the entry card + per-person doc checklist, the 研发/非研发 role choice, daily 9:00 reminders (day 1/day 2 only), and the 19:00 HR exception alert (only for people still unfinished at the end of day 2) with its overview-table link."
 category: productivity
 agent_editable: true
 ---
@@ -10,7 +10,7 @@ agent_editable: true
 HR 对 agent 说「给<某人>发入职卡」→ agent 解析出对方 open_id → 发**入职卡**（一条消息 +
 跳转到本人清单文档的按钮）→ 新人在文档里逐项打勾 → 同步回明细表并重算总览行 →
 入职第 1/2 天按截止日催办（第 1 天绿卡、第 2 天红卡，之后不再推送）→
-每日 18:30 给 HR 发汇总卡 + 总览表链接。
+入职第 2 天结束（19:00）仍未完成时，给 HR 发一张异常提醒卡 + 总览表链接。
 
 ## When to use
 
@@ -69,7 +69,7 @@ open_id；同名或查不到时向 HR 确认，不要猜。参考 `skills/feishu
    一张卡上，Day 1 就都可点。因为 `multi_use` 按 action 逐个消费，点掉一个角色按钮只退休
    那一个，其余行照旧可点，所以不需要「先发角色卡、答完再发第二张」。
    由此 **Day 1 分母是 33**（可点的项必须计入分母，否则进度看起来对不上）。
-4. 选「非研发人员」→ 那 5 个 `dev_only` 项标 `不适用`（退出分母、不催办、不进 HR 日报），
+4. 选「非研发人员」→ 那 5 个 `dev_only` 项标 `不适用`（退出分母、不催办、不进 HR 异常提醒），
    分母降到 28；`role_confirmed` 保持已完成、不受影响。工具会补发一张终态卡说明这部分不用做。
 5. 选「研发人员」→ 5 项保持 `未完成`，分母仍是 33，原卡上它们的按钮继续可点。
 6. 唯一还需要补发新卡的情形是**非研发→研发的反悔**：原卡上两个角色按钮都已被消费，
@@ -78,7 +78,7 @@ open_id；同名或查不到时向 HR 确认，不要猜。参考 `skills/feishu
 
 ### 定时任务
 
-- 催办：每人一份 `rookie-remind-<open_id 后 8 位>`，`cron="30 9 * * *"`、`fire=tool`、
+- 催办：每人一份 `rookie-remind-<open_id 后 8 位>`，`cron="0 9 * * *"`、`fire=tool`、
   `tool="rookie_sop_remind"`、`tool_args={"open_id": "ou_…"}`。由 `rookie_sop_card_send` 自动建，
   到点不经过 LLM（`fire=tool`）。
   - 只推两天，不是「没做完就一直催」：入职第 1 天发绿卡，第 2 天发红卡，第 3 天起
@@ -90,15 +90,19 @@ open_id；同名或查不到时向 HR 确认，不要猜。参考 `skills/feishu
     继续到点转、天天返回"无事可做"——全部做完随时可以毕业（不看第几天）；
     没做完但到了第 3 天则直接停推，是否继续跟进变成 HR 反馈卡（第 2 天那张）
     该管的事，不再靠天天骚扰新人来兜底。
-- HR 日报：全局一份 `rookie-digest-daily`，落在 HR 自己的 Session，`cron="30 18 * * *"`、
-  **`fire=prompt`**（内容要现算聚合，`fire=tool` 到点不经 LLM 只能传固定参数），
-  TASK 正文写「调用 rookie_sop_digest」。
+- HR 异常提醒：全局一份 `rookie-exception-alert`，落在 HR 自己的 Session，
+  `cron="0 19 * * *"`、**`fire=prompt`**（内容要现算聚合，`fire=tool` 到点不经 LLM
+  只能传固定参数），TASK 正文写「调用 rookie_sop_digest」。
+  - **它不是日报，是异常提醒**：只报「入职第 2 天结束时仍未完成」的人
+    （`rookie_sop_digest.active_rookies`）。第 1 天还在办手续，催 HR 没意义；
+    已完成的更不该占 HR 的待办。所以收到这张卡就意味着有人需要人工介入。
+  - 入职日缺失的行会照样报出来——宁可让人多看一眼，也不静默漏掉一个卡住的新人。
   **这一份不会自动建**——它需要真实的 HR open_id，必须上线时手工建一次：
   ```text
-  schedule_manage(action="create", schedule_name="rookie-digest-daily",
-    cron="30 18 * * *", fire="prompt",
-    content="调用 rookie_sop_digest 给 HR 发今天的新人入职进度日报。",
-    visibility="silent", description="新人入职进度 HR 日报")
+  schedule_manage(action="create", schedule_name="rookie-exception-alert",
+    cron="0 19 * * *", fire="prompt",
+    content="调用 rookie_sop_digest：把入职第 2 天结束仍未完成的新人报给 HR。",
+    visibility="silent", description="新人入职异常提醒（Day 2 未完成）")
   ```
   没建之前，`rookie_sop_digest` 工具本身可用（可手工调），但到点不会自己发。
 

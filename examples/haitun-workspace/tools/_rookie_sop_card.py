@@ -419,7 +419,7 @@ def remind_card(
 def hr_feedback_card(name: str, progress: Any, sop_url: str = "") -> tuple[dict[str, Any], dict[str, str]]:
     """入职第 2 天仍未完成时, 单独给 HR 的一张即时反馈卡。
 
-    与每日 18:30 的汇总日报(digest_card)不同: 那份要等到当天收尾才发, 覆盖全体在途
+    与 19:00 的异常提醒(digest_card)不同: 那份只报「第 2 天结束仍未完成」的人, 覆盖全体
     新人; 这张是「这个人到第二天还没完成」的单点及时提醒, 只读, 不挂任何回调。
     """
     remaining = max(progress.total - progress.done, 0)

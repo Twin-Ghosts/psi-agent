@@ -1723,17 +1723,29 @@ def test_rookie_sop_remind_graduates_and_self_deletes_regardless_of_day(monkeypa
     assert schedule_calls == [{"action": "delete", "schedule_name": "rookie-remind-ou_x"}]
 
 
-def test_active_rookies_keeps_in_progress_and_todays_graduates() -> None:
+def test_active_rookies_only_reports_day_two_and_later_unfinished() -> None:
+    """只报「第 2 天起仍未完成」的人 —— 这张卡是异常提醒, 不是日报。
+
+    第 1 天还在办手续, 催 HR 没意义; 做完了的更不该占 HR 的待办。
+    """
     dg = _load("rookie_sop_digest")
+    today = date(2026, 8, 7)
     overview = [
-        {"姓名": "张三", "状态": "进行中", "最后更新": date(2026, 8, 7)},
-        {"姓名": "李四", "状态": "已出新手村", "最后更新": date(2026, 8, 7)},  # 今天毕业, 报一次
-        {"姓名": "王五", "状态": "已出新手村", "最后更新": date(2026, 8, 1)},  # 早就毕业, 退场
+        # Day 1 未完成 —— 还在办手续, 不报
+        {"姓名": "张三", "状态": "进行中", "入职日": date(2026, 8, 7)},
+        # Day 2 未完成 —— 正是要报的人
+        {"姓名": "李四", "状态": "进行中", "入职日": date(2026, 8, 6)},
+        # Day 3 未完成 —— 更该报
+        {"姓名": "王五", "状态": "进行中", "入职日": date(2026, 8, 5)},
+        # 今天刚完成 —— 完成不需要 HR 处理, 不报
+        {"姓名": "赵六", "状态": "已出新手村", "入职日": date(2026, 8, 6)},
+        # 入职日缺失 —— 宁可报出来让人看一眼, 不静默漏掉
+        {"姓名": "钱七", "状态": "进行中"},
     ]
 
-    got = dg.active_rookies(overview, date(2026, 8, 7))
+    got = dg.active_rookies(overview, today)
 
-    assert [r["姓名"] for r in got] == ["张三", "李四"]
+    assert [r["姓名"] for r in got] == ["李四", "王五", "钱七"]
 
 
 def test_active_rookies_on_empty_overview_is_empty() -> None:
@@ -2421,18 +2433,28 @@ def test_link_item_counts_as_done_only_when_understood() -> None:
     assert state_for(False, False)[0] == {"read_culture": False}  # 都没勾
 
 
-def test_link_item_unclear_wins_over_got_it_and_is_reported() -> None:
-    """两个都勾时以「未完全理解」为准, 并上报给 HR。
+def test_link_item_unclear_still_counts_as_done_but_is_reported() -> None:
+    """勾「未完全理解」也算这一条完成, 但会单独报给 HR。
 
-    宁可让 HR 多看一眼, 也不要把「没懂」误记成「懂了」。
+    「没懂」是有效回答: 读过了、如实说没懂, 这个动作已经走完, 不该继续催他;
+    但它进 unclear 列表, 所以不会被悄悄放过 —— HR 看得到谁需要人去讲一遍。
     """
     d = _load("_rookie_sop_doc")
-    blocks, block_map = _understanding_blocks("read_culture", got_it=True, unclear=True)
 
-    state, unclear = d.read_doc_state(blocks, block_map)
-
-    assert state == {"read_culture": False}
+    # 只勾「未完全理解」
+    state, unclear = d.read_doc_state(*_understanding_blocks("read_culture", got_it=False, unclear=True))
+    assert state == {"read_culture": True}
     assert unclear == ["read_culture"]
+
+    # 两个都勾: 同样算完成, 且仍要上报
+    state, unclear = d.read_doc_state(*_understanding_blocks("read_culture", got_it=True, unclear=True))
+    assert state == {"read_culture": True}
+    assert unclear == ["read_culture"]
+
+    # 一个都没勾: 未完成, 也不用上报
+    state, unclear = d.read_doc_state(*_understanding_blocks("read_culture", got_it=False, unclear=False))
+    assert state == {"read_culture": False}
+    assert unclear == []
 
 
 def test_real_config_v3_has_the_three_required_readings() -> None:

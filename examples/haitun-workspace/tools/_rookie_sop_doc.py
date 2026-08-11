@@ -212,9 +212,10 @@ def read_doc_state(
     文字标记认条目, 所以文档正文没有多余字符; 新人自己新增的块不在映射里, 自然被
     忽略(当作他自己的笔记)。
 
-    互斥裁决在这里: 阅读类条目若「已完全理解」与「未完全理解」都勾了, 以后者为准 ——
-    宁可让 HR 多看一眼, 也不要把「没懂」误记成「懂了」。普通条目(role=ROLE_DONE)
-    只有一个 todo, 勾上即完成, 不受这条裁决影响。
+    阅读类条目: 「已完全理解」与「未完全理解」**任选一个**即算完成 —— 后者也是
+    有效回答(读过了、如实说没懂), 动作已经走完, 不该继续催。但勾了「未完全理解」
+    的条目会进 unclear 列表单独报给 HR, 所以「没懂」不会被悄悄放过。
+    普通条目(role=ROLE_DONE)只有一个 todo, 勾上即完成。
     """
     ticked: dict[str, dict[str, bool]] = {}
     for block in blocks:
@@ -234,8 +235,11 @@ def read_doc_state(
         if roles.get(ROLE_UNCLEAR):
             unclear.append(item_id)
         if ROLE_GOT_IT in roles or ROLE_UNCLEAR in roles:
-            # 阅读类: 勾了「已完全理解」且没勾「未完全理解」才算完成
-            state[item_id] = bool(roles.get(ROLE_GOT_IT)) and not roles.get(ROLE_UNCLEAR)
+            # 阅读类: 两个选项**任选一个**即算这一条完成 —— 需求如此。
+            # 「未完全理解」也是一种有效回答: 新人已经读过、并如实反馈没懂,
+            # 这条动作就算走完了; 剩下的是找人问清楚, 由 unclear 单独报给 HR,
+            # 不该因此把这一项一直挂在未完成里催他。
+            state[item_id] = bool(roles.get(ROLE_GOT_IT)) or bool(roles.get(ROLE_UNCLEAR))
         else:
             state[item_id] = bool(roles.get(ROLE_DONE))
     return state, unclear

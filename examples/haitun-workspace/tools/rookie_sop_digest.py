@@ -1,4 +1,4 @@
-"""每日 18:30 给 HR 发一张在途新人进度日报, 带总览表链接; 顺带重算总览做兜底对账。
+"""每日 19:00 给 HR 发一张在途新人进度日报, 带总览表链接; 顺带重算总览做兜底对账。
 
 由 schedules/rookie-digest-daily 以 fire=prompt 触发(内容要现算聚合, fire=tool
 到点不经 LLM、只能调一个工具传固定参数)。本工具自己完成聚合与发卡。
@@ -24,15 +24,24 @@ from feishu_message import feishu_message_send_card
 
 
 def active_rookies(overview_rows: list[dict[str, Any]], today: date) -> list[dict[str, Any]]:
-    """在途 = 进行中, 外加今天刚出新手村的(报一次就退场)。"""
+    """该报给 HR 的人 = **入职第 2 天结束时仍未完成**的。
+
+    刻意为之: 不再每天报所有在途新人。规则是「第 2 天(19:00)仍没做完才推」——
+    第 1 天还在办手续, 催 HR 没有意义; 做完了的更不该出现在 HR 的待办里。
+    所以这张卡不是「日报」而是「异常提醒」: 收到它就意味着有人需要人工介入。
+
+    已出新手村的一律不报(哪怕是今天刚完成的)——完成本身不需要 HR 处理。
+    """
     active: list[dict[str, Any]] = []
     for row in overview_rows:
-        status = str(row.get("状态") or "")
-        if status != "已出新手村":
+        if str(row.get("状态") or "") == "已出新手村":
+            continue
+        onboard = row.get("入职日")
+        if not isinstance(onboard, date):
+            # 入职日缺失时宁可报出来让人看一眼, 也不要静默漏掉一个卡住的新人
             active.append(row)
             continue
-        updated = row.get("最后更新")
-        if isinstance(updated, date) and updated == today:
+        if (today - onboard).days + 1 >= 2:
             active.append(row)
     return active
 
@@ -65,7 +74,7 @@ async def _fetch_overview(bitable: Any, app_token: str, overview_table_id: str) 
 async def rookie_sop_digest(hr_open_id: str = "") -> str:
     """Send HR one card summarising every in-flight new hire, plus the overview table link.
 
-    Fired by the 18:30 ``rookie-digest-daily`` schedule with ``fire=prompt`` (the schedule
+    Fired by the 19:00 ``rookie-digest-daily`` schedule with ``fire=prompt`` (the schedule
     body just says "call rookie_sop_digest" — the content must be aggregated fresh across
     every in-flight new hire, which a ``fire=tool`` schedule cannot do since it calls one
     tool with fixed arguments and no LLM). This tool is therefore self-sufficient: it takes

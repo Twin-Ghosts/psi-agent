@@ -214,7 +214,7 @@ async def rookie_sop_card_send(
     schedule_result = await schedule_manage(
         action="create",
         schedule_name=f"rookie-remind-{resolved_open_id[-8:]}",
-        cron="30 9 * * *",
+        cron="0 9 * * *",
         fire="tool",
         tool="rookie_sop_remind",
         tool_args=json.dumps({"open_id": resolved_open_id}, ensure_ascii=False),
