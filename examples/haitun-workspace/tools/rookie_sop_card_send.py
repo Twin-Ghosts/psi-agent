@@ -245,6 +245,20 @@ async def rookie_sop_card_send(
         )
     else:
         sent.append("入口卡")
+        # 记住入口卡的 message_id —— 同步后要靠它把卡上的进度重绘。
+        # 没有它, 表里数字变了而卡片永远停在发出时的那一刻(实测踩过: 用户反馈
+        # 「卡片与文档的数字都没有更新」, 因为同步工具只写表、从不回头更新卡片)。
+        card_mid = str(sent_result.get("message_id") or "")
+        if card_mid:
+            state["entry_cards"] = {
+                **{
+                    d: m
+                    for d, m in (state.get("entry_cards") or {}).items()
+                    if isinstance(state.get("entry_cards"), dict) and d != resolved_open_id
+                },
+                resolved_open_id: card_mid,
+            }
+            await _rt.save_state(state)
 
     # 每人一份催办定时任务, 落在这个新人自己的 Session workspace 里。结果不能丢:
     # schedule_manage 失败时返回 "[Error] ..." 字符串而不是抛异常, 吞掉它就等于

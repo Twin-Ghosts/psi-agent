@@ -39,6 +39,8 @@ BLOCK_DIVIDER = 22
 
 # 普通条目只有一个 todo, 勾上即完成。
 ROLE_DONE = "done"
+# 分节小计块(「到岗准备 3/5」那一行)的角色标记, item_id 位置放模块名
+ROLE_TALLY = "tally"
 # 阅读类条目拆成两个理解勾选(见 build_doc_blocks), 各有自己的角色;
 # 「已阅读」已去掉 —— 读没读不重要, 重要的是懂没懂。
 ROLE_GOT_IT = "ok"
@@ -161,6 +163,10 @@ def build_doc_blocks(
                 },
             }
         )
+        # 小计块也登记进 slots(role=ROLE_TALLY, item_id 用模块名) —— 同步后要靠
+        # 它把「x/y」改成最新值。不登记的话文档里的小计永远停在发出时那一刻,
+        # 用户勾完看到条目划掉了、分节标题却还是 0/5(实测反馈过这个)。
+        slots.append((module, ROLE_TALLY))
         for row in module_rows:
             item_id = _item_id_of(row)
             title = str(row.get("项") or "").strip()
@@ -244,6 +250,10 @@ def read_doc_state(
         if not mapped or ":" not in mapped:
             continue
         item_id, role = mapped.rsplit(":", 1)
+        # 小计块(role=tally)不是条目 —— 它的 item_id 位置放的是模块名。
+        # 不跳过的话模块名会混进 state, 被当成一个「未完成的条目」参与判定。
+        if role == ROLE_TALLY:
+            continue
         todo = block.get("todo")
         done = bool((todo or {}).get("style", {}).get("done")) if isinstance(todo, dict) else False
         ticked.setdefault(item_id, {})[role] = done

@@ -152,14 +152,16 @@ async def ensure_base(cfg: dict[str, Any]) -> dict[str, Any]:
     if not app_token:
         return {"ok": False, "error": f"cannot create bitable base: {created}"}
 
-    detail = _store._parse_result(
-        await _bt.feishu_bitable_create_table(
-            app_token, "入职明细", json.dumps(_store.DETAIL_FIELDS, ensure_ascii=False)
-        )
-    )
+    # 总览表先建 —— 多维表格里表的排列顺序就是创建顺序, HR 打开时第一眼看到的
+    # 应该是「谁完成到什么程度」的总览, 而不是几百行的逐项明细。
     overview = _store._parse_result(
         await _bt.feishu_bitable_create_table(
             app_token, "入职总览", json.dumps(_store.OVERVIEW_FIELDS, ensure_ascii=False)
+        )
+    )
+    detail = _store._parse_result(
+        await _bt.feishu_bitable_create_table(
+            app_token, "入职明细", json.dumps(_store.DETAIL_FIELDS, ensure_ascii=False)
         )
     )
     # feishu_bitable_create_table 是扁平结构 {ok, table_id, name, default_view_id,

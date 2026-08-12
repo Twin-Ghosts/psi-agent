@@ -601,7 +601,10 @@ def test_detail_fields_put_a_text_key_column_first() -> None:
     # 飞书要求索引列(第一列)是 1/2/5/13/15/20/22 之一 —— 这里必须是文本 1
     assert s.DETAIL_FIELDS[0]["field_name"] == "记录键"
     assert s.DETAIL_FIELDS[0]["type"] == 1
-    assert s.OVERVIEW_FIELDS[0]["field_name"] == "open_id"
+    # 姓名是主字段(首列): 表格视图里最显眼、分享出去第一眼就能认人。
+    # open_id 是机器可读的路由键、对 HR 无意义, 挪到最后一列。
+    assert s.OVERVIEW_FIELDS[0]["field_name"] == "姓名"
+    assert s.OVERVIEW_FIELDS[-1]["field_name"] == "open_id"
     assert s.OVERVIEW_FIELDS[0]["type"] == 1
     # 「查找引用」(19) API 建不出来, 不许出现
     assert all(f["type"] != 19 for f in s.DETAIL_FIELDS + s.OVERVIEW_FIELDS)
@@ -1975,11 +1978,15 @@ def _slots_map(slots: list[tuple[str, str]]) -> dict[str, str]:
 
 
 def _with_block_ids(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """给 todo 块补上 block_id, 模拟从飞书读回来的样子。"""
+    """给被跟踪的块补上 block_id, 模拟从飞书读回来的样子。
+
+    跟踪的是 todo(17) 与分节小计 heading2(4) 两类 —— 必须与 provision_doc 的
+    _tracked_children 保持一致, 否则块号与 slots 对不上, 映射会整体错位。
+    """
     out: list[dict[str, Any]] = []
     n = 0
     for b in blocks:
-        if b.get("block_type") == 17:
+        if b.get("block_type") in (17, 4):
             out.append({**b, "block_id": f"blk{n}"})
             n += 1
         else:
@@ -2008,7 +2015,9 @@ def test_build_doc_blocks_renders_a_todo_per_item_with_done_from_the_table() -> 
     assert "连上 WiFi" in first and "能上网" in first
     # 正文里不出现 item_id 这类英文标记
     assert "wifi" not in first
-    assert slots == [("wifi", d.ROLE_DONE), ("desk", d.ROLE_DONE)]
+    # 每个模块开头多一条小计 slot(模块名, tally), 它不是条目
+    item_slots = [s for s in slots if s[1] != d.ROLE_TALLY]
+    assert item_slots == [("wifi", d.ROLE_DONE), ("desk", d.ROLE_DONE)]
 
 
 def test_build_doc_blocks_gives_na_items_no_checkbox() -> None:
@@ -2019,7 +2028,8 @@ def test_build_doc_blocks_gives_na_items_no_checkbox() -> None:
     blocks, slots = d.build_doc_blocks(rows, name="张三")
 
     assert not [b for b in blocks if b["block_type"] == d.BLOCK_TODO]
-    assert slots == []
+    # 不适用项不出 todo, 所以没有条目 slot(只剩那条模块小计)
+    assert [s for s in slots if s[1] != d.ROLE_TALLY] == []
     assert any("不适用" in str(b) for b in blocks)
 
 
@@ -2032,9 +2042,11 @@ def test_read_doc_state_matches_by_block_id_not_by_order() -> None:
     read_back = _with_block_ids(blocks)
     # 新人自己加了一条笔记 —— 不在映射里
     read_back.append({"block_type": 17, "block_id": "blk_own_note", "todo": {"elements": [], "style": {"done": True}}})
-    # 把「找到工位」勾上
+    # 把「找到工位」勾上 —— 按映射反查它的 block_id, 不硬编码块号:
+    # 分节小计也占一个块位, 硬编码会随结构变化指到别的条目上。
+    desk_bid = next(bid for bid, mapped in stored.items() if mapped.startswith("desk:"))
     for b in read_back:
-        if b.get("block_id") == "blk1":
+        if b.get("block_id") == desk_bid:
             b["todo"]["style"]["done"] = True
 
     state, unclear = d.read_doc_state(read_back, stored)
@@ -2183,7 +2195,9 @@ def test_provision_doc_mixes_plain_and_reading_items_without_cross_mapping() -> 
     assert f"wifi:{d.ROLE_DONE}" in mapped_values
     assert f"read_culture:{d.ROLE_GOT_IT}" in mapped_values
     assert f"read_culture:{d.ROLE_UNCLEAR}" in mapped_values
-    assert len(out["block_map"]) == 3
+    # 3 个条目槽 + 2 条分节小计(每模块一条) = 5
+    item_map = {b: m for b, m in out["block_map"].items() if not m.endswith(":tally")}
+    assert len(item_map) == 3
 def test_provision_doc_refuses_when_root_append_count_mismatches_slots() -> None:
     """根节点追加返回的块数和 slots 数不一致就拒绝配对 —— 不猜, 直接报错。"""
     da = _load("_rookie_sop_docapi")
@@ -2413,7 +2427,8 @@ def test_link_items_render_as_linked_title_plus_two_stacked_todos() -> None:
     assert "未完全理解" in labels[1]
     # 正文里不出现英文 item id
     assert all("read_culture" not in lab for lab in labels)
-    assert slots == [("read_culture", d.ROLE_GOT_IT), ("read_culture", d.ROLE_UNCLEAR)]
+    item_slots = [s for s in slots if s[1] != d.ROLE_TALLY]
+    assert item_slots == [("read_culture", d.ROLE_GOT_IT), ("read_culture", d.ROLE_UNCLEAR)]
 def _understanding_blocks(
     item_id: str, *, got_it: bool, unclear: bool
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
@@ -2751,7 +2766,9 @@ def test_role_item_renders_two_mutually_exclusive_checkboxes() -> None:
     assert len(todos) == 2
     assert "我是研发人员" in labels[0]
     assert "我是非研发人员" in labels[1]
-    assert slots == [(d.ROLE_ITEM_ID, d.ROLE_IS_DEV), (d.ROLE_ITEM_ID, d.ROLE_IS_NONDEV)]
+    # 每个模块开头多一条小计 slot(模块名, tally), 它不是条目, 过滤掉再比
+    item_slots = [s for s in slots if s[1] != d.ROLE_TALLY]
+    assert item_slots == [(d.ROLE_ITEM_ID, d.ROLE_IS_DEV), (d.ROLE_ITEM_ID, d.ROLE_IS_NONDEV)]
 
 
 def test_read_role_choice_resolves_dev_nondev_and_unset() -> None:
@@ -2866,3 +2883,52 @@ def test_card_send_reuses_the_existing_doc_instead_of_creating_a_second_one() ->
     assert src.index("_existing_doc_of(state") < src.index("provision_doc("), "必须先查复用再决定是否新建"
     # docs 索引写入前要清掉这个人名下的旧条目
     assert 'str(o) != resolved_open_id' in src, "docs 索引未做一人一份的清理"
+
+
+def test_overview_shows_per_module_tally_and_unfinished_items() -> None:
+    """总览要能看出「谁卡在哪」—— 光看 11/28 看不出来。
+
+    所以把分模块小计与未完成条目名直接投影进总览, 免得为了看一个人卡在哪
+    还要去翻几百行明细。
+    """
+    p = _load("_rookie_sop_progress")
+    today = date(2026, 8, 12)
+    rows = [
+        _row("wifi", p.STATUS_DONE, date(2026, 8, 12), module="到岗准备"),
+        _row("desk", p.STATUS_TODO, date(2026, 8, 12), module="到岗准备", title="确认工位"),
+        _row("culture", p.STATUS_TODO, date(2026, 8, 14), module="必读材料", title="企业文化总则"),
+    ]
+
+    fields = p.overview_fields(rows, today, "王炜博", "ou_x", "dev")
+
+    assert fields["各部分完成情况"] == "到岗准备 1/2 · 必读材料 0/1"
+    assert "确认工位" in fields["未完成内容"]
+    assert "企业文化总则" in fields["未完成内容"]
+    # 姓名可读, open_id 仍在但不再是主角
+    assert fields["姓名"] == "王炜博"
+
+
+def test_module_tally_excludes_na_items_from_the_denominator() -> None:
+    """不适用的项不进分母 —— 非研发不该看起来永远差几项。"""
+    p = _load("_rookie_sop_progress")
+    rows = [
+        _row("role", p.STATUS_DONE, date(2026, 8, 12), module="开发环境"),
+        _row("git", p.STATUS_NA, date(2026, 8, 18), module="开发环境", title="Git 工作流"),
+        _row("repo", p.STATUS_NA, date(2026, 8, 18), module="开发环境", title="仓库权限"),
+    ]
+
+    assert p.module_tally_text(rows) == "开发环境 1/1"
+
+
+def test_unfinished_text_truncates_long_lists() -> None:
+    """单元格塞几百字没人看 —— 超过上限就截断并标注剩余数量。"""
+    p = _load("_rookie_sop_progress")
+    rows = [
+        _row(f"i{n}", p.STATUS_TODO, date(2026, 8, 14), module="制度知晓", title=f"项{n}")
+        for n in range(20)
+    ]
+
+    text = p.unfinished_text(rows, limit=5)
+
+    assert text.startswith("项0、项1")
+    assert "另 15 项" in text

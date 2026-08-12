@@ -58,17 +58,23 @@ DETAIL_FIELDS: list[dict[str, Any]] = [
 ]
 
 OVERVIEW_FIELDS: list[dict[str, Any]] = [
-    {"field_name": "open_id", "type": 1},
+    # 姓名放第一列: 它是多维表格的主字段(首列即主字段, 表格视图里最显眼、
+    # 分享出去第一眼就能认人)。open_id 是机器可读的路由键、对 HR 无意义,
+    # 挪到最后一列, 只为出问题时能对上人。
     {"field_name": "姓名", "type": 1},
     {"field_name": "入职日", "type": 5},
     {"field_name": "入职第N天", "type": 2},
     {"field_name": "角色", "type": 1},
     {"field_name": "进度", "type": 1},
     {"field_name": "完成率", "type": 2},
+    {"field_name": "状态", "type": 1},
+    # 分模块完成情况与未完成清单 —— HR 要的是「谁卡在哪」, 光看总数看不出来。
+    {"field_name": "各部分完成情况", "type": 1},
+    {"field_name": "未完成内容", "type": 1},
     {"field_name": "逾期项数", "type": 2},
     {"field_name": "逾期项", "type": 1},
-    {"field_name": "状态", "type": 1},
     {"field_name": "最后更新", "type": 5},
+    {"field_name": "open_id", "type": 1},
 ]
 
 _DATE_KEYS = ("完成时间", "入职日", "截止日", "最后更新")

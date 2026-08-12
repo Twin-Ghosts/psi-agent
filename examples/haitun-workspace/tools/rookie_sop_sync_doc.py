@@ -21,12 +21,14 @@ TOOLS_DIR = Path(__file__).resolve().parent
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
+import _rookie_sop_card as _card
 import _rookie_sop_doc as _doc
 import _rookie_sop_docapi as _docapi
 import _rookie_sop_progress as _p
 import _rookie_sop_runtime as _rt
 import _rookie_sop_store as _store
 from feishu_api import feishu_api
+from feishu_message import feishu_message_edit_card
 from schedule_manage import schedule_manage
 
 
@@ -181,6 +183,44 @@ async def rookie_sop_sync_doc(
         )
 
     progress = _p.summarize(rows, today)
+
+    # 把新进度重绘到入口卡上。只写表是不够的 —— 用户看的是卡片, 表里数字变了而
+    # 卡片停在发出时那一刻, 在他看来就是「根本没更新」(实测反馈正是如此)。
+    # 用 edit_card 原地改, 不发新消息: 入口卡上只有一个 URL 跳转按钮、没有回调,
+    # 所以不存在 edit 之后按钮失效的问题(那是 multi_use 勾选卡才要顾虑的)。
+    # 文档里各分节的小计「x/y」也要跟着改 —— 它是建文档时算好写死的, 同步只改
+    # todo 的勾选状态就会出现: 条目已划掉、分节标题还停在 0/5。
+    # 小计只是显示, 失败不该让整次同步失败, 所以只记 note。
+    tally_note = ""
+    block_map = (state.get("doc_block_maps") or {}).get(doc_id) or {}
+    if block_map:
+        tallies = await _docapi.update_tallies(feishu_api, doc_id, block_map, rows)
+        if tallies.get("ok") is not True:
+            tally_note = f"tally update: {tallies.get('failures') or tallies.get('error')}"
+        elif not tallies.get("updated"):
+            # 一条都没改到 —— 多半是这份文档建于 tally 功能上线前, 映射里没有
+            # tally 条目。此时报「成功」等于骗人: 文档里的小计会一直停在旧值。
+            # 说清原因, 让人知道要重发一次卡(重建文档才会带上 tally 映射)。
+            tally_note = (
+                f"no tally blocks in this doc's block_map ({tallies.get('note') or 'nothing updated'}); "
+                "resend the card to rebuild the doc with tally mapping"
+            )
+
+    card_note = ""
+    entry_cards = state.get("entry_cards")
+    card_mid = str((entry_cards or {}).get(target) or "") if isinstance(entry_cards, dict) else ""
+    if card_mid:
+        name = next((str(r.get("姓名") or "") for r in rows if r.get("姓名")), target)
+        doc_link = await _docapi.fetch_doc_url(feishu_api, doc_id)
+        card, _handlers = _card.entry_card(name, rows, doc_link, today)
+        edited = _store._parse_result(
+            await feishu_message_edit_card(card_mid, json.dumps(card, ensure_ascii=False), target)
+        )
+        if edited.get("ok") is not True:
+            card_note = f"card redraw failed: {edited.get('message') or edited.get('error')}"
+    else:
+        card_note = "no entry card message_id in state; card not redrawn"
+
     result: dict[str, Any] = {
         "ok": not failures,
         "document_id": doc_id,
@@ -200,6 +240,12 @@ async def rookie_sop_sync_doc(
         result["role_choice"] = role_choice
     if schedule_note:
         result["docsync_schedule"] = schedule_note
+    # 重绘失败必须报出来: 表已经写对了, 但用户看的是卡片 —— 静默就等于
+    # 「数字没更新」而没人知道为什么。
+    if card_note:
+        result["card_redraw"] = card_note
+    if tally_note:
+        result["doc_tally"] = tally_note
     if failures:
         result["failures"] = failures
     if truncated or read.get("truncated"):

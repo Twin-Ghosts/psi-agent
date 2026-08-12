@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+# ruff: noqa: RUF001
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
@@ -92,5 +93,41 @@ def overview_fields(
         "逾期项数": len(progress.overdue),
         "逾期项": "、".join(str(r.get("项") or "") for r in progress.overdue),
         "状态": "已出新手村" if progress.all_done else "进行中",
+        # HR 要的是「谁卡在哪」, 光看 11/28 看不出来 —— 所以把分模块小计和未完成
+        # 条目名直接投影进总览, 免得为了看一个人卡在哪还要去翻几百行明细。
+        "各部分完成情况": module_tally_text(rows),
+        "未完成内容": unfinished_text(rows),
         "最后更新": today,
     }
+
+
+def module_tally_text(rows: list[dict[str, Any]]) -> str:
+    """各模块「x/y」一行文字, 按模块在明细里出现的顺序。"""
+    modules: list[str] = []
+    for row in rows:
+        module = str(row.get("模块") or "")
+        if module and module not in modules:
+            modules.append(module)
+    parts: list[str] = []
+    for module in modules:
+        module_rows = [r for r in rows if str(r.get("模块") or "") == module]
+        # 不适用的项不进分母 —— 非研发的开发环境项不该让他看起来永远差几项
+        applicable = [r for r in module_rows if str(r.get("状态") or "") != STATUS_NA]
+        if not applicable:
+            continue
+        done_n = sum(1 for r in applicable if str(r.get("状态") or "") == STATUS_DONE)
+        parts.append(f"{module} {done_n}/{len(applicable)}")
+    return " · ".join(parts)
+
+
+def unfinished_text(rows: list[dict[str, Any]], limit: int = 12) -> str:
+    """未完成条目名, 按模块分组。超过 limit 条就截断并标注剩余数量 ——
+    单元格塞几百字没人看, 而 HR 真正要的是「还差哪几件」。
+    """
+    pending = [r for r in rows if str(r.get("状态") or "") == STATUS_TODO]
+    if not pending:
+        return ""
+    names = [str(r.get("项") or "") for r in pending]
+    if len(names) <= limit:
+        return "、".join(names)
+    return "、".join(names[:limit]) + f"…（另 {len(names) - limit} 项）"

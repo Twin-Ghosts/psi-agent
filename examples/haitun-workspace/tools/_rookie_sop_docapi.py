@@ -230,8 +230,68 @@ def _tracked_children(children: list[dict[str, Any]]) -> list[tuple[int, str]]:
             continue
         block_type = child.get("block_type")
         bid = str(child.get("block_id") or "")
-        if bid and block_type == _doc.BLOCK_TODO:
+        # 跟踪两类块: todo(可勾选条目) 与 heading2(分节小计「到岗准备 3/5」)。
+        # 小计块也要进映射, 否则同步后没法把它改成最新值 —— 用户勾完会看到条目
+        # 划掉了、分节标题却还停在 0/5。
+        if bid and block_type in (_doc.BLOCK_TODO, _doc.BLOCK_HEADING2):
             out.append((block_type, bid))
+    return out
+
+
+async def update_tallies(
+    api: Any, document_id: str, block_map: dict[str, str], rows: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """把文档里各分节的小计「x/y」改成最新值。
+
+    刻意为之: 小计是建文档时算好写死的, 同步只改 todo 的勾选状态, 不碰标题 ——
+    于是用户勾完会看到条目划掉了、分节标题却还停在 0/5(实测反馈过)。
+    这里按 block_map 里 role=tally 的条目反查模块名, 重算后逐块 PATCH。
+    单块失败不影响其余块: 小计只是显示, 一个没改对不该让整次同步失败。
+    """
+    tallies = {
+        bid: mapped.rsplit(":", 1)[0]
+        for bid, mapped in block_map.items()
+        if mapped.endswith(f":{_doc.ROLE_TALLY}")
+    }
+    if not tallies:
+        return {"ok": True, "updated": 0, "note": "no tally blocks in map"}
+
+    updated = 0
+    failures: list[str] = []
+    for bid, module in tallies.items():
+        module_rows = [r for r in rows if str(r.get("模块") or "") == module]
+        if not module_rows:
+            continue
+        done_n = sum(1 for r in module_rows if str(r.get("状态") or "") == "已完成")
+        res = _parsed(
+            await api(
+                "PATCH",
+                f"/open-apis/docx/v1/documents/{document_id}/blocks/{bid}",
+                body_json=json.dumps(
+                    {
+                        "update_text_elements": {
+                            "elements": [
+                                {"text_run": {"content": f"{_doc.module_emoji(module)} {module}"}},
+                                {
+                                    "text_run": {
+                                        "content": f"\u3000{done_n}/{len(module_rows)}",
+                                        "text_element_style": {"text_color": 5},
+                                    }
+                                },
+                            ]
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        )
+        if res.get("ok") is True:
+            updated += 1
+        else:
+            failures.append(f"{module}: {res.get('msg') or res.get('message')}")
+    out: dict[str, Any] = {"ok": not failures, "updated": updated}
+    if failures:
+        out["failures"] = failures
     return out
 
 
@@ -279,14 +339,19 @@ async def provision_doc(
             "document_id": document_id,
         }
 
-    # 每个 slot 都对应一个 todo 块(阅读项已回退为竖排两个 todo, 不再用表格容器),
-    # 所以按顺序直接配对。类型不符就报错而不是硬配 —— 映射错位会把勾选写到别的条目上。
+    # 按顺序配对 slots 与实际建出的块。两类 slot 期望不同的块类型:
+    #   ROLE_TALLY → heading2(分节小计「到岗准备 3/5」那一行, 同步后要改它)
+    #   其余       → todo(可勾选的条目)
+    # 类型不符就报错而不是硬配 —— 映射错位会把勾选写到别的条目上。
     block_map: dict[str, str] = {}
     for (block_type, bid), (item_id, role) in zip(tracked, slots, strict=True):
-        if block_type != _doc.BLOCK_TODO:
+        expected = _doc.BLOCK_HEADING2 if role == _doc.ROLE_TALLY else _doc.BLOCK_TODO
+        if block_type != expected:
             return {
                 "ok": False,
-                "error": f"expected a todo block for {item_id}:{role}, got block_type {block_type}",
+                "error": (
+                    f"expected block_type {expected} for {item_id}:{role}, got {block_type}"
+                ),
                 "document_id": document_id,
             }
         block_map[bid] = f"{item_id}:{role}"
