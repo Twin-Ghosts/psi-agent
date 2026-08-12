@@ -2828,3 +2828,41 @@ def test_sync_doc_accepts_an_explicit_workspace() -> None:
 
     assert "workspace" in sig.parameters
     assert sig.parameters["workspace"].default == ""
+
+
+def test_existing_doc_prefers_the_one_with_a_block_map() -> None:
+    """历史上误建多份时, 取 block_map 齐全的那一份。
+
+    没有 block_map 的文档同步时无从对齐条目, 等于废文档 —— 取到它就会把
+    「什么都没勾」如实写回表, 用户看到的进度永远不动。
+    """
+    cs = _load("rookie_sop_card_send")
+    state = {
+        "docs": {"orphan": "ou_x", "good": "ou_x", "someone_else": "ou_y"},
+        "doc_block_maps": {"good": {"blk1": "wifi:done"}},
+    }
+
+    assert cs._existing_doc_of(state, "ou_x") == "good"
+
+
+def test_existing_doc_is_empty_for_a_newcomer() -> None:
+    cs = _load("rookie_sop_card_send")
+
+    assert cs._existing_doc_of({}, "ou_x") == ""
+    assert cs._existing_doc_of({"docs": {"d1": "ou_other"}}, "ou_x") == ""
+
+
+def test_card_send_reuses_the_existing_doc_instead_of_creating_a_second_one() -> None:
+    """force_resend 不能重建文档 —— 一人一份, 否则定时同步会盯上废文档。
+
+    实测踩过: force_resend 造出第二份, 定时记住新那份, 用户手里的卡片链接却指向
+    旧那份; 同步返回 ok:true 但读的是空白文档, 进度永远不动。
+    """
+    cs = _load("rookie_sop_card_send")
+    src = inspect.getsource(cs.rookie_sop_card_send)
+
+    # 建文档前必须先查已有的
+    assert "_existing_doc_of(state" in src
+    assert src.index("_existing_doc_of(state") < src.index("provision_doc("), "必须先查复用再决定是否新建"
+    # docs 索引写入前要清掉这个人名下的旧条目
+    assert 'str(o) != resolved_open_id' in src, "docs 索引未做一人一份的清理"

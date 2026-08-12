@@ -32,6 +32,25 @@ from feishu_message import feishu_message_send_card
 from schedule_manage import schedule_manage
 
 
+def _existing_doc_of(state: dict[str, Any], open_id: str) -> str:
+    """这个新人名下已有的清单文档 token; 没有则空串。
+
+    一人只该有一份文档。docs 索引是 {document_id: open_id}, 所以这里反查 ——
+    若历史上误建了多份(force_resend 曾每次新建), 取 block_map 齐全的那一份:
+    没有 block_map 的文档同步时无从对齐条目, 等于废文档。
+    """
+    docs = state.get("docs")
+    if not isinstance(docs, dict):
+        return ""
+    mine = [str(d) for d, owner in docs.items() if str(owner) == open_id]
+    if not mine:
+        return ""
+    maps = state.get("doc_block_maps")
+    maps = maps if isinstance(maps, dict) else {}
+    with_map = [d for d in mine if maps.get(d)]
+    return (with_map or mine)[0]
+
+
 async def rookie_sop_card_send(
     open_id: str = "",
     name: str = "",
@@ -148,20 +167,39 @@ async def rookie_sop_card_send(
     # 一个跳转按钮。33 项在文档里一屏勾完, 勾选由文档变更事件同步回明细表。
     # 文档权限能精确到「单文档 + 单人」(bitable 最细只到 base 级, 做不到),
     # 所以每人只看得到自己那一份。
-    doc = await _docapi.provision_doc(
-        feishu_api,
-        open_id=resolved_open_id,
-        name=resolved_name,
-        rows=rows,
-        sop_url=sop_url,
-    )
+    # 一人一份文档, 严格幂等: 已经有了就复用, 只重发卡片。
+    #
+    # 刻意为之: 原先每次调用都新建一份文档, force_resend 于是造出第二份 ——
+    # 定时任务记住了新那份, 而用户手里的卡片链接还指向旧那份。结果同步「成功」
+    # 但读的是空白新文档, 把「什么都没勾」如实写回表, 用户看到的进度永远不动。
+    # (实测踩过, 而且返回值是 ok:true, 最难发现。)
+    existing_doc = _existing_doc_of(state, resolved_open_id)
+    if existing_doc:
+        doc = {
+            "document_id": existing_doc,
+            "url": await _docapi.fetch_doc_url(feishu_api, existing_doc),
+            "block_map": (state.get("doc_block_maps") or {}).get(existing_doc) or {},
+            "reused": True,
+        }
+    else:
+        doc = await _docapi.provision_doc(
+            feishu_api,
+            open_id=resolved_open_id,
+            name=resolved_name,
+            rows=rows,
+            sop_url=sop_url,
+        )
     if not doc.get("document_id"):
         return json.dumps({"ok": False, "error": f"provision doc failed: {doc.get('error')}"}, ensure_ascii=False)
     doc_url = str(doc.get("url") or "")
 
-    # 文档索引: 变更事件只带文档 token, 同步工具要靠它反查是谁的清单。
+    # 文档索引: 同步工具靠它反查是谁的清单。
+    # 一人只留一条 —— 先清掉这个人名下的旧条目, 再写当前这份, 否则 docs 里会
+    # 同时存在多份、反查取到哪一份取决于字典顺序(上面那个 bug 的根源)。
     state_docs = state.get("docs")
-    state_docs = dict(state_docs) if isinstance(state_docs, dict) else {}
+    state_docs = {
+        d: o for d, o in (state_docs or {}).items() if isinstance(state_docs, dict) and str(o) != resolved_open_id
+    }
     state_docs[str(doc["document_id"])] = resolved_open_id
     state["docs"] = state_docs
     # block_id → "item_id:role" 映射: 同步时靠它认条目, 所以文档正文里不写 item 标记。
