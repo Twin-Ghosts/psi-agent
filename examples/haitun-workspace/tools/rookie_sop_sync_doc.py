@@ -107,12 +107,29 @@ async def rookie_sop_sync_doc(document_id: str = "", event_payload_json: str = "
             ensure_ascii=False,
         )
 
-    doc_state, unclear = _doc.read_doc_state(read.get("blocks") or [], block_map)
+    blocks = read.get("blocks") or []
+    doc_state, unclear = _doc.read_doc_state(blocks, block_map)
     bitable = _rt.bitable_adapter()
     rows, truncated = await _store.fetch_detail(bitable, app_token, detail_table, target)
     newly_ticked = _doc.diff_state(doc_state, rows)
 
     today = date.today()
+
+    # 角色选择在文档里(两个互斥勾选框), 所以同步时要把它落地: 选了非研发就把 5 个
+    # dev_only 项标成不适用, 让分母从 28 降到 23。
+    # 刻意只在「表里还没记角色」时做一次: 反复标不适用是无谓的写入, 而且新人若
+    # 改了主意(重勾另一个框), 由 HR 或本人改表更稳妥 —— 自动来回翻转会让已完成的
+    # 开发项在两种状态间反复横跳。
+    role_note = ""
+    role_choice = _doc.read_role_choice(blocks, block_map)
+    already_has_role = any(str(r.get("适用角色") or "") in {"研发", "非研发"} for r in rows)
+    if role_choice and not already_has_role:
+        role_note = await _apply_role_choice(
+            bitable, app_token, detail_table, target=target, choice=role_choice, today=today
+        )
+        rows, _ = await _store.fetch_detail(bitable, app_token, detail_table, target)
+        newly_ticked = _doc.diff_state(doc_state, rows)
+
     marked: list[str] = []
     failures: list[dict[str, str]] = []
     for item_id in newly_ticked:
@@ -171,6 +188,10 @@ async def rookie_sop_sync_doc(document_id: str = "", event_payload_json: str = "
         # 勾了「未完全理解」的项要让 HR 看见 —— 这正是拆两组勾选的目的:
         # 「读过」与「读懂了」不是一回事。
         result["unclear"] = unclear
+    if role_note:
+        result["role_note"] = role_note
+    if role_choice:
+        result["role_choice"] = role_choice
     if schedule_note:
         result["docsync_schedule"] = schedule_note
     if failures:
@@ -178,3 +199,48 @@ async def rookie_sop_sync_doc(document_id: str = "", event_payload_json: str = "
     if truncated or read.get("truncated"):
         result["truncated"] = True
     return json.dumps(result, ensure_ascii=False)
+
+async def _apply_role_choice(
+    bitable: Any, app_token: str, detail_table: str, *, target: str, choice: str, today: date
+) -> str:
+    """把文档里勾的角色落到明细表: 打 适用角色 标签; 非研发再把 5 个开发项标不适用。
+
+    返回空串表示成功, 否则是给人看的原因 —— 不抛异常, 因为角色落地失败不该让整次
+    同步失败(勾选本身已经同步了)。
+
+    与 rookie_sop_role_set 同一套规则: role_confirmed 自己不参与标签改写、也绝不能
+    被标成不适用 —— 它是「角色已确认」这件事本身, 对研发和非研发都成立。
+    """
+    label = "研发" if choice == "dev" else "非研发"
+    rows, _ = await _store.fetch_detail(bitable, app_token, detail_table, target)
+    dev_rows = [
+        r
+        for r in rows
+        if str(r.get("模块") or "") == _rt.DEV_MODULE and _store._item_id_of(r) != _doc.ROLE_ITEM_ID
+    ]
+    if dev_rows:
+        raw = await bitable.update_records(
+            app_token,
+            detail_table,
+            json.dumps(
+                [{"record_id": r["record_id"], "fields": {"适用角色": label}} for r in dev_rows],
+                ensure_ascii=False,
+            ),
+        )
+        updated = _store._parse_result(raw)
+        if updated.get("ok") is not True:
+            return f"适用角色 update failed: {updated.get('message') or updated.get('error')}"
+
+    if choice == "nondev":
+        na = await _store.mark_module_na(
+            bitable,
+            app_token,
+            detail_table,
+            open_id=target,
+            module=_rt.DEV_MODULE,
+            today=today,
+            exclude_item_ids=frozenset({_doc.ROLE_ITEM_ID}),
+        )
+        if na.get("ok") is not True:
+            return f"mark_module_na failed: {na.get('error')}"
+    return ""

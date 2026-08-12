@@ -43,6 +43,10 @@ ROLE_DONE = "done"
 # 「已阅读」已去掉 —— 读没读不重要, 重要的是懂没懂。
 ROLE_GOT_IT = "ok"
 ROLE_UNCLEAR = "unclear"
+# 角色选择那一项的两个框。与 config/rookie_sop.yaml 里的 id 一致。
+ROLE_ITEM_ID = "role_confirmed"
+ROLE_IS_DEV = "isdev"
+ROLE_IS_NONDEV = "isnondev"
 
 _MODULE_EMOJI = {
     "到岗准备": "🏢",
@@ -174,6 +178,21 @@ def build_doc_blocks(
                 )
                 continue
 
+            if item_id == ROLE_ITEM_ID:
+                # 角色选择: 两个互斥的勾选框。勾哪个决定那 5 个 dev_only 项是否适用。
+                #
+                # 刻意放在文档里而不是入口卡上: 入口卡改成「一条消息 + 详情页链接」后
+                # 卡上不再有任何回调按钮, 角色若留在卡上就得为它单独破例。放文档里则与
+                # 必读材料的两框同一形态, 新人不用学两种交互。
+                #
+                # 代价是要等下一次同步(入职当天每 10 分钟)才生效, 而不是点完立刻生效 ——
+                # 可以接受: 那 5 个开发项的截止是 Day 7, 差十分钟无妨。
+                blocks.append(_todo([_text_run("👤 我是研发人员")], False))
+                slots.append((item_id, ROLE_IS_DEV))
+                blocks.append(_todo([_text_run("👤 我是非研发人员")], False))
+                slots.append((item_id, ROLE_IS_NONDEV))
+                continue
+
             if url:
                 # 标题本身就是超链接, 不再单独占一行放 URL
                 blocks.append(
@@ -232,6 +251,12 @@ def read_doc_state(
     state: dict[str, bool] = {}
     unclear: list[str] = []
     for item_id, roles in ticked.items():
+        if item_id == ROLE_ITEM_ID:
+            # 角色项: 两个框互斥, 都勾了以「非研发」为准 —— 宁可让研发项显示为
+            # 不适用(可由 HR 或本人改回), 也不要给非研发的人压 5 个他做不了的项。
+            picked = bool(roles.get(ROLE_IS_DEV)) or bool(roles.get(ROLE_IS_NONDEV))
+            state[item_id] = picked
+            continue
         if roles.get(ROLE_UNCLEAR):
             unclear.append(item_id)
         if ROLE_GOT_IT in roles or ROLE_UNCLEAR in roles:
@@ -243,6 +268,34 @@ def read_doc_state(
         else:
             state[item_id] = bool(roles.get(ROLE_DONE))
     return state, unclear
+
+
+def read_role_choice(blocks: list[dict[str, Any]], block_map: dict[str, str]) -> str:
+    """新人在文档里勾的角色: "dev" / "nondev" / ""(还没勾)。
+
+    两个框都勾了以「非研发」为准 —— 宁可让 5 个研发项显示为不适用(可改回),
+    也不要给非研发的人压一堆他做不了的项。
+    """
+    is_dev = False
+    is_nondev = False
+    for block in blocks:
+        if not isinstance(block, dict) or block.get("block_type") != BLOCK_TODO:
+            continue
+        mapped = block_map.get(str(block.get("block_id") or ""))
+        if not mapped or ":" not in mapped:
+            continue
+        item_id, role = mapped.rsplit(":", 1)
+        if item_id != ROLE_ITEM_ID:
+            continue
+        todo = block.get("todo")
+        done = bool((todo or {}).get("style", {}).get("done")) if isinstance(todo, dict) else False
+        if role == ROLE_IS_DEV and done:
+            is_dev = True
+        elif role == ROLE_IS_NONDEV and done:
+            is_nondev = True
+    if is_nondev:
+        return "nondev"
+    return "dev" if is_dev else ""
 
 
 def diff_state(doc_state: dict[str, bool], rows: list[dict[str, Any]]) -> list[str]:

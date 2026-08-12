@@ -1817,21 +1817,31 @@ def test_all_five_tools_exist_as_files() -> None:
         assert (TOOLS / f"{name}.py").is_file(), f"缺少工具文件 {name}.py"
 
 
-def test_trigger_and_skill_are_registered() -> None:
-    trigger = HAITUN / "triggers" / "rookie-sop-welcome" / "TRIGGER.md"
+def test_onboarding_is_hr_initiated_only() -> None:
+    """发卡只由 HR 主动说「给某人发入职卡」触发, 没有自动触发器。
+
+    刻意如此(需求): 通讯录新建员工就自动发卡会在真人身上误触发 —— HR 可能还没
+    准备好, 或那个人根本不是新人(转岗、补录)。所以 rookie-sop-welcome 已删除。
+    """
+    assert not (HAITUN / "triggers" / "rookie-sop-welcome").exists()
+
     skill = HAITUN / "skills" / "feishu-rookie-onboarding" / "SKILL.md"
-    assert trigger.is_file()
     assert skill.is_file()
-
-    trigger_text = trigger.read_text(encoding="utf-8")
-    # fire=tool: 到点/命中不经过 LLM
-    assert "fire: tool" in trigger_text
-    assert "tool: rookie_sop_card_send" in trigger_text
-    assert "event: feishu.hr.user_created" in trigger_text
-
     skill_text = skill.read_text(encoding="utf-8")
-    assert "rookie_sop_tick" in skill_text
-    assert "rookie_sop_role_set" in skill_text
+    assert "rookie_sop_card_send" in skill_text
+
+
+def test_doc_sync_trigger_is_kept_but_documented_as_inert() -> None:
+    """文档事件触发器留着(零成本、日后放开权限即生效), 但必须写清当前不生效的原因。
+
+    否则下一个人会以为进度是事件驱动的, 而实际靠拉取。
+    """
+    trigger = HAITUN / "triggers" / "rookie-doc-sync" / "TRIGGER.md"
+    assert trigger.is_file()
+    text = trigger.read_text(encoding="utf-8")
+    assert "tool: rookie_sop_sync_doc" in text
+    assert "为什么当前不生效" in text
+    assert "forbidden" in text  # 点明是权限死结, 不是配置漏了
 
 
 def test_agents_md_documents_the_new_tools() -> None:
@@ -2722,3 +2732,60 @@ def test_sync_doc_keeps_the_schedule_on_the_onboarding_day(monkeypatch: Any) -> 
     anyio.run(lambda: s.rookie_sop_sync_doc(open_id="ou_x"))
 
     assert calls == []  # 当天一次都不该碰定时
+
+
+def test_role_item_renders_two_mutually_exclusive_checkboxes() -> None:
+    """角色选择在文档里是两个互斥勾选框, 与必读材料同一形态。
+
+    刻意放文档而非入口卡: 入口卡改成「一条消息 + 详情页链接」后卡上没有任何回调
+    按钮了, 角色若留在卡上就得为它单独破例, 新人也要学两种交互。
+    """
+    d = _load("_rookie_sop_doc")
+    rows = [_doc_row(d.ROLE_ITEM_ID, "确认是否为技术人员", "未完成", module="开发环境")]
+
+    blocks, slots = d.build_doc_blocks(rows, name="张三")
+
+    todos = [b for b in blocks if b["block_type"] == d.BLOCK_TODO]
+    labels = ["".join(e["text_run"]["content"] for e in b["todo"]["elements"]) for b in todos]
+    assert len(todos) == 2
+    assert "我是研发人员" in labels[0]
+    assert "我是非研发人员" in labels[1]
+    assert slots == [(d.ROLE_ITEM_ID, d.ROLE_IS_DEV), (d.ROLE_ITEM_ID, d.ROLE_IS_NONDEV)]
+
+
+def test_read_role_choice_resolves_dev_nondev_and_unset() -> None:
+    """读回角色: 勾研发→dev, 勾非研发→nondev, 都没勾→空串。"""
+    d = _load("_rookie_sop_doc")
+
+    def blocks_for(is_dev: bool, is_nondev: bool) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        bs = [
+            {"block_type": 17, "block_id": "b1", "todo": {"elements": [], "style": {"done": is_dev}}},
+            {"block_type": 17, "block_id": "b2", "todo": {"elements": [], "style": {"done": is_nondev}}},
+        ]
+        bm = {
+            "b1": f"{d.ROLE_ITEM_ID}:{d.ROLE_IS_DEV}",
+            "b2": f"{d.ROLE_ITEM_ID}:{d.ROLE_IS_NONDEV}",
+        }
+        return bs, bm
+
+    assert d.read_role_choice(*blocks_for(True, False)) == "dev"
+    assert d.read_role_choice(*blocks_for(False, True)) == "nondev"
+    assert d.read_role_choice(*blocks_for(False, False)) == ""
+    # 都勾了以「非研发」为准: 宁可让研发项显示为不适用(可改回),
+    # 也不要给非研发的人压 5 个他做不了的项
+    assert d.read_role_choice(*blocks_for(True, True)) == "nondev"
+
+
+def test_role_item_counts_done_once_either_box_is_ticked() -> None:
+    """角色项: 勾任一个框都算这一条完成, 且不进 unclear。"""
+    d = _load("_rookie_sop_doc")
+    bs = [
+        {"block_type": 17, "block_id": "b1", "todo": {"elements": [], "style": {"done": False}}},
+        {"block_type": 17, "block_id": "b2", "todo": {"elements": [], "style": {"done": True}}},
+    ]
+    bm = {"b1": f"{d.ROLE_ITEM_ID}:{d.ROLE_IS_DEV}", "b2": f"{d.ROLE_ITEM_ID}:{d.ROLE_IS_NONDEV}"}
+
+    state, unclear = d.read_doc_state(bs, bm)
+
+    assert state == {d.ROLE_ITEM_ID: True}
+    assert unclear == []  # 角色项不该被当成「没读懂」上报给 HR

@@ -1,6 +1,6 @@
 ---
 name: feishu-rookie-onboarding
-description: "Use when HR asks the agent to send someone an onboarding card (e.g. \"给某人发入职卡\"), when a new hire joins (feishu.hr.user_created, secondary/fallback path), or when handling a <feishu_card_action> whose handler is rookie_sop_tick / rookie_sop_role_set. Covers the entry card + per-person doc checklist, the 研发/非研发 role choice, daily 9:00 reminders (day 1/day 2 only), and the 19:00 HR exception alert (only for people still unfinished at the end of day 2) with its overview-table link."
+description: "Use when HR asks the agent to send someone an onboarding card (e.g. \"给某人发入职卡\") — that is the only entry point; there is no auto-trigger. Covers the single entry card + per-person doc checklist (28 items), the 研发/非研发 choice made inside the doc, doc→table sync (every 10 min on day 1, then before the 9:00 reminder), daily 9:00 reminders (day 1/day 2 only), and the 19:00 HR exception alert for people still unfinished at the end of day 2."
 category: productivity
 agent_editable: true
 ---
@@ -17,10 +17,9 @@ HR 对 agent 说「给<某人>发入职卡」→ agent 解析出对方 open_id �
 - **主路径**：HR（或任何有权限的人）在飞书里对 agent 说「给<某人>发入职卡」/
   「给<某人>发个入职 SOP」之类的话。agent 需要先把「某人」解析成 open_id
   （通讯录按姓名查，见下方"解析姓名"），再调 `rookie_sop_card_send`。
-- **次要/兜底路径**：通讯录新建员工事件（`feishu.hr.user_created`）。这条路默认
-  对真实新人**不生效**（见 `triggers/rookie-sop-welcome/TRIGGER.md` 里的 filter
-  收窄说明）——建号和「HR 决定要发卡」不是同一时刻，让 HR 显式说一句更可靠。
-- 收到 `<feishu_card_action>`，且 `dispatch.handler` 为 `rookie_sop_tick` 或 `rookie_sop_role_set`。
+- **这是唯一入口**：没有自动触发器。原先挂在通讯录新建员工事件上的
+  `rookie-sop-welcome` 已删除——建号和「HR 决定要发卡」不是同一时刻，自动发卡会在
+  转岗、补录这类场景下误触发真人，让 HR 显式说一句更可靠。
 
 ## When not to use
 
@@ -59,22 +58,23 @@ open_id；同名或查不到时向 HR 确认，不要猜。参考 `skills/feishu
 4. **批量**：payload 若包在 `<feishu_card_action_batch>` 里，**每条各调一次**
    （漏一条就丢一项完成），然后最多回一条汇总，或直接零文本（同样不要输出 `NO_REPLY`）。
 
-### 处理角色选择
+### 角色（研发 / 非研发）
 
-1. `dispatch.handler` 为 `rookie_sop_role_set` 时调 `rookie_sop_role_set(card_action_json=…)`。
-2. 开发环境模块第一项 `role_confirmed`（确认角色）**不是** `dev_only`，全员适用、永远计入
-   进度分母；点任一角色按钮工具都会把它标已完成——一次点击，没有第二个确认动作。这样
-   不答角色卡就没法只靠其余项目「凑够」分母而误发毕业卡。
-3. **开发环境是一张卡装完**：角色两个选项（`研发人员` / `非研发人员`）与 5 个开发项同在
-   一张卡上，Day 1 就都可点。因为 `multi_use` 按 action 逐个消费，点掉一个角色按钮只退休
-   那一个，其余行照旧可点，所以不需要「先发角色卡、答完再发第二张」。
-   由此 **Day 1 分母是 33**（可点的项必须计入分母，否则进度看起来对不上）。
-4. 选「非研发人员」→ 那 5 个 `dev_only` 项标 `不适用`（退出分母、不催办、不进 HR 异常提醒），
-   分母降到 28；`role_confirmed` 保持已完成、不受影响。工具会补发一张终态卡说明这部分不用做。
-5. 选「研发人员」→ 5 项保持 `未完成`，分母仍是 33，原卡上它们的按钮继续可点。
-6. 唯一还需要补发新卡的情形是**非研发→研发的反悔**：原卡上两个角色按钮都已被消费，
-   5 项刚被复活成 `未完成` 却没有可点按钮了，只能补发一张带按钮的新卡
-   （`feishu_message_edit_card` 不重新注册回调，编辑出来的按钮全是死的）。
+角色选择在**详情页文档里**，是两个互斥的勾选框（「我是研发人员」/「我是非研发人员」），
+不在入口卡上——入口卡只有一个跳转按钮，没有任何回调动作。
+
+- 新人勾完，下一次同步（入职当天每 10 分钟）会把它落到明细表：打 `适用角色` 标签；
+  选非研发时再把 5 个 `dev_only` 项标成不适用，分母从 28 降到 23。
+- 两个框都勾了**以非研发为准**——宁可让研发项显示为不适用（可由 HR 或本人改回），
+  也不要给非研发的人压一堆他做不了的项。
+- `role_confirmed` 自己**永远不是** `dev_only`，也绝不会被标成不适用：它是「角色已确认」
+  这件事本身，对两种角色都成立。
+- 只在表里还没记角色时落地一次。反复标不适用是无谓写入，而且新人若改主意（重勾另一个框），
+  由人改表更稳妥——自动来回翻转会让已完成的开发项在两种状态间反复横跳。
+
+`rookie_sop_role_set` 这个工具仍在（卡片回调式的角色选择），但当前没有任何地方会发出
+那张角色卡，属于保留代码。
+
 
 ### 定时任务
 
