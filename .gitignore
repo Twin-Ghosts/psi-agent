@@ -11,3 +11,9 @@ dist/
 /result
 .worktrees/
 evals/
+
+# 会话内临时补丁脚本 (scp 到云端用), 不属于产物
+.ua/
+
+# 测试/手工跑 Gateway 落下的状态快照。里面有明文 api_key, 绝不能进仓库。
+state/

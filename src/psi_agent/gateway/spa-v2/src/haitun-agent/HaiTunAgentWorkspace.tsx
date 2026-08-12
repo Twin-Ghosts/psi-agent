@@ -64,6 +64,7 @@ import {
   fetchTodoSegment,
   generateSummary,
   generateTitle,
+  getAuthStatus,
   listAis,
   listSessions,
   listSummaries,
@@ -550,20 +551,57 @@ export default function HaiTunAgentWorkspace({
   }, [bootReady, tasks.length]);
 
   // First-run guide: shown only for a fresh workspace with no historical tasks.
-  const hubOpenRequest = useMemo(
-    () => (hubOpenNonce > 0 ? { nonce: hubOpenNonce, panel: "models" as const } : null),
-    [hubOpenNonce],
-  );
+  const [loginGateNonce, setLoginGateNonce] = useState(0);
+  const hubOpenRequest = useMemo(() => {
+    // 登录门禁的请求优先：它发生在首屏，此时 hubOpenNonce 还是 0
+    if (loginGateNonce > 0) return { nonce: loginGateNonce, panel: "login" as const };
+    return hubOpenNonce > 0 ? { nonce: hubOpenNonce, panel: "models" as const } : null;
+  }, [hubOpenNonce, loginGateNonce]);
+
+  /* 登录软门禁。
+   *
+   * 现状是登录入口藏在头像菜单第二项，用户不点开根本不知道自己没登录。所以启动
+   * 时先探一次登录态，未登录就把登录窗先摆出来 —— 但**保留「暂不登录，继续使用」
+   * 出口**，不做硬门禁：设计文档写明「离线不可登录」，且用户数据全在本机、不分
+   * 用户目录，登录不是使用本产品的前置条件。断网时把人挡在门外，本机功能明明可用。
+   *
+   * "checking" 期间压住首屏引导与模型池自动弹窗，避免两层弹窗叠在一起。
+   */
+  const [authGate, setAuthGate] = useState<"checking" | "open" | "passed">("checking");
+  useEffect(() => {
+    if (!bootReady) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const st = await getAuthStatus();
+        if (cancelled) return;
+        // 认证未启用（旧网关/显式关掉）或已登录：门禁直接放行
+        if (st.available && !st.loggedIn) {
+          setAuthGate("open");
+          setLoginGateNonce((n) => n + 1); // 让 UserHub 把登录面板打开
+        } else {
+          setAuthGate("passed");
+        }
+      } catch {
+        // 探测失败（断网）不拦人：本机功能不依赖登录
+        if (!cancelled) setAuthGate("passed");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [bootReady]);
 
   const firstRunEligibilityCheckedRef = useRef(false);
   const bootLandingRef = useRef(false);
   useEffect(() => {
-    if (!bootReady || firstRunEligibilityCheckedRef.current) return;
+    // 等门禁落定：未登录时先让用户面对登录窗，别把引导聚光灯压在它上面
+    if (!bootReady || authGate !== "passed" || firstRunEligibilityCheckedRef.current) return;
     firstRunEligibilityCheckedRef.current = true;
     if (tasks.length > 0) return;
     setIsFirstRunUser(true);
     setFirstRunSpotlightStep(1);
-  }, [bootReady, tasks.length]);
+  }, [bootReady, authGate, tasks.length]);
 
   // Warm a few recent histories so sidebar → focus matches dialogue-bar snappiness.
   const historyWarmBootRef = useRef(false);
@@ -2213,9 +2251,11 @@ export default function HaiTunAgentWorkspace({
             agent={defaultAgent}
             onChangeAgent={onChangeAgent}
             onToast={showToast}
-            openModelsOnMount={bootReady && openModelsOnce}
+            // 门禁未落定 / 登录窗还开着时不要自动弹模型池，两层弹窗会叠在一起
+            openModelsOnMount={bootReady && authGate === "passed" && openModelsOnce}
             onModelsAutoOpened={() => setOpenModelsOnce(false)}
             openPanelRequest={hubOpenRequest}
+            onLoginGateDone={() => setAuthGate("passed")}
             onAisChanged={(ais: AiInfo[]) => {
               if (ais.length === 0) {
                 setAiId(null);

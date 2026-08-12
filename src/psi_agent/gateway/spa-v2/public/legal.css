@@ -1,0 +1,87 @@
+/* 协议页样式。两份协议共用，故单独成文件而非各自内联。 */
+:root {
+  --ink: #0f172a;
+  --muted: #5b6478;
+  --line: #e3e8f0;
+  --brand: #1d6fe0;
+  --bg: #f6f8fc;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 48px 20px 96px;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.85 -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+}
+main {
+  max-width: 760px;
+  margin: 0 auto;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 44px 52px 56px;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 4%), 0 12px 32px rgb(15 23 42 / 5%);
+}
+h1 {
+  margin: 0 0 6px;
+  font-size: 26px;
+  letter-spacing: -0.2px;
+}
+.meta {
+  margin: 0 0 32px;
+  color: var(--muted);
+  font-size: 13px;
+}
+h2 {
+  margin: 34px 0 10px;
+  font-size: 17px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+h2:first-of-type { border-top: 0; padding-top: 0; }
+p, li { color: #26314a; }
+ul { padding-left: 22px; }
+li { margin: 5px 0; }
+strong { color: var(--ink); }
+a { color: var(--brand); }
+code {
+  background: #eef2f8;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 14px 0;
+  font-size: 14px;
+}
+th, td {
+  border: 1px solid var(--line);
+  padding: 9px 12px;
+  text-align: left;
+  vertical-align: top;
+}
+th { background: #f7f9fd; font-weight: 600; }
+.note {
+  margin: 18px 0;
+  padding: 13px 16px;
+  background: #f0f6ff;
+  border-left: 3px solid var(--brand);
+  border-radius: 0 8px 8px 0;
+  color: #234;
+  font-size: 14px;
+}
+footer {
+  max-width: 760px;
+  margin: 22px auto 0;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+@media (max-width: 640px) {
+  main { padding: 30px 22px 40px; }
+}

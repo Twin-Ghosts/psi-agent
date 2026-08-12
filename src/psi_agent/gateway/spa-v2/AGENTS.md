@@ -172,14 +172,41 @@ npm run dev
 **改完验收**：用户经 Gateway 看页面时，前端改动后先 `npm run build` 再让对方刷新（硬刷）；不要只改源码不 build。
 安装包：PyInstaller / Nuitka CI 会构建并 `--add-data` / `--include-data-dir` 打入 `spa-v2/dist`；有该目录时安装版默认 `GET /` → v2。
 
+单测：`npm test`（vitest）。DOM 行为测试在文件头写 `@vitest-environment jsdom`，纯逻辑测试留在默认 node 环境（快得多）。
+
+## 登录（C 端账号）
+
+界面 `components/user-hub/HubLoginPanel.tsx`（挂在 `UserHub` 头像菜单的「登录账号」），纯逻辑抽到 `services/authFlow.ts` 以便 vitest 直接测，验证码 6 格是 `HubOtpInput.tsx`。
+
+**token 不进浏览器**：页面只 `fetch('/auth/*')` 打本机 Gateway，凭证由 Gateway 侧持有并加密落盘。两段式注册的 `tempToken` 同样扣在 Gateway 进程内 —— 页面脚本一旦持有凭证，XSS 即等于凭证泄露。所以 `verifyAuthCode` 的返回里没有 `tempToken`，`completeAuth` 也不需要传。
+
+**错误码文案对着实际后端写**，不对着契约文档写：`AUTH_ERROR_TEXT` 的键取自云端 `core/errors.py` 的 `code` 常量（`code_invalid` / `rate_limited` / `unauthorized` / `forbidden` / `not_found` / `conflict` / `identity_taken` / `last_identity` / `invalid_input` / `provider_failure`）+ FastAPI 校验失败的 `invalid_request`。文档里出现过 `invalid_code` / `code_expired` / `invitation_*` 这些**服务端从未发出**的码；照文档写只会得到一份自洽的幻觉。未收录的码 `?? raw` 原样透出，宁可露英文码也不吞线索。
+
+`/auth/*` 未配置时全部 404，`getAuthStatus()` 把它翻成 `available: false` 而非抛错 —— 界面据此显示「本地模式」说明。注意 `available` 是**前端合成**的（404 → false，其余 → true），服务端响应体里没有这个字段。
+
+**新用户信号是 `registrationRequired`，不是 `tempToken`。** 凭证被 Gateway 扣下后，响应里补一个不含凭证的布尔标记，`needsComplete()` 判它。曾经判 `tempToken` —— 扣掉凭证后该判断恒为 false，新用户被当成登录失败弹回输入页，而 154 个测试全绿，因为假后端 `__fixtures__/fakeAuthBackend.ts` 还在回旧字段。**改了 Gateway 的响应形状，假后端必须同步**，否则测的是一份已不存在的契约。
+
+**登录成功的落点是关窗回工作台**（原型 D4），不是账户面板：`finishAndClose()` 关窗 + toast，侧栏靠 `notifyAuthChanged()` 广播就地更新。账户面板（C1）只由「已登录后主动从侧栏点进来」到达。
+
+**登录态跨组件共享走 `services/useAuthAccount.ts`**（事件广播，无 module 级可变全局）。侧栏账户区必须读它而非 localStorage 里的本地昵称，否则登录完外面还显示「用户」和「登录账号」。
+
+**首屏是软门禁不是硬门禁**：`HaiTunAgentWorkspace` 的 `authGate` 在 boot 后探一次登录态，未登录则自动弹登录窗并压住首屏引导与模型池自动弹窗；窗上必须给「暂不登录，继续使用」（`showSkip`）。不做硬门禁的理由：设计文档写明「离线不可登录」，且用户数据全在本机、不分用户目录，登录不是使用本产品的前置条件。
+
+`public/` 下的 `terms.html` / `privacy.html` 是协议页，**引用时必须走 `import.meta.env.BASE_URL`** —— 本 SPA 挂在 `/spa-v2/` 下，写死绝对路径会打到站点根目录 404（海豚图标曾这么碎过）。
+
 ## 目录
 
 ```text
 src/
   App.tsx                 # 工作区门禁 → 工作台
   components/WorkspaceGate.tsx
-  services/               # api / sse / chatStream / sessionBridge / bootstrapAi / turnProgress / reasoningDisplay / clipboardFiles / composerFileDrop
+  services/               # api / sse / chatStream / sessionBridge / bootstrapAi / turnProgress / reasoningDisplay / clipboardFiles / composerFileDrop / authFlow / useAuthAccount
   haitun-agent/           # 任务 UI（设计包）；focus-chat-thread 含「已思考」展开
   components/user-hub/    # 用户中心（自 v1：资料 / 大模型 / 登录 / 设置）
   styles/globals.css
+public/                   # 不打包, 由站点根提供; 引用一律走 import.meta.env.BASE_URL
+  haitun-dolphin.png
+  terms.html              # 用户服务协议（工程稿, 发布前需法务复核）
+  privacy.html            # 隐私政策（同上）
+  legal.css               # 两份协议共用样式
 ```

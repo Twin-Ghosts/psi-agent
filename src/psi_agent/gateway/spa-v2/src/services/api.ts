@@ -26,6 +26,11 @@ export type SessionInfo = {
   workspace: string
   agent?: string
   channel_socket: string
+  /** Gateway 的 SessionInfo dataclass 经 ``asdict`` 整体序列化，故这两个字段
+   *  一直在响应里；``ai_id`` 是 ``backend_type === 'ai'`` 时由 server.py 从
+   *  ``backend_id`` 派生出来的别名。非 ai 后端只有 backend_id。 */
+  backend_type?: string
+  backend_id?: string
 }
 
 export type GatewayDefaults = {
@@ -40,6 +45,9 @@ export type AiInfo = {
   base_url: string
   /** Present on GET /ais; used to detect free-path ``haitun-default``. */
   api_key?: string
+  /** Gateway 的 AiInfo dataclass 有 socket 字段，``asdict`` 会一并序列化，
+   *  所以 GET/POST /ais 的响应里一直有它。 */
+  socket?: string
 }
 
 export async function createAi(body: {
@@ -252,3 +260,217 @@ export async function streamChat(
   if (!r.body) throw new Error('No response body')
   return r.body.getReader()
 }
+
+// ---------------------------------------------------------------- 认证 (/auth/*)
+//
+// 这些接口默认存在（认证地址有内置默认值）；把 `PSI_AUTH_ENDPOINT` 显式设成空值
+// 才会关掉认证, 此时全部 404。旧版网关也没有这些路由。
+// 前端必须先探 `getAuthStatus()`，据 `available` 决定显示登录入口还是「本地模式」
+// 说明 —— 不能假定端点一定在。
+//
+// token 全程由 Gateway 侧持有并加密落盘，**前端拿不到也不该存 token**：
+// 页面脚本一旦持有凭证，XSS 即等于凭证泄露。
+
+export type AuthStatus = {
+  /** Gateway 是否配了云端地址；false 时其余字段无意义 */
+  available: boolean
+  endpoint: string
+  loggedIn: boolean
+  deviceKey: string
+  platform: string
+  /** 钥匙串不可用时为 false —— 界面应提示「凭证未加密」而非假装安全 */
+  credentialEncrypted: boolean
+}
+
+export type AuthUser = {
+  id: string
+  displayName: string | null
+  avatarUrl: string | null
+  createdAt: string
+}
+
+export type AuthIdentity = {
+  provider: string
+  identifier: string
+  verifiedAt?: string | null
+}
+
+export type AuthDevice = {
+  id: string
+  platform: string
+  name: string | null
+  createdAt: string
+  lastSeenAt: string | null
+  current: boolean
+}
+
+export type SendCodeResult = { retryAfter: number }
+
+/**
+ * 认证接口的错误。
+ *
+ * 通用 `api()` 只把 `error` 塞进 message，把响应体其余字段丢掉。但登录界面要用
+ * 两个：`retryAfter`（D2 按钮内倒计时）与 `remaining`（D1 剩余尝试次数）。丢了它们，
+ * 界面只能自己猜秒数、猜次数 —— 猜错比不显示更糟。
+ */
+export class AuthApiError extends Error {
+  readonly status: number
+  readonly retryAfter?: number
+  readonly remaining?: number
+
+  constructor(code: string, status: number, retryAfter?: number, remaining?: number) {
+    super(code)
+    this.name = 'AuthApiError'
+    this.status = status
+    this.retryAfter = retryAfter
+    this.remaining = remaining
+  }
+}
+
+/** 认证专用请求：与 `api()` 同契约，但失败时抛 AuthApiError 保留限频字段。 */
+async function authApi<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
+  const r = await fetch(G() + path, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  })
+  if (!r.ok) {
+    const e = (await r.json().catch(() => ({}))) as {
+      error?: string
+      retryAfter?: number
+      remaining?: number
+      remainingAttempts?: number
+    }
+    throw new AuthApiError(
+      e.error || `HTTP ${r.status}`,
+      r.status,
+      typeof e.retryAfter === 'number' ? e.retryAfter : undefined,
+      typeof e.remaining === 'number'
+        ? e.remaining
+        : typeof e.remainingAttempts === 'number'
+          ? e.remainingAttempts
+          : undefined,
+    )
+  }
+  if (r.status === 204) return undefined as T
+  return (await r.json()) as T
+}
+
+/** 校验结果：老用户当场登录完成，新用户看 `registrationRequired` 转去填昵称再
+ * completeAuth。
+ *
+ * 没有 `tempToken` 字段：那枚凭证由 Gateway 扣在进程内，不下发到页面。 */
+export type VerifyResult = {
+  token?: string
+  isNewUser?: boolean
+  user?: AuthUser
+  /**
+   * 新用户标记。Gateway 把注册凭证 `tempToken` 扣在本进程、不下发给页面，
+   * 这个布尔值是它留给页面的替代信号：为真就进建号屏。
+   */
+  registrationRequired?: boolean
+}
+
+/** 探测认证是否可用。404 表示这个 Gateway 没开认证（或版本旧），不是错误。 */
+export async function getAuthStatus(): Promise<AuthStatus> {
+  const r = await fetch(G() + '/auth/status')
+  if (r.status === 404) {
+    return {
+      available: false,
+      endpoint: '',
+      loggedIn: false,
+      deviceKey: '',
+      platform: '',
+      credentialEncrypted: false,
+    }
+  }
+  if (!r.ok) throw new Error(`HTTP ${r.status}`)
+  const data = (await r.json()) as Omit<AuthStatus, 'available'>
+  return { ...data, available: true }
+}
+
+export async function sendAuthCode(body: { phone?: string; email?: string }): Promise<SendCodeResult> {
+  return authApi<SendCodeResult>('POST', '/auth/send-code', body)
+}
+
+// 两段式注册的 tempToken **整个不进浏览器**：Gateway 的 AuthManager 在 verify 时
+// 扣下它、在 complete 时自己取用，响应体里已经把该字段剥掉。
+//
+// 早先的写法是在本文件放一个模块级 `let _pendingTempToken` 暂存。那样凭证仍然进了
+// 页面脚本的作用域（XSS 即可读走），而且违反「模块不留可变全局」——两个问题同一处
+// 解决：状态挪到进程侧，前端连变量都不需要。
+export async function verifyAuthCode(body: {
+  code: string
+  phone?: string
+  email?: string
+}): Promise<VerifyResult> {
+  return authApi<VerifyResult>('POST', '/auth/verify', body)
+}
+
+export async function completeAuth(body: { displayName?: string } = {}): Promise<{
+  token?: string
+  user?: AuthUser
+}> {
+  return authApi<{ token?: string; user?: AuthUser }>('POST', '/auth/complete', body)
+}
+
+export async function getAuthMe(): Promise<{ user: AuthUser; identities: AuthIdentity[] }> {
+  // 线上云端 /me 返回扁平 UserOut {id, displayName, avatarUrl, identities}，
+  // 而界面按 {user, identities} 消费 —— 在此适配，兼容两种形状、缺字段给默认，
+  // 避免登录后渲染崩成白屏。
+  const raw = await api<Record<string, unknown>>('GET', '/auth/me')
+  const u = (raw.user ?? raw) as Record<string, unknown>
+  const ids = (raw.identities ?? u.identities ?? []) as AuthIdentity[]
+  return {
+    user: {
+      id: String(u.id ?? ''),
+      displayName: (u.displayName as string | null) ?? null,
+      avatarUrl: (u.avatarUrl as string | null) ?? null,
+      createdAt: String(u.createdAt ?? ''),
+    },
+    identities: Array.isArray(ids) ? ids : [],
+  }
+}
+
+export async function authLogout(): Promise<{ ok: boolean }> {
+  return api<{ ok: boolean }>('POST', '/auth/logout')
+}
+
+/** 已登录态下绑定手机号/邮箱到当前账号（R2）。复用发码，校验走 /auth/bind。 */
+export async function bindAuthIdentity(body: {
+  code: string
+  phone?: string
+  email?: string
+}): Promise<{ ok?: boolean }> {
+  return api<{ ok?: boolean }>('POST', '/auth/bind', body)
+}
+
+/** 解绑一种登录方式（R2）。云端拦截「解绑最后一个身份」，返回 409 conflict。 */
+export async function unbindAuthIdentity(provider: 'phone' | 'email'): Promise<unknown> {
+  return api<unknown>('DELETE', `/auth/identities/${provider}`)
+}
+
+export async function listAuthDevices(): Promise<{ devices: AuthDevice[] }> {
+  // 线上云端 /sessions 返回裸数组（字段 lastUsedAt），界面按 {devices:[…]}（lastSeenAt）
+  // 消费 —— 在此归一化，兼容裸数组 / {devices} / {sessions} 三种形状。
+  const raw = await api<unknown>('GET', '/auth/devices')
+  const arr = Array.isArray(raw)
+    ? raw
+    : ((raw as { devices?: unknown[]; sessions?: unknown[] })?.devices
+      ?? (raw as { sessions?: unknown[] })?.sessions
+      ?? [])
+  const devices: AuthDevice[] = (arr as Record<string, unknown>[]).map((d) => ({
+    id: String(d.id ?? ''),
+    platform: String(d.platform ?? ''),
+    name: (d.name as string | null) ?? null,
+    createdAt: String(d.createdAt ?? ''),
+    lastSeenAt: (d.lastSeenAt as string | null) ?? (d.lastUsedAt as string | null) ?? null,
+    current: Boolean(d.current),
+  }))
+  return { devices }
+}
+
+export async function revokeAuthDevice(deviceId: string): Promise<{ ok: boolean }> {
+  return api<{ ok: boolean }>('DELETE', `/auth/devices/${encodeURIComponent(deviceId)}`)
+}
+

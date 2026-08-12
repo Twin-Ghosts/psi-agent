@@ -42,6 +42,8 @@ Gateway 进程
 | `_defaults.py` | `resolve_default_agent` / `resolve_default_workspace`；再导出 ``psi_agent._appdata`` 路径助手 — CLI / `GET /defaults` 用 |
 | `_feishu_manager.py` | `FeishuManager` — 飞书会话 → Session 路由表（私聊按 `open_id`、群聊按 `chat_id`；复用 SessionManager 按需 spawn）+ FeishuRoute |
 | `_oauth_manager.py` | `OAuthRelay` — OAuth 回调中继（`state → code` 一次性信箱，带 TTL；供 `GET /oauth/callback` + `GET /oauth/code`），让授权码免用户手工复制 |
+| `_auth_manager.py` | `AuthManager` — 云端账号服务的**转发层** + 登录态持有者；不持供应商密钥、不做授权判定（发码与鉴权全在云端）。两段式注册的 `tempToken` 扣在进程内不下发给页面，改回 `registrationRequired: true`；把云端 `Retry-After` 响应头抄进 body 供倒计时用；云端 `GET /sessions` 回**裸数组**，`_call` 装 `items` 信封、`list_devices` 统一成 `{"devices": [...]}`。`resolve_endpoint()` 定地址（显式参数 > `PSI_AUTH_ENDPOINT` > 内置默认；显式空串=关闭） |
+| `_auth_store.py` | 本机凭证落盘 `{appdata}/auth.enc.json`（0600）+ `device_key`；密钥存 OS 钥匙串，钥匙串不可用则降级明文并记 warning、`credentialEncrypted: false` 如实上报。`load_token()` 读到明文且钥匙串此时可用会**就地重新加密**（用户装上 keyring 重启后凭证真的转密文，而不只是黄条消失）；`credentialEncrypted` 报的是**盘上真实形态**，没碰过盘时才退回“钥匙串可用性”做预测 |
 | `_title_manager.py` | 会话标题 CRUD + AI 自动生成 |
 | `_summary_manager.py` | 任务摘要 CRUD + AI 自动生成（spa-v2；与 title 同级持久化） |
 | `_state.py` | `GatewayState` — `{appdata}/state/latest.json` + 时间戳快照；缺则双读 cwd `state/latest.json` |
@@ -69,7 +71,8 @@ Gateway 进程
 6. 创建 AIManager + RouterManager + SessionManager（注入 `_default_agent` / `_default_workspace`）+ TitleManager + SummaryManager
 7. 恢复 AI / Router / Session（Session 恢复时带 `agent`，缺省用 Gateway default）/ titles / summaries
 8. 创建 SchedulerManager（`--scheduler-ai-id`，空则回落 `--feishu-ai-id`）
-9. await create_app(..., default_agent=..., default_workspace=..., appdata=..., schedm=...)  — 注册 REST（含 `GET /defaults`）
+8b. 创建 AuthManager（地址非空时；从 `{appdata}/auth.enc.json` 恢复登录态）— **旁挂**：不注入 Session、不写 ContextVar、不进 `_do_persist` 快照（凭证不落 `state/latest.json`）
+9. await create_app(..., default_agent=..., default_workspace=..., appdata=..., schedm=..., authm=...)  — 注册 REST（含 `GET /defaults`；`authm` 非 None 才注册 `/auth/*`）
 10. 为每个已恢复 Session 的 workspace `schedm.ensure(...)` — 按需拉起调度 Session（无 `schedules/` 则跳过）
 11. 创建 _do_persist 闭包（快照 managers → state.save，sessions 含 `agent`；`list_all()` 默认已排除调度 Session）
 12. 注入 _persist + 初始全量持久化
@@ -122,6 +125,7 @@ schedules → `{workspace}/schedules/`（归 workspace，非 agent 包 / 非 App
 | `--default-workspace` | 新建 Session / `GET /defaults` 的用户工作区；空 → 软默认 `{Desktop}/haitun交付`（**只宣布路径**；目录在 `SessionManager.create` / 开始对话时才 mkdir。`platformdirs.user_desktop_dir`）。安装包 `haitun.exe` **显式**传该路径（运行时解析桌面，不写死用户名） |
 | `--appdata` | AppData 记忆区根；空 → `PSI_APPDATA` → `platformdirs`（**禁止**手写死 `%AppData%`） |
 | `--scheduler-ai-id` | 调度 Session 挂载的 AI 实例；空 → 回落 `--feishu-ai-id`；两者都空则有 `schedules/` 的 workspace 只记 warning 不启动调度 |
+| `--auth-endpoint` | 云端账号服务地址。**空 ≠ 关闭**：空则取内置默认（正式账号服务），装了包即能登录。要关掉整套认证（不创建 `AuthManager`、不注册 `/auth/*`、不读写本机凭证）须显式 `PSI_AUTH_ENDPOINT=""`。前缀另由 `PSI_AUTH_PREFIX` 覆盖（默认 `/auth`） |
 
 `POST /sessions` 可显式带 `agent` / `workspace`；省略时用上述默认。`SessionInfo` 与 `state/latest.json` 持久化含 `agent`。
 
@@ -427,6 +431,16 @@ OAuth 回调中继（`_oauth_manager.py`）：让**授权码自己回到发起�
 | GET | `/feishu/routes` | 列出所有飞书会话 → Session 路由 `[{open_id, chat_id, session_id}]`（群聊记录只有 `chat_id`，私聊只有 `open_id`） |
 | GET | `/oauth/callback` | OAuth 重定向落地点：收下 `?code=&state=` 交给 `OAuthRelay` 暂存，回一张「授权成功」页；缺 state → 400。用户因此**不必**手工复制 code |
 | GET | `/oauth/code` | 发起方（workspace 工具，通常在另一进程）按 `?state=` 取件，命中返回 `{state, code}` 并作废（一次性）；回调带错误则 `{state, error}`；未到达 → 404 |
+| GET | `/auth/status` | 登录态 + 链路自检信息 `{endpoint, prefix, loggedIn, deviceKey, platform, credentialEncrypted}`；**不含 token**。SPA 据此决定显示登录引导还是身份信息 |
+| POST | `/auth/send-code` | 请云端发验证码 `{phone}` 或 `{email}`（二选一，缺则 400） |
+| POST | `/auth/verify` | 校验验证码 `{code, phone?/email?}`。老用户当场登录；新用户回 `{registrationRequired: true, isNewUser: true}`，其 `tempToken` 由 Gateway 扣在进程内**不下发**。前端判 `registrationRequired` 决定是否进建号屏 —— 扣掉凭证就必须留这个替代信号，否则新用户被当成登录失败 |
+| POST | `/auth/complete` | 两段式注册第二段 `{displayName?}`；`tempToken` 取自上一步暂存，用后即弃 |
+| POST | `/auth/bind` | 已登录态绑定手机号/邮箱 `{code, phone?/email?}`；已归他人 → 409 `identity_taken` |
+| DELETE | `/auth/identities/{provider}` | 解绑一种登录方式（`phone`/`email`）；解绑最后一个 → 409 `last_identity` |
+| GET | `/auth/me` | 当前账号 + 已绑定的登录方式 |
+| POST | `/auth/logout` | 撤销云端本会话并清本机凭证；云端不可达也清本机（否则点了登出仍显示已登录） |
+| GET | `/auth/devices` | 已登录设备列表，统一为 `{"devices": [...]}`。上游 `GET /sessions` 回裸数组，须在 manager 侧归一化 —— 早先「非 dict 即坏响应」把整个列表吃掉，界面上设备数恒为 0 |
+| DELETE | `/auth/devices/{device_id}` | 踢掉某台设备，该设备下次请求即 401 |
 | GET | `/defaults` | 默认 `agent` + `workspace` + `appdata`（建 Session 调用方可读；`appdata` 为记忆区根：todos / history / Gateway state） |
 | GET | `/workspace/cwd` | Gateway 进程当前工作目录 |
 | GET | `/workspace/places` | PathPicker 快捷位置（cwd / home / desktop / documents / downloads）+ 盘符 |
@@ -720,7 +734,7 @@ AI 创建对话框支持从 provider 的 `/models` API 实时拉取可用模型�
 ## CLI 集成
 
 ```
-psi-agent gateway [--listen http://127.0.0.1:PORT] [--socket-path psi] [--icon PATH] [--app-name NAME] [--browser/--no-browser] [--webview/--no-webview] [--tray/--no-tray] [--feishu-ai-id ID] [--feishu-workspace-root DIR] [--default-agent DIR] [--default-workspace DIR] [--appdata DIR] [--verbose]
+psi-agent gateway [--listen http://127.0.0.1:PORT] [--socket-path psi] [--icon PATH] [--app-name NAME] [--browser/--no-browser] [--webview/--no-webview] [--tray/--no-tray] [--feishu-ai-id ID] [--feishu-workspace-root DIR] [--default-agent DIR] [--default-workspace DIR] [--appdata DIR] [--auth-endpoint URL] [--verbose]
 ```
 
 默认 listen 为空，会自动绑定 127.0.0.1 随机高端口。`--browser` 开启自动打开浏览器。
