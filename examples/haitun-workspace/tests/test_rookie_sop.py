@@ -4,6 +4,7 @@ from __future__ import annotations
 
 # ruff: noqa: RUF002, RUF003
 import importlib.util
+import inspect
 import json
 import sys
 from datetime import date, timedelta
@@ -1175,7 +1176,7 @@ def test_ensure_base_refuses_to_persist_an_incomplete_state(monkeypatch: Any) ->
     """建表只成功了一半(比如总览表没拿到 table_id)时, 不该把半成品状态存下来。"""
     r = _load("_rookie_sop_runtime")
 
-    async def _fake_load_state() -> dict[str, Any]:
+    async def _fake_load_state(workspace: str = "") -> dict[str, Any]:
         return {}
 
     saved: list[dict[str, Any]] = []
@@ -1263,7 +1264,7 @@ def test_resolve_context_rejects_a_wrong_handler() -> None:
 def _wire_fake_bitable(t: Any, fake: _FakeBitable) -> None:
     """把 t 内部用到的 _rt.bitable_adapter / load_state 换成假的, 免得真去连飞书。"""
 
-    async def _fake_load_state() -> dict[str, Any]:
+    async def _fake_load_state(workspace: str = "") -> dict[str, Any]:
         return {}
 
     t._rt.bitable_adapter = lambda: fake
@@ -1390,7 +1391,7 @@ def test_role_set_surfaces_card_send_failure_as_not_ok(monkeypatch: Any) -> None
     )
     rs._rt.bitable_adapter = lambda: fake
 
-    async def _fake_load_state() -> dict[str, Any]:
+    async def _fake_load_state(workspace: str = "") -> dict[str, Any]:
         return {}
 
     rs._rt.load_state = _fake_load_state
@@ -1423,7 +1424,7 @@ def test_role_set_switching_nondev_to_dev_revives_all_five_rows(monkeypatch: Any
     )
     rs._rt.bitable_adapter = lambda: fake
 
-    async def _fake_load_state() -> dict[str, Any]:
+    async def _fake_load_state(workspace: str = "") -> dict[str, Any]:
         return {}
 
     rs._rt.load_state = _fake_load_state
@@ -1545,7 +1546,7 @@ def test_rookie_sop_remind_day1_sends_green_card_without_hr_feedback(monkeypatch
     today = date.today()
     fake = _FakeBitable([[_remind_detail_item("rec1", "wifi", p.STATUS_TODO, today, today)]])
 
-    async def _fake_load_state() -> dict[str, Any]:
+    async def _fake_load_state(workspace: str = "") -> dict[str, Any]:
         return {"app_token": "app1", "detail_table_id": "tblDetail", "overview_table_id": "tblOverview"}
 
     rm._rt.bitable_adapter = lambda: fake
@@ -1577,7 +1578,7 @@ def test_rookie_sop_remind_day2_notifies_hr_when_hr_notify_id_is_configured(monk
     onboard = today - timedelta(days=1)  # day_index == 2
     fake = _FakeBitable([[_remind_detail_item("rec1", "wifi", p.STATUS_TODO, onboard, onboard)]])
 
-    async def _fake_load_state() -> dict[str, Any]:
+    async def _fake_load_state(workspace: str = "") -> dict[str, Any]:
         return {"app_token": "app1", "detail_table_id": "tblDetail", "overview_table_id": "tblOverview"}
 
     rm._rt.bitable_adapter = lambda: fake
@@ -1616,7 +1617,7 @@ def test_rookie_sop_remind_day2_skips_hr_feedback_when_hr_notify_id_is_empty(mon
     onboard = today - timedelta(days=1)  # day_index == 2
     fake = _FakeBitable([[_remind_detail_item("rec1", "wifi", p.STATUS_TODO, onboard, onboard)]])
 
-    async def _fake_load_state() -> dict[str, Any]:
+    async def _fake_load_state(workspace: str = "") -> dict[str, Any]:
         return {"app_token": "app1", "detail_table_id": "tblDetail", "overview_table_id": "tblOverview"}
 
     rm._rt.bitable_adapter = lambda: fake
@@ -1654,7 +1655,7 @@ def test_rookie_sop_remind_stops_and_self_deletes_from_day_3(monkeypatch: Any) -
     onboard = today - timedelta(days=2)  # day_index == 3
     fake = _FakeBitable([[_remind_detail_item("rec1", "wifi", p.STATUS_TODO, onboard, onboard)]])
 
-    async def _fake_load_state() -> dict[str, Any]:
+    async def _fake_load_state(workspace: str = "") -> dict[str, Any]:
         return {"app_token": "app1", "detail_table_id": "tblDetail", "overview_table_id": "tblOverview"}
 
     rm._rt.bitable_adapter = lambda: fake
@@ -1693,7 +1694,7 @@ def test_rookie_sop_remind_graduates_and_self_deletes_regardless_of_day(monkeypa
     onboard = today - timedelta(days=4)  # day_index == 5
     fake = _FakeBitable([[_remind_detail_item("rec1", "wifi", p.STATUS_DONE, onboard, onboard)]])
 
-    async def _fake_load_state() -> dict[str, Any]:
+    async def _fake_load_state(workspace: str = "") -> dict[str, Any]:
         return {"app_token": "app1", "detail_table_id": "tblDetail", "overview_table_id": "tblOverview"}
 
     rm._rt.bitable_adapter = lambda: fake
@@ -1758,7 +1759,7 @@ def test_rookie_sop_digest_sends_nothing_on_empty_roster(monkeypatch: Any) -> No
     dg = _load("rookie_sop_digest")
     fake = _FakeBitable([[], []])  # 对账前后各查一次总览, 都是空的
 
-    async def _fake_load_state() -> dict[str, Any]:
+    async def _fake_load_state(workspace: str = "") -> dict[str, Any]:
         return {"app_token": "app1", "detail_table_id": "tblDetail", "overview_table_id": "tblOverview"}
 
     dg._rt.bitable_adapter = lambda: fake
@@ -1788,7 +1789,7 @@ def test_rookie_sop_digest_follows_has_more_when_reading_the_overview_table(monk
         ]
     )
 
-    async def _fake_load_state() -> dict[str, Any]:
+    async def _fake_load_state(workspace: str = "") -> dict[str, Any]:
         return {"app_token": "app1", "detail_table_id": "", "overview_table_id": "tblOverview"}
 
     dg._rt.bitable_adapter = lambda: fake
@@ -2498,7 +2499,7 @@ def test_remind_syncs_the_doc_before_deciding(monkeypatch: Any) -> None:
     monkeypatch.setattr(rm._sync, "rookie_sop_sync_doc", _fake_sync)
 
     # state 里有这个人的文档映射, 催办就该先同步它
-    async def _fake_state() -> dict[str, Any]:
+    async def _fake_state(workspace: str = "") -> dict[str, Any]:
         return {
             "app_token": "app1",
             "detail_table_id": "tbl1",
@@ -2531,7 +2532,7 @@ def test_remind_survives_a_doc_sync_failure_instead_of_aborting(monkeypatch: Any
 
     monkeypatch.setattr(rm._sync, "rookie_sop_sync_doc", _boom)
 
-    async def _fake_state() -> dict[str, Any]:
+    async def _fake_state(workspace: str = "") -> dict[str, Any]:
         return {"app_token": "app1", "detail_table_id": "tbl1", "docs": {"doc1": "ou_x"}}
 
     monkeypatch.setattr(rm._rt, "load_state", _fake_state)
@@ -2553,7 +2554,7 @@ def test_sync_doc_resolves_the_document_from_open_id_alone(monkeypatch: Any) -> 
     """
     s = _load("rookie_sop_sync_doc")
 
-    async def _fake_state() -> dict[str, Any]:
+    async def _fake_state(workspace: str = "") -> dict[str, Any]:
         return {
             "app_token": "app1",
             "detail_table_id": "tbl1",
@@ -2584,7 +2585,7 @@ def test_sync_doc_refuses_when_open_id_is_not_in_the_index(monkeypatch: Any) -> 
     """open_id 不在索引里就明确报错, 不要静默当成功。"""
     s = _load("rookie_sop_sync_doc")
 
-    async def _fake_state() -> dict[str, Any]:
+    async def _fake_state(workspace: str = "") -> dict[str, Any]:
         return {"app_token": "app1", "detail_table_id": "tbl1", "docs": {"doc1": "ou_someone_else"}}
 
     monkeypatch.setattr(s._rt, "load_state", _fake_state)
@@ -2656,7 +2657,7 @@ def test_sync_doc_deletes_its_own_high_frequency_schedule_after_day_one(monkeypa
 
     monkeypatch.setattr(s, "schedule_manage", _fake_schedule)
 
-    async def _fake_state() -> dict[str, Any]:
+    async def _fake_state(workspace: str = "") -> dict[str, Any]:
         return {
             "app_token": "app1",
             "detail_table_id": "tbl1",
@@ -2699,7 +2700,7 @@ def test_sync_doc_keeps_the_schedule_on_the_onboarding_day(monkeypatch: Any) -> 
 
     monkeypatch.setattr(s, "schedule_manage", _fake_schedule)
 
-    async def _fake_state() -> dict[str, Any]:
+    async def _fake_state(workspace: str = "") -> dict[str, Any]:
         return {
             "app_token": "app1",
             "detail_table_id": "tbl1",
@@ -2789,3 +2790,41 @@ def test_role_item_counts_done_once_either_box_is_ticked() -> None:
 
     assert state == {d.ROLE_ITEM_ID: True}
     assert unclear == []  # 角色项不该被当成「没读懂」上报给 HR
+
+
+def test_docsync_schedule_carries_document_id_and_workspace_in_its_args() -> None:
+    """同步定时的参数里必须写死 document_id 与 workspace, 不能依赖运行时上下文。
+
+    框架的 schedule_registry._fire_tool 直接 await func(**args), 不建立
+    runtime_scope —— 工具里 resolve_workspace() 于是回落到 agent 包目录,
+    load_state() 读不到这个新人的 state, 反查 docs 索引必然失败。
+    实测踩过: 定时每 10 分钟准时触发, 每次都返回
+    "open_id is not in the doc index", 进度从来没更新过。
+    """
+    cs = _load("rookie_sop_card_send")
+    src = inspect.getsource(cs.rookie_sop_card_send)
+
+    # 建 docsync 定时那段必须同时传这三个键
+    start = src.index("rookie-docsync-")
+    args_block = src[start : start + 900]
+    assert '"open_id"' in args_block
+    assert '"document_id"' in args_block, "定时参数缺 document_id, 定时那条路会反查失败"
+    assert '"workspace"' in args_block, "定时参数缺 workspace, load_state 会读错目录"
+
+
+def test_load_state_accepts_an_explicit_workspace() -> None:
+    """load_state 必须能接显式 workspace —— 定时那条路没有路径上下文可用。"""
+    rt = _load("_rookie_sop_runtime")
+    sig = inspect.signature(rt.load_state)
+
+    assert "workspace" in sig.parameters
+    assert sig.parameters["workspace"].default == ""
+
+
+def test_sync_doc_accepts_an_explicit_workspace() -> None:
+    """rookie_sop_sync_doc 同样要能接 workspace, 否则定时传了也没处接。"""
+    s = _load("rookie_sop_sync_doc")
+    sig = inspect.signature(s.rookie_sop_sync_doc)
+
+    assert "workspace" in sig.parameters
+    assert sig.parameters["workspace"].default == ""

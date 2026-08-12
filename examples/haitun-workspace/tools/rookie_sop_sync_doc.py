@@ -43,7 +43,9 @@ def _doc_id_of(payload: dict[str, Any]) -> str:
     return ""
 
 
-async def rookie_sop_sync_doc(document_id: str = "", event_payload_json: str = "", open_id: str = "") -> str:
+async def rookie_sop_sync_doc(
+    document_id: str = "", event_payload_json: str = "", open_id: str = "", workspace: str = ""
+) -> str:
     """Sync a new hire's ticked items from their onboarding checklist doc into the detail table.
 
     Fired by the ``haitun.rookie.doc_edited`` trigger with ``fire=tool`` when the doc
@@ -57,11 +59,15 @@ async def rookie_sop_sync_doc(document_id: str = "", event_payload_json: str = "
         document_id: The checklist doc. Empty → read from ``event_payload_json``.
         event_payload_json: Event envelope payload (injected by Session).
         open_id: Whose checklist this is. Empty → resolved from the state file's doc index.
+        workspace: That person's workspace dir. Required when fired by a schedule —
+            ``schedule_registry._fire_tool`` calls tools without a ``runtime_scope``, so
+            path ContextVars are unset and the state file would be looked up under the
+            agent package instead of the new hire's workspace.
     """
     payload = _store._parse_result(event_payload_json) if event_payload_json else {}
     doc_id = (document_id or "").strip() or _doc_id_of(payload)
 
-    state = await _rt.load_state()
+    state = await _rt.load_state(workspace)
     if not doc_id:
         # 只给了 open_id 时按 docs 索引反查 —— 催办前的同步就是这条路径:
         # 它手里只有人, 没有文档 token。原先在读 state 之前就返回, 于是催办

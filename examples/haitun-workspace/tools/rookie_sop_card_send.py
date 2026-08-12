@@ -26,6 +26,7 @@ import _rookie_sop_config as _cfg
 import _rookie_sop_docapi as _docapi
 import _rookie_sop_runtime as _rt
 import _rookie_sop_store as _store
+import _runtime_paths as _paths
 from feishu_api import feishu_api
 from feishu_message import feishu_message_send_card
 from schedule_manage import schedule_manage
@@ -239,7 +240,20 @@ async def rookie_sop_card_send(
         cron="*/10 * * * *",
         fire="tool",
         tool="rookie_sop_sync_doc",
-        tool_args=json.dumps({"open_id": resolved_open_id}, ensure_ascii=False),
+        # 把 document_id 与 workspace 都写死进参数, 不让定时那条路径依赖运行时上下文:
+        # 框架的 schedule_registry._fire_tool 直接 await func(**args), 不建立
+        # runtime_scope, 所以工具里 resolve_workspace() 会回落到 agent 包目录 ——
+        # load_state() 读不到这个新人的 state, 反查 docs 索引必然失败。
+        # (实测踩过: 定时每 10 分钟准时触发, 但每次都返回
+        #  "open_id is not in the doc index", 进度从来没更新过。)
+        tool_args=json.dumps(
+            {
+                "open_id": resolved_open_id,
+                "document_id": str(doc["document_id"]),
+                "workspace": str(_paths.resolve_workspace()),
+            },
+            ensure_ascii=False,
+        ),
         visibility="silent",
         description=f"{resolved_name} 入职清单同步（当天每 10 分钟，之后自删）",
     )

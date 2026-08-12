@@ -43,8 +43,15 @@ def bitable_adapter() -> Any:
     return _Adapter()
 
 
-async def load_state() -> dict[str, Any]:
-    path = _paths.resolve_workspace() / _STATE_REL
+async def load_state(workspace: str = "") -> dict[str, Any]:
+    """读这个新人的 state 文件。
+
+    workspace 可显式传入 —— 定时任务(fire=tool)执行工具时框架不建立路径上下文
+    (schedule_registry._fire_tool 直接 await func(**args), 没有 runtime_scope),
+    于是 resolve_workspace() 会回落到 agent 包目录、读不到 state。定时那条路径
+    因此必须自带 workspace, 不能依赖 ContextVar。
+    """
+    path = _paths.resolve_workspace(workspace) / _STATE_REL
     try:
         text = await path.read_text(encoding="utf-8")
     except (FileNotFoundError, OSError):
