@@ -229,8 +229,36 @@ def _context_header(ctx: Any) -> str:
     thread_id = getattr(ctx, "thread_id", None) or getattr(ctx, "reply_to_message_id", None)
     if thread_id:
         lines.append(f"thread_id: {thread_id}")
+    mentions_line = _mentions_line(ctx)
+    if mentions_line:
+        lines.append(mentions_line)
     lines.append("</feishu_context>")
     return "\n".join(lines)
+
+
+def _mentions_line(ctx: Any) -> str:
+    """被 @ 的人, 形如 ``mentions: 王炜博=ou_xxx, 李四=ou_yyy``; 无人被 @ 时空串。
+
+    与 ``sender_open_id`` 同一性质的客观协议事实 —— 消息正文里 @ 只留下
+    ``@_user_1`` 这类占位符, 不含身份, agent 光看文本无从知道被 @ 的是谁,
+    只能回退去按姓名搜通讯录, 而那个接口只吃 user token(机器人 token 报
+    99991663), 于是每次都要先走一轮 OAuth 授权。SDK 已经把 open_id 解析好放在
+    ``ctx.mentions`` 里, 透出来即可省掉这轮授权。
+
+    机器人自己被 @ 不算(群聊里 @机器人 是唤醒手势, 不是在指人), 否则每条群消息
+    都会多出一条无意义的自指。
+    """
+    mentions = getattr(ctx, "mentions", None) or []
+    parts: list[str] = []
+    for mention in mentions:
+        if getattr(mention, "is_bot", False):
+            continue
+        open_id = str(getattr(mention, "open_id", "") or "").strip()
+        if not open_id:
+            continue
+        name = str(getattr(mention, "name", "") or "").strip()
+        parts.append(f"{name}={open_id}" if name else open_id)
+    return f"mentions: {', '.join(parts)}" if parts else ""
 
 
 def _comment_context_header(event: Any, ctx: Any) -> str:
