@@ -27,7 +27,7 @@ Nuitka 因此退成"只在发版时才编"：产物没有下游消费者，跨�
 | Workflow | 触发 | 说明 |
 | --- | --- | --- |
 | `PyInstaller` | `main` 推送、`v*` tag、PR、手动 | 三平台全编 + Windows 安装包；发布通道上游 |
-| `Nuitka` | `main` 推送、`v*` tag、手动 | 仅当 `haitun.iss` 变动（或 `NUITKA_PLATFORMS` 强制）才真正编译 |
+| `Nuitka` | `main` 推送、`v*` tag、手动 | 仅当 `haitun.iss` 变动（或 `NUITKA_PLATFORMS` 强制）才真正编译；一旦编就是三平台全编 |
 | `Publish Haitun Installer to OSS` | `PyInstaller` 在 `main` / `v*` 上成功完成 | 再按 `haitun.iss` 变动和 OSS `version.txt` 决定是否上传 |
 
 `PyInstaller` 的 push 只认 `main` 和 `v*`，特性分支靠 PR 触发——覆盖面不变，但不再
@@ -59,7 +59,7 @@ Variables：
 | `HAITUN_UPDATE_INTERVAL_HOURS` | `24` | 用户端检查更新的间隔小时数；联调时可临时设为 `1` |
 | `HAITUN_UPDATE_INSTALLER_NAME` | `HaiTun_Agent_Setup.exe` | 用户端下载的安装包文件名 |
 | `NUITKA_PLATFORMS` | 空 | 逗号分隔的平台列表。**设了就无条件覆盖"只在发版时才编"的判断**，是恢复"每次都编三平台"的总开关（填 `ubuntu-latest,windows-latest,macos-latest`），不需要改任何 workflow 文件；留空则按 `haitun.iss` 是否变动决定 |
-| `NUITKA_RELEASE_PLATFORMS` | `windows-latest` | 发版时编哪些平台。默认只有 Windows，因为发版链只消费 Windows 产物 |
+| `NUITKA_RELEASE_PLATFORMS` | `ubuntu-latest,windows-latest,macos-latest` | 发版时编哪些平台。默认三平台全编；想只编 Windows 省时间就设成 `windows-latest` |
 
 ## 用户侧更新
 

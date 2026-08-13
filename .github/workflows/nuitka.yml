@@ -26,7 +26,9 @@ jobs:
   # 跨平台可编译性不靠这条流水线兜: pyinstaller.yml 在每次 push 和 PR 上都编
   # 全三平台, 编不过那边先红。
   #
-  # **想恢复成"每次都编三平台"不需要改这个文件**: 把仓库 Variable
+  # 门槛只管"编不编", 不裁平台: 一旦判定为发版, 三平台照旧全编。
+  #
+  # **想恢复成"每次推送都编三平台"不需要改这个文件**: 把仓库 Variable
   # `NUITKA_PLATFORMS` 设成 `ubuntu-latest,windows-latest,macos-latest`
   # (Settings → Variables), 它会覆盖下面所有判断, 每次推送都编全三平台。
   # 留空则按判据走。
@@ -47,9 +49,11 @@ jobs:
         env:
           # 逗号分隔的平台列表。设了就无条件用它, 是恢复三平台的总开关。
           FORCE_PLATFORMS: ${{ vars.NUITKA_PLATFORMS }}
-          # 发版时编哪些。默认只有 Windows: 发版链只消费
-          # psi-agent-nuitka-windows-latest, 另两个产物没有下游。
-          RELEASE_PLATFORMS: ${{ vars.NUITKA_RELEASE_PLATFORMS || 'windows-latest' }}
+          # 发版时编哪些。默认三平台: 门槛只管"这次是不是发版", 发版了就把三个
+          # 平台的产物都留下 (ubuntu/macOS 产物眼下没有下游消费者, 但发版是留档
+          # 的时机)。想只编 Windows 省时间, 把仓库 Variable
+          # NUITKA_RELEASE_PLATFORMS 设成 windows-latest。
+          RELEASE_PLATFORMS: ${{ vars.NUITKA_RELEASE_PLATFORMS || 'ubuntu-latest,windows-latest,macos-latest' }}
           EVENT_NAME: ${{ github.event_name }}
           REF: ${{ github.ref }}
         run: |
