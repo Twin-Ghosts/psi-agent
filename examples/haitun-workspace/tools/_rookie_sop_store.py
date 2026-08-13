@@ -293,6 +293,42 @@ def _item_id_of(row: dict[str, Any]) -> str:
     return key.rsplit(":", 1)[-1] if ":" in key else key
 
 
+async def reset_progress(
+    bitable: Any,
+    app_token: str,
+    detail_table_id: str,
+    *,
+    open_id: str,
+) -> dict[str, Any]:
+    """把这个人的全部明细行退回「未完成」, 并清掉完成时间与角色标记。
+
+    用于 HR 点名发卡 —— 那意味着「重新开始」, 而不是接着上次的进度。
+    刻意不删行重建: 行里还有入职日/截止日等播种时算好的字段, 原地改状态比
+    删了重播种少一半往返, 也不会在中途失败时留下半套数据。
+    """
+    rows, _ = await fetch_detail(bitable, app_token, detail_table_id, open_id)
+    stale = [r for r in rows if str(r.get("状态") or "") != _p.STATUS_TODO]
+    if not stale:
+        return {"ok": True, "reset": 0}
+
+    records = [
+        {
+            "record_id": r["record_id"],
+            "fields": {"状态": _p.STATUS_TODO, "完成时间": None, "适用角色": ""},
+        }
+        for r in stale
+        if r.get("record_id")
+    ]
+    if not records:
+        return {"ok": True, "reset": 0}
+
+    raw = await bitable.update_records(app_token, detail_table_id, json.dumps(records, ensure_ascii=False))
+    ok, error = _write_ok(raw)
+    if not ok:
+        return {"ok": False, "error": f"update_records rejected: {error}"}
+    return {"ok": True, "reset": len(records)}
+
+
 async def mark_module_na(
     bitable: Any,
     app_token: str,

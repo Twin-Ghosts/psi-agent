@@ -2932,3 +2932,75 @@ def test_unfinished_text_truncates_long_lists() -> None:
 
     assert text.startswith("项0、项1")
     assert "另 15 项" in text
+
+
+def test_state_goes_to_the_rookies_own_workspace_not_the_senders() -> None:
+    """state 必须落在**新人自己的** workspace, 不是发指令那个 HR 的。
+
+    实测踩过: 罗霖说「给王炜博发入职卡」, 工具跑在罗霖的 session 里,
+    resolve_workspace() 解析出的是罗霖的目录, state 就写进了
+    users/ou_f330a7e0.../ 而不是王炜博的。后果是新人那侧的定时同步与催办都找不到
+    数据, 且每个 HR 各攒一份、同一个新人被不同 HR 发卡就分裂成多份表。
+    """
+    cs = _load("rookie_sop_card_send")
+    src = inspect.getsource(cs.rookie_sop_card_send)
+
+    # 必须先算出新人的 workspace, 再拿它去 ensure_base / save_state
+    assert "_rookie_workspace(resolved_open_id)" in src
+    assert "ensure_base(cfg, target_workspace)" in src
+    assert "save_state(state)" not in src, "save_state 必须显式传 target_workspace"
+
+
+def test_rookie_workspace_is_derived_from_the_sibling_directory() -> None:
+    """新人 workspace = <feishu-workspace-root>/<open_id> —— Gateway 就按这个结构建。"""
+    cs = _load("rookie_sop_card_send")
+
+    got = cs._rookie_workspace("ou_rookie")
+
+    # 与当前 workspace 同级、目录名是那个人的 open_id
+    assert got.endswith("ou_rookie")
+    assert cs._rookie_workspace("") == ""
+
+
+def test_hr_naming_someone_starts_over_by_default() -> None:
+    """HR 点名发卡 = 重新开始: 进度清零 + 重建清单文档。
+
+    否则新人会对着一份上次已勾满的清单, 而卡上直接显示 27/28(实测反馈过)。
+    第二天的自动催办卡不走这里, 所以不受影响 —— 它只是提醒, 不是重新入职。
+    """
+    cs = _load("rookie_sop_card_send")
+    sig = inspect.signature(cs.rookie_sop_card_send)
+
+    assert "fresh_start" in sig.parameters
+    assert sig.parameters["fresh_start"].default is True
+
+    src = inspect.getsource(cs.rookie_sop_card_send)
+    # 清零走 store.reset_progress, 且 fresh_start 时不复用旧文档
+    assert "reset_progress(" in src
+    assert 'existing_doc = "" if fresh_start else' in src
+
+
+def test_reset_progress_puts_every_row_back_to_todo() -> None:
+    """清零把所有非「未完成」的行退回未完成, 并抹掉完成时间与角色标记。"""
+    st = _load("_rookie_sop_store")
+    p = _load("_rookie_sop_progress")
+    # 假替身会把行 JSON 序列化(模拟飞书返回), 所以日期用 epoch 毫秒 —— 真实行
+    # 也是这个形态, fetch_detail 才把它转成 date。
+    rows = [
+        {"record_id": "r1", "fields": {"记录键": "ou_x:wifi", "状态": p.STATUS_DONE, "完成时间": 1786579200000}},
+        {"record_id": "r2", "fields": {"记录键": "ou_x:git", "状态": p.STATUS_NA, "适用角色": "非研发"}},
+        {"record_id": "r3", "fields": {"记录键": "ou_x:desk", "状态": p.STATUS_TODO}},
+    ]
+    fake = _FakeBitable([rows])
+
+    out = anyio.run(lambda: st.reset_progress(fake, "app1", "tbl1", open_id="ou_x"))
+
+    assert out["ok"] is True
+    # 只改需要改的两行, 已是未完成的那行不动
+    assert out["reset"] == 2
+    written = fake.updates[-1]["records"]
+    assert {r["record_id"] for r in written} == {"r1", "r2"}
+    for r in written:
+        assert r["fields"]["状态"] == p.STATUS_TODO
+        assert r["fields"]["完成时间"] is None
+        assert r["fields"]["适用角色"] == ""

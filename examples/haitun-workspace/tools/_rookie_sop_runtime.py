@@ -63,8 +63,16 @@ async def load_state(workspace: str = "") -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-async def save_state(state: dict[str, Any]) -> None:
-    path = _paths.resolve_workspace() / _STATE_REL
+async def save_state(state: dict[str, Any], workspace: str = "") -> None:
+    """写这个新人的 state。
+
+    workspace 必须显式传 **新人自己的** 目录, 不能靠 resolve_workspace() ——
+    HR 说「给某人发入职卡」时工具跑在 HR 的 session 里, 默认解析出来的是 HR 的
+    workspace, state 会落到 HR 名下(实测踩过: 罗霖发卡, state 写进了
+    users/ou_f330a7e0.../ 而不是王炜博的目录)。后果是新人那侧的定时同步与催办
+    都找不到数据, 而且每个 HR 各攒一份、同一个新人被不同 HR 发卡就分裂成多份表。
+    """
+    path = _paths.resolve_workspace(workspace) / _STATE_REL
     await path.parent.mkdir(parents=True, exist_ok=True)
     await path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -129,9 +137,9 @@ def should_send_cards(*, is_first_send: bool, force_resend: bool) -> bool:
     return is_first_send or force_resend
 
 
-async def ensure_base(cfg: dict[str, Any]) -> dict[str, Any]:
+async def ensure_base(cfg: dict[str, Any], workspace: str = "") -> dict[str, Any]:
     """首次运行时建 base + 明细表 + 总览表; 之后复用状态文件里的 id。"""
-    state = await load_state()
+    state = await load_state(workspace)
     if state.get("app_token") and state.get("detail_table_id") and state.get("overview_table_id"):
         return state
 
@@ -164,6 +172,26 @@ async def ensure_base(cfg: dict[str, Any]) -> dict[str, Any]:
             app_token, "入职明细", json.dumps(_store.DETAIL_FIELDS, ensure_ascii=False)
         )
     )
+    # 飞书建 base 时会自带一张名为「数据表」的空表, 而且它排在最前面 —— 会把
+    # 总览表挤到第二位, HR 打开先看到一张空表。删掉它。
+    # 失败不阻断建库(顶多多一张空表), 但记进返回值, 不静默。
+    stray_note = ""
+    try:
+        listed = _store._parse_result(
+            await _api.feishu_api(
+                "GET",
+                f"/open-apis/bitable/v1/apps/{app_token}/tables",
+                query_json=json.dumps({"page_size": 20}, ensure_ascii=False),
+            )
+        )
+        for table in _store._items_of(listed):
+            if str(table.get("name") or "") == "数据表":
+                await _api.feishu_api(
+                    "DELETE", f"/open-apis/bitable/v1/apps/{app_token}/tables/{table.get('table_id')}"
+                )
+    except Exception as exc:
+        stray_note = f"stray default table not removed: {exc!r}"
+
     # feishu_bitable_create_table 是扁平结构 {ok, table_id, name, default_view_id,
     # field_ids} —— table_id 直接在顶层, 同样没有 "result" 包装。
     detail_table_id = str(detail.get("table_id") or "")
@@ -184,5 +212,9 @@ async def ensure_base(cfg: dict[str, Any]) -> dict[str, Any]:
         "overview_table_id": overview_table_id,
         "table_url": f"https://feishu.cn/base/{app_token}",
     }
-    await save_state(state)
+    await save_state(state, workspace)
+    # 自带空表没删掉不影响功能, 但要让人知道 —— 否则 HR 打开会先看到一张空表,
+    # 而没人清楚它是哪来的。刻意不写进 state: 那是持久化的库坐标, 不该混入一次性的告警。
+    if stray_note:
+        return {**state, "warning": stray_note}
     return state

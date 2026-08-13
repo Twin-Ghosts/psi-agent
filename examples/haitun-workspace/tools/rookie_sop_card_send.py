@@ -11,6 +11,7 @@ triggers/rookie-sop-welcome/TRIGGER.md)。两种入口共享同一套 open_id/na
 from __future__ import annotations
 
 # ruff: noqa: E402, RUF001
+import contextlib
 import json
 import sys
 from datetime import date, datetime
@@ -30,6 +31,23 @@ import _runtime_paths as _paths
 from feishu_api import feishu_api
 from feishu_message import feishu_message_send_card
 from schedule_manage import schedule_manage
+
+
+def _rookie_workspace(open_id: str) -> str:
+    """这个新人自己的 workspace 目录。
+
+    从当前 workspace 的父目录(feishu-workspace-root, 形如 .../users)拼出
+    ``<root>/<open_id>`` —— Gateway 就是按这个结构给每个飞书用户建 workspace 的。
+    推不出来时回退空串, 由调用方沿用默认解析(单机/测试场景下两者本就同一个)。
+    """
+    if not open_id:
+        return ""
+    current = Path(_paths.workspace_dir())
+    root = current.parent
+    if not root.name or root.name == current.name:
+        return ""
+    candidate = root / open_id
+    return str(candidate)
 
 
 def _existing_doc_of(state: dict[str, Any], open_id: str) -> str:
@@ -57,6 +75,7 @@ async def rookie_sop_card_send(
     event_payload_json: str = "",
     onboard_date: str = "",
     force_resend: bool = False,
+    fresh_start: bool = True,
 ) -> str:
     """Send a new hire the 入职卡 (entry card + per-person doc checklist).
 
@@ -95,7 +114,14 @@ async def rookie_sop_card_send(
     if not items:
         return json.dumps({"ok": False, "error": "config/rookie_sop.yaml has no items"}, ensure_ascii=False)
 
-    state = await _rt.ensure_base(cfg)
+    # 新人自己的 workspace —— 不能用 resolve_workspace() 的默认值: HR 说
+    # 「给某人发入职卡」时本工具跑在 HR 的 session 里, 默认解析出的是 HR 的目录,
+    # state 会落到 HR 名下(实测: 罗霖发卡, state 写进了他自己的 users/ 目录),
+    # 于是新人那侧的定时同步与催办都找不到数据, 且每个 HR 各攒一份、同一个新人
+    # 被不同 HR 发卡就分裂成多份表。
+    target_workspace = _rookie_workspace(resolved_open_id)
+
+    state = await _rt.ensure_base(cfg, target_workspace)
     missing = [k for k in ("app_token", "detail_table_id", "overview_table_id") if not state.get(k)]
     if missing:
         return json.dumps(
@@ -173,7 +199,28 @@ async def rookie_sop_card_send(
     # 定时任务记住了新那份, 而用户手里的卡片链接还指向旧那份。结果同步「成功」
     # 但读的是空白新文档, 把「什么都没勾」如实写回表, 用户看到的进度永远不动。
     # (实测踩过, 而且返回值是 ok:true, 最难发现。)
-    existing_doc = _existing_doc_of(state, resolved_open_id)
+    # HR 点名发卡 = 重新开始, 所以先把这个人的进度清零、并弃用旧文档;
+    # 第二天的自动催办卡则沿用现有文档与进度(它只是提醒, 不是重新入职)。
+    # 两条路径靠 fresh_start 区分: HR 走 rookie_sop_card_send(默认 True),
+    # 催办走 rookie_sop_remind 自己的 remind_card, 压根不经过这里。
+    existing_doc = "" if fresh_start else _existing_doc_of(state, resolved_open_id)
+    if fresh_start:
+        reset = await _store.reset_progress(
+            bitable, app_token, detail_table, open_id=resolved_open_id
+        )
+        if reset.get("ok") is not True:
+            return json.dumps(
+                {"ok": False, "error": f"reset progress failed: {reset.get('error')}"}, ensure_ascii=False
+            )
+        # 旧文档留着会让新人对着一份已勾满的清单, 且它的 block_map 还在 state 里,
+        # 同步会把旧勾选又写回表 —— 所以连同映射一起弃用, 下面会重建一份。
+        for stale in [d for d, o in (state.get("docs") or {}).items() if str(o) == resolved_open_id]:
+            with contextlib.suppress(Exception):
+                await feishu_api(
+                    "DELETE",
+                    f"/open-apis/drive/v1/files/{stale}",
+                    query_json=json.dumps({"type": "docx"}, ensure_ascii=False),
+                )
     if existing_doc:
         doc = {
             "document_id": existing_doc,
@@ -208,7 +255,7 @@ async def rookie_sop_card_send(
     block_maps = dict(block_maps) if isinstance(block_maps, dict) else {}
     block_maps[str(doc["document_id"])] = doc.get("block_map") or {}
     state["doc_block_maps"] = block_maps
-    await _rt.save_state(state)
+    await _rt.save_state(state, target_workspace)
 
     # 入口卡: 一条消息交代全貌, 没有回调动作(勾选在文档里做)。
     card, handlers = _card.entry_card(resolved_name, rows, doc_url, today)
@@ -258,7 +305,7 @@ async def rookie_sop_card_send(
                 },
                 resolved_open_id: card_mid,
             }
-            await _rt.save_state(state)
+            await _rt.save_state(state, target_workspace)
 
     # 每人一份催办定时任务, 落在这个新人自己的 Session workspace 里。结果不能丢:
     # schedule_manage 失败时返回 "[Error] ..." 字符串而不是抛异常, 吞掉它就等于
