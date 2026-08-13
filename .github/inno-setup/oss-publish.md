@@ -26,12 +26,15 @@ Nuitka 因此退成"只在发版时才编"：产物没有下游消费者，跨�
 
 | Workflow | 触发 | 说明 |
 | --- | --- | --- |
-| `PyInstaller` | `main` 推送、`v*` tag、PR、手动 | 三平台全编 + Windows 安装包；发布通道上游 |
+| `PyInstaller` | 任何分支的推送、PR | 三平台全编 + Windows 安装包；发布通道上游 |
 | `Nuitka` | `main` 推送、`v*` tag、手动 | 仅当 `haitun.iss` 变动（或 `NUITKA_PLATFORMS` 强制）才真正编译；一旦编就是三平台全编 |
 | `Publish Haitun Installer to OSS` | `PyInstaller` 在 `main` / `v*` 上成功完成 | 再按 `haitun.iss` 变动和 OSS `version.txt` 决定是否上传 |
 
-`PyInstaller` 的 push 只认 `main` 和 `v*`，特性分支靠 PR 触发——覆盖面不变，但不再
-和 PR 的 run 重复一份，也避免下游 `workflow_run` 从每周几次涨到每天几十次。
+`PyInstaller` 的触发面刻意保持宽口径：它承担跨平台可编译性的兜底职责，编得越勤，
+问题暴露得越早。接成发布通道的上游不需要收窄它——管住发布面的是
+`Publish Haitun Installer to OSS` 自己 `workflow_run` 上的 `branches: [main, v*]`
+过滤，加上 job 级的 `head_branch == 'main'` 第二道闸，特性分支和 PR 的 run 根本到
+不了发布这一步。
 
 ## 需要的阿里云权限
 
