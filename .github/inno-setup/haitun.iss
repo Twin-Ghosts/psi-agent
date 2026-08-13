@@ -2,7 +2,7 @@
 ; Packages the entire haitun-workspace (including psi-agent.exe, copied in at build time).
 
 #define MyAppName "HaiTun Agent"
-#define MyAppVersion "1.0.1"
+#define MyAppVersion "1.0.2"
 #define MyAppPublisher "Hefei Zhenzhi Artificial Intelligence Application Software Co., Ltd"
 #define MyAppExeName "haitun.exe"
 
