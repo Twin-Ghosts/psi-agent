@@ -3,12 +3,35 @@
 ## 发版流程
 
 1. 修改 `.github/inno-setup/haitun.iss` 里的 `MyAppVersion`，推送 `main`。
-2. `Nuitka` workflow 构建 Windows 安装包，产出 `haitun-agent-installer-nuitka` artifact。
+2. `PyInstaller` workflow 构建 Windows 安装包，产出 `haitun-agent-installer-pyinstaller` artifact。
 3. `Publish Haitun Installer to OSS` workflow 检测该 commit 是否改动了 `haitun.iss`：
    - 如果 OSS 上的 `version.txt` 已等于本次版本，跳过；
    - 否则上传 `HaiTun_Agent_Setup.exe`、`HaiTun_Agent_Setup-<version>.exe` 和 `version.txt` 到阿里云 OSS。
 
 当前使用 OSS bucket 直连下载，不经过 CDN，因此不需要 CDN 刷新权限。
+
+### 为什么发布通道是 PyInstaller 而不是 Nuitka
+
+同一个安装包，PyInstaller 全链约 17 分钟，Nuitka 约 2 小时（三平台并行，墙钟取最慢
+那个，99% 花在单条编译命令上）。两者对发版是等价的：`haitun.c` 硬编码
+`psi-agent.exe`，两个 builder 都把 exe 拷到
+`examples/haitun-workspace/psi-agent.exe`，`build-haitun-launcher.ps1` 只从
+`haitun.iss` 解析 `MyAppVersion`，不碰 agent exe。两条流水线的
+`haitun-inno-setup` job 结构也完全一致，只差来源 / 产出 artifact 名。
+
+Nuitka 因此退成"只在发版时才编"：产物没有下游消费者，跨平台可编译性由
+`PyInstaller` 兜（每次 main 推送和每个 PR 都编全三平台）。
+
+### 各流水线的触发面
+
+| Workflow | 触发 | 说明 |
+| --- | --- | --- |
+| `PyInstaller` | `main` 推送、`v*` tag、PR、手动 | 三平台全编 + Windows 安装包；发布通道上游 |
+| `Nuitka` | `main` 推送、`v*` tag、手动 | 仅当 `haitun.iss` 变动（或 `NUITKA_PLATFORMS` 强制）才真正编译 |
+| `Publish Haitun Installer to OSS` | `PyInstaller` 在 `main` / `v*` 上成功完成 | 再按 `haitun.iss` 变动和 OSS `version.txt` 决定是否上传 |
+
+`PyInstaller` 的 push 只认 `main` 和 `v*`，特性分支靠 PR 触发——覆盖面不变，但不再
+和 PR 的 run 重复一份，也避免下游 `workflow_run` 从每周几次涨到每天几十次。
 
 ## 需要的阿里云权限
 
@@ -35,6 +58,8 @@ Variables：
 | `ALIYUN_OSS_PREFIX` | 空 | OSS 对象前缀；bucket 根目录就填 `/`（如果 GitHub 不允许留空） |
 | `HAITUN_UPDATE_INTERVAL_HOURS` | `24` | 用户端检查更新的间隔小时数；联调时可临时设为 `1` |
 | `HAITUN_UPDATE_INSTALLER_NAME` | `HaiTun_Agent_Setup.exe` | 用户端下载的安装包文件名 |
+| `NUITKA_PLATFORMS` | 空 | 逗号分隔的平台列表。**设了就无条件覆盖"只在发版时才编"的判断**，是恢复"每次都编三平台"的总开关（填 `ubuntu-latest,windows-latest,macos-latest`），不需要改任何 workflow 文件；留空则按 `haitun.iss` 是否变动决定 |
+| `NUITKA_RELEASE_PLATFORMS` | `windows-latest` | 发版时编哪些平台。默认只有 Windows，因为发版链只消费 Windows 产物 |
 
 ## 用户侧更新
 

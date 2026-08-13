@@ -1,8 +1,29 @@
 name: PyInstaller
 
+# 这条流水线有两个身份:
+#   1. 跨平台可编译性的兜底 —— 三平台全编, 编不过这里先红 (nuitka.yml 只在发版
+#      时才编, 不承担这个职责);
+#   2. OSS 发版通道的上游 —— `haitun-inno-setup` 产出的
+#      `haitun-agent-installer-pyinstaller` 由 oss-publish.yml 消费。
+#
+# 触发面收窄的原因: 原来是裸 `on: push / pull_request`, 任何分支的任何推送都跑
+# (历史 3359 次 run)。作为 oss-publish.yml 的 `workflow_run` 上游, 这会让下游从
+# 每周几次变成每天几十次。现在 push 只认 main 和 v* tag, 特性分支靠 PR 触发 ——
+# 覆盖面不变 (PR 照样全三平台), 但不再和 PR 的 run 重复一份。
 on:
+  workflow_dispatch:
   push:
+    branches:
+      - main
+    tags:
+      - "v*"
   pull_request:
+
+# 同一 ref 上的旧 run 直接取消: 全链 17 min, 连续推送时没必要让过期的 run 跑完。
+# main 上不取消 —— 每个 main 提交都可能是发版, 产物要留着给 oss-publish 取。
+concurrency:
+  group: pyinstaller-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   pyinstaller:
