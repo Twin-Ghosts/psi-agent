@@ -33,7 +33,8 @@ async def test_session_connector_keeps_connection_across_sms_wait(tmp_path: Path
         connector = session.connector
         # 收窄到 TCPConnector: session.connector 的静态类型是 BaseConnector | None,
         # 下面要读的字段只在 TCPConnector 上。isinstance 断言让 ty 自己认出来,
-        # 不必写 # type: ignore (本仓库用 ty, 那条注释是 mypy 语法, 压不住)。
+        # 不必写 type-ignore 注释 (本仓库用 ty, 那是 mypy 语法, 压不住; 而且写出那个
+        # 字面量本身就会被 ty 当成一条真指令, 反倒多报一条 unused 警告)。
         assert isinstance(connector, aiohttp.TCPConnector)
         # 等短信最长约 90s; keepalive 必须比它长, 否则连接在等待期间就被回收了。
         assert _KEEPALIVE_SECONDS > 90.0
@@ -93,7 +94,7 @@ async def test_unreachable_server_is_not_retried(tmp_path: Path, monkeypatch: py
     ) -> tuple[int, dict[str, Any]]:
         calls.append(path)
         # 造个真的 ConnectionKey: 传 None 运行时能过, 但 ty 会拦 (它要 ConnectionKey),
-        # 而本仓库不许用 # type: ignore 压。
+        # 而本仓库不许用 type-ignore 注释压。
         key = ConnectionKey(
             host="example.invalid",
             port=443,

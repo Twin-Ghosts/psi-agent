@@ -42,7 +42,7 @@ Gateway 进程
 | `_defaults.py` | `resolve_default_agent` / `resolve_default_workspace`；再导出 ``psi_agent._appdata`` 路径助手 — CLI / `GET /defaults` 用 |
 | `_feishu_manager.py` | `FeishuManager` — 飞书会话 → Session 路由表（私聊按 `open_id`、群聊按 `chat_id`；复用 SessionManager 按需 spawn）+ FeishuRoute |
 | `_oauth_manager.py` | `OAuthRelay` — OAuth 回调中继（`state → code` 一次性信箱，带 TTL；供 `GET /oauth/callback` + `GET /oauth/code`），让授权码免用户手工复制 |
-| `_auth_manager.py` | `AuthManager` — 云端账号服务的**转发层** + 登录态持有者；不持供应商密钥、不做授权判定（发码与鉴权全在云端）。两段式注册的 `tempToken` 扣在进程内不下发给页面，改回 `registrationRequired: true`；把云端 `Retry-After` 响应头抄进 body 供倒计时用；云端 `GET /sessions` 回**裸数组**，`_call` 装 `items` 信封、`list_devices` 统一成 `{"devices": [...]}`。`resolve_endpoint()` 定地址（显式参数 > `PSI_AUTH_ENDPOINT` > 内置默认；显式空串=关闭） |
+| `_auth_manager.py` | `AuthManager` — 云端账号服务的**转发层** + 登录态持有者；不持供应商密钥、不做授权判定（发码与鉴权全在云端）。两段式注册的 `tempToken` 扣在进程内不下发给页面，改回 `registrationRequired: true`；把云端 `Retry-After` 响应头抄进 body 供倒计时用；云端 `GET /sessions` 回**裸数组**，`_call` 装 `items` 信封、`list_devices` 统一成 `{"devices": [...]}`。`resolve_endpoint()` 定地址（显式参数 > `PSI_AUTH_ENDPOINT` > 内置默认；显式空串=关闭）。连接池 / 预热 / 重试边界见 [AuthManager 连接复用](#authmanager-连接复用) |
 | `_auth_store.py` | 本机凭证落盘 `{appdata}/auth.enc.json`（0600）+ `device_key`；密钥存 OS 钥匙串，钥匙串不可用则降级明文并记 warning、`credentialEncrypted: false` 如实上报。`load_token()` 读到明文且钥匙串此时可用会**就地重新加密**（用户装上 keyring 重启后凭证真的转密文，而不只是黄条消失）；`credentialEncrypted` 报的是**盘上真实形态**，没碰过盘时才退回“钥匙串可用性”做预测 |
 | `_title_manager.py` | 会话标题 CRUD + AI 自动生成 |
 | `_summary_manager.py` | 任务摘要 CRUD + AI 自动生成（spa-v2；与 title 同级持久化） |
@@ -71,7 +71,7 @@ Gateway 进程
 6. 创建 AIManager + RouterManager + SessionManager（注入 `_default_agent` / `_default_workspace`）+ TitleManager + SummaryManager
 7. 恢复 AI / Router / Session（Session 恢复时带 `agent`，缺省用 Gateway default）/ titles / summaries
 8. 创建 SchedulerManager（`--scheduler-ai-id`，空则回落 `--feishu-ai-id`）
-8b. 创建 AuthManager（地址非空时；从 `{appdata}/auth.enc.json` 恢复登录态）— **旁挂**：不注入 Session、不写 ContextVar、不进 `_do_persist` 快照（凭证不落 `state/latest.json`）
+8b. 创建 AuthManager（地址非空时；从 `{appdata}/auth.enc.json` 恢复登录态）— **旁挂**：不注入 Session、不写 ContextVar、不进 `_do_persist` 快照（凭证不落 `state/latest.json`）。随后 `nudge_warm()` 预热云端连接（注入 `tg`，详见 [AuthManager 连接复用](#authmanager-连接复用)）
 9. await create_app(..., default_agent=..., default_workspace=..., appdata=..., schedm=..., authm=...)  — 注册 REST（含 `GET /defaults`；`authm` 非 None 才注册 `/auth/*`）
 10. 为每个已恢复 Session 的 workspace `schedm.ensure(...)` — 按需拉起调度 Session（无 `schedules/` 则跳过）
 11. 创建 _do_persist 闭包（快照 managers → state.save，sessions 含 `agent`；`list_all()` 默认已排除调度 Session）
@@ -386,6 +386,34 @@ OAuth 回调中继（`_oauth_manager.py`）：让**授权码自己回到发起�
 - `take(state) → _Pending | None` — 发起方取件，命中即返回并**删除**（一次性），未到达返回 `None`
 - TTL 600s（飞书 code 本身 5 分钟有效），每次 `deliver`/`take` 顺带清理过期项；`_MAX_PENDING=256` 满则淘汰最旧一条，防内存无界增长
 
+## AuthManager 连接复用
+
+云端账号服务在境外，RTT 约 210ms。登录要点 3–4 次，冷连接每次付 TCP 1 RTT + TLS 1 RTT + 请求 1 RTT。三处针对性设计（详见 `docs/superpowers/specs/2026-08-14-auth-connection-reuse-design.md`）：
+
+**1. 连接池配置** —— `_ensure_session()` 显式传 connector，不吃 aiohttp 默认值：
+
+| 值 | 本地 | aiohttp 默认 | 为什么默认值不行 |
+|---|---|---|---|
+| `keepalive_timeout` | 120s | 15s | 撑不过登录任一步的间隔：输手机号 5–20s、等短信 30–90s。默认值下每一步都是冷连接 —— 代码里复用 `self._session` 成立，网络层一次也没复用上 |
+| `ttl_dns_cache` | 600s | 10s | 云端地址不变，没必要反复解析 |
+
+120s 的上界由服务端空闲超时定（取值须更短，否则池里攒着对端已关的连接）。2026-08-14 实测空闲 10/30/60/90/120/180s **全部复用**，服务端超时比 180s 还长，故 120s 稳在安全侧、客户端先于服务端回收。也不再往上加：登录全程最大间隔约 90s，120s 已完整覆盖。
+
+**不设 `enable_cleanup_closed`**：那是为老 SSL 实现「服务端关连接但客户端 transport 不自觉」的泄漏兜底，代价是常驻一个清理循环。本模块的复用已由 `ServerDisconnectedError` 重试兜住，不需要它。
+
+**2. 连接预热** —— `nudge_warm()` 往 task group 里塞一个 `GET /me` 就返回，让首次点击也落在热连接上。两个触发点：
+
+- Gateway 启动创建 AuthManager 后（`__init__.py`）
+- `GET /auth/status`（`server.py`）—— SPA 挂载登录面板必然探这个端点，是最自然的预热时机，**前端一行都不用改**。该端点本身只读内存不打云端，加预热也不让它变慢
+
+预热**不带 token**（`_call(..., auth=...)` 不传），因为它只为建立 TCP+TLS 连接，带上反而可能因 token 过期收 401 而误清本机凭证。节流 5s，防 SPA 连发。`_tg is None` 就不预热，功能不受影响；`_warm()` 用 `try/except/finally` 吞掉所有异常并复位 `_warming` —— 异常逃出 `start_soon` 会拆掉整个 task group 连带弄死 Gateway，不复位则一次失败永久堵死后续预热。
+
+**3. 只有幂等 GET 能重试** —— `_call(retry=True)` 仅用于 `/me` 与 `/sessions`。四个业务 POST（send-code / verify / complete / bind）与 DELETE **一次都不重试**：验证码被消费两次，前端会在本该成功的时候显示「验证码不正确」；DELETE 重试撞 404 会告诉界面「设备不存在」，而第一次其实已经成功了。
+
+重试只捕 `ServerDisconnectedError`，**不能扩到 `ClientOSError` / `ClientConnectionError`** —— `ServerDisconnectedError` 与 `ClientConnectorError`（DNS 失败、连接被拒）都是它们的子类，罩上去会把真正连不通的情况也重试一遍，白等一个超时周期。这条边界有专门的测试守着（`tests/psi_agent/gateway/test_auth_connection.py`）。
+
+**效果**（2026-08-14 真机）：冷连接均值 814ms → 热连接 218ms，单次省 597ms。热连接与实测 RTT 226ms 相等，已贴到一个 RTT 的物理下限。
+
 ## TitleManager
 
 内存存储 `dict[str, str]`（session_id → title），维护会话标题映射。
@@ -431,7 +459,7 @@ OAuth 回调中继（`_oauth_manager.py`）：让**授权码自己回到发起�
 | GET | `/feishu/routes` | 列出所有飞书会话 → Session 路由 `[{open_id, chat_id, session_id}]`（群聊记录只有 `chat_id`，私聊只有 `open_id`） |
 | GET | `/oauth/callback` | OAuth 重定向落地点：收下 `?code=&state=` 交给 `OAuthRelay` 暂存，回一张「授权成功」页；缺 state → 400。用户因此**不必**手工复制 code |
 | GET | `/oauth/code` | 发起方（workspace 工具，通常在另一进程）按 `?state=` 取件，命中返回 `{state, code}` 并作废（一次性）；回调带错误则 `{state, error}`；未到达 → 404 |
-| GET | `/auth/status` | 登录态 + 链路自检信息 `{endpoint, prefix, loggedIn, deviceKey, platform, credentialEncrypted}`；**不含 token**。SPA 据此决定显示登录引导还是身份信息 |
+| GET | `/auth/status` | 登录态 + 链路自检信息 `{endpoint, prefix, loggedIn, deviceKey, platform, credentialEncrypted}`；**不含 token**。SPA 据此决定显示登录引导还是身份信息。顺带触发连接预热 —— 该端点只读内存不打云端，预热是后台任务，不拖慢本响应 |
 | POST | `/auth/send-code` | 请云端发验证码 `{phone}` 或 `{email}`（二选一，缺则 400） |
 | POST | `/auth/verify` | 校验验证码 `{code, phone?/email?}`。老用户当场登录；新用户回 `{registrationRequired: true, isNewUser: true}`，其 `tempToken` 由 Gateway 扣在进程内**不下发**。前端判 `registrationRequired` 决定是否进建号屏 —— 扣掉凭证就必须留这个替代信号，否则新用户被当成登录失败 |
 | POST | `/auth/complete` | 两段式注册第二段 `{displayName?}`；`tempToken` 取自上一步暂存，用后即弃 |
