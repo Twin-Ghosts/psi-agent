@@ -36,6 +36,7 @@ def _stub_call(
         payload: dict[str, Any] | None = None,
         *,
         auth: bool = False,
+        retry: bool = False,
     ) -> tuple[int, dict[str, Any]]:
         return status, body
 

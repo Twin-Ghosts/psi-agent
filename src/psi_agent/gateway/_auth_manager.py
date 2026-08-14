@@ -165,50 +165,84 @@ class AuthManager:
             )
         return self._session
 
-    async def _call(
+    async def _attempt(
         self, method: str, path: str, payload: dict[str, Any] | None = None, *, auth: bool = False
     ) -> tuple[int, dict[str, Any]]:
-        """发一次云端请求, 返回 ``(状态码, 响应体)``。
+        """发一次请求并把响应改造成前端契约。
 
-        网络异常收敛成 ``(0, {"error": ...})`` —— 调用方 (HTTP 路由) 据此回 502,
-        而不是让异常冒到 aiohttp 中间件变成 500。
+        连接异常**不在这里吞**, 往上抛给 ``_call`` 决定要不要重试。
         """
-        if not self.endpoint:
-            return 0, {"error": "auth_endpoint_not_configured"}
         headers: dict[str, str] = {}
         if auth:
             if not self._token:
                 return _UNAUTHORIZED, {"error": "unauthorized"}
             headers["Authorization"] = f"Bearer {self._token}"
         url = f"{self.endpoint}{self.prefix}{path}"
-        try:
-            session = self._ensure_session()
-            async with session.request(method, url, json=payload, headers=headers) as resp:
-                body: dict[str, Any]
-                try:
-                    body = await resp.json()
-                except Exception:
-                    text = await resp.text()
-                    body = {"error": "bad_response", "detail": text[:200]}
-                if isinstance(body, list):
-                    # 云端 ``GET /sessions`` 回**裸数组**。这里的返回类型契约是 dict,
-                    # 但不能因此把数据丢掉 —— 装进信封转交, 由路由层原样下发。
-                    # (曾经这一支落到下面的 bad_response, 设备列表恒为空。)
-                    body = {"items": body}
-                elif not isinstance(body, dict):
-                    body = {"error": "bad_response"}
-                # 云端把重试间隔放在 ``Retry-After`` **响应头**里, 响应体里没有。
-                # 而 SPA 的 fetch 封装只读 body —— 于是「请 60 秒后再试」的倒计时
-                # 永远拿不到秒数, 只能不显示或瞎猜。在此抄进 body, 前端契约保持
-                # 「所有信息都在 body」一条, 不必让每个调用点都去摸 headers。
-                if "retryAfter" not in body:
-                    raw_retry = resp.headers.get("Retry-After", "")
-                    if raw_retry.strip().isdigit():
-                        body["retryAfter"] = int(raw_retry.strip())
-                return resp.status, body
-        except Exception as e:
-            logger.warning(f"认证服务请求失败 {method} {path}: {e!r}")
-            return 0, {"error": "upstream_unreachable", "detail": repr(e)[:200]}
+        session = self._ensure_session()
+        async with session.request(method, url, json=payload, headers=headers) as resp:
+            body: dict[str, Any]
+            try:
+                body = await resp.json()
+            except Exception:
+                text = await resp.text()
+                body = {"error": "bad_response", "detail": text[:200]}
+            if isinstance(body, list):
+                # 云端 ``GET /sessions`` 回**裸数组**。这里的返回类型契约是 dict,
+                # 但不能因此把数据丢掉 —— 装进信封转交, 由路由层原样下发。
+                # (曾经这一支落到下面的 bad_response, 设备列表恒为空。)
+                body = {"items": body}
+            elif not isinstance(body, dict):
+                body = {"error": "bad_response"}
+            # 云端把重试间隔放在 ``Retry-After`` **响应头**里, 响应体里没有。
+            # 而 SPA 的 fetch 封装只读 body —— 于是「请 60 秒后再试」的倒计时
+            # 永远拿不到秒数, 只能不显示或瞎猜。在此抄进 body, 前端契约保持
+            # 「所有信息都在 body」一条, 不必让每个调用点都去摸 headers。
+            if "retryAfter" not in body:
+                raw_retry = resp.headers.get("Retry-After", "")
+                if raw_retry.strip().isdigit():
+                    body["retryAfter"] = int(raw_retry.strip())
+            return resp.status, body
+
+    async def _call(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        auth: bool = False,
+        retry: bool = False,
+    ) -> tuple[int, dict[str, Any]]:
+        """发一次云端请求, 返回 ``(状态码, 响应体)``。
+
+        网络异常收敛成 ``(0, {"error": ...})`` —— 调用方 (HTTP 路由) 据此回 502,
+        而不是让异常冒到 aiohttp 中间件变成 500。
+
+        ``retry`` 只对幂等 GET 生效, 且必须在**调用点显式开启** —— 这样将来给新
+        端点加方法时, 默认落在「不重试」那一侧。业务 POST 永不重试: 验证码被消耗
+        两次后, 前端 D1 兜底屏会说「验证码不正确」, 而码是对的。
+        """
+        if not self.endpoint:
+            return 0, {"error": "auth_endpoint_not_configured"}
+        attempts = 2 if (retry and method == "GET") else 1
+        last: Exception | None = None
+        for i in range(attempts):
+            try:
+                return await self._attempt(method, path, payload, auth=auth)
+            except aiohttp.ServerDisconnectedError as e:
+                # 只认这一种: keepalive 拉长后, 池里的连接可能在「取出」与「发出」
+                # 之间被对端关掉。不能捕 ClientOSError 或 ClientConnectionError ——
+                # ServerDisconnectedError 与 ClientConnectorError (DNS 失败、连接
+                # 被拒) 都是它们的子类, 罩上去会把真正连不通的情况也重试一遍,
+                # 白等一个超时周期。
+                last = e
+                if i + 1 < attempts:
+                    logger.info(f"连接已被对端关闭, 重试一次 {method} {path}")
+                    continue
+            except Exception as e:
+                last = e
+                break
+        logger.warning(f"认证服务请求失败 {method} {path}: {last!r}")
+        return 0, {"error": "upstream_unreachable", "detail": repr(last)[:200]}
 
     async def _on_response(self, status: int) -> None:
         """401 即清本地凭证 —— 云端撤销设备后, 本机不该继续显示已登录。"""
@@ -317,7 +351,7 @@ class AuthManager:
 
     # ---- 已登录接口 ----
     async def me(self) -> tuple[int, dict[str, Any]]:
-        status, body = await self._call("GET", "/me", auth=True)
+        status, body = await self._call("GET", "/me", auth=True, retry=True)
         await self._on_response(status)
         return status, body
 
@@ -327,7 +361,7 @@ class AuthManager:
         云端回裸数组, ``_call`` 会装进 ``items`` 信封; 在此拆回并落到页面契约的
         ``devices`` 键, 页面不必再猜三种形状。
         """
-        status, body = await self._call("GET", "/sessions", auth=True)
+        status, body = await self._call("GET", "/sessions", auth=True, retry=True)
         await self._on_response(status)
         if status == 200:
             items = body.get("items")
@@ -337,6 +371,8 @@ class AuthManager:
         return status, body
 
     async def revoke_device(self, device_id: str) -> tuple[int, dict[str, Any]]:
+        # 不开 retry。DELETE 按 HTTP 语义算幂等, 但重试拿到的 404 会让界面说
+        # 「设备不存在」—— 而第一次其实已经删成功了。误导比省一个 RTT 重要。
         if not device_id:
             return 400, {"error": "device_id_required"}
         status, body = await self._call("DELETE", f"/sessions/{device_id}", auth=True)
