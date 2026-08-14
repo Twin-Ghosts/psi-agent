@@ -97,6 +97,16 @@ def _resolve_prefix() -> str:
 # 整个 Gateway 请求。
 _TIMEOUT_SECONDS = 30.0
 
+# 连接保活时长。aiohttp 默认 15s, 撑不过登录任一步的间隔: 输手机号 5-20s、
+# 等短信 30-90s。默认值下每一步都是冷连接 (TCP 1 RTT + TLS 1 RTT + 请求 1 RTT),
+# 境外云 RTT 约 210ms, 每步白付约 420ms —— 代码里复用 self._session 成立,
+# 网络层一次也没复用上。
+# 取值须比服务端空闲超时短, 否则池里会攒着对端已关的连接 (实测见 gateway/AGENTS.md)。
+_KEEPALIVE_SECONDS = 120.0
+
+# DNS 缓存。默认 10s, 云端地址不变, 没必要反复解析。
+_DNS_CACHE_SECONDS = 600
+
 
 @dataclass
 class AuthManager:
@@ -142,7 +152,17 @@ class AuthManager:
 
     def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=_TIMEOUT_SECONDS))
+            # 必须显式传 connector: 默认值的 keepalive 15s 撑不过登录步距,
+            # 见 _KEEPALIVE_SECONDS。不加 enable_cleanup_closed —— Python 3.14.7
+            # 下它已是 no-op 且抛 DeprecationWarning, 而本仓库禁止 noqa 抑制。
+            connector = aiohttp.TCPConnector(
+                keepalive_timeout=_KEEPALIVE_SECONDS,
+                ttl_dns_cache=_DNS_CACHE_SECONDS,
+            )
+            self._session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(total=_TIMEOUT_SECONDS),
+            )
         return self._session
 
     async def _call(
