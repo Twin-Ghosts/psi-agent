@@ -107,6 +107,9 @@ _KEEPALIVE_SECONDS = 120.0
 # DNS 缓存。默认 10s, 云端地址不变, 没必要反复解析。
 _DNS_CACHE_SECONDS = 600
 
+# 预热节流。SPA 挂载登录面板时可能连发几次 /auth/status, 没必要每次都热一遍。
+_WARM_THROTTLE_SECONDS = 5.0
+
 
 @dataclass
 class AuthManager:
@@ -124,6 +127,10 @@ class AuthManager:
     _platform: str = ""
     _lock: anyio.Lock = field(default_factory=anyio.Lock)
     _session: aiohttp.ClientSession | None = None
+    _tg: Any = None  # anyio.TaskGroup (ty不识别的第三方类型)
+    """Gateway 的 task group, 只用来调度连接预热。没注入就不预热, 功能不受影响。"""
+    _warming: bool = False
+    _last_warm: float = 0.0
 
     @classmethod
     async def create(cls, endpoint: str, appdata_root: str = "", platform: str = "") -> AuthManager:
@@ -243,6 +250,40 @@ class AuthManager:
                 break
         logger.warning(f"认证服务请求失败 {method} {path}: {last!r}")
         return 0, {"error": "upstream_unreachable", "detail": repr(last)[:200]}
+
+    async def nudge_warm(self) -> None:
+        """请求把连接焐热。不阻塞调用方 —— 只往 task group 里塞个任务就返回。
+
+        连接池只在**发过一次请求之后**才有连接可复用, 而用户点「获取验证码」是
+        这个进程里的第一次请求, 必然是冷的。趁用户还在看界面时先建好连接, 那一
+        次点击就能落在热连接上。
+        """
+        if self._tg is None or self._warming:
+            return
+        now = anyio.current_time()
+        if now - self._last_warm < _WARM_THROTTLE_SECONDS:
+            return
+        # 从「检查」到「置位」之间没有 await, 协作式调度下不会被抢占, 不需要锁。
+        self._warming = True
+        self._last_warm = now
+        self._tg.start_soon(self._warm)
+
+    async def _warm(self) -> None:
+        """发一次无副作用的 ``GET /me`` 把 TCP+TLS 建好。
+
+        **不带 token** (``auth=False``): 云端回 401, 而这里不调 ``_on_response``,
+        因此不会把已登录用户踢下线。
+
+        异常必须在这里吞掉 —— 逃出 ``start_soon`` 会拆掉整个 task group, 连带杀死
+        Gateway。``_call`` 目前自己收敛异常, 但预热的代价太高, 不赌它将来不变。
+        """
+        try:
+            await self._call("GET", "/me", retry=True)
+        except Exception as e:
+            logger.debug(f"连接预热失败, 忽略: {e!r}")
+        finally:
+            # 必须复位, 否则一次失败就永久堵死后续预热。
+            self._warming = False
 
     async def _on_response(self, status: int) -> None:
         """401 即清本地凭证 —— 云端撤销设备后, 本机不该继续显示已登录。"""
