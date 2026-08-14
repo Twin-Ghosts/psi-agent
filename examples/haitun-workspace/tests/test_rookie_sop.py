@@ -3093,3 +3093,32 @@ def test_remind_card_day_two_mentions_hr_will_ask_why() -> None:
     # 不用问责口吻
     assert "上报" not in rendered
     assert "通报" not in rendered
+
+
+def test_resend_relinks_the_old_card_before_deleting_its_doc() -> None:
+    """重发卡时: 先建新文档 → 改旧卡按钮指向它 → 再删旧文档。
+
+    反过来(先删后改)会留一段时间窗, 新人正好这时点旧卡就看到「文档已被删除」——
+    而飞书对已删除与无权限用同一句提示, 他无从判断。实测踩过: HR 给郑伟丽发了两次
+    卡, 第一份文档 FsvEd21I... 变成 resource deleted, 她点旧卡就报文档已删除。
+    """
+    cs = _load("rookie_sop_card_send")
+    src = inspect.getsource(cs.rookie_sop_card_send)
+
+    # 只收集待删列表, 不在原地删
+    assert "stale_docs = [" in src
+    relink_at = src.index("feishu_message_edit_card")
+    delete_at = src.index('"/open-apis/drive/v1/files/{stale}"')
+    assert relink_at < delete_at, "必须先改旧卡链接, 再删旧文档"
+
+
+def test_resend_keeps_the_old_doc_when_the_card_cannot_be_relinked() -> None:
+    """改不动旧卡就别删旧文档 —— 宁可留一份孤儿文档, 也不给新人死链接。
+
+    且失败必须报进返回值: 静默会留下一份无人知晓的孤儿文档。
+    """
+    cs = _load("rookie_sop_card_send")
+    src = inspect.getsource(cs.rookie_sop_card_send)
+
+    assert "stale_docs = []" in src, "relink 失败时要清空待删列表"
+    assert 'result["old_card_relink"] = relink_note' in src, "relink 失败要报出来"

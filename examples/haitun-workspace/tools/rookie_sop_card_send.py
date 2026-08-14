@@ -29,7 +29,7 @@ import _rookie_sop_runtime as _rt
 import _rookie_sop_store as _store
 import _runtime_paths as _paths
 from feishu_api import feishu_api
-from feishu_message import feishu_message_send_card
+from feishu_message import feishu_message_edit_card, feishu_message_send_card
 from schedule_manage import schedule_manage
 
 
@@ -214,13 +214,15 @@ async def rookie_sop_card_send(
             )
         # 旧文档留着会让新人对着一份已勾满的清单, 且它的 block_map 还在 state 里,
         # 同步会把旧勾选又写回表 —— 所以连同映射一起弃用, 下面会重建一份。
-        for stale in [d for d, o in (state.get("docs") or {}).items() if str(o) == resolved_open_id]:
-            with contextlib.suppress(Exception):
-                await feishu_api(
-                    "DELETE",
-                    f"/open-apis/drive/v1/files/{stale}",
-                    query_json=json.dumps({"type": "docx"}, ensure_ascii=False),
-                )
+        #
+        # 但删之前必须先把**旧卡**的按钮改指到新文档, 否则新人手上那张卡的链接会
+        # 变成死链: 飞书对已删除和无权限用同一句「文档已被删除」提示, 他只会以为
+        # 东西丢了。(实测踩过: HR 给同一个人发了两次卡, 第一份文档被删, 对方点旧
+        # 卡就报文档已删除。)
+        #
+        # 顺序: 先建新文档 → 改旧卡指向它 → 再删旧文档。所以这里只收集待删列表,
+        # 真正的删除挪到新文档就位、旧卡改好之后。
+        stale_docs = [d for d, o in (state.get("docs") or {}).items() if str(o) == resolved_open_id]
     if existing_doc:
         doc = {
             "document_id": existing_doc,
@@ -239,6 +241,32 @@ async def rookie_sop_card_send(
     if not doc.get("document_id"):
         return json.dumps({"ok": False, "error": f"provision doc failed: {doc.get('error')}"}, ensure_ascii=False)
     doc_url = str(doc.get("url") or "")
+
+    # 新文档已就位: 先把旧卡的按钮改指到它, 再删旧文档。
+    # 反过来做(先删后改)会留下一段时间窗, 新人正好在这时点旧卡就看到「文档已被
+    # 删除」—— 而飞书对已删除与无权限用同一句提示, 他无从判断是系统问题还是自己
+    # 没权限。edit_card 能改按钮 url(实测 ok), 所以这个窗口完全可以避掉。
+    relink_note = ""
+    if stale_docs:
+        old_mid = str((state.get("entry_cards") or {}).get(resolved_open_id) or "")
+        if old_mid:
+            old_card, _old_handlers = _card.entry_card(resolved_name, rows, doc_url, today)
+            relinked = _store._parse_result(
+                await feishu_message_edit_card(
+                    old_mid, json.dumps(old_card, ensure_ascii=False), resolved_open_id
+                )
+            )
+            if relinked.get("ok") is not True:
+                # 改不动旧卡就别删旧文档 —— 宁可留一份孤儿文档, 也不要给新人一个死链接
+                relink_note = f"old card relink failed: {relinked.get('message') or relinked.get('error')}"
+                stale_docs = []
+        for stale in stale_docs:
+            with contextlib.suppress(Exception):
+                await feishu_api(
+                    "DELETE",
+                    f"/open-apis/drive/v1/files/{stale}",
+                    query_json=json.dumps({"type": "docx"}, ensure_ascii=False),
+                )
 
     # 文档索引: 同步工具靠它反查是谁的清单。
     # 一人只留一条 —— 先清掉这个人名下的旧条目, 再写当前这份, 否则 docs 里会
@@ -368,6 +396,9 @@ async def rookie_sop_card_send(
         "schedule": schedule_result,
         "sync_schedule": sync_schedule,
     }
+    # 旧卡改不动就没删旧文档 —— 必须报出来, 否则会留下一份无人知晓的孤儿文档
+    if relink_note:
+        result["old_card_relink"] = relink_note
     if failed:
         result["cards_failed"] = failed
     if truncated:
