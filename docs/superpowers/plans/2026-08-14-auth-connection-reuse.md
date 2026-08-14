@@ -27,12 +27,15 @@
 
 ## 基线（2026-08-14 实测）
 
-```
-uv run pytest tests/psi_agent/gateway/test_auth_manager.py tests/psi_agent/gateway/test_auth_store.py -q --no-cov
-→ 7 passed in 4.39s
-```
+按文件计（避开下面那个 `--cov` 陷阱后的真实数字）：
 
-全仓 `uv run pytest` 有 57 个既有失败，全在 `tests/psi_agent/session/`，与本次改动无关。**每个任务只需保证 auth 相关测试全绿**，不要试图修 session 的既有失败。
+| 文件 | 基线 |
+| --- | --- |
+| `test_auth_manager.py` | 6 passed |
+| `test_auth_store.py` | 7 passed |
+| `test_auth_connection.py` | 新建 |
+
+全仓 `uv run pytest` 有 50+ 个既有失败，全在 `tests/psi_agent/session/` 与 `tests/integration/`，与本次改动无关。**每个任务只需保证 auth 三个文件全绿**，不要试图修那些既有失败。
 
 常用命令：
 
@@ -41,6 +44,20 @@ uv run ruff check src/psi_agent/gateway/_auth_manager.py tests/psi_agent/gateway
 uv run ruff format src/psi_agent/gateway/_auth_manager.py tests/psi_agent/gateway/test_auth_connection.py
 uv run ty check
 ```
+
+`ty check` 目前有 **2 个既有 error**（`examples/haitun-workspace/tools/run_flow.py` 的 `os.killpg`，Windows 上没这个函数），与本次改动无关。判据是**数量不增**，不是归零。
+
+### ⚠ 跑单个测试文件必须覆盖 addopts
+
+`pyproject.toml` 的 `addopts` 里有个**裸 `--cov`**。它接可选值，于是会把紧跟其后的第一个路径参数**当成自己的值吞掉** —— `uv run pytest tests/xxx.py` 会静默变成跑全量 1299 个测试（其中 50+ 个既有失败，且要跑 5 分钟以上）。
+
+所以本计划里所有测试命令都写成：
+
+```
+uv run pytest -o addopts="--strict-markers -ra" tests/psi_agent/gateway/test_auth_connection.py -q
+```
+
+（传两个以上路径时 `--cov` 只吞掉第一个，看起来「正常」，但第一个文件其实没被跑到 —— 更隐蔽，别依赖这种写法。）
 
 ## 涉及文件
 
@@ -139,12 +156,11 @@ _DNS_CACHE_SECONDS = 600
 
 ### Step 4 验证并提交
 
-```
-uv run pytest tests/psi_agent/gateway/test_auth_connection.py tests/psi_agent/gateway/test_auth_manager.py -q --no-cov
-uv run ruff check ... && uv run ruff format ... && uv run ty check
-```
+**已完成**（commit `16d720e5`）。三个 auth 文件合计 14 passed（13 基线 + 1 新增），ruff 干净，`ty` 无新增。
 
-预期 8 passed（原 7 + 新 1）。提交只带这两个文件，**不要带 `AGENTS.md`**（工作区里那处改动是别人的）：
+实施时踩到两处，已修正：`ttl_dns_cache` 不在 connector 上（`connector._ttl_dns_cache` 不存在），实际落在 `connector._cached_hosts._ttl`；`session.connector` 的静态类型是 `BaseConnector | None`，要先 `assert isinstance(connector, aiohttp.TCPConnector)` 收窄，`ty` 才认那些私有字段。
+
+提交只带这两个文件，**不要带 `AGENTS.md`**（工作区里那处改动是别人的）：
 
 ```
 perf(auth): 登录连接复用, 冷连接 3 RTT → 热连接 1 RTT
@@ -313,7 +329,7 @@ DELETE 不开。`revoke_device` / `unbind` 按 HTTP 语义算幂等，但重试�
 
 ### Step 6 验证并提交
 
-预期 `test_auth_connection.py` 6 passed（Task 1 的 1 + 本任务的 1 + 4 个参数化），`test_auth_manager.py` 仍 7 passed。三件套（ruff check / format / ty check）全过。
+预期 `test_auth_connection.py` 6 passed（Task 1 的 1 + 本任务的 1 + 4 个参数化），`test_auth_manager.py` 仍 6、`test_auth_store.py` 仍 7。三件套（ruff check / format / ty check）全过。
 
 ```
 fix(auth): 重试边界, 幂等 GET 重试一次, 业务 POST 永不重试
@@ -480,7 +496,7 @@ _WARM_THROTTLE_SECONDS = 5.0
 
 ### Step 5 验证并提交
 
-预期 `test_auth_connection.py` 9 passed（6 + 3），`test_auth_manager.py` 仍 7 passed。三件套全过。
+预期 `test_auth_connection.py` 9 passed（6 + 3），另两个文件仍 6 / 7。三件套全过。
 
 ```
 perf(auth): 连接预热, 首次点击也落在热连接上
@@ -573,7 +589,7 @@ async def _auth_status(request: web.Request) -> web.Response:
 
 ### Step 5 自动化验证
 
-预期 `test_auth_connection.py` 10 passed（9 + 1），`test_auth_manager.py` 仍 7 passed。三件套全过。
+预期 `test_auth_connection.py` 10 passed（9 + 1），另两个文件仍 6 / 7。三件套全过。
 
 `ty check` 会容忍 `_tg: Any` —— 与 `_ai_manager.py:47` 同一写法（`# anyio.TaskGroup (ty不识别的第三方类型)`），照抄那条注释。
 
