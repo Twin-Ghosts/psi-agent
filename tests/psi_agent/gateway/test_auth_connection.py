@@ -149,3 +149,90 @@ async def test_business_post_never_retries(tmp_path: Path, monkeypatch: pytest.M
         assert len(calls) == 1  # 只发一次, 绝不重试
     finally:
         await m.aclose()
+
+
+class _FakeTaskGroup:
+    """只记下被 ``start_soon`` 的次数, 够测预热的调度与节流。"""
+
+    def __init__(self) -> None:
+        self.started = 0
+
+    def start_soon(self, func: object, *args: object) -> None:  # 签名照 anyio.TaskGroup
+        # 只计数, **不调用 func** —— 调了会造出一个没人 await 的协程,
+        # 冒出 RuntimeWarning: coroutine was never awaited。
+        self.started += 1
+
+
+@pytest.mark.anyio
+async def test_warm_401_does_not_clear_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """预热必须绕开 _on_response, 否则每次预热都把已登录用户踢下线。"""
+    m = await AuthManager.create("https://example.invalid", appdata_root=str(tmp_path))
+    m._token = "real-user-token"
+
+    async def fake_call(
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        auth: bool = False,
+        retry: bool = False,
+    ) -> tuple[int, dict[str, Any]]:
+        assert auth is False  # 预热不带 token
+        return 401, {"error": "unauthorized"}
+
+    monkeypatch.setattr(m, "_call", fake_call)
+    try:
+        await m._warm()
+        assert m._token == "real-user-token"  # 没被清掉
+    finally:
+        await m.aclose()
+
+
+@pytest.mark.anyio
+async def test_warm_swallows_errors_and_resets_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """预热失败必须自己吞掉。
+
+    异常逃出 start_soon 会拆掉整个 task group, 连带杀死 Gateway —— 为了省一个
+    RTT 把进程搞没了。且失败后要复位 _warming, 否则一次失败永久堵死后续预热。
+    """
+    m = await AuthManager.create("https://example.invalid", appdata_root=str(tmp_path))
+
+    async def boom(*args: object, **kwargs: object) -> tuple[int, dict[str, Any]]:
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(m, "_call", boom)
+    try:
+        await m._warm()  # 不抛
+        assert m._warming is False
+    finally:
+        await m.aclose()
+
+
+@pytest.mark.anyio
+async def test_nudge_warm_throttles_consecutive_calls(tmp_path: Path) -> None:
+    """SPA 挂载登录面板时可能连发几次 /auth/status, 节流保证只热一次。"""
+    m = await AuthManager.create("https://example.invalid", appdata_root=str(tmp_path))
+    tg = _FakeTaskGroup()
+    m._tg = tg
+    try:
+        await m.nudge_warm()
+        # 手工复位 _warming: 假 task group 不真跑 _warm, 标志不会自己落下。
+        # 不复位的话这个用例考的是 _warming 那道闸, 而不是节流那道 —— 两道闸都要考。
+        m._warming = False
+        await m.nudge_warm()
+        m._warming = False
+        await m.nudge_warm()
+        assert tg.started == 1  # 节流窗口内的连发只热一次
+    finally:
+        await m.aclose()
+
+
+@pytest.mark.anyio
+async def test_nudge_warm_without_task_group_is_silent(tmp_path: Path) -> None:
+    """没注入 task group 时静默跳过 —— 预热是优化, 缺了不算故障。"""
+    m = await AuthManager.create("https://example.invalid", appdata_root=str(tmp_path))
+    try:
+        await m.nudge_warm()  # 不抛
+        assert m._warming is False
+    finally:
+        await m.aclose()
