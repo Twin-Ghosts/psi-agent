@@ -41,6 +41,8 @@ BLOCK_DIVIDER = 22
 ROLE_DONE = "done"
 # 分节小计块(「到岗准备 3/5」那一行)的角色标记, item_id 位置放模块名
 ROLE_TALLY = "tally"
+# 超链接后面的统一备注 —— 加粗蓝字在飞书里未必被认成「可点」, 明说比指望领会可靠
+LINK_NOTE = "（必读材料，请点击超链接打开阅读）"
 # 阅读类条目拆成两个理解勾选(见 build_doc_blocks), 各有自己的角色;
 # 「已阅读」已去掉 —— 读没读不重要, 重要的是懂没懂。
 ROLE_GOT_IT = "ok"
@@ -136,7 +138,14 @@ def build_doc_blocks(
         blocks.append(
             {
                 "block_type": BLOCK_TEXT,
-                "text": {"elements": [_linked_run("📘 完整 SOP 原文", sop_url.strip())], "style": {}},
+                "text": {
+                    "elements": [
+                        _linked_run("📘 完整 SOP 原文", sop_url.strip()),
+                        # 与下面的必读材料同一处理: 加粗蓝字未必被认成可点, 明说一句
+                        _text_run(LINK_NOTE, grey=True),
+                    ],
+                    "style": {},
+                },
             }
         )
 
@@ -210,7 +219,7 @@ def build_doc_blocks(
                             "elements": [
                                 _text_run("📖 "),
                                 _linked_run(title, url, bold=True),
-                                _text_run("（必读材料，请打开超链接）", grey=True),
+                                _text_run(LINK_NOTE, grey=True),
                             ],
                             "style": {},
                         },

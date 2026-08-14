@@ -3028,7 +3028,7 @@ def test_link_items_spell_out_that_the_link_must_be_opened() -> None:
     blocks, _slots = d.build_doc_blocks(rows, name="王炜博")
 
     rendered = json.dumps(blocks, ensure_ascii=False)
-    assert "必读材料，请打开超链接" in rendered
+    assert "必读材料，请点击超链接打开阅读" in rendered
     # 标题本身仍是超链接, 备注不能把它顶掉
     assert "https://wiki.example/culture" in rendered
 
