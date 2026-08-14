@@ -4,7 +4,7 @@
 
 **版本号：** 1.0
 
-**状态：** 开发中
+**状态：** 已交付
 
 **适用范围：** psi-agent Gateway 认证链路
 
@@ -140,6 +140,8 @@ SOP 的触发式要求针对「诊断写于数周前」的情况。本次诊断�
 | `7d04f1e4` | Task 2 重试边界 |
 | `1304173b` | Task 3 预热能力 |
 | `55e8bb0a` | Task 4 接线 |
+| `610626be` | Task 5 实测回写 |
+| 本 commit | Task 6 三向同步 |
 
 ### 中途变更的决策理由
 
@@ -181,7 +183,9 @@ SOP 的触发式要求针对「诊断写于数周前」的情况。本次诊断�
 - `test_auth_connection.py` + `test_auth_manager.py` + `test_auth_store.py`：25 passed
 - `tests/psi_agent/gateway/`：184 passed, 2 skipped
 - ruff：clean
-- `ty`：维持仓库既有的 2 个错误（`examples/haitun-workspace/tools/run_flow.py` 的 `os.killpg`），本任务零新增
+- `ty`：全仓 2 个诊断，均为既有（`examples/haitun-workspace/tools/run_flow.py` 的 `os.killpg`），本任务零新增
+
+  收尾时发现一个自己挖的坑：新测试的中文注释里写了 `type: ignore` 这个**字面量**来解释「本仓库不能用它」，`ty` 把注释里的它当成一条真指令，报了 2 条 unused 警告。早先我只跑 `ty check src/` 就下了「零新增」的结论，漏掉了 `tests/`。已把注释改成不含该字面量的说法，全仓复核回到 2 条。教训：`ty` 的核验范围要用全仓，不能只看 `src/`。
 
 其中 A3（keepalive 取值须有实测依据）是本任务唯一带前置测量的验收项——若实测发现服务端空闲超时低于预设值，需回头修 spec 的常量取值并在 A 段记录该偏差。
 
