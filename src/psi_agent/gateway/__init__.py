@@ -222,7 +222,9 @@ class Gateway:
             # api_key 是明文, 登录凭证不再踩这个坑)。地址显式为空则整套不加载。
             authm: AuthManager | None = None
             if resolve_endpoint(self.auth_endpoint):
-                authm = await AuthManager.create(self.auth_endpoint, appdata_root=appdata_root)
+                authm = await AuthManager.create(self.auth_endpoint, appdata_root=appdata_root, tg=tg)
+                # 趁用户还没点「获取验证码」, 先把连接建好, 省下 TCP+TLS 两个 RTT。
+                await authm.nudge_warm()
             else:
                 logger.info("Auth disabled (PSI_AUTH_ENDPOINT set to empty)")
             app = await create_app(

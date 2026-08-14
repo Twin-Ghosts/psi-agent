@@ -236,3 +236,20 @@ async def test_nudge_warm_without_task_group_is_silent(tmp_path: Path) -> None:
         assert m._warming is False
     finally:
         await m.aclose()
+
+
+@pytest.mark.anyio
+async def test_create_accepts_task_group(tmp_path: Path) -> None:
+    """create(tg=...) 把 task group 存下来; 不传时行为不变 (仍能建、仍不预热)。"""
+    tg = _FakeTaskGroup()
+    m = await AuthManager.create("https://example.invalid", appdata_root=str(tmp_path), tg=tg)
+    try:
+        assert m._tg is tg
+    finally:
+        await m.aclose()
+
+    plain = await AuthManager.create("https://example.invalid", appdata_root=str(tmp_path))
+    try:
+        assert plain._tg is None
+    finally:
+        await plain.aclose()
