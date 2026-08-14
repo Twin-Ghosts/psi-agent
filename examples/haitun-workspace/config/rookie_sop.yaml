@@ -12,7 +12,7 @@
 company_name: 真知
 card_title_prefix: 入职卡
 sop_doc_url: https://genuineknowledge.feishu.cn/docx/BFs4dmCxkohnMVxP47vc7Exonxf
-hr_notify_id: ""         # 罗霖的 open_id，空则日报不发
+hr_notify_id: ou_f330a7e0874e53d4f3d1e08ba1d41853   # 罗霖（HRD）；留空则异常提醒不发
 hr_notify_id_type: open_id
 
 modules:
