@@ -133,8 +133,11 @@ class AuthManager:
     _last_warm: float = 0.0
 
     @classmethod
-    async def create(cls, endpoint: str, appdata_root: str = "", platform: str = "") -> AuthManager:
-        """建一个 manager 并从磁盘恢复登录态 (满足 R3: 跨重启保持)。"""
+    async def create(cls, endpoint: str, appdata_root: str = "", platform: str = "", *, tg: Any = None) -> AuthManager:
+        """建一个 manager 并从磁盘恢复登录态 (满足 R3: 跨重启保持)。
+
+        ``tg`` 是 Gateway 的 anyio task group, 只用于连接预热; 不传则不预热。
+        """
         store = await AuthStore.from_appdata(appdata_root)
         token = await store.load_token()
         device_key = await store.device_key()
@@ -145,6 +148,7 @@ class AuthManager:
             _token=token,
             _device_key=device_key,
             _platform=_resolve_platform(platform),
+            _tg=tg,
         )
         if token:
             logger.info("已从本机凭证恢复登录态 (未回验, 首次请求 401 时再清)")

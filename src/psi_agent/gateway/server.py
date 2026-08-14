@@ -880,8 +880,15 @@ def _auth_reply(status: int, body: dict[str, Any]) -> web.Response:
 
 
 async def _auth_status(request: web.Request) -> web.Response:
-    """当前登录态。SPA 据此决定显示登录引导还是身份信息; 不含 token。"""
-    return _json(_auth(request).status())
+    """当前登录态。SPA 据此决定显示登录引导还是身份信息; 不含 token。
+
+    顺手把连接焐热: SPA 挂载登录面板时必然探这个端点, 是最自然的预热时机 ——
+    因此前端一行都不用改。它本身只读内存、不打云端, 而 ``nudge_warm`` 只是往
+    task group 里塞个任务就返回, 所以加上预热也不会让这个响应变慢。
+    """
+    authm = _auth(request)
+    await authm.nudge_warm()
+    return _json(authm.status())
 
 
 async def _auth_send_code(request: web.Request) -> web.Response:
