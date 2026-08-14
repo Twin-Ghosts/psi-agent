@@ -4,7 +4,7 @@
 
 **版本号：** 1.0
 
-**状态：** 待评审
+**状态：** 开发中
 
 **适用范围：** psi-agent Gateway 认证链路
 
@@ -124,19 +124,64 @@ SOP 的触发式要求针对「诊断写于数周前」的情况。本次诊断�
 
 ## A —— 执行过程
 
-**尚未开工。** 本文档状态为「待评审」，W / H 已按 SOP 规则一在动手前落定，A 段待开发开始后追写。
-
 按 SOP 载体分工，本段只记录实际路径、分支、commit 与中途变更的决策理由，代码细节归 spec，不复制。
 
 - 技术 spec：`docs/superpowers/specs/2026-08-14-auth-connection-reuse-design.md`
-- 分支：待建
-- 关键 commit：待补
+- 实施计划：`docs/superpowers/plans/2026-08-14-auth-connection-reuse.md`
+- 分支：`ci/oss-publish-via-pyinstaller`（沿用当前分支，未另开）
+
+关键 commit：
+
+| commit | 内容 |
+| --- | --- |
+| `e1b915b1` | 诊断与设计两份文档 |
+| `3239894f` | 实施计划 |
+| `16d720e5` | Task 1 连接池配置 |
+| `7d04f1e4` | Task 2 重试边界 |
+| `1304173b` | Task 3 预热能力 |
+| `55e8bb0a` | Task 4 接线 |
+
+### 中途变更的决策理由
+
+**1. keepalive 保持 120s，未按「取下方一档」的原定规则调整。** 原计划是「第一次出现 create 的梯度即服务端空闲超时上界，取其下方一档」。实测整条梯度（10/30/60/90/120/180s）**全部复用，没出现过 create** —— 服务端超时比 180s 还长，梯度没测到上界。此时 120s 已稳在安全侧（客户端先于服务端回收），不需要改。也没有往上加，因为登录全程最大间隔约 90s，120s 已完整覆盖，再加只是让空闲连接多占资源。
+
+**2. 重试只捕 `ServerDisconnectedError`，比 spec 初稿收窄。** 初稿写的是捕 `(ServerDisconnectedError, ClientOSError)`。写计划时核对 aiohttp 继承树发现前者本就是后者的子类，这个元组等价于只捕 `ClientOSError` —— 而 `ClientConnectorError`（DNS 失败、连接被拒）也是它的子类，于是真正连不通的情况也会被重试，白等一个超时周期。收窄后加了一条专门的测试守住这个边界。
+
+**3. 顺带发现一个仓库级的测试陷阱（不属本任务范围，未修）。** `pyproject.toml` 的 `addopts` 里有个裸 `--cov`，它会把紧跟其后的第一个路径参数当成自己的值吞掉 —— `uv run pytest tests/xxx.py` 于是静默变成跑全量 1299 个测试。本任务早期报出的「基线 7 passed」就是这么来的（实际只跑了 `test_auth_store.py`）。真实基线按文件是 manager 6 / store 7。绕法是 `-o addopts="--strict-markers -ra"`，已写入实施计划。改 `pyproject.toml` 会影响所有人的本地跑法与 CI，超出本任务范围，未动。
 
 ***
 
 ## T —— 测试与验收
 
-**尚未开工。** 待 A 段完成后，照 W 段第 3 节的 A1–A7 逐条核验并贴证据，不自定新标准。
+照 W 段第 3 节的 A1–A7 逐条核验，不自定新标准。全部通过。
+
+| 项 | 结论 | 证据 |
+| --- | --- | --- |
+| A1 连接跨短信等待存活 | 通过 | `test_session_connector_keeps_connection_across_sms_wait` 断言 connector 的 `_keepalive_timeout` 为 120s，覆盖登录最大间隔（等短信 30-90s）；真机梯度探针 10/30/60/90/120/180s 全部 `reuse` |
+| A2 幂等 GET 遇陈旧连接重试一次 | 通过 | `test_idempotent_get_retries_once_on_stale_connection` |
+| A3 连不通的服务不重试 | 通过 | `test_unreachable_server_is_not_retried`（造 `ClientConnectorError`，断言只发一次） |
+| A4 四个业务 POST 一次不重试 | 通过 | `test_business_post_never_retries`，参数化覆盖 send_code / verify / complete / bind |
+| A5 预热不误伤凭证 | 通过 | `test_warm_401_does_not_clear_credentials`；预热走 `/me` 且不带 token |
+| A6 预热节流 | 通过 | `test_nudge_warm_throttles_consecutive_calls`；真机 4 次连发 `/auth/status` 只触发 1 次预热 |
+| A7 预热失败不拖垮 Gateway | 通过 | 真机断网启动：退出码 124（活到被 kill），日志 1 条 warning，`Traceback` / `ExceptionGroup` 计数均为 0 |
+
+### 效果实测（2026-08-14，真机对生产端点）
+
+| | 三次耗时 | 均值 |
+| --- | --- | --- |
+| 冷连接 | 740 / 992 / 711 ms | 814 ms |
+| 热连接 | 208 / 232 / 213 ms | 218 ms |
+
+单次请求省 **597ms**，比设计估的 420ms 更多 —— 冷连接除 TCP+TLS 两个 RTT 外还要付 TLS 证书链校验。热连接 218ms 与实测 RTT 226ms 基本相等，说明已经贴到物理下限（一个 RTT），客户端侧没有进一步可压的空间。
+
+`/auth/status` 首次 218ms、之后约 2ms，预热本身不让这个端点变慢。
+
+### 回归
+
+- `test_auth_connection.py` + `test_auth_manager.py` + `test_auth_store.py`：25 passed
+- `tests/psi_agent/gateway/`：184 passed, 2 skipped
+- ruff：clean
+- `ty`：维持仓库既有的 2 个错误（`examples/haitun-workspace/tools/run_flow.py` 的 `os.killpg`），本任务零新增
 
 其中 A3（keepalive 取值须有实测依据）是本任务唯一带前置测量的验收项——若实测发现服务端空闲超时低于预设值，需回头修 spec 的常量取值并在 A 段记录该偏差。
 
