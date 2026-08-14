@@ -207,6 +207,22 @@ def entry_card(
     head = f"👋 **{name}**，这是你的入职卡\n{_progress_bar(f'{progress.done}/{progress.total}')}"
     elements: list[dict[str, Any]] = [{"tag": "markdown", "content": head}, {"tag": "hr"}]
 
+    # 卡片转红(入职第 2 天起)且还没做完时, 把 19:00 那条规则说在前面 ——
+    # rookie_sop_digest 确实只报「第 2 天结束仍未完成」的人, 事先告知比事后被问公平。
+    # 措辞用「了解原因」而非「上报」: 卡住多半有正当理由(等权限、等人带),
+    # HR 要做的是解开堵点而不是问责。
+    if not progress.all_done and _day_index(rows, today) >= 2:
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": (
+                    "🔴 **今天是最后一天**——若今天收尾时仍未完成，HR 会来了解原因。"
+                    "卡在哪里直接说，缺权限、缺人带都能帮你推。"
+                ),
+            }
+        )
+        elements.append({"tag": "hr"})
+
     modules: list[str] = []
     for row in rows:
         module = str(row.get("模块") or "")
@@ -381,10 +397,19 @@ def remind_card(
     """
     is_day1 = day_index <= 1
     header = f"入职第 {day_index} 天\n{_progress_bar(f'{progress.done}/{progress.total}')}"
+    # 第 2 天的文案点明「今天收尾时仍未完成, HR 会来了解原因」—— 这不是威胁,
+    # 而是把既定规则说在前面: 19:00 的异常提醒确实只报第 2 天结束仍未完成的人
+    # (见 rookie_sop_digest.active_rookies), 让人知道时间线比事后被问更公平。
+    # 措辞刻意用「了解原因」而不是「上报/通报」: 卡住往往有正当理由(等权限、
+    # 等人带), HR 要做的是把堵点解开, 不是问责。
     urgency = (
         "🟢 今天是入职第一天，抽空把清单上的事项过一遍～"
         if is_day1
-        else "🔴 入职已经第二天了，清单还没完成，请尽快处理。"
+        else (
+            "🔴 入职第二天了，清单还没完成，请尽快处理。\n"
+            "如果今天收尾时仍未完成，HR 会来了解原因——卡在哪里就直接说，"
+            "缺权限、缺人带都能帮你推。"
+        )
     )
     elements: list[dict[str, Any]] = [
         {"tag": "markdown", "content": header},

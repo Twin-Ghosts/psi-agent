@@ -200,12 +200,18 @@ def build_doc_blocks(
                 continue
 
             if url:
-                # 标题本身就是超链接, 不再单独占一行放 URL
+                # 标题本身就是超链接, 不再单独占一行放 URL。
+                # 后面补一句括号备注: 加粗蓝字在飞书里未必被认成"可点", 新人容易
+                # 直接勾"已完全理解"而没打开过材料 —— 明说一句比指望他领会更可靠。
                 blocks.append(
                     {
                         "block_type": BLOCK_TEXT,
                         "text": {
-                            "elements": [_text_run("📖 "), _linked_run(title, url, bold=True)],
+                            "elements": [
+                                _text_run("📖 "),
+                                _linked_run(title, url, bold=True),
+                                _text_run("（必读材料，请打开超链接）", grey=True),
+                            ],
                             "style": {},
                         },
                     }

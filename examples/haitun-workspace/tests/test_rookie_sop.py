@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-# ruff: noqa: RUF002, RUF003
+# ruff: noqa: RUF001, RUF002, RUF003
 import importlib.util
 import inspect
 import json
@@ -3004,3 +3004,92 @@ def test_reset_progress_puts_every_row_back_to_todo() -> None:
         assert r["fields"]["状态"] == p.STATUS_TODO
         assert r["fields"]["完成时间"] is None
         assert r["fields"]["适用角色"] == ""
+
+
+def test_link_items_spell_out_that_the_link_must_be_opened() -> None:
+    """必读材料要明说「请打开超链接」。
+
+    加粗蓝字在飞书里未必被认成「可点」, 新人容易直接勾「已完全理解」而根本没打开
+    过材料 —— 明说一句比指望他领会更可靠。
+    """
+    d = _load("_rookie_sop_doc")
+    rows = [
+        {
+            "记录键": "ou_x:read_culture",
+            "项": "企业文化总则",
+            "状态": "未完成",
+            "模块": "必读材料",
+            "必读链接": "https://wiki.example/culture",
+            "入职日": date(2026, 8, 13),
+            "截止日": date(2026, 8, 16),
+        }
+    ]
+
+    blocks, _slots = d.build_doc_blocks(rows, name="王炜博")
+
+    rendered = json.dumps(blocks, ensure_ascii=False)
+    assert "必读材料，请打开超链接" in rendered
+    # 标题本身仍是超链接, 备注不能把它顶掉
+    assert "https://wiki.example/culture" in rendered
+
+
+def test_entry_card_warns_about_hr_followup_only_on_the_last_day() -> None:
+    """卡片转红且未做完时才提醒「HR 会来了解原因」。
+
+    rookie_sop_digest 确实只报「第 2 天结束仍未完成」的人, 事先说清比事后被问公平。
+    但第 1 天说、或已经做完了还说, 都只是徒增压力。
+    """
+    c = _load("_rookie_sop_card")
+    onboard = date(2026, 8, 13)
+
+    def rows(status: str = "未完成") -> list[dict[str, Any]]:
+        return [
+            {
+                "记录键": "ou_x:wifi",
+                "项": "连上 WiFi",
+                "状态": status,
+                "模块": "到岗准备",
+                "入职日": onboard,
+                "截止日": date(2026, 8, 14),
+            }
+        ]
+
+    def has_warning(card: dict[str, Any]) -> bool:
+        return "HR 会来了解原因" in json.dumps(card, ensure_ascii=False)
+
+    day1, _ = c.entry_card("王炜博", rows(), "https://doc", onboard)
+    day2, _ = c.entry_card("王炜博", rows(), "https://doc", onboard + timedelta(days=1))
+    day2_done, _ = c.entry_card("王炜博", rows("已完成"), "https://doc", onboard + timedelta(days=1))
+
+    assert has_warning(day1) is False, "第 1 天不该施压"
+    assert has_warning(day2) is True
+    assert day2["header"]["template"] == "red"
+    assert has_warning(day2_done) is False, "做完了就不该再提 HR"
+
+
+def test_remind_card_day_two_mentions_hr_will_ask_why() -> None:
+    """第 2 天的催办卡同样点明这条规则, 且措辞是「了解原因」不是「上报」。
+
+    卡住多半有正当理由(等权限、等人带), HR 要做的是解开堵点而不是问责。
+    """
+    c = _load("_rookie_sop_card")
+    p = _load("_rookie_sop_progress")
+    rows = [
+        {
+            "记录键": "ou_x:wifi",
+            "项": "连上 WiFi",
+            "状态": p.STATUS_TODO,
+            "模块": "到岗准备",
+            "入职日": date(2026, 8, 13),
+            "截止日": date(2026, 8, 14),
+        }
+    ]
+    progress = p.summarize(rows, date(2026, 8, 14))
+
+    card, _ = c.remind_card("王炜博", 2, progress, "")
+
+    rendered = json.dumps(card, ensure_ascii=False)
+    assert "HR 会来了解原因" in rendered
+    # 不用问责口吻
+    assert "上报" not in rendered
+    assert "通报" not in rendered
