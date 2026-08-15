@@ -205,7 +205,7 @@ npm run dev
 
 协议正文仍在 `public/terms.html` / `privacy.html`（安装器读的就是这两个，见下），只是 SPA 目前不再链向它们。**若将来要在界面上重新放出协议入口，引用必须走 `import.meta.env.BASE_URL`** —— 本 SPA 挂在 `/spa-v2/` 下，写死绝对路径会打到站点根目录 404（海豚图标曾这么碎过，`DOLPHIN` 常量就是为此）。
 
-**这两个 HTML 是生成物，不要手改。** 源是 `docs/Haitun_软件许可及服务协议_1.0.md` 与 `docs/Haitun_隐私保护政策_1.0.md`，由 `scripts/gen_legal_html.py` 生成；`legal.css` 是手写的，两页共用。安装器的协议页以 `dontcopy` 引同一路径（`.github/inno-setup/haitun.iss`），**安装期与产品内共用一份产物** —— 各存一份必有一份过时。改了 md 要重新生成，CI 有 `--check` 步骤守着。加粗（`**`）写在 md 源里而非生成器里：加粗属法律判断，得留在人能审的 diff 里。
+**这两个 HTML 是生成物，不要手改。** 源是 `legal/Haitun_软件许可及服务协议_1.0.md` 与 `legal/Haitun_隐私保护政策_1.0.md`，由 `scripts/gen_legal_html.py` 生成；`legal.css` 是手写的，两页共用。安装器的协议页以 `dontcopy` 引同一路径（`.github/inno-setup/haitun.iss`），**安装期与产品内共用一份产物** —— 各存一份必有一份过时。改了 md 要重新生成，CI 有 `--check` 步骤守着。加粗（`**`）写在 md 源里而非生成器里：加粗属法律判断，得留在人能审的 diff 里。
 
 ## 目录
 

@@ -142,7 +142,7 @@ src/
 
 项目使用 **src-layout**（`src/psi_agent/`），由 `uv sync` 安装为 editable package。
 
-`scripts/` 放不属于包的仓库工具。目前一个：`gen_legal_html.py` 把 `docs/` 下两份协议 md 生成为 `spa-v2/public/{terms,privacy}.html`，**安装器协议页与产品内协议链接共用这一份产物**（安装器以 `dontcopy` 引同一路径）。它是生成物、入库、CI 用 `--check` 守同步；设计见 `docs/superpowers/specs/2026-08-15-installer-tos-consent-design.md`。
+`scripts/` 放不属于包的仓库工具。目前一个：`gen_legal_html.py` 把 `spa-v2/legal/` 下两份协议 md 生成为 `spa-v2/public/{terms,privacy}.html`，**安装器协议页与产品内协议链接共用这一份产物**（安装器以 `dontcopy` 引同一路径）。它是生成物、入库、CI 用 `--check` 守同步；设计见 `docs/superpowers/specs/2026-08-15-installer-tos-consent-design.md`。
 
 各层的详细设计文档见：
 - **AI 层**: `src/psi_agent/ai/AGENTS.md` — provider 配置、请求透传、错误处理、context compaction 触发
@@ -378,7 +378,7 @@ uv build                         # 构建
 
 C 端注册登录的云端服务**不在本仓库**，在服务器 `/srv/psi-cloud`（独立 git 仓库）。psi-agent 是可安装的客户端包，塞进服务端目录会让打包与依赖边界变浑。
 
-- 两侧只通过 HTTP 契约耦合。契约的权威定义是云端的 `/openapi.json`（自动生成，不会与实现脱同步），设计意图见 `docs/onboarding/psi-agent C端注册登录方案.md`。
+- 两侧只通过 HTTP 契约耦合。契约的权威定义是云端的 `/openapi.json`（自动生成，不会与实现脱同步）。
 - 云端的目录结构、模块契约与硬规则记在 `/srv/psi-cloud/AGENTS.md`，**本文不重复**。一句话概括：`core/` 是框架且不认识任何业务，`modules/` 下每个目录一块业务自报清单，认证是 `modules/auth`。
 - 本机侧只有 `gateway/_auth_manager.py` 与 `_auth_store.py` 两个文件与它对接，**不持任何供应商密钥**。改动云端接口要同步上面那份设计文档。
 

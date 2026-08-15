@@ -20,8 +20,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DOCS_DIR = REPO_ROOT / "docs"
-OUT_DIR = REPO_ROOT / "src" / "psi_agent" / "gateway" / "spa-v2" / "public"
+_SPA_V2 = REPO_ROOT / "src" / "psi_agent" / "gateway" / "spa-v2"
+# ** 源不放 docs/ **: 这两份 md 不是给开发者读的文档, 是发给用户的协议正文 ——
+# 改它等于改产品内容。放在产物目录隔壁, 源与产物的关系一眼可见;
+# 而 docs/ 下只放 superpowers 的 spec 与 plan。
+SRC_DIR = _SPA_V2 / "legal"
+OUT_DIR = _SPA_V2 / "public"
 
 # 生成物同时被两处消费, 改路径要同步:
 #   - vite 把 public/* 拷进 dist/, PyInstaller 再打包 dist → 产品内登录面板的协议链接
@@ -51,8 +55,8 @@ class LegalDoc:
 
 
 DOCS_TO_BUILD: tuple[LegalDoc, ...] = (
-    LegalDoc(DOCS_DIR / "Haitun_软件许可及服务协议_1.0.md", OUT_DIR / "terms.html", "软件许可及服务协议"),
-    LegalDoc(DOCS_DIR / "Haitun_隐私保护政策_1.0.md", OUT_DIR / "privacy.html", "隐私保护政策"),
+    LegalDoc(SRC_DIR / "Haitun_软件许可及服务协议_1.0.md", OUT_DIR / "terms.html", "软件许可及服务协议"),
+    LegalDoc(SRC_DIR / "Haitun_隐私保护政策_1.0.md", OUT_DIR / "privacy.html", "隐私保护政策"),
 )
 
 _PUBLISHER = "合肥真知人工智能应用软件有限公司"

@@ -2,7 +2,7 @@
 
 > **目标**：把《Haitun Agent 软件许可及服务协议》与《Haitun Agent 隐私保护政策》接入 Inno Setup 安装流程 —— 两份可分别点开阅读，**一个勾选框同时覆盖两份**，不勾无法继续安装。
 >
-> **来源**：负责人 2026-08-15 需求，四项决策已定（见「四项决策」表）。协议正文由法务提供，位于 `docs/Haitun_软件许可及服务协议_1.0.md`、`docs/Haitun_隐私保护政策_1.0.md`。
+> **来源**：负责人 2026-08-15 需求，四项决策已定（见「四项决策」表）。协议正文由法务提供，位于 `src/psi_agent/gateway/spa-v2/legal/Haitun_软件许可及服务协议_1.0.md`、`src/psi_agent/gateway/spa-v2/legal/Haitun_隐私保护政策_1.0.md`。
 >
 > **范围**：`.github/inno-setup/haitun.iss` 加自定义向导页；新增 `scripts/gen_legal_html.py`；换版 `src/psi_agent/gateway/spa-v2/public/{terms,privacy}.html`；两份 md 源文件补加粗标记。不改认证逻辑、不改 `haitun.c`、不改 SPA 组件代码。
 
@@ -31,15 +31,17 @@
 ## 一、单一源与生成链路
 
 ```
-docs/Haitun_软件许可及服务协议_1.0.md ─┐
-docs/Haitun_隐私保护政策_1.0.md ───────┴→ scripts/gen_legal_html.py
-                                            ↓
-                    src/psi_agent/gateway/spa-v2/public/terms.html
-                    src/psi_agent/gateway/spa-v2/public/privacy.html
-                                            ↓
-                    ├→ vite build 把 public/* 拷进 dist/ → PyInstaller
-                    │  `--add-data spa-v2/dist`（`pyinstaller.yml:32`）→ 产品内可读
-                    └→ haitun.iss 用 `Flags: dontcopy` 引同一路径 → 安装期可读
+spa-v2/legal/Haitun_软件许可及服务协议_1.0.md ─┐
+spa-v2/legal/Haitun_隐私保护政策_1.0.md ───────┴→ scripts/gen_legal_html.py
+                                  ↓
+                spa-v2/public/terms.html
+                spa-v2/public/privacy.html
+                                  ↓
+                ├→ vite build 把 public/* 拷进 dist/ → PyInstaller
+                │  `--add-data spa-v2/dist`（`pyinstaller.yml:32`）→ 产品内可读
+                └→ haitun.iss 用 `Flags: dontcopy` 引同一路径 → 安装期可读
+
+（上面省了 `src/psi_agent/gateway/` 前缀，两处 spa-v2 都在它下面。）
 ```
 
 **生成物入库。** CI 里 `haitun-inno-setup`（`pyinstaller.yml:82`）与前端 build（`:66`）是两个 job，若不入库则两处都得装 Python 跑生成器。入库后加一步 `--check` 校验（生成结果与库内文件不一致则 CI 失败），避免改了 md 忘了重生成。
