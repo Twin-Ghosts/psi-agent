@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { ClipboardList, ExternalLink, GripVertical } from 'lucide-react'
+import { fetchSurveyDone, markSurveyDone } from '../services/api'
 import './survey-popup.css'
 
 /** 问卷反馈表单（飞书共享问卷）。 */
@@ -8,26 +9,10 @@ const SURVEY_URL =
 
 // 进入 HaiTun 页面 5 分钟后弹出。
 const SURVEY_DELAY_MS = 300_000
-const SURVEY_DONE_KEY = 'haitun-survey-done'
-
-function surveyCompleted(): boolean {
-  try {
-    return window.localStorage.getItem(SURVEY_DONE_KEY) === '1'
-  } catch {
-    return false
-  }
-}
-
-function markSurveyCompleted() {
-  try {
-    window.localStorage.setItem(SURVEY_DONE_KEY, '1')
-  } catch {
-    /* ignore */
-  }
-}
 
 /** 进入 HaiTun 页面 5 分钟后弹出的悬浮框：可拖动，点击按钮在新标签页打开问卷。
- *  关闭后写入 localStorage 标记，重启电脑后也不再弹，直到用户清除浏览器数据。 */
+ *  关闭后由 Gateway 落盘（AppData `ui-prefs.json`），此后不再弹。标记不放
+ *  `localStorage`：Gateway 每次启动换随机端口，origin 变了标记就读不回来。 */
 export default function SurveyPopup() {
   const [open, setOpen] = useState(false)
   const [canClose, setCanClose] = useState(false)
@@ -35,9 +20,19 @@ export default function SurveyPopup() {
   const frameRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
-    if (surveyCompleted()) return
-    const timer = window.setTimeout(() => setOpen(true), SURVEY_DELAY_MS)
-    return () => window.clearTimeout(timer)
+    let cancelled = false
+    let timer = 0
+    // 查不到就当已填：宁可少弹一次，也不要向填过的用户重复骚扰。
+    fetchSurveyDone()
+      .then(({ done }) => {
+        if (cancelled || done) return
+        timer = window.setTimeout(() => setOpen(true), SURVEY_DELAY_MS)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
   }, [])
 
   if (!open) return null
@@ -103,8 +98,9 @@ export default function SurveyPopup() {
               type="button"
               className="survey-popup-close"
               onClick={() => {
-                markSurveyCompleted()
+                // 先关再落盘：用户已经表达了关闭意图，落盘失败不该把弹窗留在脸上。
                 setOpen(false)
+                void markSurveyDone().catch(() => {})
               }}
             >
               关闭

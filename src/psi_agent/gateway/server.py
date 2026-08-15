@@ -31,6 +31,7 @@ from psi_agent.gateway._spa_shell import DEFAULT_APP_NAME, inject_app_name, read
 from psi_agent.gateway._summary_manager import SummaryManager
 from psi_agent.gateway._title_manager import TitleManager
 from psi_agent.gateway._todo_manager import TodoManager
+from psi_agent.gateway._ui_prefs import UIPrefs
 from psi_agent.gateway._workspace_manager import WorkspaceManager
 
 # Browser fetch often dies during multi-minute tool silence; SSE comments keep it open.
@@ -132,6 +133,32 @@ async def _request_attention(request: web.Request) -> web.Response:
     return _json({"ok": True})
 
 
+async def _get_survey_pref(request: web.Request) -> web.Response:
+    """GET /ui/prefs/survey — has the user already dismissed the survey popup?
+
+    Server-side because the SPA origin's port changes every startup (random port),
+    which silently voids any ``localStorage`` flag. See ``_ui_prefs``.
+    """
+    prefs: UIPrefs = request.app["uiprefs"]
+    return _json({"done": await prefs.survey_done()})
+
+
+async def _set_survey_pref(request: web.Request) -> web.Response:
+    """POST /ui/prefs/survey — record that the survey popup was dismissed.
+
+    Body ``{"done": bool}``; missing/non-bool ``done`` is treated as ``true``
+    since the only caller is the dismiss action.
+    """
+    prefs: UIPrefs = request.app["uiprefs"]
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        body = {}
+    done = body.get("done") if isinstance(body, dict) else None
+    await prefs.set_survey_done(done if isinstance(done, bool) else True)
+    return _json({"done": await prefs.survey_done()})
+
+
 def _json(data: object, status: int = 200) -> web.Response:
     return web.Response(
         text=json.dumps(data, ensure_ascii=False),
@@ -209,6 +236,9 @@ async def create_app(
     app["default_agent"] = default_agent
     app["default_workspace"] = default_workspace
     app["appdata"] = appdata
+    # Built from *appdata* rather than taken as a parameter: prefs are a plain
+    # file, no lifecycle to own and nothing for callers to inject or fake.
+    app["uiprefs"] = await UIPrefs.from_appdata(appdata)
 
     spa_root = _gateway_spa_root()
     spa_dist = spa_root / "spa" / "dist"
@@ -250,6 +280,8 @@ async def create_app(
     app.router.add_post("/summaries", _set_summary)
     app.router.add_post("/summaries/generate", _generate_summary)
     app.router.add_post("/ui/attention", _request_attention)
+    app.router.add_get("/ui/prefs/survey", _get_survey_pref)
+    app.router.add_post("/ui/prefs/survey", _set_survey_pref)
     app.router.add_get("/workspace/cwd", _get_cwd)
     app.router.add_get("/defaults", _get_defaults)
     app.router.add_get("/workspace/places", _list_workspace_places)

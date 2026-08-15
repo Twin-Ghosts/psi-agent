@@ -474,3 +474,13 @@ export async function revokeAuthDevice(deviceId: string): Promise<{ ok: boolean 
   return api<{ ok: boolean }>('DELETE', `/auth/devices/${encodeURIComponent(deviceId)}`)
 }
 
+/** 问卷弹窗是否已被关闭。服务端存 —— Gateway 每次启动换随机端口，
+ *  origin 跟着变，`localStorage` 的标记下次读不到。 */
+export async function fetchSurveyDone() {
+  return api<{ done: boolean }>('GET', '/ui/prefs/survey')
+}
+
+export async function markSurveyDone() {
+  return api<{ done: boolean }>('POST', '/ui/prefs/survey', { done: true })
+}
+

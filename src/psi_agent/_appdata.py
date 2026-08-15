@@ -110,6 +110,16 @@ def appdata_state_latest_path(appdata_root: str) -> anyio.Path:
     return appdata_state_dir(appdata_root) / "latest.json"
 
 
+def appdata_ui_prefs_path(appdata_root: str) -> anyio.Path:
+    """AppData path: ``{appdata}/ui-prefs.json``.
+
+    Deliberately **not** under ``state/``: that dir holds ``latest.json`` (manager
+    snapshots) plus a timestamped copy per startup. UI preferences are neither a
+    manager snapshot nor worth versioning, so they sit at the AppData root.
+    """
+    return anyio.Path(appdata_root) / "ui-prefs.json"
+
+
 async def resolve_state_read_path(*, appdata_root: str) -> anyio.Path:
     """Dual-read: prefer AppData ``state/latest.json``, else legacy cwd ``state/``."""
     primary = appdata_state_latest_path(appdata_root)
