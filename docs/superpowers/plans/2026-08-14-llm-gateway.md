@@ -515,9 +515,42 @@ variable.` —— 我在 Task 7 里判断的「拿云端 401」不成立（详�
 **根本没有请求到达服务器**（`docker logs` 在对应时间窗内 `sms/send` 与 `/auth/me` 各 0 条），
 证实 TLS 是当时唯一的拦路虎。真实号码能否发出**只能由负责人用自己的号码验**。
 
-> 移交给云端仓（`/srv/psi-cloud`，非本仓）的一条改进：`aliyun.py:145` 的 non-OK 日志
-> 只打了 `Code`，没打 `Message`。阿里云的具体原因全在 `Message` 里，不打等于每次
-> 发码失败都要重新复现一遍才能知道为什么。
+> ~~移交给云端仓（`/srv/psi-cloud`，非本仓）的一条改进：`aliyun.py:145` 的 non-OK 日志
+> 只打了 `Code`，没打 `Message`。~~ **已在 Task 12 做掉。**
+
+---
+
+## Task 12: 负责人验收后的四项（登录已通之后）
+
+- [x] **删掉登录屏那句协议文字。** 直接删等于没人同意过协议，所以**同意动作前移到安装期** ——
+      安装向导第一页必勾，不勾则「下一步」禁用。一个勾选框覆盖两份协议，这是许可协议导言
+      自己规定的形态（「勾选同意本协议即视为同时同意隐私保护政策」），不是 UI 选择；也因此
+      不能用 Inno 内置 `LicenseFile`（单选钮、一次只挂一份文件）
+- [x] 协议 HTML 由 `scripts/gen_legal_html.py` 从 `docs/` 下两份 md 生成，安装器以 `dontcopy`
+      引 `spa-v2/public/` 同一路径 —— **安装期与产品内共用一份产物**，各存一份必有一份过时。
+      CI 加 `--check` 步防「改了 md 忘了重新生成」
+- [x] **修登出后门禁失效**（负责人报的 bug：登出后 ✕ 回来了、点遮罩也能关掉）。根因是
+      硬门禁只在冷启动探一次 `/auth/status`，而登出发生在 `HubLoginPanel` 内部，不往上说
+      一声，父层 `authGate` 就停在启动那次的 `passed` —— 门只在冷启动那一下存在。
+      加 `onLoginStateChanged` 回调链到 `recheckAuthGate`，补 2 条回归断言
+- [x] **答「是否改了协议层」：没有。** `git show --stat 82df399e` 的 12 个文件里没有
+      `protocol.py`，该文件上次改动是别人的 `a8aed458`（#664）
+- [x] **云端 `Message` 日志**（本仓之外，`/srv/psi-cloud`，commit `9ed700c`）：两个 non-OK
+      分支都补 `Message` 与 `RequestId`（找阿里云工单唯一能对上的凭据）。`check_code` 那支
+      原先**一行日志都没有** —— 调用失败与「码填错了」在日志里长得一样，而用户两边看到的
+      都是「验证码不正确」。字段名用 `api_code` 不用 `code`：那个方法里 `code` 是用户填的
+      验证码，日志里出现 `code=` 会让人以为把验证码打出去了
+- [x] 云端验证：容器内桩掉 `_call` 跑两支，手机号仍走 `mask_phone`，验证码明文未出现。
+      **镜像必须重建**（`build: .`，没有 src 挂载，重启不生效），重建后 `/healthz` 200、容器 healthy
+- [ ] **安装器协议页未实测** —— 需要在 Windows 上真跑一次 Inno 构建，我没打包
+
+**这里踩到的一个坑**：本机裸 `python` 是 **3.7.9**，跑生成器会报
+`TypeError: 'type' object is not subscriptable`（`tuple[LegalDoc, ...]`）。CI 走 `uv run python`
+（3.14）没这问题。**这不是生成器的 bug** —— 本仓的 Python 命令一律用 `.venv/Scripts/python.exe`
+或 `uv run`。
+
+**psi-cloud 仓没有任何测试套件**（全仓 0 个 `test_*.py`），且那台机器上没有 ruff、装不上
+（容器到不了 PyPI）。所以云端那笔只做了语法检查与 88 列扫描 + 桩跑实证，**ruff 没跑**。
 
 ---
 
