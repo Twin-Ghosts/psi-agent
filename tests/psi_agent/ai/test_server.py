@@ -141,3 +141,35 @@ async def test_handler_strips_internal_routing_before_calling_the_external_provi
 
     assert "routing" not in received_provider_kwargs
     assert received_provider_kwargs["temperature"] == 0.2
+
+
+async def test_handler_passes_http_client_through_client_args(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """自带的 httpx client 必须经 ``client_args`` 进 provider 的 client 构造。
+
+    放进请求体 (**body) 是不行的 —— 那是发给上游的 JSON 字段。这条线断了的表现是
+    对话请求全部超时, 见 psi_agent._tls。
+    """
+    received: dict[str, Any] = {}
+    stream = _TrackingStream([_FakeChunk()])
+    sentinel = object()
+    runner, socket_path = await _serve_handler(tmp_path, monkeypatch, stream, received)
+    runner.app["http_client"] = sentinel
+    try:
+        await _drain(socket_path)
+    finally:
+        await runner.cleanup()
+
+    assert received["client_args"] == {"http_client": sentinel}
+
+
+async def test_handler_omits_client_args_without_http_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """没配 client 时不能传空的 ``client_args``: 那些 provider 走 any-llm 默认。"""
+    received: dict[str, Any] = {}
+    stream = _TrackingStream([_FakeChunk()])
+    runner, socket_path = await _serve_handler(tmp_path, monkeypatch, stream, received)
+    try:
+        await _drain(socket_path)
+    finally:
+        await runner.cleanup()
+
+    assert "client_args" not in received

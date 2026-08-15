@@ -78,6 +78,7 @@ src/
     ├── _send_markers.py        # [SEND:] 解码：正则 + 空路径过滤（Channel↔Session 共享）
     ├── _run.py                 # YAML 配置批量启动（psi-agent run config.yml）
     ├── _logging.py              # loguru 配置，verbose→DEBUG
+    ├── _tls.py                  # 出站 HTTPS 的 TLS 上下文（AuthManager↔AI 层共享；绕开 PQ ClientHello 被丢）
     ├── ai/
     │   ├── AGENTS.md                # AI 层设计文档
     │   ├── __init__.py               # Ai + serve_ai

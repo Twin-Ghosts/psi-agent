@@ -392,6 +392,9 @@ describe('硬门禁：不可跳过', () => {
       expect(screen.queryByRole('button', { name: '暂不登录，继续使用' })).toBeNull()
       // 得说清为什么退不出去, 否则就是一堵没有解释的墙
       expect(screen.getByText(/登录后才能使用/)).toBeTruthy()
+      // 硬门禁下不能再说「本机功能不受影响」—— 那时人是真进不去
+      expect(screen.queryByText('登录需要联网，本机功能不受影响')).toBeNull()
+      expect(screen.getByText('登录需要联网，请检查网络后重试')).toBeTruthy()
     } finally {
       spy.mockRestore()
     }

@@ -26,7 +26,7 @@ Session ── POST /chat/completions ──► AI
 
 | 文件 | 职责 |
 |------|------|
-| `__init__.py` | `Ai` dataclass + `run()` + `serve_ai()` |
+| `__init__.py` | `Ai` dataclass + `run()` + `serve_ai()` + `_build_http_client()`（按 provider 决定是否自带 TLS 上下文的 httpx client，见下） |
 
 | `server.py` | `handle_chat_completions()` — 请求处理 |
 
@@ -62,6 +62,20 @@ Session 发送的 body 中，除 `model` 被启动配置覆盖、`messages` 被�
 any-llm-sdk 原生支持的 50+ provider 全部可用，无需额外代码。包括：OpenAI, Anthropic, Gemini, DeepSeek, Mistral, Groq, Ollama, Cerebras, Cohere, Perplexity, Fireworks, Together, xAI, Bedrock, Azure, VertexAI 等。
 
 Anthropic→OpenAI 格式转换由 any-llm-sdk 自动完成，包括 `thinking_delta`→`reasoning`、`input_json_delta`→`tool_calls`、`content_block_stop`→`finish_reason="tool_calls"`。
+
+## 自带 TLS 上下文的 httpx client
+
+`serve_ai()` 的 `_build_http_client(provider)` 建一个 `httpx.AsyncClient(verify=psi_agent._tls.client_ssl_context())`，经 `acompletion(client_args={"http_client": ...})` 灌进 provider 的 client 构造。
+
+| 问题 | 说明 |
+|------|------|
+| 为什么要 | 默认组列表下部分网络会丢 TLS 握手包，表现为**对话请求全部超时**（实测 19s 超时 vs 换上下文后 0.6s 拿到上游响应）。成因见 `psi_agent/_tls.py` |
+| 为什么走 `client_args` | 它进的是 provider 的 client 构造，不是请求体。any-llm 内部自己 new httpx client，从 `**body` 传 `http_client` 只会变成发给上游的 JSON 字段 |
+| 为什么按 provider 挑 | OpenAI 系（`BaseOpenAIProvider`）与 Anthropic 系（`BaseAnthropicProvider`）的 SDK 收 `http_client`；Gemini（google-genai）与 Mistral **不收**，无条件传过去会当场 `TypeError`，等于为修一条路把另外几条弄断。不适用的 provider 拿 `None`，走 any-llm 默认 |
+| 为什么建一次 | 每请求新建等于扔掉连接池，每次对话白付一轮 TCP + TLS 握手；而这个进程全程只对一个上游说话。进程退出时 `aclose()` |
+| 为什么不设 timeout | 超时由上层（Channel / Gateway）决定，这里设了会把长回答截断 |
+
+`handle_chat_completions` 用 `request.app.get("http_client")` 而非 `[...]`：该 handler 也被不经 `serve_ai` 装配的 app 用（测试、将来的嵌入式用法），少一个键不该变成 500。
 
 ## 错误处理
 

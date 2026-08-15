@@ -29,6 +29,14 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
     model = request.app["model"]
     api_key = request.app["api_key"]
     base_url = request.app["base_url"]
+    # ``client_args`` 走的是 provider 的 client 构造, 不是请求体 —— 换掉 TLS
+    # 上下文只能从这里进去, any-llm 内部自己 new httpx client。client 由
+    # ``serve_ai`` 按 provider 建 (不收 http_client 的 provider 拿到 None)、
+    # 进程退出时关。见 psi_agent._tls 与 _build_http_client。
+    # 用 get 而不是 []: 这个 handler 也被不经 ``serve_ai`` 装配的 app 用 (测试、
+    # 将来的嵌入式用法), 少一个键不该变成 500。缺了就走 any-llm 默认 client。
+    http_client = request.app.get("http_client")
+    client_args: dict[str, Any] = {"client_args": {"http_client": http_client}} if http_client else {}
 
     logger.debug(f"Body keys before pop: {list(body)}")
     messages = body.pop("messages", [])
@@ -81,6 +89,7 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
                 stream=True,
                 api_key=api_key,
                 api_base=base_url,
+                **client_args,
                 **body,
             ),
         )

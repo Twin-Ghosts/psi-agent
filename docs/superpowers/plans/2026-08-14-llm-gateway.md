@@ -467,6 +467,58 @@ variable.` —— 我在 Task 7 里判断的「拿云端 401」不成立（详�
 - [ ] 负责人手工验：全新客户端未登录启动 → 只能看到关不掉的登录窗；登录成功 → 直接进
       工作台且能对话（这一条同时兑现 A1）
 
+## Task 11：TLS 握手包被丢导致云端全不可达（Task 10 验收时暴露）
+
+**起因**：负责人按 Task 10 最后一条去验，门禁显示正确，但**人被彻底关在外面** ——
+截图是 D3 断网屏，日志里 `认证服务请求失败 GET /me: TimeoutError()` 与
+`POST /sms/send: TimeoutError()` 反复出现，30s 打满。而同一时刻 `curl` 同一域名
+0.7s 就回。硬门禁把「登录坏了」放大成了「整个产品用不了」。
+
+**定位过程**（逐层排除，每步都是背靠背实测）：
+
+| 排除项 | 证据 |
+|---|---|
+| DNS / TCP | 域名解析到单个 IPv4 `8.222.255.23`；裸 TCP 连接 0.20s 通 |
+| aiohttp connector 配置 | 裸 asyncio TLS 同样 0/12，与 connector 无关 |
+| 事件循环 | Proactor 0/5、`_WindowsSelectorEventLoop` 0/5 |
+| asyncio 本身 | 同步 `http.client` 也失败（2/5、1/4） |
+| Python 整体 / 网络整体 | 同一 Python 打 baidu 4/4 通 |
+| TLS 版本协商 | 强制 1.2 与 1.3 各 0/6 |
+| curl 为什么行 | curl on Windows 走 **Schannel**，不发后量子密钥份额 |
+
+**结论**：`ctx.set_ecdh_curve("prime256v1")` **8/8 通，默认组列表 0/8**。OpenSSL 3.5
+默认组列表带后量子混合密钥交换（X25519MLKEM768），ClientHello 撑过 ~1400 字节被分片，
+路径上有设备把分片的握手包丢了。**与本产品代码无关**，但必须由本产品绕开。
+
+- [x] 新增 `psi_agent/_tls.py`：`client_ssl_context()` 从 `create_default_context()` 起手，
+      **证书校验与主机名核对一个都不动**，只收窄密钥交换曲线。放顶层是因为出站 HTTPS 有
+      两条独立的路、分属两个进程，同一成因不该有两份注释
+- [x] `AuthManager._ensure_session()`：`TCPConnector(ssl=client_ssl_context())`。
+      实测经真实 `AuthManager`、每次新连接 **4/4 拿到云端 401**（此前 0/N 全超时）
+- [x] AI 层同样中招（免费模型经 any-llm/httpx 打 `/llm/v1`，也是 OpenSSL）—— **不修的话
+      登录成功后第一次对话照样超时**。实测默认 19s 超时 vs 修后 0.64s 拿到上游 401
+- [x] `serve_ai()` 加 `_build_http_client(provider)`，经 `acompletion(client_args=...)` 注入。
+      **按 provider 挑**：Gemini（google-genai）与 Mistral 不收 `http_client`，无条件传会
+      当场 `TypeError` —— 为修一条路把另外几条弄断
+- [x] `handle_chat_completions` 用 `app.get("http_client")` 而非 `[...]`：该 handler 也被
+      不经 `serve_ai` 装配的 app 用（测试），少一个键不该变成 500
+- [x] 测试 5 例：provider 分档 3 例（收 / 不收 / 名字不认识不拦启动）+ handler 注入 2 例
+      （经 `client_args` 传进去 / 没配时不传空壳）
+- [x] 排查过其它出站 client：只有飞书 `open.feishu.cn` 是另一个外部 host，实测
+      default 4/4、p256 4/4 —— **不受影响，不动**。其余 `ClientSession` 全是本机组件间 socket
+- [x] 修正 D3 断网屏那句「登录需要联网，**本机功能不受影响**」—— 硬门禁下这话是假的
+      （人是真进不去），`mandatory` 时改为「请检查网络后重试」，并补断言守着
+
+**顺带查清的一件事（结论：不是 bug）**：`POST /auth/sms/send` 回 502
+`provider_failure`。服务器日志显示阿里云 HTTP 200 但体里 `Code=UNKNOWN`。这是我拿
+**测试号码 `13800000000`** 打出来的 —— 该号段是保留号，被上游拒属正常。负责人那次登录
+**根本没有请求到达服务器**（`docker logs` 在对应时间窗内 `sms/send` 与 `/auth/me` 各 0 条），
+证实 TLS 是当时唯一的拦路虎。真实号码能否发出**只能由负责人用自己的号码验**。
+
+> 移交给云端仓（`/srv/psi-cloud`，非本仓）的一条改进：`aliyun.py:145` 的 non-OK 日志
+> 只打了 `Code`，没打 `Message`。阿里云的具体原因全在 `Message` 里，不打等于每次
+> 发码失败都要重新复现一遍才能知道为什么。
+
 ---
 
 ## 收尾

@@ -5,7 +5,7 @@ import os
 import pytest
 from aiohttp import web
 
-from psi_agent.ai import Ai, serve_ai
+from psi_agent.ai import Ai, _build_http_client, serve_ai
 
 
 def test_ai_backend_env_fallback(monkeypatch) -> None:
@@ -104,3 +104,26 @@ async def test_serve_ai_app_accepts_large_bodies(monkeypatch: pytest.MonkeyPatch
         )
     # 100 MiB, matching the gateway app — well above aiohttp's 1 MiB default.
     assert captured["app"]._client_max_size == 100 * 1024 * 1024
+
+
+async def test_http_client_built_for_providers_that_accept_it() -> None:
+    """OpenAI 系与 Anthropic 系要拿到自带 TLS 上下文的 client。
+
+    这个 client 是绕开握手包被丢的唯一手段 (见 psi_agent._tls); 拿不到就是
+    「登录成功了但一对话就超时」。
+    """
+    for provider in ("openai", "anthropic", "deepseek", "moonshot"):
+        client = _build_http_client(provider)
+        assert client is not None, provider
+        await client.aclose()
+
+
+def test_no_http_client_for_providers_that_reject_it() -> None:
+    """Mistral 的 SDK 不收 http_client —— 传过去会 TypeError, 把好路弄断。"""
+    assert _build_http_client("mistral") is None
+
+
+def test_unknown_provider_does_not_block_startup() -> None:
+    """provider 名字不认识不该拦住服务起来: 报错留给第一次请求, 那时信息更全。"""
+    assert _build_http_client("no-such-provider") is None
+    assert _build_http_client("") is None

@@ -399,8 +399,12 @@ export default function HubLoginPanel({ show, onClose, onToast, mandatory = fals
       <div className="mark">{offline ? null : <img src={DOLPHIN} alt="HaiTun" />}</div>
       <h3>{offline ? '暂时无法连接' : '欢迎使用 HaiTun Agent'}</h3>
       <p>
+        {/* 硬门禁下不能再说「本机功能不受影响」—— 登录成了使用前置条件, 断网时
+            人是真进不去。原先那句是软门禁时代留下的, 会让用户以为可以绕过。 */}
         {offline
-          ? '登录需要联网，本机功能不受影响'
+          ? mandatory
+            ? '登录需要联网，请检查网络后重试'
+            : '登录需要联网，本机功能不受影响'
           : `验证${channel === 'phone' ? '手机号' : '邮箱'}即可登录，未注册将自动创建账号`}
       </p>
     </div>
