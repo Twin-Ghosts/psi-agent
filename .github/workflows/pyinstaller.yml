@@ -55,7 +55,7 @@ jobs:
         with:
           python-version: "3.14"
       - run: uv sync
-      # 协议 HTML 是 docs/ 下两份 md 的生成物, 入库以免 build 与 installer 两个 job 都要跑生成器。
+      # 协议 HTML 是 spa-v2/legal/ 下两份 md 的生成物, 入库以免 build 与 installer 两个 job 都要跑生成器。
       # 这一步防的是「改了 md 忘了重新生成」—— 那会让安装器与产品内展示过时协议。
       - name: Check legal HTML is in sync with docs
         run: uv run python scripts/gen_legal_html.py --check

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -142,3 +143,32 @@ def test_generate_writes_lf_even_on_windows(tmp_path: Path, monkeypatch: pytest.
     out = _one_doc_at(tmp_path, monkeypatch)
     assert gen.main([]) == 0
     assert b"\r\n" not in out.read_bytes()
+
+
+def test_check_mode_survives_cp1252_stdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """cp1252 的 stdout 下 ``--check`` 仍要返回 0。
+
+    实测的 CI 失败: GitHub 的 windows-latest 上 stdout 是 cp1252, 编不出
+    ``产物与 md 源一致。``, 于是**产物明明一致**却抛 UnicodeEncodeError 退出码 1 ——
+    同步守卫变成了「Windows 上必红」。这条用真的 cp1252 缓冲区复现, 不是 mock 掉
+    print 了事: 要锁的正是「中文能编出去」。
+    """
+    # 只要它把产物指到 tmp 的副作用, 返回的路径这条用例不看。
+    _one_doc_at(tmp_path, monkeypatch)
+    assert gen.main([]) == 0
+
+    with capsys.disabled():
+        buf = io.BytesIO()
+        cp1252 = io.TextIOWrapper(buf, encoding="cp1252", newline="")
+        monkeypatch.setattr(sys, "stdout", cp1252)
+        try:
+            rc = gen.main(["--check"])
+        finally:
+            cp1252.flush()
+            monkeypatch.undo()
+
+    assert rc == 0
+    # reconfigure 之后写进去的是 UTF-8 字节, 所以按 UTF-8 读回来。
+    assert "产物与 md 源一致。" in buf.getvalue().decode("utf-8")

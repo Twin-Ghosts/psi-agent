@@ -204,7 +204,28 @@ def _normalize(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
+def _force_utf8_stdout() -> None:
+    """把 stdout 切成 UTF-8。**本脚本所有输出都是中文, 不切会直接崩。**
+
+    Windows 控制台默认 cp1252, 编不出中文 —— GitHub 的 windows-latest 上
+    ``print("产物与 md 源一致。")`` 抛 ``UnicodeEncodeError``, 于是 CI 的
+    ``--check`` 步在**产物其实是一致的**时候仍然以退出码 1 失败。这比漏检更坏:
+    它把「同步守卫」变成了「Windows 上必红」。
+
+    修在脚本里而不是给 workflow 加 ``PYTHONIOENCODING`` —— 本仓开发机就是
+    Windows, 人在 cmd.exe 里跑会撞同一个坑, 只修 CI 等于把坑留给人。
+
+    ``reconfigure`` 在 stdout 被替换成非 ``TextIOWrapper`` 时可能不存在
+    (某些捕获实现), 所以先探再调; 探不到就维持原样, 不为了日志把主流程搞挂。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _force_utf8_stdout()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--check",
