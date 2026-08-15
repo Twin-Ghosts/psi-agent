@@ -106,6 +106,31 @@ export function reset(): void {
   devices.push(...seedDevices())
 }
 
+/**
+ * 直接置成「已登录」，不走发码校验。
+ *
+ * 给需要从 C1 起步的用例用（设备管理那几条）。**不能靠「在面板里登录一次」来到
+ * C1** —— 登录成功那条路径按原型 D4 是关窗回工作台，压根不进 C1；侧栏点进来看
+ * 账户才进。用登录流程铺垫等于把测试建在一个不存在的落点上。
+ *
+ * 字段与 `verify()` 的老用户支保持一致，两处要一起改。
+ */
+export function seedLoggedIn(): void {
+  loggedIn = true
+  user = {
+    id: 'u-mock-1',
+    displayName: '海豚用户 8000',
+    avatarUrl: null,
+    createdAt: '2026-07-01T09:00:00Z',
+  }
+  identities.length = 0
+  identities.push({
+    provider: 'phone',
+    identifier: SCENARIOS.existing,
+    verifiedAt: new Date().toISOString(),
+  })
+}
+
 reset()
 
 /* ---------------------------------------------------------------- 端点 */

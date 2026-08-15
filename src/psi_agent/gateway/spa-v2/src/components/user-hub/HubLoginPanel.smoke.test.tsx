@@ -15,7 +15,7 @@ import { useState } from 'react'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { MOCK_CODE, SCENARIOS, reset as resetFake } from './__fixtures__/fakeAuthBackend'
+import { MOCK_CODE, SCENARIOS, reset as resetFake, seedLoggedIn } from './__fixtures__/fakeAuthBackend'
 
 /* 用模块替身把 8 个认证接口换成假后端。
  *
@@ -174,9 +174,11 @@ describe('屏 B2：邮箱验证码', () => {
   })
 })
 
-describe('屏 A3 → D4 → C1：新用户建号后到账户面板', () => {
-  it('新号验证通过进 A3，提交后落到 C1 已登录', async () => {
-    openPanel()
+describe('屏 A3 → D4：新用户建号后关窗回工作台', () => {
+  it('新号验证通过进 A3，提交后关窗并 toast', async () => {
+    const onClose = vi.fn()
+    const onToast = vi.fn()
+    render(<HubLoginPanel show onClose={onClose} onToast={onToast} />)
     await waitForA1()
     typePhone('13900001111') // 非 SCENARIOS.existing，走新用户
     fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
@@ -189,33 +191,58 @@ describe('屏 A3 → D4 → C1：新用户建号后到账户面板', () => {
     // D4：建号收尾期间不可中断
     expect(await screen.findByText('正在为您准备账号…')).toBeTruthy()
     expect(screen.queryByLabelText('关闭')).toBeNull()
-    /* C1。timeout 放宽到 4s：这一步串了 complete(700ms) + status(180ms) +
-       me(150ms) 三个 mock 延迟，默认 1000ms 不够 —— 是测试等得太短，
-       不是界面慢。 */
-    expect(await screen.findByText('已登录', {}, { timeout: 4000 })).toBeTruthy()
-    expect(screen.getByText('测试用户')).toBeTruthy()
-    expect(screen.getByText(/退出登录不会删除任何本地数据/)).toBeTruthy()
+    /* 建号成功 = 关窗 + 一句 toast，**不落 C1**（原型 D4：不插一屏「登录成功」）。
+       原先这里断言的是落到 C1 —— 那是在断言一个 bug：refresh() 会先把 C1 渲染出来
+       再去拉 me 与设备列表，用户看到的是个只有窗框和标题的空账户面板闪一秒多。
+       timeout 4s：串了 complete(700ms) + status(180ms) 两个 mock 延迟。 */
+    await waitFor(() => expect(onClose).toHaveBeenCalled(), { timeout: 4000 })
+    expect(onToast).toHaveBeenCalledWith('账号已创建')
+    expect(screen.queryByText(/退出登录不会删除任何本地数据/)).toBeNull()
   })
 })
 
 describe('屏 C1 → C2：设备管理', () => {
-  const loginAsExisting = async () => {
+  /* 已登录态下开窗 —— 这是 C1 的**唯一**真实入口（侧栏点进来看账户）。
+   *
+   * 原先这里是「在面板里走一遍登录」，那是错的：登录成功按原型 D4 关窗回工作台，
+   * 不进 C1。它当时能过，是因为本文件的 harness 把 show 钉死为真、onClose 是空
+   * 函数，面板关不掉，于是 C1 得以渲染 —— 测的正是那个「登录后闪一下空账户面板」
+   * 的 bug。修掉 bug 后这几条自然红，换成从已登录态起步。 */
+  const openAsLoggedIn = async () => {
+    seedLoggedIn()
     openPanel()
+    await screen.findByText('已登录')
+  }
+
+  it('已登录时开窗直接落在 C1', async () => {
+    await openAsLoggedIn()
+    expect(screen.getByText('海豚用户 8000')).toBeTruthy()
+    expect(screen.getByText(/退出登录不会删除任何本地数据/)).toBeTruthy()
+  })
+
+  /* 负责人实测报的体感问题：验证码通过后「短暂显示账户与设备管理组件，但没显示完整，
+     只有窗框和标题，一秒多后自己关闭」。根因是 refresh() 先 setStage('done') 把 C1
+     渲染出来，再去拉 me 与设备列表，等它们回来才关窗 —— 那两个请求的往返就是那一秒多。
+     现在关窗路径只探登录态，压根不进 C1。 */
+  it('老用户登录成功直接关窗，中途不渲染账户面板', async () => {
+    const onClose = vi.fn()
+    const onToast = vi.fn()
+    render(<HubLoginPanel show onClose={onClose} onToast={onToast} />)
     await waitForA1()
     typePhone(SCENARIOS.existing)
     fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
     await screen.findByLabelText('验证码第 1 位')
     fillCode(MOCK_CODE)
-    await screen.findByText('已登录')
-  }
 
-  it('老用户直接登录，跳过 A3', async () => {
-    await loginAsExisting()
-    expect(screen.getByText('海豚用户 8000')).toBeTruthy()
+    await waitFor(() => expect(onClose).toHaveBeenCalled(), { timeout: 4000 })
+    expect(onToast).toHaveBeenCalledWith('已登录')
+    // C1 的两处标志物一个都不该出现过
+    expect(screen.queryByText(/退出登录不会删除任何本地数据/)).toBeNull()
+    expect(screen.queryByRole('button', { name: /管理登录设备/ })).toBeNull()
   })
 
   it('进 C2 列出 3 台设备，本机行无移除按钮', async () => {
-    await loginAsExisting()
+    await openAsLoggedIn()
     fireEvent.click(screen.getByRole('button', { name: /管理登录设备/ }))
     expect(await screen.findByText(/移除设备后/)).toBeTruthy()
     expect(screen.getByText('本机')).toBeTruthy()
@@ -224,7 +251,7 @@ describe('屏 C1 → C2：设备管理', () => {
   })
 
   it('移除一台后列表少一行', async () => {
-    await loginAsExisting()
+    await openAsLoggedIn()
     fireEvent.click(screen.getByRole('button', { name: /管理登录设备/ }))
     await screen.findByText(/移除设备后/)
     fireEvent.click(screen.getAllByRole('button', { name: '移除设备' })[0])
@@ -406,12 +433,9 @@ describe('登出后必须重新被拦住（回归）', () => {
      于是登出后登录窗上冒出 ✕、点遮罩也能关掉 —— 门只在冷启动那一下存在。 */
   it('登出成功后回调父层，让它重判门禁', async () => {
     const onLoginStateChanged = vi.fn()
+    // 从已登录态起步：登录成功那条路径是关窗回工作台，不停在 C1，铺垫不能走它
+    seedLoggedIn()
     render(<HubLoginPanel show onClose={() => {}} onLoginStateChanged={onLoginStateChanged} />)
-    await waitForA1()
-    typePhone(SCENARIOS.existing)
-    fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
-    await screen.findByLabelText('验证码第 1 位')
-    fillCode(MOCK_CODE)
     await screen.findByText('已登录')
 
     expect(onLoginStateChanged).not.toHaveBeenCalled()

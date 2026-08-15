@@ -143,12 +143,23 @@ export default function HubLoginPanel({
     if (cooldown === 0 && fail === 'D2') setFail('')
   }, [cooldown, fail])
 
-  /** 返回「现在是否登录态」，调用方据此决定是留在账户面板还是关窗回工作台。 */
-  const refresh = useCallback(async (): Promise<boolean> => {
+  /**
+   * 返回「现在是否登录态」，调用方据此决定是留在账户面板还是关窗回工作台。
+   *
+   * `enterAccount` 为假时只探登录态，**不切到账户面板、也不拉 me 与设备列表**。
+   * 马上要关窗的路径必须传假：默认那条会先 `setStage('done')` 把 C1 渲染出来，
+   * 再等两个请求回来才关窗 —— 用户看到的是一个只有窗框和标题、内容空着的账户面板
+   * 闪一秒多，正是原型 D4 禁止的「插一屏」。少掉的这两个请求下次开窗会补上。
+   */
+  const refresh = useCallback(async (enterAccount = true): Promise<boolean> => {
     try {
       const st = await getAuthStatus()
       setStatus(st)
       if (st.available && st.loggedIn) {
+        // 广播要在最前面: 关窗路径靠它让侧栏账户区就地变成已登录, 而这条路径
+        // 下面的 me/devices 都不取。
+        notifyAuthChanged()
+        if (!enterAccount) return true
         setStage('done')
         const [info, devs] = await Promise.all([
           getAuthMe().catch(() => null),
@@ -156,8 +167,6 @@ export default function HubLoginPanel({
         ])
         setMe(info)
         setDevices(Array.isArray(devs?.devices) ? devs.devices : [])
-        // 侧栏账户区靠这个广播就地更新, 否则登录完外面还显示「未登录」
-        notifyAuthChanged()
         return true
       }
       setStage('input')
@@ -267,7 +276,8 @@ export default function HubLoginPanel({
           return
         }
         // 老用户登录成功：关窗回工作台，不停在账户面板（原型 D4）
-        if (await refresh()) finishAndClose('已登录')
+        // 传 false：不进账户面板, 否则关窗前会闪一下空的 C1
+        if (await refresh(false)) finishAndClose('已登录')
       } catch (e) {
         const c = errorCodeOf(e)
         const screen = failScreenFor(c)
@@ -323,7 +333,8 @@ export default function HubLoginPanel({
       const wanted = skipName ? '' : displayName.trim()
       await completeAuth(wanted ? { displayName: wanted } : {})
       // 建号成功同样关窗回工作台，侧栏就地更新（原型 D4）
-      if (await refresh()) finishAndClose('账号已创建')
+      // 同上传 false：D4 的转圈屏直接接关窗, 中间不插一屏空账户面板
+      if (await refresh(false)) finishAndClose('账号已创建')
     } catch (e) {
       if (isTempTokenExpired(errorCodeOf(e))) {
         // tempToken 过期（10 分钟）：退回 A1，说清要重新获取验证码
