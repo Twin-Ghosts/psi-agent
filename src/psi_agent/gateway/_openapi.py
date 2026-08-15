@@ -557,6 +557,22 @@ OPENAPI_SPEC = {
                 },
             },
         },
+        "/ui/prefs/survey": {
+            "get": {
+                "summary": "Whether the survey popup was already dismissed on this machine",
+                "operationId": "getSurveyPref",
+                "responses": {
+                    "200": {"description": "Survey flag state"},
+                },
+            },
+            "post": {
+                "summary": "Record that the survey popup was dismissed",
+                "operationId": "setSurveyPref",
+                "responses": {
+                    "200": {"description": "Survey flag persisted"},
+                },
+            },
+        },
         "/defaults": {
             "get": {
                 "summary": "Default agent, workspace, and AppData root paths",

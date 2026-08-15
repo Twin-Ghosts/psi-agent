@@ -47,6 +47,7 @@ Gateway 进程
 | `_title_manager.py` | 会话标题 CRUD + AI 自动生成 |
 | `_summary_manager.py` | 任务摘要 CRUD + AI 自动生成（spa-v2；与 title 同级持久化） |
 | `_state.py` | `GatewayState` — `{appdata}/state/latest.json` + 时间戳快照；缺则双读 cwd `state/latest.json` |
+| `_ui_prefs.py` | `UIPrefs` — SPA 的一次性 UI 标记（问卷是否已填），落 `{appdata}/ui-prefs.json`，读写经 `GET/POST /ui/prefs/survey`。**刻意不放 `localStorage`**：安装包不传 `--listen`，Gateway 每次启动 `_random_port()`，而 `localStorage` 按 origin（含端口）分桶 → 上次写的标记下次读不到，弹窗每次重启都再弹一遍。也不放 `_state.py`（那是 5 个固定 key 的 manager 快照 + 每启动一份时间戳副本，UI 偏好两头都不属于）；不像 `_auth_store` 加密（存布尔不存凭证）。按**机器**存不按登录用户：认证是旁挂且可整套关掉的，绑 `user_id` 会让纯本地模式无处落脚 |
 | `_spa_shell.py` | SPA 外壳注入 — `DEFAULT_APP_NAME`、`inject_app_name()`、`read_spa_index_template()`；`GET /spa/index.html` 替换 `__GATEWAY_APP_NAME__` |
 | `server.py` | aiohttp Application + REST handlers |
 | `_chat_manager.py` | SSE 流式对话管理（复用 ChannelCore） |
@@ -482,6 +483,8 @@ OAuth 回调中继（`_oauth_manager.py`）：让**授权码自己回到发起�
 | POST | `/summaries` | 设置任务摘要 `{id, summary}` |
 | POST | `/summaries/generate` | AI 生成任务摘要 `{id, user_text, assistant_text}` |
 | POST | `/ui/attention` | 会话在后台完成时闪烁托盘/webview（best-effort，需 `--tray` / `--webview`） |
+| GET | `/ui/prefs/survey` | 问卷弹窗是否已关闭过 → `{"done": bool}`（按机器，落 `{appdata}/ui-prefs.json`） |
+| POST | `/ui/prefs/survey` | 记录问卷弹窗已关闭；body `{"done": bool}`，缺省/非 bool 视作 `true`（唯一调用方是"关闭"动作） |
 | GET | `/openapi.json` | OpenAPI schema |
 | GET | `/favicon.ico` | 托盘图标（仅当 `--icon` 设置时注册，返回该图标文件） |
 
@@ -644,6 +647,8 @@ MD3 暗色/亮色双主题，通过 `:root.light-mode` CSS 变量切换。默认
 | `gw-theme` | 主题偏好 | 客户端 UI 状态 |
 
 Session 标题由服务端 `/titles` 端点维护，不在浏览器 localStorage 存储。
+
+**跨启动的 UI 标记也不能放 localStorage**（问卷弹窗踩过）：安装包拉起 Gateway 不带 `--listen`，端口每次 `_random_port()`，而 localStorage 按 origin（scheme+host+**port**）分桶，于是上次运行写的标记下次一律读不到。上表那几个 key 只是"读不到就回默认值"的 UI 状态，代价可以接受；凡是"一次性、之后不该再触发"的标记必须走服务端（见 `_ui_prefs.py`），否则表现为每次重启都重来一遍。
 
 **启动加载流程**：
 ```
