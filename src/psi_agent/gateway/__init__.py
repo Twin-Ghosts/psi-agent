@@ -17,6 +17,7 @@ from psi_agent.gateway._ai_manager import AIManager
 from psi_agent.gateway._attention import AttentionHub
 from psi_agent.gateway._auth_manager import AuthManager, resolve_endpoint
 from psi_agent.gateway._defaults import resolve_appdata_root, resolve_default_agent, resolve_default_workspace
+from psi_agent.gateway._free_model import make_key_resolver
 from psi_agent.gateway._router_manager import RouterManager, RouterUpstreamInfo
 from psi_agent.gateway._scheduler_manager import SchedulerManager
 from psi_agent.gateway._session_manager import SessionManager
@@ -159,6 +160,23 @@ class Gateway:
             tm = TitleManager()
             sum_m = SummaryManager()
 
+            # 认证是**旁挂**的: 不注入 Session 的构造参数, 不写 ContextVar, 不参与
+            # _do_persist 的 manager 快照 (凭证不进 state/latest.json —— 那里的
+            # api_key 是明文, 登录凭证不再踩这个坑)。地址显式为空则整套不加载。
+            #
+            # ** 必须建在恢复 AI 之前 **: 免费模型的 socket 在构造时就要拿到 token,
+            # 建晚了恢复出来的 socket 会带着哨兵值起来, 第一次对话必然 401。
+            authm: AuthManager | None = None
+            if resolve_endpoint(self.auth_endpoint):
+                authm = await AuthManager.create(self.auth_endpoint, appdata_root=appdata_root, tg=tg)
+                # 免费模型的哨兵值换成登录 token。传的是取值函数而不是 token ——
+                # socket 重建时要拿到当时的新值, 不是接线那一刻的旧值。
+                aim._resolve_key = make_key_resolver(authm.bearer_token, authm.endpoint)
+                # 趁用户还没点「获取验证码」, 先把连接建好, 省下 TCP+TLS 两个 RTT。
+                await authm.nudge_warm()
+            else:
+                logger.info("Auth disabled (PSI_AUTH_ENDPOINT set to empty)")
+
             for cfg in snapshot.get("ais", []):
                 try:
                     await aim.create(
@@ -217,16 +235,6 @@ class Gateway:
 
             attention = AttentionHub()
             schedm = SchedulerManager(_sm=sm, _ai_id=self.scheduler_ai_id or self.feishu_ai_id)
-            # 认证是**旁挂**的: 不注入 Session 的构造参数, 不写 ContextVar, 不参与
-            # _do_persist 的 manager 快照 (凭证不进 state/latest.json —— 那里的
-            # api_key 是明文, 登录凭证不再踩这个坑)。地址显式为空则整套不加载。
-            authm: AuthManager | None = None
-            if resolve_endpoint(self.auth_endpoint):
-                authm = await AuthManager.create(self.auth_endpoint, appdata_root=appdata_root, tg=tg)
-                # 趁用户还没点「获取验证码」, 先把连接建好, 省下 TCP+TLS 两个 RTT。
-                await authm.nudge_warm()
-            else:
-                logger.info("Auth disabled (PSI_AUTH_ENDPOINT set to empty)")
             app = await create_app(
                 aim,
                 sm,

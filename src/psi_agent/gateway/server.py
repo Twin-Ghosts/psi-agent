@@ -21,6 +21,7 @@ from psi_agent.gateway._defaults import (
     resolve_default_workspace,
 )
 from psi_agent.gateway._feishu_manager import FeishuManager
+from psi_agent.gateway._free_model import is_cloud_free_model
 from psi_agent.gateway._history_manager import HistoryManager
 from psi_agent.gateway._oauth_manager import OAuthRelay
 from psi_agent.gateway._openapi import render_openapi
@@ -903,6 +904,21 @@ async def _auth_send_code(request: web.Request) -> web.Response:
     return _auth_reply(status, data)
 
 
+async def _refresh_free_models(request: web.Request) -> None:
+    """登录态变了, 让免费模型的 socket 重新取一次 token。
+
+    ** 为什么要显式做 **: 交给 ``Ai`` 的 key 在 socket 构造时就定了, 而
+    ``AiInfo.api_key`` 里存的是哨兵 —— 去重键看不见 token 变化, 不会自然重建。
+    不做的话: 换账号登录后仍拿旧 token (已被云端吊销) 去请求, 一路 401;
+    登出后仍能继续用, 更糟。
+
+    只重建、不删除: 模型列表与 Session 绑定都不动, 用户看不到任何抖动。
+    """
+    authm: AuthManager = request.app["authm"]
+    aim: AIManager = request.app["aim"]
+    await aim.refresh_where(lambda info: is_cloud_free_model(info.api_key, info.base_url, authm.endpoint))
+
+
 async def _auth_verify(request: web.Request) -> web.Response:
     """校验验证码。老用户直接登录; 新用户的 tempToken 由 manager 扣住不下发。"""
     body = await _read_json(request)
@@ -913,6 +929,9 @@ async def _auth_verify(request: web.Request) -> web.Response:
         phone=str(body.get("phone", "")),
         email=str(body.get("email", "")),
     )
+    # 老用户在这一步就拿到了正式 token; 新用户要走 /complete, 那边也刷。
+    if status == 200:
+        await _refresh_free_models(request)
     return _auth_reply(status, data)
 
 
@@ -941,6 +960,8 @@ async def _auth_complete(request: web.Request) -> web.Response:
     if body is None:
         return _error("invalid_request", status=400)
     status, data = await _auth(request).complete(display_name=str(body.get("displayName", "")))
+    if status == 200:
+        await _refresh_free_models(request)
     return _auth_reply(status, data)
 
 
@@ -951,6 +972,9 @@ async def _auth_me(request: web.Request) -> web.Response:
 
 async def _auth_logout(request: web.Request) -> web.Response:
     status, data = await _auth(request).logout()
+    # 无条件刷: 云端不可达时本机凭证也已清掉 (logout_local), socket 必须跟着走,
+    # 否则登出后免费模型还能继续用。
+    await _refresh_free_models(request)
     return _auth_reply(status, data)
 
 

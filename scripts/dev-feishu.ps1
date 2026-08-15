@@ -16,7 +16,12 @@ $AiId = 'feishu-default'
 # Company proxy allowlist: deepseek-v4-flash | deepseek-v4-pro only.
 # Never use deepseek-v4-flash-free (retired; upstream 400).
 $Model = 'deepseek-v4-flash'
-$BaseUrl = 'https://misakamikoto.genuineknowledge.cn'
+# 云端转发器。旧地址 misakamikoto.genuineknowledge.cn 是个人服务器上的转发,
+# 即将停用 —— 本行是它在本仓的最后一处依赖。
+$BaseUrl = 'https://account.genuineknowledge.cn/llm/v1'
+# 哨兵值,不是真 key。Gateway 在拉起 AI 子进程时换成当前登录 token
+# (见 gateway/_free_model.py) —— ** 所以跑这个脚本前要先在客户端登录 **,
+# 否则上游回 401。改这个字面量要同时改 _free_model.py 与两份 SPA。
 $ApiKey = 'haitun-default'
 
 if (-not $env:PSI_FEISHU_APP_ID -or -not $env:PSI_FEISHU_APP_SECRET) {

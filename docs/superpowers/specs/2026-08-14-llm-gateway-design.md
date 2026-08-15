@@ -283,10 +283,30 @@ psi-cloud 侧新增环境变量，按现有分层（业务前缀归模块，与 
 
 v1 SPA 那份别漏，两份都在使用中。`bootstrapAi.test.ts` 断言了配置值，需同步。
 
-`api_key` 字段改为传登录态 token。这牵动 `isPlaceholderAi()`
-（`bootstrapAi.ts:56`）—— 它现在把 `haitun-default` 判为「非真实模型」并让它在
-`pickPreferredAi` 里不敌真实 key。登录态 token 进来后这个语义要重新定义，否则免费
-模型会被误判。**这是客户端唯一有逻辑风险的改动点，不是纯改字符串。**
+### ⚠️ 「`api_key` 改为传登录态 token」这条没照做（实施时推翻）
+
+本节原先写「`api_key` 字段改为传登录态 token」，并判断这会牵动 `isPlaceholderAi()`
+（`bootstrapAi.ts:56`）、是客户端唯一有逻辑风险的改动点。**两条既有硬约束挡着，不能
+照做：**
+
+1. `spa-v2/src/services/api.ts:271` —— token 全程由 Gateway 持有并加密落盘，**前端
+   拿不到也不该存**；`authFlow.ts:290` 更要求登录组件源码不出现 token 字面量（XSS）。
+   SPA 里根本取不到 token 可填。
+2. `gateway/_auth_store.py:10` 与 `gateway/__init__.py` —— `api_key` 是**明文写进快照**
+   的，注释明确写着「登录凭证不再踩这个坑」。把 token 当 api_key 存就是重新踩。
+
+**实际做法：** SPA 继续填哨兵 `haitun-default`，由 **Gateway 在拉起 AI 子进程时替换成
+真 token**（`gateway/_free_model.py`）。替换条件是**哨兵 + 与认证服务同源**两条同时成立
+—— token 只能发给签发它的那台主机，否则改一份快照就能把凭证送去任意域名。
+
+于是 `isPlaceholderAi()` **语义不变、无需改动**（`api_key` 在前端看来始终是哨兵），
+spec 预判的那个风险点不存在。token 只活在 `Ai` 实例里：不进 `state/latest.json`、不经
+`/ais` 下发、不进 `AuthManager.status()`。
+
+轮换靠 `AIManager.refresh_where()` 在登录/登出时**原地重建** socket（`AiInfo` 一个字段
+都不变）。**不能指望 `_config_key` 自然生效** —— 进去重键的是哨兵，它看不见 token 变化。
+
+详见 `gateway/AGENTS.md` 的「免费模型的 key 替换」一节。
 
 未登录时的行为要定：`ensureDefaultAi()` 在无登录态时不应创建默认 AI，而应引导登录。
 

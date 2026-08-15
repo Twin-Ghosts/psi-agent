@@ -42,7 +42,7 @@ Gateway 进程
 | `_defaults.py` | `resolve_default_agent` / `resolve_default_workspace`；再导出 ``psi_agent._appdata`` 路径助手 — CLI / `GET /defaults` 用 |
 | `_feishu_manager.py` | `FeishuManager` — 飞书会话 → Session 路由表（私聊按 `open_id`、群聊按 `chat_id`；复用 SessionManager 按需 spawn）+ FeishuRoute |
 | `_oauth_manager.py` | `OAuthRelay` — OAuth 回调中继（`state → code` 一次性信箱，带 TTL；供 `GET /oauth/callback` + `GET /oauth/code`），让授权码免用户手工复制 |
-| `_auth_manager.py` | `AuthManager` — 云端账号服务的**转发层** + 登录态持有者；不持供应商密钥、不做授权判定（发码与鉴权全在云端）。两段式注册的 `tempToken` 扣在进程内不下发给页面，改回 `registrationRequired: true`；把云端 `Retry-After` 响应头抄进 body 供倒计时用；云端 `GET /sessions` 回**裸数组**，`_call` 装 `items` 信封、`list_devices` 统一成 `{"devices": [...]}`。`resolve_endpoint()` 定地址（显式参数 > `PSI_AUTH_ENDPOINT` > 内置默认；显式空串=关闭）。连接池 / 预热 / 重试边界见 [AuthManager 连接复用](#authmanager-连接复用) |
+| `_auth_manager.py` | `AuthManager` — 云端账号服务的**转发层** + 登录态持有者；不持供应商密钥、不做授权判定（发码与鉴权全在云端）。两段式注册的 `tempToken` 扣在进程内不下发给页面，改回 `registrationRequired: true`；把云端 `Retry-After` 响应头抄进 body 供倒计时用；云端 `GET /sessions` 回**裸数组**，`_call` 装 `items` 信封、`list_devices` 统一成 `{"devices": [...]}`。`resolve_endpoint()` 定地址（显式参数 > `PSI_AUTH_ENDPOINT` > 内置默认；显式空串=关闭）。`bearer_token()` 是 token 的**唯一进程内取值口**，只给免费模型换算力用，不接任何下行响应（见 [免费模型的 key 替换](#免费模型的-key-替换)）。连接池 / 预热 / 重试边界见 [AuthManager 连接复用](#authmanager-连接复用) |
 | `_auth_store.py` | 本机凭证落盘 `{appdata}/auth.enc.json`（0600）+ `device_key`；密钥存 OS 钥匙串，钥匙串不可用则降级明文并记 warning、`credentialEncrypted: false` 如实上报。`load_token()` 读到明文且钥匙串此时可用会**就地重新加密**（用户装上 keyring 重启后凭证真的转密文，而不只是黄条消失）；`credentialEncrypted` 报的是**盘上真实形态**，没碰过盘时才退回“钥匙串可用性”做预测 |
 | `_title_manager.py` | 会话标题 CRUD + AI 自动生成 |
 | `_summary_manager.py` | 任务摘要 CRUD + AI 自动生成（spa-v2；与 title 同级持久化） |
@@ -69,9 +69,10 @@ Gateway 进程
 4. state = GatewayState.from_appdata(appdata_root) + snapshot = await state.load()  — AppData state（legacy 双读）
 5. anyio.create_task_group()                          — 手动管理 task group
 6. 创建 AIManager + RouterManager + SessionManager（注入 `_default_agent` / `_default_workspace`）+ TitleManager + SummaryManager
+6b. 创建 AuthManager（地址非空时；从 `{appdata}/auth.enc.json` 恢复登录态）— **旁挂**：不注入 Session、不写 ContextVar、不进 `_do_persist` 快照（凭证不落 `state/latest.json`）。随后把 `aim._resolve_key` 接上 `make_key_resolver(...)`，再 `nudge_warm()` 预热云端连接（注入 `tg`，详见 [AuthManager 连接复用](#authmanager-连接复用)）
+   - **必须排在第 7 步之前**：交给 `Ai` 的 key 在 socket 构造时就定了，建晚了恢复出来的免费模型会带着哨兵起来，第一次对话必然 401（见 [免费模型的 key 替换](#免费模型的-key-替换)）
 7. 恢复 AI / Router / Session（Session 恢复时带 `agent`，缺省用 Gateway default）/ titles / summaries
 8. 创建 SchedulerManager（`--scheduler-ai-id`，空则回落 `--feishu-ai-id`）
-8b. 创建 AuthManager（地址非空时；从 `{appdata}/auth.enc.json` 恢复登录态）— **旁挂**：不注入 Session、不写 ContextVar、不进 `_do_persist` 快照（凭证不落 `state/latest.json`）。随后 `nudge_warm()` 预热云端连接（注入 `tg`，详见 [AuthManager 连接复用](#authmanager-连接复用)）
 9. await create_app(..., default_agent=..., default_workspace=..., appdata=..., schedm=..., authm=...)  — 注册 REST（含 `GET /defaults`；`authm` 非 None 才注册 `/auth/*`）
 10. 为每个已恢复 Session 的 workspace `schedm.ensure(...)` — 按需拉起调度 Session（无 `schedules/` 则跳过）
 11. 创建 _do_persist 闭包（快照 managers → state.save，sessions 含 `agent`；`list_all()` 默认已排除调度 Session）
@@ -228,7 +229,7 @@ def _socket_path(prefix: str, kind: str, entity_id: str) -> str:
 2. 无显式 ``id`` 且已有 **完全相同** 配置（`provider`/`model`/`api_key`/`base_url`，base_url 忽略尾部 `/`）→ **直接返回已有** `AiInfo`，不新建实例（防模型池堆同款）。带显式 ``id``（如 Session 复活悬空 `ai_id`）时仍可再建一条同配置不同 id——spa-v2 模型池按配置指纹折叠展示。显式 `id` 已存在 → `ValueError`
 3. `_socket_path(prefix, "ais", ai_id)` 生成 socket 路径
 4. `_ensure_socket_dir(socket)` 创建父目录（anyio 异步）
-5. 构造 `Ai(...)`（传入 api_key + base_url + `max_context_tokens`），创建 `CancelScope`，`task_group.start_soon`
+5. `_spawn(info)`：构造 `Ai(...)`（传入 api_key + base_url + `max_context_tokens`），创建 `CancelScope`，`task_group.start_soon`。**key 解析只在这一处发生**（见下「免费模型的 key 替换」），`create` 与 `refresh_where` 共用，不会出现「新建时替换了、重建时忘了替换」
    - `max_context_tokens` 是 compaction 阈值：`-1`（默认）保持 `Ai` 自身的解析
      （`PSI_MAX_CONTEXT_TOKENS`，否则 100K），`0` 表示禁用。**必须显式透传**——漏传会让
      该参数永远停在兜底值、Gateway 侧无法配置。阈值应显著小于模型真实上下文窗口，详见
@@ -248,6 +249,30 @@ def _socket_path(prefix: str, kind: str, entity_id: str) -> str:
 **get_socket(ai_id)**：AI 在 `_entries` 中则返回其 socket 路径；不在则通过 `_socket_path()` 计算路径返回（不抛 LookupError）。这使 Session 创建可以在 AI 尚未启动时预计算 socket 路径，支持启动恢复场景。
 
 AI 运行时 crash 时，`_run_ai` 的 except 块从 `_entries` 中移除该 entry 并调用 `_persist`，确保持久化状态与内存一致。
+
+### 免费模型的 key 替换
+
+实现在 `_free_model.py`。C 端默认免费模型走云端转发（`https://account.genuineknowledge.cn/llm/v1`），供应商 key 只在云端的 litellm 容器里，客户端凭**登录态**换算力。但 token 全程由 Gateway 持有并加密落盘，前端拿不到也不该拿（`authFlow.ts` 更要求登录组件源码不出现 token 字面量，理由是 XSS）。
+
+所以 SPA 填哨兵值 `haitun-default`，Gateway 在 `_spawn` 里换成真 token：
+
+| 关注点 | 做法 |
+| --- | --- |
+| 注入点 | `AIManager._resolve_key: Callable[[str, str], str]`，默认 `_key_as_is` 原样返回。`__init__.py` 在创建 `AuthManager` 后接上 `make_key_resolver(authm.bearer_token, authm.endpoint)` |
+| 替换条件 | **两条同时成立**：`api_key` 是哨兵，且 `base_url` 与认证服务**同源**（scheme + host + port）。token 只能发给签发它的那台主机 —— 否则改一份 `state/latest.json` 就能把凭证送去任意域名 |
+| token 去哪了 | **只活在 `Ai` 实例里**。`AiInfo.api_key` 仍是哨兵，所以不进 `state/latest.json`（那里 api_key 是明文）、不经 `/ais` 下发给 SPA。`test_free_model.py` 断言整个 `asdict(AiInfo)` 里不出现 token |
+| 取值口 | `AuthManager.bearer_token()` 是唯一的进程内取值口，**不接任何下行响应**（不进 `status()`、不进 `/ais`、不进快照） |
+| 未登录 | **仍然拉起 socket，key 为空**，请求时拿云端 401。不拉起的表现是用户看到模型列表少一项，比 401 难懂得多 |
+| 认证关闭 | `PSI_AUTH_ENDPOINT=""` 时不创建 `AuthManager`，`_resolve_key` 保持默认，一切原样透传 |
+
+**`AuthManager` 必须建在恢复 AI 之前**（`__init__.py`）：交给 `Ai` 的 key 在 socket 构造时就定了，建晚了恢复出来的 socket 会带着哨兵起来，第一次对话必然 401。
+
+**`refresh_where(predicate) -> list[str]`**：登录态变了要原地重建匹配的 socket。
+- **为什么需要**：进 `_config_key` 去重键的是 `AiInfo.api_key`，而那里存的是哨兵 —— 去重键**看不见 token 变化**，换了登录态不会自然重建。不补这个机制的后果：换账号后仍拿已吊销的旧 token 请求，一路 401；登出后仍能继续用，更糟
+- **原地重建，不是删了重加**：同一个 `AiInfo` 原样放回，模型列表 / Session 的 `backend_id` / 快照全都不动，用户看不到模型消失又出现。变的只有 `Ai` 手里那份 key
+- **接线**（`server.py:_refresh_free_models`）：`_auth_verify` / `_auth_complete` 在 `status == 200` 时调；`_auth_logout` **无条件**调 —— `logout()` 即使云端不可达也会走 `logout_local()`，本机已经登出了
+
+哨兵值 `haitun-default` 是**跨边界契约**，共三处：`_free_model.py`、`spa-v2/src/services/bootstrapAi.ts`、`spa/src/bootstrapAi.js`。任改一处就静默失效（带着哨兵去请求，云端回 401）。
 
 ## RouterManager
 

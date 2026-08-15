@@ -2,13 +2,18 @@ import { api } from './api.js'
 
 /**
  * SPA open-and-use defaults. Gateway only exposes POST /ais — no server-side
- * bootstrap. Real upstream key lives only on the company proxy VM
- * (misakamikoto.genuineknowledge.cn); client ships a placeholder Bearer.
+ * bootstrap. The upstream provider key lives only in the cloud; the client ships
+ * a placeholder and the Gateway substitutes the login token when spawning the AI
+ * process.
+ *
+ * `base_url` must stay same-origin with the account service and `api_key` must
+ * match `PLACEHOLDER_API_KEY` in `gateway/_free_model.py` — the Gateway only
+ * substitutes when both hold. Keep this in sync with `spa-v2`'s copy.
  */
 export const DEFAULT_REMOTE_AI = {
   provider: 'openai',
   model: 'deepseek-v4-flash',
-  base_url: 'https://misakamikoto.genuineknowledge.cn',
+  base_url: 'https://account.genuineknowledge.cn/llm/v1',
   api_key: 'haitun-default',
 }
 

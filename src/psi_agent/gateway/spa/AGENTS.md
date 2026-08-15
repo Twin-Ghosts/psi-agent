@@ -81,7 +81,9 @@ fallback 模式隐藏控制 AI 并提交 `router_ai_id: null`、`router_timeout:
 
 ## 打开即用（远程默认 AI）
 
-空 AI 池时 **不要**在启动时 POST 默认模型——必须先打开 Hub 模型池，让用户选择「连接自有 API」或「使用免费模型」。「使用免费模型」= `clearAiPool()` 清空本地 AI 配置（池保持为空）；真正需要对话/新建会话时，再由 `ensureDefaultAi()` 惰性 `POST /ais` 挂上远程默认（公司域名 `https://misakamikoto.genuineknowledge.cn` / `deepseek-v4-flash`，与 Hub DeepSeek 预设一致；占位 key `haitun-default`）。Gateway AI 把该 `base_url` 原样交给 any-llm（`api_base`），请求上游 `{base_url}/chat/completions`。真正的 upstream（当前为 OpenCode Zen）与 API key **只在公司域名所在 VM 的 Nginx 注入**，不进 SPA / 安装包。Gateway **不**提供 `/ais/bootstrap` 或内置默认 AI。
+空 AI 池时 **不要**在启动时 POST 默认模型——必须先打开 Hub 模型池，让用户选择「连接自有 API」或「使用免费模型」。「使用免费模型」= `clearAiPool()` 清空本地 AI 配置（池保持为空）；真正需要对话/新建会话时，再由 `ensureDefaultAi()` 惰性 `POST /ais` 挂上远程默认（`https://account.genuineknowledge.cn/llm/v1` / `deepseek-v4-flash`，与 Hub DeepSeek 预设一致；哨兵 key `haitun-default`）。Gateway AI 把该 `base_url` 原样交给 any-llm（`api_base`），请求上游 `{base_url}/chat/completions`。真正的 upstream 与供应商 API key **只在 psi-cloud 同机的 litellm 容器里**，不进 SPA / 安装包。Gateway **不**提供 `/ais/bootstrap` 或内置默认 AI。
+
+**哨兵 key 由 Gateway 换成登录 token**（`gateway/_free_model.py`）：`api_key` 是 `haitun-default` 且 `base_url` 与认证服务同源时，拉起 AI 子进程时替换成 `AuthManager` 持有的 token；替换后的值只活在 `Ai` 实例里，不进快照、不经 `/ais` 下发。所以这里的 `haitun-default` 是**跨边界契约**，改它要同时改 `spa-v2/src/services/bootstrapAi.ts` 与 `gateway/_free_model.py`。
 
 ## 目录结构
 
@@ -393,7 +395,7 @@ Session 标题由服务端 `/titles` 维护，**不在** localStorage 存储。
 5. selectSession (useSession.js) → 从 /history + localStorage 加载消息
 6. loadingEnv = false
 ```
-打开即用：远程 `https://misakamikoto.genuineknowledge.cn`（常量见 `bootstrapAi.js`）。空池先展示模型池；「使用免费模型」清空本地配置；新建会话 / 首条对话时若仍空池，才 `ensureDefaultAi()` 惰性挂远程免费默认。Hub/高级配置可覆盖。
+打开即用：远程 `https://account.genuineknowledge.cn/llm/v1`（常量见 `bootstrapAi.js`；需登录态，Gateway 用 token 换掉哨兵 key）。空池先展示模型池；「使用免费模型」清空本地配置；新建会话 / 首条对话时若仍空池，才 `ensureDefaultAi()` 惰性挂远程免费默认。Hub/高级配置可覆盖。
 
 新对话空池路径（`handleNewSession`）：`ensureDefaultAi()` → 失败则提示用户去 Hub 自连。
 

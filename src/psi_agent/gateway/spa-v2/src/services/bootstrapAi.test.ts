@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AiInfo } from './api'
 import {
   dedupeAisForDisplay,
+  DEFAULT_REMOTE_AI,
   hydrateAiForSessions,
   isPlaceholderAi,
   pickPreferredAi,
@@ -25,6 +26,27 @@ const ai = (partial: Partial<AiInfo> & Pick<AiInfo, 'id' | 'api_key'>): AiInfo =
   base_url: partial.base_url ?? 'https://api.deepseek.com/v1',
 })
 
+describe('DEFAULT_REMOTE_AI', () => {
+  /**
+   * These three values are a contract with `gateway/_free_model.py`. The Gateway
+   * only swaps the placeholder for a login token when the key matches AND the
+   * base_url is same-origin with the account service. Drift on either side means
+   * the free model ships a placeholder and the cloud answers 401 — a failure the
+   * SPA's own tests would otherwise never see.
+   */
+  it('keeps the placeholder key so the Gateway substitutes a token', () => {
+    expect(DEFAULT_REMOTE_AI.api_key).toBe(PLACEHOLDER_API_KEY)
+  })
+
+  it('points at the account service origin, /llm/v1 path', () => {
+    expect(DEFAULT_REMOTE_AI.base_url).toBe('https://account.genuineknowledge.cn/llm/v1')
+  })
+
+  it('is treated as a placeholder AI, so real keys still win', () => {
+    expect(isPlaceholderAi(DEFAULT_REMOTE_AI)).toBe(true)
+  })
+})
+
 describe('dedupeAisForDisplay', () => {
   it('collapses same config different ids; keeps preferred', () => {
     const a = ai({
@@ -32,14 +54,14 @@ describe('dedupeAisForDisplay', () => {
       api_key: PLACEHOLDER_API_KEY,
       provider: 'openai',
       model: 'deepseek-v4-flash',
-      base_url: 'https://misakamikoto.genuineknowledge.cn/',
+      base_url: 'https://account.genuineknowledge.cn/llm/v1/',
     })
     const b = ai({
       id: 'b',
       api_key: PLACEHOLDER_API_KEY,
       provider: 'openai',
       model: 'deepseek-v4-flash',
-      base_url: 'https://misakamikoto.genuineknowledge.cn',
+      base_url: 'https://account.genuineknowledge.cn/llm/v1',
     })
     expect(dedupeAisForDisplay([a, b]).map((x) => x.id)).toEqual(['a'])
     expect(dedupeAisForDisplay([a, b], 'b').map((x) => x.id)).toEqual(['b'])

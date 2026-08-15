@@ -119,6 +119,7 @@ src/
         ├── __init__.py              # Gateway dataclass + run()
         ├── _manager.py             # 共享类型 + helpers
         ├── _ai_manager.py         # AIManager
+        ├── _free_model.py          # 免费模型哨兵 key → 登录 token（同源校验）
         ├── _session_manager.py    # SessionManager
         ├── _scheduler_manager.py  # SchedulerManager — 每 workspace 一个全量激活的调度 Session（触发其 schedules/）
         ├── _router_manager.py      # RouterManager — 内部语义路由服务注册表
@@ -369,6 +370,14 @@ uv build                         # 构建
 3. **异常与取消安全**：检查改动点及其邻近代码是否异常安全——被 `cancel` 时会不会出问题？是否存在 cancel 时资源泄露（未关闭的 socket / `AppRunner` / 文件 / 子进程 / 上游 streaming 连接）？清理代码必须放在 `finally`、`except` 或 `async with` 上下文管理器（`__aexit__`）中，跨 `await` 的清理用 `anyio.CancelScope(shield=True)` 保护。注意 `CancelledError` 是 `BaseException`，不在 `Exception` 之下——`except Exception` 不会（也不应）吞掉它；严禁用 `except BaseException` 误吞取消信号。
 
 4. **测试补充**：为新增 / 变更的逻辑补 unit test；涉及跨组件交互（socket、SSE、agent loop、错误传播）的补 integration test。测试目录镜像 `src/psi_agent/`，集成测试放 `tests/integration/`。改完后跑 `uv run pytest` 确认通过。
+
+## 云端服务边界（psi-cloud）
+
+C 端注册登录的云端服务**不在本仓库**，在服务器 `/srv/psi-cloud`（独立 git 仓库）。psi-agent 是可安装的客户端包，塞进服务端目录会让打包与依赖边界变浑。
+
+- 两侧只通过 HTTP 契约耦合。契约的权威定义是云端的 `/openapi.json`（自动生成，不会与实现脱同步），设计意图见 `docs/onboarding/psi-agent C端注册登录方案.md`。
+- 云端的目录结构、模块契约与硬规则记在 `/srv/psi-cloud/AGENTS.md`，**本文不重复**。一句话概括：`core/` 是框架且不认识任何业务，`modules/` 下每个目录一块业务自报清单，认证是 `modules/auth`。
+- 本机侧只有 `gateway/_auth_manager.py` 与 `_auth_store.py` 两个文件与它对接，**不持任何供应商密钥**。改动云端接口要同步上面那份设计文档。
 
 ## 未来扩展方向
 

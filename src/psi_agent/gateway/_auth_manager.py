@@ -455,6 +455,18 @@ class AuthManager:
         if self._store is not None:
             await self._store.clear_token()
 
+    def bearer_token(self) -> str:
+        """当前 token, 未登录时为空串。
+
+        ** 唯一的进程内取值口 **, 只给免费模型换算力用 (见 ``_free_model.py``)。
+        不加锁: 读一个 str 是原子的, 而这里要的就是「此刻的值」—— 拿到旧值的
+        后果是一次 401, 拿锁的代价是每次建 AI socket 都要等一次认证请求。
+
+        ** 不要把它接到任何下行响应上 **: token 不进快照、不进 ``/ais``、不进
+        ``status()``。要判断有没有登录用 ``status()["loggedIn"]``。
+        """
+        return self._token
+
     # ---- 状态 ----
     def status(self) -> dict[str, Any]:
         """给 SPA 判断该显示登录引导还是身份信息。不含 token 本身。"""

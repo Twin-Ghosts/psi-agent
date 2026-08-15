@@ -1,18 +1,29 @@
 import { createAi, listAis, type AiInfo } from './api'
 
 /**
- * Remote free-model endpoint (company domain). Real upstream key lives only on
- * the VM behind this proxy; SPA ships a placeholder Bearer.
+ * Remote free-model endpoint (company domain). The upstream provider key lives
+ * only in the cloud; the SPA ships a placeholder and the Gateway substitutes the
+ * login token when spawning the AI process — the SPA never holds a token.
+ *
+ * `PLACEHOLDER_API_KEY` below is a cross-boundary contract with
+ * `gateway/_free_model.py`. Change one side only and the free model silently
+ * ships the placeholder to the cloud, which answers 401.
  *
  * Do NOT POST this on boot when the pool is empty and there are no Sessions —
  * open the models panel first. If a Session's bound AI was deleted, the next
  * chat falls back to the currently selected model (see ``ensureSessionAi``).
  */
-/** Aligns with Hub model pool DeepSeek preset (`deepseek-v4-flash`); key injected on VPS. */
+/**
+ * Aligns with Hub model pool DeepSeek preset (`deepseek-v4-flash`).
+ *
+ * `base_url` must stay same-origin with the account service: the Gateway only
+ * swaps the placeholder for a real token when the two origins match, so a
+ * different host silently gets an empty key (and a 401 from upstream).
+ */
 export const DEFAULT_REMOTE_AI = {
   provider: 'openai',
   model: 'deepseek-v4-flash',
-  base_url: 'https://misakamikoto.genuineknowledge.cn',
+  base_url: 'https://account.genuineknowledge.cn/llm/v1',
   api_key: 'haitun-default',
 }
 

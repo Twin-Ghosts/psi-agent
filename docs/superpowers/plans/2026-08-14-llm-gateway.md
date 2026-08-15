@@ -340,8 +340,16 @@ spec「客户端改动」写「`api_key` 字段改为传登录态 token」。**�
 
 **改为：** SPA 继续填哨兵值，由 **Gateway 在拉起 AI 子进程时把哨兵替换成真实 token**。
 好处是 token 不进快照、不进前端、AI 层与 Session 层零改动（符合 spec「不做」第 5 条）。
-`_ai_manager._config_key` 把 api_key 计入去重键（`_ai_manager.py:131`），所以重新登录
-后 token 变化会自然拉起新 socket、旧的退役 —— 轮换不需要额外机制。
+**本条原先写「`_config_key` 把 api_key 计入去重键，所以重新登录后 token 变化会自然
+拉起新 socket —— 轮换不需要额外机制」，实施时证伪。** 进去重键的是 `AiInfo.api_key`，
+而那里存的是**哨兵**（token 只活在 `Ai` 实例里，见上）—— 去重键从头到尾看不见 token
+变化，socket 不会自然重建。不补机制的后果：换账号登录后仍拿旧 token（已被云端吊销）
+去请求，一路 401；登出后仍能继续用，更糟。
+
+**改为：** `AIManager.refresh_where(predicate)` 在登录/登出时**原地重建**匹配的 socket
+（`AiInfo` 一个字段都不变，所以模型列表、Session 的 `backend_id`、快照全都不动），
+重建时重新走一次 key 解析。接线在 `server.py` 的 `_auth_verify` / `_auth_complete`
+（200 时）与 `_auth_logout`（无条件 —— `logout()` 即使云端不可达也会 `logout_local()`）。
 
 ### Interfaces
 
@@ -356,22 +364,40 @@ export const DEFAULT_REMOTE_AI = {
 ```
 
 ```python
-# gateway/__init__.py —— 构造 AI socket 配置处（现 167 行附近）
-# api_key 为哨兵且 base_url 指向云端时，用 AuthManager 持有的 token 替换。
-# 未登录则不拉起该 socket ——  免费模型需要登录态。
+# gateway/_free_model.py（新增）
+PLACEHOLDER_API_KEY = "haitun-default"          # 与两份 SPA 是同一个契约
+def is_cloud_free_model(api_key: str, base_url: str, auth_endpoint: str) -> bool: ...
+def make_key_resolver(token_of, auth_endpoint) -> Callable[[str, str], str]: ...
+
+# gateway/_ai_manager.py
+_resolve_key: Callable[[str, str], str] = _key_as_is   # 注入点，只作用于交给 Ai 的那一份
+async def refresh_where(self, predicate) -> list[str]: ...
+
+# gateway/_auth_manager.py
+def bearer_token(self) -> str: ...   # 唯一的进程内取值口，不接任何下行响应
 ```
+
+替换条件是**两条同时成立**：`api_key` 是哨兵，且 `base_url` 与认证服务**同源** ——
+token 只能发给签发它的那台主机，否则改一份快照就能把凭证送去任意域名。
+
+**「未登录则不拉起该 socket」这一条改掉了。** 免费模型是默认配置，不拉起的表现是用户
+看到模型列表少一项，比云端回的 401 难懂得多。改为：仍然拉起，key 为空，请求时拿云端
+的 401。（`_free_model.py` 与 `test_free_model.py` 里都写明了这个取舍。）
+
+AuthManager 的构造必须**移到恢复 AI 之前**（`__init__.py`）：免费模型的 socket 在构造时
+就要拿到 token，建晚了恢复出来的 socket 会带着哨兵起来，第一次对话必然 401。
 
 ### Steps
 
-- [ ] 读 `gateway/__init__.py:150-270` 与 `_ai_manager.py:50-115`，确认替换点与未登录时的现有行为
-- [ ] 写 Python 测试（`tests/psi_agent/gateway/` 下，跟随既有命名）：哨兵 + 云端 base_url + 已登录 → 传给 AI 的 api_key 是真实 token；未登录 → 不拉起/明确失败；用户自填 key → 原样透传不被替换
-- [ ] 实现替换逻辑，跑测试转绿。**替换后的 token 不得写回快照** —— 加断言或测试守住
-- [ ] 改 `spa-v2/src/services/bootstrapAi.ts:12` 的 `base_url`
-- [ ] 同步 `spa-v2/src/services/bootstrapAi.test.ts` 断言
-- [ ] 改 `spa/src/bootstrapAi.js:8` 的 `base_url`（v1 别漏，两份都在用）
-- [ ] 复核 `isPlaceholderAi()`（`bootstrapAi.ts:56`）：api_key 仍是哨兵，语义**不变** —— 确认 `pickPreferredAi` 行为与改动前一致，不需要改。若跑测试发现不一致再处理
-- [ ] 前端测试与 lint：按仓库既有命令跑 `spa-v2` 的单测
-- [ ] 端到端验证 A1：已登录状态下 SPA v2 新建会话直接对话成功；SPA v1 同样验一次
+- [x] 读 `gateway/__init__.py:150-270` 与 `_ai_manager.py:50-115`，确认替换点与未登录时的现有行为
+- [x] 写 Python 测试（`tests/psi_agent/gateway/test_free_model.py`，16 例）：同源判定 6 例、解析函数 4 例、接进 `AIManager` 6 例
+- [x] 实现替换逻辑，跑测试转绿。**替换后的 token 不得写回快照** —— `test_token_reaches_ai_but_not_aiinfo` 断言整个 `asdict(AiInfo)` 里不出现 token
+- [x] 改 `spa-v2/src/services/bootstrapAi.ts:12` 的 `base_url`
+- [x] 同步 `spa-v2/src/services/bootstrapAi.test.ts` 断言（两处 dedupe URL + 新增 `DEFAULT_REMOTE_AI` 三条）
+- [x] 改 `spa/src/bootstrapAi.js:8` 的 `base_url`（v1 别漏，两份都在用）
+- [x] 复核 `isPlaceholderAi()`：api_key 仍是哨兵，语义不变，`pickPreferredAi` 无需改动（前端 163 例全绿佐证）
+- [x] 前端测试：`spa-v2` vitest 163 例全绿，`vite build` 通过。**spa-v2 没有 lint script**；`tsc --noEmit` 是**先前就坏的**（TypeScript 7.0.2 移除了 `baseUrl`，其 tsconfig 仍设着），与本次改动无关
+- [ ] 端到端验证 A1：已登录状态下 SPA v2 新建会话直接对话成功；SPA v1 同样验一次 —— **需要真实登录，交由负责人在客户端上点一次**；服务端侧的等价证据已由 `verify-llm-e2e.py` 取得（真实登录拿真 token 打真实上游，10 项通过）
 
 ---
 
