@@ -1,0 +1,95 @@
+"""`scripts/gen_legal_html.py` 的解析规则测试。
+
+锁的是四条容易回退的规则: 目录块判定(重复标题即结束)、Tab 表格、加粗透传、小标题与引出语之分。
+脚本在 `scripts/` 下不属包, 故用 importlib 按路径加载。
+"""
+# ruff: noqa: RUF001, RUF002  全角冒号是协议原文的字面量, 换成半角这些用例就测不到真实输入。
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+from types import ModuleType
+
+_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "gen_legal_html.py"
+
+
+def _load() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("gen_legal_html", _SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+gen = _load()
+
+
+def test_toc_run_ends_at_repeated_heading() -> None:
+    """目录末项后紧跟的正文首个标题同样匹配「一、」, 只数连续会把它吞进目录。"""
+    lines = ["标题", "一、甲", "二、乙", "三、丙", "一、甲", "正文一句。"]
+    assert gen._find_toc_range(lines) == (1, 4)
+
+
+def test_no_toc_when_headings_have_body_between() -> None:
+    """许可协议每个标题后紧跟正文, 不应误判出目录。"""
+    lines = ["标题", "一、甲", "正文。", "二、乙", "正文。", "三、丙", "正文。"]
+    assert gen._find_toc_range(lines) is None
+
+
+def test_body_heading_survives_toc() -> None:
+    """回归: 正文的「一、甲」曾被目录判定吞掉, 生成结果里少一个 h2。
+
+    这里的行序照隐私政策的真实形状: 先一段目录, 再逐章正文。
+    """
+    lines = ["标题", "一、甲", "二、乙", "三、丙", "一、甲", "正文。", "二、乙", "正文。", "三、丙", "正文。"]
+    body, _ = gen._render_body(lines)
+    assert body.count("<h2") == 3  # 正文三章都在, 目录不计入编号
+    assert '<nav class="toc">' in body
+    assert body.count("<li><a href=") == 3  # 三个目录项都能链到正文
+
+
+def test_bold_passthrough_and_escaping() -> None:
+    assert gen._inline("**要紧**的话") == "<strong>要紧</strong>的话"
+    # 先转义再替换, 否则 escape 会把生成的 <strong> 一起转掉
+    assert gen._inline("a<b & c") == "a&lt;b &amp; c"
+    assert gen._inline("**a<b**") == "<strong>a&lt;b</strong>"
+
+
+def test_tab_block_becomes_table() -> None:
+    body, _ = gen._render_body(["标题", "列一\t列二", "值一\t值二"])
+    assert "<th>列一</th>" in body
+    assert "<td>值一</td>" in body
+    assert body.count("<table>") == 1
+
+
+def test_numbered_subheading_vs_lead_in() -> None:
+    """`3.2 注册与登录` 是小标题; 以「：」收尾的同形行是正文引出语。"""
+    assert gen._is_h3("3.2 注册与登录")
+    assert not gen._is_h3("3.1 我们可能通过以下几种方式收集用户个人信息：")
+    # 超长的编号行是正文而非标题
+    assert not gen._is_h3("3.3 " + "字" * gen._H3_MAX_LEN)
+
+
+def test_meta_lines_collected_not_rendered() -> None:
+    body, meta = gen._render_body(["标题", "更新日期：2026-08-13", "生效日期：2026-08-13", "正文。"])
+    assert meta == ["更新日期：2026-08-13", "生效日期：2026-08-13"]
+    assert "更新日期" not in body
+
+
+def test_repo_docs_render_expected_shape() -> None:
+    """对库内两份真实协议做形状断言, 防止源文件换版后静默产出残缺 HTML。"""
+    for doc in gen.DOCS_TO_BUILD:
+        html_out = gen.render(doc)
+        assert html_out.count("<h1>") == 1
+        assert html_out.count("<h2") >= 12  # 两份都有十二章以上
+        assert 'class="meta"' in html_out
+        assert "<strong>" in html_out  # 加粗已写进 md 源
+        assert "**" not in html_out  # 加粗标记不应漏进产物
+
+
+def test_check_mode_passes_for_committed_output() -> None:
+    """库内产物应与 md 源一致 —— 不一致说明改了 md 忘了重新生成。"""
+    assert gen.main(["--check"]) == 0
