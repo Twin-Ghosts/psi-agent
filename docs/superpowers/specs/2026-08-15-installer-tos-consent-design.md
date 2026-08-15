@@ -46,7 +46,7 @@ spa-v2/legal/Haitun_隐私保护政策_1.0.md ───────┴→ script
 
 **生成物入库。** CI 里 `haitun-inno-setup`（`pyinstaller.yml:82`）与前端 build（`:66`）是两个 job，若不入库则两处都得装 Python 跑生成器。入库后加一步 `--check` 校验（生成结果与库内文件不一致则 CI 失败），避免改了 md 忘了重生成。
 
-**安装器不留副本。** `dontcopy` 直接 source 到 `spa-v2/public/`，装机时 `ExtractTemporaryFile` 落 `{tmp}` 再 `ShellExec` 打开。三个文件（两份 HTML + `legal.css`）必须一起解，否则浏览器拿不到样式。
+**安装器不留副本。** `dontcopy` 直接 source 到 `spa-v2/public/`，装机时 `ExtractTemporaryFile` 落 `{tmp}` 再 `ShellExec` 打开。三个文件（两份 HTML + `legal.css`）必须一起解，否则浏览器拿不到样式。**这三条必须写在 `[Files]` 的最前面** —— `SolidCompression=yes` 下取流中某文件要先解完它前面的所有文件，放末尾会让向导卡死几分钟（1.0.4 实测踩到，见第七节 A4）。
 
 ### 生成器要处理的四处源文件特征
 
@@ -186,6 +186,27 @@ Pascal 侧的静态核对：花括号 14/14 配平、`begin` 11 / `end;` 11 配�
 **查过一处存疑写法**：`Cursor := crHand`。Inno 的脚本引擎是 RemObjects Pascal Script + MiniVCL，光标常量用的是 Lazarus 的名字，不是 Delphi 的 `crHandPoint` —— 两份 Inno 实例代码（其中一份正是「装机时显示协议链接」的同类场景）都写 `crHand`，写法成立。
 
 **向导没人点过。** A3–A6（勾选门禁、链接打开、样式、`ScaleY` 0/48/72/108 的排版）需要在 Windows 上装一遍真安装包才能收，只有负责人能做。
+
+### A4 实测不通过（1.0.4），已修
+
+> 负责人在 1.0.4 真安装包上实测：**点两个链接没反应，等两三分钟后再点才正常打开。**
+>
+> 原因是本设计把三条 `dontcopy` 放在了 `[Files]` 的**末尾**。`SolidCompression=yes`
+> 把整包压成一条流，`ExtractTemporaryFile` 要取流中某个文件，得先把它**前面的全部文件**
+> 解一遍 —— 而前面是 `psi-agent.exe`（PyInstaller 全量依赖）加一整套 `msys64`，GB 量级。
+> 解压同步跑在 UI 线程上，所以症状是「整个向导点不动」而不是「打开得慢」；解完才弹浏览器，
+> 之后因为 `LegalFilesExtracted` 标记已置，再点就是即时的 —— 与「等两三分钟再点就好了」完全吻合。
+>
+> 官方文档 `ExtractTemporaryFile` 一节原话："When solid compression is enabled, be sure to
+> list your temporary files at (or near) the top of the [Files] section."
+> 本设计第 49 行只写了「三个文件必须一起解」，漏了顺序这一条。
+>
+> **改法**：三条 `dontcopy` 移到 `[Files]` 最前，并在紧随其后的 workspace 那行加 `solidbreak`
+> 另起压缩流 —— 前者解决当下，后者把协议文件的解压代价永久锁在约 70 KB 的独立块内，
+> 防止以后有人往列表后面追加大文件时重现同一问题。版本号 1.0.4 → 1.0.5。
+>
+> 没有加等待光标或进度条：那只会把卡顿装饰得体面些，不会让它变快。
+> **A4 需在 1.0.5 上重测。**
 
 英文语言下用户看到的仍是中文正文 —— 两份协议只有中文版，属已知限制。
 

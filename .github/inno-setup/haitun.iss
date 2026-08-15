@@ -2,7 +2,7 @@
 ; Packages the entire haitun-workspace (including psi-agent.exe, copied in at build time).
 
 #define MyAppName "HaiTun Agent"
-#define MyAppVersion "1.0.4"
+#define MyAppVersion "1.0.5"
 #define MyAppPublisher "Hefei Zhenzhi Artificial Intelligence Application Software Co., Ltd"
 #define MyAppExeName "haitun.exe"
 
@@ -47,15 +47,26 @@ english.LegalAgree=I have read and agree to the agreements above
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "..\..\examples\haitun-workspace\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "haitun.ico"; DestDir: "{app}"
-Source: "haitun.exe"; DestDir: "{app}"
-; 协议页要读的三个文件。dontcopy = 只打进安装包供向导页临时解出, 不装到 {app}
+; ** 这三行必须留在 [Files] 最前面, 不是风格问题。 **
+; SolidCompression=yes 把整包压成一条流, ExtractTemporaryFile 要解出流中某个文件,
+; 就得先把它前面的所有文件全解一遍。本包里前面是 psi-agent.exe（PyInstaller 全量依赖）
+; 加一整套 msys64, 量级在 GB —— 实测把它们放在末尾时, 协议页点链接后向导整体卡死
+; 两三分钟（解压在 UI 线程上跑, 所以是「点了没反应」而非「打开得慢」), 解完才弹浏览器。
+; 挪到最前, 前面没有东西要解, 于是即时打开。官方文档 ExtractTemporaryFile 一节原话:
+; "be sure to list your temporary files at (or near) the top of the [Files] section"。
+;
+; dontcopy = 只打进安装包供向导页临时解出, 不装到 {app}
 ; —— 产品内那份走 spa-v2/dist（vite 会把 public/* 拷进去）, 装两份必有一份过时。
-; 这三个是 scripts/gen_legal_html.py 的产物, 改 docs/ 下的 md 后需重新生成。
+; 这三个是 scripts/gen_legal_html.py 的产物, 改 spa-v2/legal/ 下的 md 后需重新生成。
 Source: "..\..\src\psi_agent\gateway\spa-v2\public\terms.html"; Flags: dontcopy
 Source: "..\..\src\psi_agent\gateway\spa-v2\public\privacy.html"; Flags: dontcopy
 Source: "..\..\src\psi_agent\gateway\spa-v2\public\legal.css"; Flags: dontcopy
+; solidbreak: 在此另起一条压缩流, 把上面三个文件锁在一个只有它们自己的块里(约 70 KB)。
+; 上面的「放最前」已经解决了当下的卡顿; 这行防的是以后有人往列表**后面**追加大文件,
+; 那时协议文件的解压代价仍然被限制在这 70 KB 内。代价是损失一点压缩率, 可忽略。
+Source: "..\..\examples\haitun-workspace\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs solidbreak
+Source: "haitun.ico"; DestDir: "{app}"
+Source: "haitun.exe"; DestDir: "{app}"
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\haitun.ico"
@@ -84,7 +95,12 @@ var
 
 { 打开协议 HTML。ExtractTemporaryFile 对同一文件重复调用会报错, 故用标记只解一次;
   legal.css 必须一并解出, 否则浏览器拿到的是无样式裸文本。临时目录由 Inno 退出时自清。
-  注意: 本行不能写花括号常量 —— Pascal 注释以花括号定界, 写进去会提前闭合注释。 }
+  注意: 本行不能写花括号常量 —— Pascal 注释以花括号定界, 写进去会提前闭合注释。
+
+  解压是同步的, 跑在 UI 线程上, 期间窗口不响应。没有加等待光标或进度提示:
+  三个文件已被 [Files] 的顺序 + solidbreak 限制在约 70 KB 的独立压缩块内, 这个量级
+  没有可感知的等待。真正要防的是「块前面堆了 GB 级文件」, 那已经在 [Files] 处结构性
+  解决了 —— 加个转圈光标只会把卡顿装饰得体面些, 不会让它变快。 }
 procedure OpenLegalDoc(const FileName: String);
 var
   ResultCode: Integer;
