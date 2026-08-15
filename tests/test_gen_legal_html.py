@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "gen_legal_html.py"
 
 
@@ -93,3 +95,50 @@ def test_repo_docs_render_expected_shape() -> None:
 def test_check_mode_passes_for_committed_output() -> None:
     """库内产物应与 md 源一致 —— 不一致说明改了 md 忘了重新生成。"""
     assert gen.main(["--check"]) == 0
+
+
+def _one_doc_at(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, out_name: str = "out.html") -> Path:
+    """把 DOCS_TO_BUILD 收窄成一份、产物指向 tmp, 返回那个产物路径。
+
+    REPO_ROOT 一并改掉: ``main()`` 打日志时对产物路径调 ``relative_to(REPO_ROOT)``,
+    tmp 在库外会直接 ValueError。
+    """
+    out = tmp_path / out_name
+    src = gen.DOCS_TO_BUILD[0]
+    monkeypatch.setattr(gen, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(gen, "DOCS_TO_BUILD", (gen.LegalDoc(src.src, out, src.browser_title),))
+    return out
+
+
+def test_check_mode_fails_when_output_is_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """**CI 拦「改了 md 忘了重生成」全靠这个非 0 返回。**
+
+    原先只测了「一致时返回 0」那一面 —— 那条在 --check 整个坏掉(比如恒返回 0)时
+    照样绿, 等于守门的那一半没测。
+    """
+    out = _one_doc_at(tmp_path, monkeypatch)
+    out.write_text("<html>过期内容</html>", encoding="utf-8")
+    assert gen.main(["--check"]) == 1
+    # 产物缺失也该判过期, 不该当成一致
+    out.unlink()
+    assert gen.main(["--check"]) == 1
+
+
+def test_check_mode_ignores_crlf_from_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """CRLF 检出不该被判过期。
+
+    本仓 core.autocrlf=true 且无 .gitattributes: 库内存 LF, Windows 检出得 CRLF。
+    按字节比对会让 CI(windows-latest)在干净检出上就判过期 —— 这条守住那次修正。
+    """
+    out = _one_doc_at(tmp_path, monkeypatch)
+    generated = gen.render(gen.DOCS_TO_BUILD[0])
+    # 模拟 autocrlf 检出: 写成 CRLF
+    out.write_bytes(generated.replace("\n", "\r\n").encode("utf-8"))
+    assert gen.main(["--check"]) == 0
+
+
+def test_generate_writes_lf_even_on_windows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """生成必须写 LF: 否则换台机器跑一次就产生全文件 diff。"""
+    out = _one_doc_at(tmp_path, monkeypatch)
+    assert gen.main([]) == 0
+    assert b"\r\n" not in out.read_bytes()
