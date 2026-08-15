@@ -77,9 +77,20 @@ HAITUN_UPDATE_INSTALLER_NAME=HaiTun_Agent_Setup.exe
 
 `haitun.exe` 启动后会开启一个后台线程，每 24 小时请求 `<base>/version.txt`。发现远端版本与本地 `HAITUN_VERSION` 不一致时弹窗询问，用户确认后自动下载并启动 `<base>/HaiTun_Agent_Setup.exe`；下载失败时回退为用浏览器打开下载链接。
 
+## 安装期协议同意
+
+安装向导第一页是协议页：两个链接分别打开《Haitun Agent 软件许可及服务协议》与《Haitun Agent 隐私保护政策》，**一个勾选框同时覆盖两份**，不勾则「下一步」禁用。这个形态由许可协议导言本身规定（「您在本软件安装过程中勾选同意本协议，即视为您同时同意隐私保护政策」），不是 UI 选择。
+
+两份协议的 HTML 是 `docs/` 下 md 源的生成物，由 `scripts/gen_legal_html.py` 产出到 `src/psi_agent/gateway/spa-v2/public/`，安装器与产品内共用同一份。**改了 md 必须重新生成**，否则 CI 的 `--check` 步骤会失败。
+
+**不记录同意状态。** 无注册表、无标记文件 —— 团队决定每次安装都勾。自动更新走完整向导（`haitun.c` 拉起 setup 未带 `/SILENT`），因此升级也会经过协议页。
+
+**静默安装视为同意。** `/SILENT` 与 `/VERYSILENT` 会跳过全部向导页含协议页，未提供 `/ACCEPTTOS` 之类的显式参数。以静默方式批量部署本软件的一方，视为已代表最终用户接受上述两份协议，并应自行向最终用户完成协议告知。
+
 ## 上线前检查
 
 - 确认 `haitun.iss` 版本号已递增；
+- 确认协议 HTML 与 `docs/` 下 md 源一致（`python scripts/gen_legal_html.py --check`），协议换版时尤其要查；
 - 确认 OSS 上 `version.txt` 内容是纯版本号（例如 `1.0.1`）；
 - 确认下载文件名是 `HaiTun_Agent_Setup.exe`，与 `HAITUN_UPDATE_INSTALLER_NAME` 一致；
 - 首次发布时如果 OSS 还没有 `version.txt`，workflow 会直接上传；

@@ -142,6 +142,8 @@ src/
 
 项目使用 **src-layout**（`src/psi_agent/`），由 `uv sync` 安装为 editable package。
 
+`scripts/` 放不属于包的仓库工具。目前一个：`gen_legal_html.py` 把 `docs/` 下两份协议 md 生成为 `spa-v2/public/{terms,privacy}.html`，**安装器协议页与产品内协议链接共用这一份产物**（安装器以 `dontcopy` 引同一路径）。它是生成物、入库、CI 用 `--check` 守同步；设计见 `docs/superpowers/specs/2026-08-15-installer-tos-consent-design.md`。
+
 各层的详细设计文档见：
 - **AI 层**: `src/psi_agent/ai/AGENTS.md` — provider 配置、请求透传、错误处理、context compaction 触发
 - **Session 层**: `src/psi_agent/session/AGENTS.md` — workspace 启动、agent loop、tool 加载调用、schedule 机制、history 持久化、context compaction

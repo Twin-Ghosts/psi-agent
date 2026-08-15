@@ -40,6 +40,11 @@ type Props = {
    * 父层探到「认证可用且未登录」时置真。
    */
   loginRequired?: boolean
+  /**
+   * 登录态在登录面板内变过（目前只有登出）。父层据此重新判门禁 ——
+   * 登出后必须重新拦住，否则登录窗上会冒出 ✕、点遮罩也能关掉。
+   */
+  onLoginStateChanged?: () => void
 }
 
 /**
@@ -59,6 +64,7 @@ export default function UserHub({
   openPanelRequest,
   onLoginGateDone,
   loginRequired = false,
+  onLoginStateChanged,
 }: Props) {
   // 头像改成弹菜单(资料 / 登录)后需要这两个: rootRef 判点击是否落在菜单外。
   const rootRef = useRef<HTMLDivElement | null>(null)
@@ -240,6 +246,8 @@ export default function UserHub({
         onClose={closeLoginPanel}
         onToast={onToast}
         mandatory={loginRequired}
+        /* 登出发生在面板内部, 父层不知道 —— 不透上去的话门禁只在冷启动那一下存在。 */
+        onLoginStateChanged={onLoginStateChanged}
       />
       <HubSettingsPanel
         show={panel === 'settings'}

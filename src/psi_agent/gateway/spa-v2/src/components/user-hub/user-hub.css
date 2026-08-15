@@ -1049,23 +1049,6 @@ button.hub-login-resend {
   font-size: 15px;
   justify-content: center;
 }
-/* ---------- 协议告知（A1）----------
-   原先是必勾复选框, 登录改为硬门禁后去掉了勾选(见 HubLoginPanel.tsx), 只留告知。 */
-.hub-legal-note {
-  display: flex;
-  margin: 14px 0 4px;
-  font-size: 12px;
-  line-height: 1.7;
-  color: var(--ink-soft);
-  text-align: center;
-  justify-content: center;
-}
-
-.hub-legal-note a {
-  color: var(--brand-600);
-  text-decoration: none;
-  font-weight: 600;
-}
 /* ---------- 提示条：info / warn / bad / ok ---------- */
 .hub-tip {
   display: flex;

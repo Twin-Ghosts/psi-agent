@@ -201,9 +201,11 @@ npm run dev
 | 两种刻意放行 | `available === false`（部署方显式关掉登录，没有门可守，拦下去只会得到一个点不动的表单）；探测抛错（连「是否需要登录」都不知道，且 Gateway 不通本身会由别处报错） |
 | 断网时不放行 | D3 屏在 `mandatory` 下撤掉「暂不登录，继续使用」，只留「重试」，并把文案改成「登录后才能使用」—— 退不出去必须给出原因 |
 
-**登录时没有隐私条款勾选**（同批决定删除）：改为一行被动告知「登录即表示同意《用户服务协议》与《隐私政策》」（`.hub-legal-note`）。**协议链接必须保留** —— 去掉勾选不等于不告知。原先的 `agreed` / `shakeAgree` state 与 `onSend` 的前置检查一并删净，`startBind` 里那句「已登录用户绑定无需再勾」也随之消失。
+**登录屏上没有任何协议文字。** 演变过三轮：必勾复选框 → 一行被动告知（`.hub-legal-note`）→ 整句去掉。**因为同意动作已前移到安装期** —— 安装向导第一页是必勾的协议页（`.github/inno-setup/haitun.iss`），装过软件的人必然已经同意过，登录窗再说一遍只是噪音。`agreed` / `shakeAgree` state、`onSend` 的前置检查、`LEGAL_TERMS` / `LEGAL_PRIVACY` 常量均已删净。`HubLoginPanel.smoke.test.tsx` 用 `queryByRole(...)).toBeNull()` 反向守着，防止有人「顺手加回来」。
 
-`public/` 下的 `terms.html` / `privacy.html` 是协议页，**引用时必须走 `import.meta.env.BASE_URL`** —— 本 SPA 挂在 `/spa-v2/` 下，写死绝对路径会打到站点根目录 404（海豚图标曾这么碎过）。
+协议正文仍在 `public/terms.html` / `privacy.html`（安装器读的就是这两个，见下），只是 SPA 目前不再链向它们。**若将来要在界面上重新放出协议入口，引用必须走 `import.meta.env.BASE_URL`** —— 本 SPA 挂在 `/spa-v2/` 下，写死绝对路径会打到站点根目录 404（海豚图标曾这么碎过，`DOLPHIN` 常量就是为此）。
+
+**这两个 HTML 是生成物，不要手改。** 源是 `docs/Haitun_软件许可及服务协议_1.0.md` 与 `docs/Haitun_隐私保护政策_1.0.md`，由 `scripts/gen_legal_html.py` 生成；`legal.css` 是手写的，两页共用。安装器的协议页以 `dontcopy` 引同一路径（`.github/inno-setup/haitun.iss`），**安装期与产品内共用一份产物** —— 各存一份必有一份过时。改了 md 要重新生成，CI 有 `--check` 步骤守着。加粗（`**`）写在 md 源里而非生成器里：加粗属法律判断，得留在人能审的 diff 里。
 
 ## 目录
 

@@ -2270,6 +2270,12 @@ export default function HaiTunAgentWorkspace({
               setAuthGate("passed");
               void recheckAuthGate();
             }}
+            /* 登出后重新判门禁。门禁本来只在启动时探一次, 而登出发生在登录面板
+               内部 —— 不重探的话 authGate 停在 `passed`, 登录窗就有了 ✕、点遮罩
+               也能关掉, 门等于只在冷启动那一下存在。 */
+            onLoginStateChanged={() => {
+              void recheckAuthGate();
+            }}
             onAisChanged={(ais: AiInfo[]) => {
               if (ais.length === 0) {
                 setAiId(null);

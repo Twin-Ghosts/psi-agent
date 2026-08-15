@@ -53,6 +53,14 @@ type Props = {
    * 唯一出口是登录成功。用户自己从侧栏点开时为假（那时他已登录或想看账户）。
    */
   mandatory?: boolean
+  /**
+   * 登录态在本面板内变过（登出成功 / 本设备被移除）。
+   *
+   * 硬门禁是父层按 `/auth/status` 定的, 而**登出发生在本面板内部** —— 不往上说
+   * 一声, 父层的 `authGate` 会一直停在启动那次探到的 `passed`, 于是登出后登录窗
+   * 就有了 ✕、点遮罩也能关掉, 门等于只在冷启动那一下存在。
+   */
+  onLoginStateChanged?: () => void
 }
 
 /**
@@ -76,11 +84,14 @@ const EMPTY_CHANNEL: ChannelState = { account: '', cooldown: 0 }
 // 必须走 BASE_URL: 这个 SPA 挂在 `/spa-v2/` 下, 写死 `/haitun-dolphin.png`
 // 会打到站点根目录, 404 出一个碎图标。
 const DOLPHIN = `${import.meta.env.BASE_URL}haitun-dolphin.png`
-// 协议页同样在 public/ 下, 同样必须走 BASE_URL
-const LEGAL_TERMS = `${import.meta.env.BASE_URL}terms.html`
-const LEGAL_PRIVACY = `${import.meta.env.BASE_URL}privacy.html`
 
-export default function HubLoginPanel({ show, onClose, onToast, mandatory = false }: Props) {
+export default function HubLoginPanel({
+  show,
+  onClose,
+  onToast,
+  mandatory = false,
+  onLoginStateChanged,
+}: Props) {
   const [status, setStatus] = useState<AuthStatus | null>(null)
   const [channel, setChannel] = useState<Channel>('phone')
   // 两条链路各自留一份，切 Tab 不互相清（原型 B1）
@@ -344,6 +355,10 @@ export default function HubLoginPanel({ show, onClose, onToast, mandatory = fals
       setDisplayName('')
       backToInput()
       await refresh()
+      /* 必须通知父层重新判门禁: 登出后就该重新被拦在登录窗里。放在 refresh() 之后
+         是为了让本面板先回到输入屏 —— 父层随后把 mandatory 置真, 用户看到的是一个
+         关不掉的输入屏, 而不是先闪一下账户面板。 */
+      onLoginStateChanged?.()
     } catch (e) {
       setError(humanize(e))
     } finally {
@@ -421,26 +436,9 @@ export default function HubLoginPanel({ show, onClose, onToast, mandatory = fals
     </div>
   )
 
-  /* 协议告知。原先是必勾的复选框, 现已按团队决定去掉 —— 登录成了使用前置条件,
-   * 再摆一个「不勾就走不下去」的开关只是多一次点击, 拦不住任何人。协议链接保留:
-   * 去掉勾选不等于不告知。
-   *
-   * 新窗口打开: 协议是 public/ 下的静态页, 若原地跳转会把用户从登录流里踢出去,
-   * 回来又得重填号码。rel 必带, 防 reverse tabnabbing。 */
-  const legalNote = (
-    <div className="hub-legal-note">
-      <span>
-        登录即表示同意{' '}
-        <a href={LEGAL_TERMS} target="_blank" rel="noopener noreferrer">
-          《用户服务协议》
-        </a>{' '}
-        与{' '}
-        <a href={LEGAL_PRIVACY} target="_blank" rel="noopener noreferrer">
-          《隐私政策》
-        </a>
-      </span>
-    </div>
-  )
+  /* 登录屏不放协议文字。先是必勾复选框, 后改成一行被动告知, 现按团队决定整句去掉。
+   * `public/terms.html` 与 `public/privacy.html` 仍在包里, 但**界面上已无入口** ——
+   * 要再挂回去的话, 挂在设置或关于页比堵在登录路径上合适。 */
 
   // ---- 屏 A1/B1：输入账号 ----
   const renderInput = () => (
@@ -515,7 +513,6 @@ export default function HubLoginPanel({ show, onClose, onToast, mandatory = fals
         {busy ? <Loader2 size={15} className="hub-spin" /> : null}
         {cooldown > 0 ? `重新获取（${cooldown}s）` : busy ? '正在发送…' : '获取验证码'}
       </button>
-      {bindMode ? null : legalNote}
       {error ? <p className="hub-login-err"><span>⊘</span><span>{error}</span></p> : null}
       {/* 硬门禁下没有「暂不登录」出口 —— 登录是使用前置条件。 */}
     </>

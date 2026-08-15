@@ -64,16 +64,17 @@ const fillCode = (code: string) => {
 }
 
 describe('屏 A1：输入手机号', () => {
-  it('渲染品牌头、双 Tab 与协议告知', async () => {
+  it('渲染品牌头与双 Tab，登录屏上没有协议文字', async () => {
     openPanel()
     await waitForA1()
     expect(screen.getByRole('tab', { name: '手机号' })).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByRole('tab', { name: '邮箱' })).toHaveAttribute('aria-selected', 'false')
-    // 勾选已去掉, 但协议必须仍然告知 + 两个链接可点
-    expect(screen.getByText(/登录即表示同意/)).toBeTruthy()
-    expect(screen.getByRole('link', { name: '《用户服务协议》' })).toBeTruthy()
-    expect(screen.getByRole('link', { name: '《隐私政策》' })).toBeTruthy()
+    // 协议先是必勾复选框, 后改成一行被动告知, 现按团队决定整句去掉。
+    // 勾选控件与告知文字都不该再有。
     expect(screen.queryByLabelText('同意协议')).toBeNull()
+    expect(screen.queryByText(/登录即表示同意/)).toBeNull()
+    expect(screen.queryByRole('link', { name: '《软件许可及服务协议》' })).toBeNull()
+    expect(screen.queryByRole('link', { name: '《隐私保护政策》' })).toBeNull()
   })
 
   it('号码格式非法时主按钮禁用，合法后亮起', async () => {
@@ -345,19 +346,9 @@ describe('登录成功的落点', () => {
   })
 })
 
-describe('协议链接', () => {
-  it('两个协议指向真实页面且在新窗口打开', async () => {
-    openPanel()
-    await waitForA1()
-    const terms = screen.getByText('《用户服务协议》').closest('a')
-    const privacy = screen.getByText('《隐私政策》').closest('a')
-    // 曾是 href="#" 的死链
-    expect(terms?.getAttribute('href')).toMatch(/terms\.html$/)
-    expect(privacy?.getAttribute('href')).toMatch(/privacy\.html$/)
-    expect(terms?.getAttribute('target')).toBe('_blank')
-    expect(terms?.getAttribute('rel')).toContain('noopener')
-  })
-})
+/* 原有 describe('协议链接') 已删：登录屏上的协议文字与两个链接按团队决定整句去掉，
+   守着的东西不存在了。`public/terms.html` 与 `public/privacy.html` 仍在包里，但界面
+   上已无入口 —— 将来若挂回设置或关于页，对应的断言应写在那个组件的测试里。 */
 
 /* 首屏硬门禁：登录是使用前置条件, 一个出口都不能有。
  *
@@ -406,5 +397,38 @@ describe('硬门禁：不可跳过', () => {
     expect(screen.queryByRole('button', { name: '暂不登录，继续使用' })).toBeNull()
     // ✕ 与可点遮罩都在（两者 aria-label 都是「关闭」）
     expect(screen.getAllByRole('button', { name: '关闭' })).toHaveLength(2)
+  })
+})
+
+describe('登出后必须重新被拦住（回归）', () => {
+  /* 这条守的是已经发出去过的一个洞：硬门禁由父层按 /auth/status 判定，而**登出发生在
+     本面板内部**。不往上通知一声，父层的 authGate 会一直停在启动那次探到的 passed，
+     于是登出后登录窗上冒出 ✕、点遮罩也能关掉 —— 门只在冷启动那一下存在。 */
+  it('登出成功后回调父层，让它重判门禁', async () => {
+    const onLoginStateChanged = vi.fn()
+    render(<HubLoginPanel show onClose={() => {}} onLoginStateChanged={onLoginStateChanged} />)
+    await waitForA1()
+    typePhone(SCENARIOS.existing)
+    fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
+    await screen.findByLabelText('验证码第 1 位')
+    fillCode(MOCK_CODE)
+    await screen.findByText('已登录')
+
+    expect(onLoginStateChanged).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: '退出登录' }))
+    // 回调必须发生在面板已经回到输入屏之后, 否则父层置 mandatory 时会闪一下账户面板
+    await waitFor(() => expect(onLoginStateChanged).toHaveBeenCalled())
+    expect(await waitForA1()).toBeTruthy()
+  })
+
+  it('父层随后把 mandatory 置真时，✕ 与可点遮罩都消失', async () => {
+    // 模拟父层重判门禁的结果：同一个面板从非 mandatory 变 mandatory
+    const { rerender } = render(<HubLoginPanel show onClose={() => {}} />)
+    await waitForA1()
+    expect(screen.getAllByRole('button', { name: '关闭' })).toHaveLength(2)
+
+    rerender(<HubLoginPanel show mandatory onClose={() => {}} />)
+    await waitForA1()
+    expect(screen.queryByRole('button', { name: '关闭' })).toBeNull()
   })
 })
