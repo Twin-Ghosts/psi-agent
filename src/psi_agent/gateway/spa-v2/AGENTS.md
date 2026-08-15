@@ -190,7 +190,18 @@ npm run dev
 
 **登录态跨组件共享走 `services/useAuthAccount.ts`**（事件广播，无 module 级可变全局）。侧栏账户区必须读它而非 localStorage 里的本地昵称，否则登录完外面还显示「用户」和「登录账号」。
 
-**首屏是软门禁不是硬门禁**：`HaiTunAgentWorkspace` 的 `authGate` 在 boot 后探一次登录态，未登录则自动弹登录窗并压住首屏引导与模型池自动弹窗；窗上必须给「暂不登录，继续使用」（`showSkip`）。不做硬门禁的理由：设计文档写明「离线不可登录」，且用户数据全在本机、不分用户目录，登录不是使用本产品的前置条件。
+**首屏是硬门禁**（2026-08-15 团队决定，此前是可跳过的软门禁）：`HaiTunAgentWorkspace` 的 `authGate` 在 boot 后探一次登录态，未登录则弹登录窗并**关不掉**，同时压住首屏引导与模型池自动弹窗。
+
+| 关注点 | 做法 |
+| --- | --- |
+| 为什么必须硬 | C 端默认模型的 key 由云端按登录态下发，未登录时 AI 子进程拿到空 key，**any-llm 在本地就抛** `No openai API key provided ... set the OPENAI_API_KEY environment variable`（走不到云端，没有 401）。放人进来只是把拦截点从登录窗推迟到第一次对话，还换成一句与本产品无关的话 |
+| 三个关闭通道全堵 | ✕ 与遮罩点击：`HubLoginPanel` 的 `mandatory` 透传成 `HubDialog` 的 `blocking`（遮罩退化为 `aria-hidden` 装饰层）。Esc：`UserHub` 的 keydown effect 里 `if (loginRequired) return`。**三处分散在两个组件，漏一个就漏一个绕过口** —— `HubLoginPanel.smoke.test.tsx` 的 `describe('硬门禁：不可跳过')` 逐条守 |
+| 不能只用 `panel === 'login'` | `show={loginRequired \|\| panel === 'login'}`。否则用户点侧栏别的入口（模型池/设置）就把登录窗顶掉，门只拦得住第一下 |
+| 登录成功才放行 | `onLoginGateDone` **重新探一次** `/auth/status`（`recheckAuthGate`），不是直接 `setAuthGate("passed")` |
+| 两种刻意放行 | `available === false`（部署方显式关掉登录，没有门可守，拦下去只会得到一个点不动的表单）；探测抛错（连「是否需要登录」都不知道，且 Gateway 不通本身会由别处报错） |
+| 断网时不放行 | D3 屏在 `mandatory` 下撤掉「暂不登录，继续使用」，只留「重试」，并把文案改成「登录后才能使用」—— 退不出去必须给出原因 |
+
+**登录时没有隐私条款勾选**（同批决定删除）：改为一行被动告知「登录即表示同意《用户服务协议》与《隐私政策》」（`.hub-legal-note`）。**协议链接必须保留** —— 去掉勾选不等于不告知。原先的 `agreed` / `shakeAgree` state 与 `onSend` 的前置检查一并删净，`startBind` 里那句「已登录用户绑定无需再勾」也随之消失。
 
 `public/` 下的 `terms.html` / `privacy.html` 是协议页，**引用时必须走 `import.meta.env.BASE_URL`** —— 本 SPA 挂在 `/spa-v2/` 下，写死绝对路径会打到站点根目录 404（海豚图标曾这么碎过）。
 

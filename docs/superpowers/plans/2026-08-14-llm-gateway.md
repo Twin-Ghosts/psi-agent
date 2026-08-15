@@ -381,8 +381,14 @@ def bearer_token(self) -> str: ...   # 唯一的进程内取值口，不接任�
 token 只能发给签发它的那台主机，否则改一份快照就能把凭证送去任意域名。
 
 **「未登录则不拉起该 socket」这一条改掉了。** 免费模型是默认配置，不拉起的表现是用户
-看到模型列表少一项，比云端回的 401 难懂得多。改为：仍然拉起，key 为空，请求时拿云端
-的 401。（`_free_model.py` 与 `test_free_model.py` 里都写明了这个取舍。）
+看到模型列表少一项，更难懂。改为：仍然拉起，key 为空。
+
+**⚠️ 这里我判断错了一次，负责人实测推翻。** 原先写的是「请求时拿云端的 401，那是能看懂
+的错误」—— 实际上空 key **走不到云端**：any-llm 的 openai provider 在发 HTTP 之前就本地
+抛 `No openai API key provided. Please provide it in the config or set the
+OPENAI_API_KEY environment variable`，一句与本产品毫无关系的话（截图见负责人反馈）。
+未登录的真正兜底改在前端：SPA v2 启动即**硬门禁**，未登录进不来（见下方 Task 10）。
+`_free_model.py`、`test_free_model.py`、`gateway/AGENTS.md` 三处措辞已同步改正。
 
 AuthManager 的构造必须**移到恢复 AI 之前**（`__init__.py`）：免费模型的 socket 在构造时
 就要拿到 token，建晚了恢复出来的 socket 会带着哨兵起来，第一次对话必然 401。
@@ -422,6 +428,44 @@ AuthManager 的构造必须**移到恢复 AI 之前**（`__init__.py`）：免�
 - [ ] 与个人服务器持有者确认该机器上是否还有其它在用服务，只停 LLM 转发，不动其它
 - [ ] 停用后验证旧地址不再转发；确认线上客户端已全部指向新地址（旧版安装包本就已坏，不构成回退）
 - [ ] 若确认阻塞或需他人操作，**不要强行推进** —— 在交付文档 A 段记下卡点与责任人，其余任务照常收尾
+
+---
+
+## Task 10：C 端强制登录（团队 2026-08-15 决定，spec 之外的追加）
+
+**起因**：负责人实测未登录对话，拿到 `[Upstream Error]: [openai] No openai API key
+provided. Please provide it in the config or set the OPENAI_API_KEY environment
+variable.` —— 我在 Task 7 里判断的「拿云端 401」不成立（详见上方 Task 7 的 ⚠️ 块）。
+团队随后决定：**C 端必须登录才能使用**，进应用即检查登录态，未登录弹登录窗且**不可跳过**，
+点击组件外部不关闭；同时**删除登录时的隐私条款勾选**。
+
+原先是**软门禁**（可跳过）：理由是「设计文档写明离线不可登录、数据全在本机，登录不是
+使用前置条件」。这条理由现在不成立了 —— C 端默认模型的 key 由云端按登录态下发，未登录
+时它**根本不可用**。放人进来只是把拦截点从登录窗推迟到第一次对话，还换成一句看不懂的话。
+
+- [x] `HubLoginPanel`：`showSkip` → `mandatory`。为真时不给「暂不登录，继续使用」、
+      `blocking` 传给 `HubDialog`（藏 ✕ + 遮罩退化为 `aria-hidden` 装饰层）
+- [x] `HubLoginPanel`：删掉 `agreed` / `shakeAgree` 两个 state、`onSend` 的勾选前置检查、
+      `onLogout` / `startBind` 里的 `setAgreed` —— 勾选框改为一行被动告知「登录即表示同意
+      《用户服务协议》与《隐私政策》」。**协议链接保留**：去掉勾选不等于不告知
+- [x] `UserHub`：加 `loginRequired`。为真时 (a) `show={loginRequired || panel === 'login'}`
+      强制显示，否则用户点侧栏别的入口就把登录窗顶掉、门只拦得住第一下；(b) Esc 直接 return
+- [x] `HaiTunAgentWorkspace`：`authGate` 由软改硬，探测逻辑提成 `recheckAuthGate`；
+      `onLoginGateDone` 改为**重新探一次** `/auth/status` 而不是直接 `setAuthGate("passed")`
+      —— 硬门禁只该被真的登录成功打开
+- [x] 放行的两种情形（**刻意保留**）：`available === false`（部署方显式关掉登录，没有门可守，
+      拦下去只会得到一个点不动的表单）；探测抛错（连「是否需要登录」都不知道，且 Gateway
+      不通本身会由别处报错，不该在这里变成一堵解释不清的墙）
+- [x] CSS：`.hub-agree`（含 `prefers-reduced-motion` 里的 `.box.shake`）→ `.hub-legal-note`
+- [x] 测试：`describe('硬门禁：不可跳过')` 4 例 —— 无跳过按钮 / 无 ✕ 且点遮罩不关窗 /
+      断网屏也不放行且说清原因 / 非 mandatory 时 ✕ 与可点遮罩仍在。原「未勾协议就点」
+      改为「号码合法即可直接发码」，A1 那条补断言协议链接仍在且 `同意协议` 控件已消失
+- [x] SPA v1（`spa/`）**无任何认证 UI**（`grep` 无 `auth/status` / `sendAuthCode`），不加门
+- [x] 同步改正五处「云端会回 401」的错误措辞：`_free_model.py`（docstring + resolve 注释 +
+      日志文案）、`test_free_model.py` docstring、`gateway/AGENTS.md` 表格「未登录」行、
+      本 plan 的 Task 7、交付文档 A 段
+- [ ] 负责人手工验：全新客户端未登录启动 → 只能看到关不掉的登录窗；登录成功 → 直接进
+      工作台且能对话（这一条同时兑现 A1）
 
 ---
 

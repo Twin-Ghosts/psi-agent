@@ -1002,8 +1002,7 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .hub-otp.bad,
-  .hub-agree .box.shake {
+  .hub-otp.bad {
     animation: none;
   }
 }
@@ -1050,51 +1049,19 @@ button.hub-login-resend {
   font-size: 15px;
   justify-content: center;
 }
-/* ---------- 协议勾选（A1）---------- */
-.hub-agree {
+/* ---------- 协议告知（A1）----------
+   原先是必勾复选框, 登录改为硬门禁后去掉了勾选(见 HubLoginPanel.tsx), 只留告知。 */
+.hub-legal-note {
   display: flex;
-  gap: 9px;
   margin: 14px 0 4px;
   font-size: 12px;
   line-height: 1.7;
   color: var(--ink-soft);
+  text-align: center;
+  justify-content: center;
 }
 
-.hub-agree > button {
-  flex: none;
-  margin-top: 2px;
-  padding: 0;
-  border: 0;
-  background: none;
-  cursor: pointer;
-  line-height: 0;
-}
-
-.hub-agree .box {
-  width: 16px;
-  height: 16px;
-  display: grid;
-  place-items: center;
-  border-radius: 5px;
-  border: 1.5px solid #b7c6d8;
-  background: var(--paper);
-  color: transparent;
-  font-size: 10px;
-}
-
-.hub-agree .box.on {
-  background: var(--brand-500);
-  border-color: var(--brand-500);
-  color: #fff;
-}
-
-/* 未勾选就点主按钮：抖动 420ms，不弹 Toast */
-.hub-agree .box.shake {
-  border-color: var(--coral);
-  animation: hub-otp-nudge 420ms ease;
-}
-
-.hub-agree a {
+.hub-legal-note a {
   color: var(--brand-600);
   text-decoration: none;
   font-weight: 600;

@@ -558,39 +558,43 @@ export default function HaiTunAgentWorkspace({
     return hubOpenNonce > 0 ? { nonce: hubOpenNonce, panel: "models" as const } : null;
   }, [hubOpenNonce, loginGateNonce]);
 
-  /* 登录软门禁。
+  /* 登录硬门禁。
    *
-   * 现状是登录入口藏在头像菜单第二项，用户不点开根本不知道自己没登录。所以启动
-   * 时先探一次登录态，未登录就把登录窗先摆出来 —— 但**保留「暂不登录，继续使用」
-   * 出口**，不做硬门禁：设计文档写明「离线不可登录」，且用户数据全在本机、不分
-   * 用户目录，登录不是使用本产品的前置条件。断网时把人挡在门外，本机功能明明可用。
+   * 启动时探一次登录态，未登录就把登录窗摆出来且**关不掉** —— 没有「暂不登录」
+   * 出口、✕ 与遮罩点击都失效、Esc 也不放行。原先是软门禁（可跳过），团队已改为
+   * 必须登录：C 端默认模型的 key 由云端按登录态下发，未登录时 AI 子进程拿到的是
+   * 空 key，any-llm 在本地就抛「No openai API key provided」——一个与本产品毫无
+   * 关系的错误。放人进来只是把拦截点从登录窗推迟到第一次对话，还换成了看不懂的话。
+   *
+   * 认证不可用时（旧网关、或 PSI_AUTH_ENDPOINT 被显式清空）放行：那是部署方主动
+   * 关掉了登录，此时没有门可守，拦下去只会得到一个点不动的表单。
+   * 探测失败（Gateway 不通）也放行：这时连"是否需要登录"都不知道，而 Gateway
+   * 不通本身会由别处报错，不该在这里变成一堵解释不清的墙。
    *
    * "checking" 期间压住首屏引导与模型池自动弹窗，避免两层弹窗叠在一起。
    */
   const [authGate, setAuthGate] = useState<"checking" | "open" | "passed">("checking");
+  const recheckAuthGate = useCallback(async () => {
+    try {
+      const st = await getAuthStatus();
+      if (st.available && !st.loggedIn) {
+        setAuthGate("open");
+        setLoginGateNonce((n) => n + 1); // 让 UserHub 把登录面板打开
+        return;
+      }
+    } catch {
+      // 见上：探不到就放行
+    }
+    setAuthGate("passed");
+    /* 放行时必须清零。不清的话 hubOpenRequest 永远返回 `panel: "login"`（那个
+       memo 只看 `loginGateNonce > 0`），之后首屏引导点「配置」想开模型池，开出来
+       的还是登录窗。 */
+    setLoginGateNonce(0);
+  }, []);
   useEffect(() => {
     if (!bootReady) return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const st = await getAuthStatus();
-        if (cancelled) return;
-        // 认证未启用（旧网关/显式关掉）或已登录：门禁直接放行
-        if (st.available && !st.loggedIn) {
-          setAuthGate("open");
-          setLoginGateNonce((n) => n + 1); // 让 UserHub 把登录面板打开
-        } else {
-          setAuthGate("passed");
-        }
-      } catch {
-        // 探测失败（断网）不拦人：本机功能不依赖登录
-        if (!cancelled) setAuthGate("passed");
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [bootReady]);
+    void recheckAuthGate();
+  }, [bootReady, recheckAuthGate]);
 
   const firstRunEligibilityCheckedRef = useRef(false);
   const bootLandingRef = useRef(false);
@@ -2255,7 +2259,17 @@ export default function HaiTunAgentWorkspace({
             openModelsOnMount={bootReady && authGate === "passed" && openModelsOnce}
             onModelsAutoOpened={() => setOpenModelsOnce(false)}
             openPanelRequest={hubOpenRequest}
-            onLoginGateDone={() => setAuthGate("passed")}
+            loginRequired={authGate === "open"}
+            /* 先放行, 再复查。
+               先放行: 硬门禁下 onClose 只会由登录成功触发, 而 recheckAuthGate 是
+               一次网络往返 —— 等它回来才放行的话, 这段时间 loginRequired 仍为真,
+               登录窗留在屏上并闪一下账户面板(C1), 正是原型 D4 禁止的落点。
+               再复查: 若真的还没登录(边角路径关了窗), recheckAuthGate 会把门重新
+               合上, 而不是把人放进一个用不了默认模型的工作台。 */
+            onLoginGateDone={() => {
+              setAuthGate("passed");
+              void recheckAuthGate();
+            }}
             onAisChanged={(ais: AiInfo[]) => {
               if (ais.length === 0) {
                 setAiId(null);

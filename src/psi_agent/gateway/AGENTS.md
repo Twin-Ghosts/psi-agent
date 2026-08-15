@@ -262,7 +262,7 @@ AI 运行时 crash 时，`_run_ai` 的 except 块从 `_entries` 中移除该 ent
 | 替换条件 | **两条同时成立**：`api_key` 是哨兵，且 `base_url` 与认证服务**同源**（scheme + host + port）。token 只能发给签发它的那台主机 —— 否则改一份 `state/latest.json` 就能把凭证送去任意域名 |
 | token 去哪了 | **只活在 `Ai` 实例里**。`AiInfo.api_key` 仍是哨兵，所以不进 `state/latest.json`（那里 api_key 是明文）、不经 `/ais` 下发给 SPA。`test_free_model.py` 断言整个 `asdict(AiInfo)` 里不出现 token |
 | 取值口 | `AuthManager.bearer_token()` 是唯一的进程内取值口，**不接任何下行响应**（不进 `status()`、不进 `/ais`、不进快照） |
-| 未登录 | **仍然拉起 socket，key 为空**，请求时拿云端 401。不拉起的表现是用户看到模型列表少一项，比 401 难懂得多 |
+| 未登录 | **仍然拉起 socket，key 为空**（不拉起的表现是模型列表少一项，更难懂）。但这条路的报错很难看：空 key **走不到云端**，any-llm 的 openai provider 在本地就抛 `No openai API key provided ... set the OPENAI_API_KEY environment variable`。所以未登录的真正兜底在前端 —— SPA v2 启动即**硬门禁**（`spa-v2` 的 `authGate`，登录窗关不掉），这一支只在门禁被绕过或认证关闭时走到 |
 | 认证关闭 | `PSI_AUTH_ENDPOINT=""` 时不创建 `AuthManager`，`_resolve_key` 保持默认，一切原样透传 |
 
 **`AuthManager` 必须建在恢复 AI 之前**（`__init__.py`）：交给 `Ai` 的 key 在 socket 构造时就定了，建晚了恢复出来的 socket 会带着哨兵起来，第一次对话必然 401。

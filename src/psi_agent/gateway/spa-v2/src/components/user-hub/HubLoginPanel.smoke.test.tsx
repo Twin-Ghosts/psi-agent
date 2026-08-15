@@ -58,20 +58,22 @@ const typePhone = (v: string) => {
   fireEvent.change(screen.getByLabelText('手机号'), { target: { value: v } })
 }
 
-const checkAgree = () => fireEvent.click(screen.getByLabelText('同意协议'))
-
 /** 把 6 位码整段粘进第 1 格。 */
 const fillCode = (code: string) => {
   fireEvent.change(screen.getByLabelText('验证码第 1 位'), { target: { value: code } })
 }
 
 describe('屏 A1：输入手机号', () => {
-  it('渲染品牌头、双 Tab 与协议勾选', async () => {
+  it('渲染品牌头、双 Tab 与协议告知', async () => {
     openPanel()
     await waitForA1()
     expect(screen.getByRole('tab', { name: '手机号' })).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByRole('tab', { name: '邮箱' })).toHaveAttribute('aria-selected', 'false')
-    expect(screen.getByText(/我已阅读并同意/)).toBeTruthy()
+    // 勾选已去掉, 但协议必须仍然告知 + 两个链接可点
+    expect(screen.getByText(/登录即表示同意/)).toBeTruthy()
+    expect(screen.getByRole('link', { name: '《用户服务协议》' })).toBeTruthy()
+    expect(screen.getByRole('link', { name: '《隐私政策》' })).toBeTruthy()
+    expect(screen.queryByLabelText('同意协议')).toBeNull()
   })
 
   it('号码格式非法时主按钮禁用，合法后亮起', async () => {
@@ -84,14 +86,13 @@ describe('屏 A1：输入手机号', () => {
     expect(btn).not.toBeDisabled()
   })
 
-  it('未勾协议就点：不进下一屏，勾选框抖动', async () => {
+  it('号码合法即可直接发码，没有协议勾选这道门', async () => {
     openPanel()
     await waitForA1()
-    typePhone('13800138001')
+    typePhone(SCENARIOS.existing)
     fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
-    // 仍停在 A1，没有跳到验证码屏
-    expect(screen.queryByLabelText('验证码第 1 位')).toBeNull()
-    expect(document.querySelector('.hub-agree .box.shake')).toBeTruthy()
+    // 勾选删掉后不该再有任何前置条件把用户拦在 A1
+    expect(await screen.findByLabelText('验证码第 1 位')).toBeTruthy()
   })
 })
 
@@ -124,7 +125,6 @@ describe('屏 A2：验证码', () => {
     openPanel()
     await waitForA1()
     typePhone(SCENARIOS.existing)
-    checkAgree()
     fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
     expect(await screen.findByLabelText('验证码第 1 位')).toBeTruthy()
     expect(screen.getByText('+86 138****8000')).toBeTruthy()
@@ -135,7 +135,6 @@ describe('屏 A2：验证码', () => {
     openPanel()
     await waitForA1()
     typePhone(SCENARIOS.existing)
-    checkAgree()
     fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
     await screen.findByLabelText('验证码第 1 位')
     fillCode('987654')
@@ -148,7 +147,6 @@ describe('屏 A2：验证码', () => {
     openPanel()
     await waitForA1()
     typePhone(SCENARIOS.existing)
-    checkAgree()
     fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
     await screen.findByLabelText('验证码第 1 位')
     fireEvent.click(screen.getByLabelText('返回'))
@@ -165,7 +163,6 @@ describe('屏 B2：邮箱验证码', () => {
     fireEvent.change(screen.getByLabelText('邮箱'), {
       target: { value: SCENARIOS.existingEmail },
     })
-    checkAgree()
     fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
     await screen.findByLabelText('验证码第 1 位')
     expect(screen.getByText(SCENARIOS.existingEmail)).toBeTruthy()
@@ -181,7 +178,6 @@ describe('屏 A3 → D4 → C1：新用户建号后到账户面板', () => {
     openPanel()
     await waitForA1()
     typePhone('13900001111') // 非 SCENARIOS.existing，走新用户
-    checkAgree()
     fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
     await screen.findByLabelText('验证码第 1 位')
     fillCode(MOCK_CODE) // 填满即自动提交
@@ -206,7 +202,6 @@ describe('屏 C1 → C2：设备管理', () => {
     openPanel()
     await waitForA1()
     typePhone(SCENARIOS.existing)
-    checkAgree()
     fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
     await screen.findByLabelText('验证码第 1 位')
     fillCode(MOCK_CODE)
@@ -243,7 +238,6 @@ describe('屏 D1：验证码错误', () => {
     openPanel()
     await waitForA1()
     typePhone(SCENARIOS.existing)
-    checkAgree()
     fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
     await screen.findByLabelText('验证码第 1 位')
     fillCode('000000')
@@ -257,7 +251,6 @@ describe('屏 D2：发码被限频', () => {
     openPanel()
     await waitForA1()
     typePhone(SCENARIOS.rateLimited)
-    checkAgree()
     fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
     expect(await screen.findByText(/发送过于频繁/)).toBeTruthy()
     // 48 来自 mock 的 retryAfter，不是前端拍的 60
@@ -268,7 +261,6 @@ describe('屏 D2：发码被限频', () => {
     openPanel()
     await waitForA1()
     typePhone(SCENARIOS.dailyCap)
-    checkAgree()
     fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
     expect(await screen.findByText(/今日发送次数已达上限/)).toBeTruthy()
   })
@@ -279,7 +271,6 @@ describe('屏 D3：无法连接', () => {
     openPanel()
     await waitForA1()
     typePhone(SCENARIOS.offline)
-    checkAgree()
     fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
     expect(await screen.findByText('暂时无法连接')).toBeTruthy()
     expect(screen.getByText('登录需要联网，本机功能不受影响')).toBeTruthy()
@@ -325,7 +316,6 @@ describe('登录成功的落点', () => {
     render(<Controlled onToast={onToast} />)
     await waitForA1()
     typePhone(SCENARIOS.existing)
-    checkAgree()
     fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
     await screen.findByLabelText('验证码第 1 位')
     fillCode(MOCK_CODE)
@@ -341,7 +331,6 @@ describe('登录成功的落点', () => {
     render(<Controlled onToast={onToast} />)
     await waitForA1()
     typePhone('13900001234') // 未注册 → 走建号
-    checkAgree()
     fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
     await screen.findByLabelText('验证码第 1 位')
     fillCode(MOCK_CODE)
@@ -370,22 +359,49 @@ describe('协议链接', () => {
   })
 })
 
-/* 首屏软门禁：登录窗自动弹出时必须有明确的「暂不登录，继续使用」出口。
- * 只给一个 ✕ 会让用户以为登录是硬门禁 —— 而设计文档写明「离线不可登录」、
- * 数据全在本机，登录不是使用本产品的前置条件。 */
-describe('软门禁出口', () => {
-  it('showSkip 时 A1 上有「暂不登录，继续使用」，点击即关窗', async () => {
-    const onClose = vi.fn()
-    render(<HubLoginPanel show showSkip onClose={onClose} />)
+/* 首屏硬门禁：登录是使用前置条件, 一个出口都不能有。
+ *
+ * 这几条守的是「门真的关得住」。少一条就漏一个绕过口 —— 之前是软门禁, 出口是
+ * 一个显式按钮; 现在出口变成了「所有能关窗的通道都不该存在」, 而 ✕、遮罩点击、
+ * Esc 分散在 HubDialog / UserHub 两处, 只看代码很容易漏掉其中一个。 */
+describe('硬门禁：不可跳过', () => {
+  it('mandatory 时 A1 上没有「暂不登录，继续使用」', async () => {
+    render(<HubLoginPanel show mandatory onClose={() => {}} />)
     await waitForA1()
-    const skip = screen.getByRole('button', { name: '暂不登录，继续使用' })
-    fireEvent.click(skip)
-    expect(onClose).toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: '暂不登录，继续使用' })).toBeNull()
   })
 
-  it('用户自己点开登录面板时不显示该出口（他本来就是想登录）', async () => {
+  it('mandatory 时没有 ✕，点遮罩也不关窗', async () => {
+    const onClose = vi.fn()
+    render(<HubLoginPanel show mandatory onClose={onClose} />)
+    await waitForA1()
+    expect(screen.queryByRole('button', { name: '关闭' })).toBeNull()
+    // 遮罩退化为 aria-hidden 的装饰层：既没有可点的角色, 也不该触发 onClose
+    const backdrop = document.querySelector('.hub-dialog-backdrop')
+    expect(backdrop?.getAttribute('aria-hidden')).toBe('true')
+    if (backdrop) fireEvent.click(backdrop)
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('mandatory 时断网屏也不放行，只给重试', async () => {
+    const api = await import('../../services/api')
+    const spy = vi.spyOn(api, 'getAuthStatus').mockRejectedValue(new Error('network down'))
+    try {
+      render(<HubLoginPanel show mandatory onClose={() => {}} />)
+      expect(await screen.findByRole('button', { name: '重试' })).toBeTruthy()
+      expect(screen.queryByRole('button', { name: '暂不登录，继续使用' })).toBeNull()
+      // 得说清为什么退不出去, 否则就是一堵没有解释的墙
+      expect(screen.getByText(/登录后才能使用/)).toBeTruthy()
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('非 mandatory（用户自己点开）时不显示该出口，但 ✕ 在', async () => {
     openPanel()
     await waitForA1()
     expect(screen.queryByRole('button', { name: '暂不登录，继续使用' })).toBeNull()
+    // ✕ 与可点遮罩都在（两者 aria-label 都是「关闭」）
+    expect(screen.getAllByRole('button', { name: '关闭' })).toHaveLength(2)
   })
 })

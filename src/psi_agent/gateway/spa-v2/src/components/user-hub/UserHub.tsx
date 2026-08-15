@@ -31,10 +31,15 @@ type Props = {
   /** External open-panel request (e.g. first-run guide jumps into model pool). */
   openPanelRequest?: { nonce: number; panel: HubPanel } | null
   /**
-   * 登录软门禁结束（登录成功或用户选择「暂不登录」）。父层据此放行首屏引导。
-   * 只在门禁触发的那次开窗后回调；用户平时自己点开登录面板不影响首屏流程。
+   * 登录门禁结束（只可能是登录成功 —— 硬门禁没有「暂不登录」出口）。父层据此
+   * 放行首屏引导。只在门禁那次开窗后回调；用户平时自己点开登录面板不影响首屏。
    */
   onLoginGateDone?: () => void
+  /**
+   * 硬门禁进行中：登录面板锁死在最上层, 关不掉也切不走, 直到登录成功。
+   * 父层探到「认证可用且未登录」时置真。
+   */
+  loginRequired?: boolean
 }
 
 /**
@@ -53,6 +58,7 @@ export default function UserHub({
   onModelsAutoOpened,
   openPanelRequest,
   onLoginGateDone,
+  loginRequired = false,
 }: Props) {
   // 头像改成弹菜单(资料 / 登录)后需要这两个: rootRef 判点击是否落在菜单外。
   const rootRef = useRef<HTMLDivElement | null>(null)
@@ -79,7 +85,12 @@ export default function UserHub({
     setPanel(openPanelRequest.panel)
   }, [openPanelRequest])
 
-  /** 关闭登录面板：若是门禁开的，通知父层放行。 */
+  /**
+   * 关闭登录面板：若是门禁开的，通知父层放行。
+   *
+   * 硬门禁下这个函数只会被「登录成功」那条路径调到（✕ 与遮罩已被 blocking 摘掉），
+   * 所以不需要在这里再判一次 loginRequired —— 父层收到回调后会自行复查登录态。
+   */
   const closeLoginPanel = () => {
     setPanel(null)
     if (loginFromGateRef.current) {
@@ -111,6 +122,8 @@ export default function UserHub({
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
       if (freeModelNoticeOpen) return
+      // 硬门禁：Esc 不是出口，否则一按就把登录窗关了，门形同虚设。
+      if (loginRequired) return
       if (panel === 'settingsAdvanced') {
         setPanel('settings')
         return
@@ -127,7 +140,7 @@ export default function UserHub({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [freeModelNoticeOpen, panel, menuOpen])
+  }, [freeModelNoticeOpen, panel, menuOpen, loginRequired])
 
   /* 云端账号优先于本地昵称: 登录后侧栏必须显示账号身份, 否则用户看不出自己
    * 已登录(原型 D4「侧栏账户区就地更新为已登录」)。未登录时回落本地昵称。 */
@@ -221,12 +234,12 @@ export default function UserHub({
         }}
       />
       <HubLoginPanel
-        show={panel === 'login'}
+        /* 硬门禁期间强制显示, 不受 panel 影响: 否则用户点侧栏别的入口
+           (模型池/设置)就把登录窗顶掉了, 门只拦得住第一下。 */
+        show={loginRequired || panel === 'login'}
         onClose={closeLoginPanel}
         onToast={onToast}
-        /* 门禁开的那次要有明确的「暂不登录，继续使用」出口 —— 只给一个 ✕
-           会让用户以为必须登录 */
-        showSkip={loginFromGateRef.current}
+        mandatory={loginRequired}
       />
       <HubSettingsPanel
         show={panel === 'settings'}

@@ -19,7 +19,7 @@ from loguru import logger
 PLACEHOLDER_API_KEY = "haitun-default"
 """与 SPA 的 ``PLACEHOLDER_API_KEY`` 是同一个契约 (见 ``spa-v2/src/services/
 bootstrapAi.ts`` 与 ``spa/src/bootstrapAi.js``)。两边任改一边就会静默失效 ——
-免费模型会带着哨兵值去请求, 云端回 401。改动时三处一起改。"""
+免费模型会带着哨兵值原样去请求, 云端回 401。改动时三处一起改。"""
 
 
 def _origin(url: str) -> str:
@@ -61,9 +61,18 @@ def make_key_resolver(token_of: Callable[[], str], auth_endpoint: str) -> Callab
         token = token_of()
         if not token:
             # ** 不阻止 socket 起来 **: 免费模型是默认配置, 未登录时也要能起,
-            # 否则用户看到的是「模型列表空了」而不是「请先登录」。带空 key 去请求
-            # 会拿到云端的 401, 那是能看懂的错误。
-            logger.info("免费模型: 尚未登录, 交给 AI 层的 key 为空 (云端将回 401)")
+            # 否则用户看到的是「模型列表空了」而不是「请先登录」。
+            #
+            # 但这条路上的报错**很难看**: 空 key 根本走不到云端 —— any-llm 的
+            # openai provider 在发请求之前就本地抛
+            # ``No openai API key provided. Please provide it in the config or
+            # set the OPENAI_API_KEY environment variable``, 一句与本产品毫无
+            # 关系的话。(先前这里写着「会拿到云端的 401」, 实测不成立。)
+            #
+            # 所以真正的兜底在前端: SPA v2 启动即硬门禁, 未登录进不来 (见
+            # ``spa-v2/src/haitun-agent/HaiTunAgentWorkspace.tsx`` 的 authGate)。
+            # 这一支只在门禁被绕过或认证服务关闭时才会走到。
+            logger.info("免费模型: 尚未登录, 交给 AI 层的 key 为空 (请求会在 AI 层本地失败)")
             return ""
         logger.info("免费模型: 已用登录态替换哨兵值")
         return token

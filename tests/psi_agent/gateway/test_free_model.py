@@ -87,7 +87,11 @@ def test_resolver_yields_empty_when_logged_out() -> None:
     """未登录不阻止 socket 起来 —— 否则用户看到「模型列表空了」而不是「请先登录」。
 
     plan 原先写的是「未登录 → 不拉起/明确失败」, 实现成了这样: 免费模型是默认
-    配置, 拉不起来的表现是模型列表少一项, 比云端回的 401 难懂得多。
+    配置, 拉不起来的表现是模型列表少一项, 更难懂。
+
+    注意这条路上的报错很难看: 空 key 走不到云端, any-llm 在本地就抛
+    ``No openai API key provided``。所以未登录的真正兜底是前端硬门禁 (SPA v2
+    启动即拦), 这一支只在门禁被绕过或认证关闭时走到。
     """
     resolve = make_key_resolver(lambda: "", ENDPOINT)
     assert resolve(PLACEHOLDER_API_KEY, FREE_BASE) == ""
