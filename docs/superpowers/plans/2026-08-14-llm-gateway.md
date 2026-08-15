@@ -522,27 +522,61 @@ variable.` —— 我在 Task 7 里判断的「拿云端 401」不成立（详�
 
 ## Task 12: 负责人验收后的四项（登录已通之后）
 
-- [x] **删掉登录屏那句协议文字。** 直接删等于没人同意过协议，所以**同意动作前移到安装期** ——
-      安装向导第一页必勾，不勾则「下一步」禁用。一个勾选框覆盖两份协议，这是许可协议导言
-      自己规定的形态（「勾选同意本协议即视为同时同意隐私保护政策」），不是 UI 选择；也因此
-      不能用 Inno 内置 `LicenseFile`（单选钮、一次只挂一份文件）
+> **下面前两项（安装器侧）不是本 plan 做的。** 负责人在**另一个会话**里做完了它们，那个会话
+> 与本会话共用同一个工作树和同一个 git index，所以 `git add` 时被本 plan 的提交一并带上了
+> （`fe944dce` 混了 11 个安装器文件 + 5 个本 plan 的 UI 文件）。负责人的决定是「将错就错，
+> 合并为一个 PR」，故提交结构不动，但**署名要说清**：设计与实现在
+> `docs/superpowers/specs/2026-08-15-installer-tos-consent-design.md`，作者是那个会话。
+> 本会话在其上只补了测试（见下）。
+> **教训**：并行会话要各开 git worktree，否则谁都可能提交对方的半成品。
+
+- [x] **删掉登录屏那句协议文字。**（另一会话）直接删等于没人同意过协议，所以**同意动作前移到
+      安装期** —— 安装向导第一页必勾，不勾则「下一步」禁用。一个勾选框覆盖两份协议，这是许可
+      协议导言自己规定的形态（「勾选同意本协议即视为同时同意隐私保护政策」），不是 UI 选择；
+      也因此不能用 Inno 内置 `LicenseFile`（单选钮、一次只挂一份文件）
 - [x] 协议 HTML 由 `scripts/gen_legal_html.py` 从 `docs/` 下两份 md 生成，安装器以 `dontcopy`
       引 `spa-v2/public/` 同一路径 —— **安装期与产品内共用一份产物**，各存一份必有一份过时。
-      CI 加 `--check` 步防「改了 md 忘了重新生成」
+      CI 加 `--check` 步防「改了 md 忘了重新生成」（另一会话）
+- [x] **本会话补的那部分**：`tests/test_gen_legal_html.py` 原先是未跟踪文件，差点连生成器一起
+      漏提（`fe944dce` 提了生成器和 CI 的 `--check` 步，却没提守着它的测试），补提为
+      `89520a3c`。又补 3 条（`c4618584`）：`--check` 的**失败侧**原先一条没测 —— CI 的整个
+      门禁就压在那个非零返回上，一个永远返回 0 的 `--check` 照样是绿的。同时测了
+      `core.autocrlf=true` 的干净检出不会被误判为过时
 - [x] **修登出后门禁失效**（负责人报的 bug：登出后 ✕ 回来了、点遮罩也能关掉）。根因是
       硬门禁只在冷启动探一次 `/auth/status`，而登出发生在 `HubLoginPanel` 内部，不往上说
       一声，父层 `authGate` 就停在启动那次的 `passed` —— 门只在冷启动那一下存在。
       加 `onLoginStateChanged` 回调链到 `recheckAuthGate`，补 2 条回归断言
 - [x] **答「是否改了协议层」：没有。** `git show --stat 82df399e` 的 12 个文件里没有
       `protocol.py`，该文件上次改动是别人的 `a8aed458`（#664）
-- [x] **云端 `Message` 日志**（本仓之外，`/srv/psi-cloud`，commit `9ed700c`）：两个 non-OK
+> **⚠ 这笔改到了错的机器上，尚未在生产生效。**
+> `9ed700c` 提在 **47.100.84.197**（阿里云内地节点）。但 `account.genuineknowledge.cn`
+> 解析到 **8.222.255.23**（新加坡节点）—— 本 spec 第 109 行写的就是它。判据三条：
+> 内地节点上 `modules/` 只有 `auth`、`analytics`，**没有 `llm`**，也没有 litellm 容器、
+> 没有 `.env.upstream`；而公网 `/openapi.json` 有全部 3 条 `/llm/v1` 路由。
+> 两台机器都没有 git remote，各自一份独立副本，所以 `9ed700c` 只存在于内地那台。
+> **代码本身是对的**（改法与验证见下），只是要由有权限的人在新加坡节点上重放一遍。
+> 我没有 8.222.255.23 的授权（免密授权当时只给了内地那台），没去连。
+
+- [x] **云端 `Message` 日志**（本仓之外，`/srv/psi-cloud`，commit `9ed700c`，**内地节点**）：两个 non-OK
       分支都补 `Message` 与 `RequestId`（找阿里云工单唯一能对上的凭据）。`check_code` 那支
       原先**一行日志都没有** —— 调用失败与「码填错了」在日志里长得一样，而用户两边看到的
       都是「验证码不正确」。字段名用 `api_code` 不用 `code`：那个方法里 `code` 是用户填的
       验证码，日志里出现 `code=` 会让人以为把验证码打出去了
 - [x] 云端验证：容器内桩掉 `_call` 跑两支，手机号仍走 `mask_phone`，验证码明文未出现。
       **镜像必须重建**（`build: .`，没有 src 挂载，重启不生效），重建后 `/healthz` 200、容器 healthy
-- [ ] **安装器协议页未实测** —— 需要在 Windows 上真跑一次 Inno 构建，我没打包
+- [x] **修「验证码通过后闪一屏空账户面板」**（负责人报的体感问题：只有窗框和标题，一秒多后
+      自己关闭）。根因在本会话自己写的 `refresh()`：先 `setStage('done')` 把 C1 渲染出来，
+      再去 `getAuthMe()` + `listAuthDevices()`，等这两个请求回来才关窗 —— 那一秒多就是两个
+      往返。给 `refresh` 加 `enterAccount` 参数，关窗那两条路径传 `false`，只探登录态、不进
+      C1，顺带把登录路径上的这两个请求也省了。
+      **修完 5 条测试红了，查了才发现它们是靠这个 bug 过的** —— 冒烟夹具把 `show` 钉死为真、
+      `onClose` 是空函数，面板压根关不掉，于是 4 条用例用「在面板里登录一次」当到达 C1 的
+      铺垫，而按原型 D4 登录成功就该关窗回工作台，那个落点不存在。改为 `seedLoggedIn()` 直接
+      置已登录态（侧栏点进来看账户才是 C1 的真实入口），并补 1 条回归断言这条路径不渲染 C1
+- [ ] **安装器协议页仍未实测。** 本机没装 Inno Setup，编译那一半改由 CI 收 ——
+      `haitun-inno-setup` job 是 `on: push` 无分支过滤，推特性分支就会编译，**结果待看**。
+      A3–A6（勾选门禁、两个链接打开且带样式、离线可读、`ScaleY` 0/48/72/108 的排版）
+      必须在 Windows 上装一遍真包，**只有负责人能收**
 
 **这里踩到的一个坑**：本机裸 `python` 是 **3.7.9**，跑生成器会报
 `TypeError: 'type' object is not subscriptable`（`tuple[LegalDoc, ...]`）。CI 走 `uv run python`
@@ -556,10 +590,18 @@ variable.` —— 我在 Task 7 里判断的「拿云端 401」不成立（详�
 
 ## 收尾
 
-- [ ] 提交：本仓只提交 spec 与本 plan 及客户端代码改动，**不提交其它文档**
-- [ ] 提交说明须写明：加独立容器改了 `docker-compose.yml`，属「独立容器」类变更，不违反「新增业务模块不改编排」的契约
-- [ ] 服务器改动无 remote 可推，在服务器本地 commit 并打 tag `llm-gateway-2026-08-14`
-- [ ] 把 spec 的「客户端改动」节按 Task 7 的修正更新（三向同步：spec ←→ 代码不能对不上）
+- [x] 提交：本仓只提交 spec 与本 plan 及客户端代码改动，**不提交其它文档**
+- [x] 提交说明须写明：加独立容器改了 `docker-compose.yml`，属「独立容器」类变更，不违反「新增业务模块不改编排」的契约
+- [x] 服务器改动无 remote 可推，在服务器本地 commit 并打 tag `llm-gateway-2026-08-14`
+- [x] 把 spec 的「客户端改动」节按 Task 7 的修正更新（三向同步：spec ←→ 代码不能对不上）
+- [x] 已合并 origin/main（`448af493`，4 处冲突）。`_auth_manager.py` 的 `TCPConnector` 取并集
+      （keepalive + dns cache + 显式 `ssl=client_ssl_context()`，后者少了会「全超时而 curl 秒回」）；
+      `gateway/__init__.py` 删掉上游在 8b 处重复的 AuthManager 装配，保留本分支 6b 处那份 ——
+      它还接了 `aim._resolve_key`，必须排在 AI 恢复之前
+- [x] 全量验证：gateway 200 passed / 2 skipped、ai 17 passed、spa-v2 167 passed、build 通过、
+      ruff 干净、211 文件 formatted、ty 干净、生成器 `--check` 一致、`.iss` 的 BOM 仍在
+- [ ] **PR 需负责人自己开**（本机没装 `gh`，Program Files / chocolatey / AppData 都查过）：
+      https://github.com/genuineknowledge/psi-agent/pull/new/feat/llm-gateway
 - [ ] 交付文档补 A/T 两段：A 段只放路径与 commit，T 段贴 A1–A8 的验证证据（A8 与 A3 是手工证据）
 
 ## 已知开放项（归属他人，不阻塞本 plan 前 8 个任务）

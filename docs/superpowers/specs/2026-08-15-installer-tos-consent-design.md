@@ -177,9 +177,13 @@ PrevPageID := CurPageID;
 
 ## 七、未验到的部分
 
-本机没装 Inno Setup（两处 Program Files 均查过），**`ISCC.exe` 编译没跑过**。Pascal 侧只做了静态核对：花括号 14/14 配平、`begin` 11 / `end;` 11 配平、10 个例程、6 个 `{cm:Legal*}` 键在两种语言下都有定义、3 条 `dontcopy` 路径都存在。编译期错误仍有可能。
+本机没装 Inno Setup（两处 Program Files 均查过），**本地没跑过 `ISCC.exe`**。改为把分支推上去让 CI 编译 —— `.github/workflows/pyinstaller.yml` 的 `haitun-inno-setup` job 在**每次 push 上都跑**（`on: push` 无分支过滤，job 级也没有 `if`），特性分支同样会编译，所以 A9 的编译那一半由 CI 收。**结果要看 CI**，本文档不代它下结论。
 
-**向导没人点过。** A3–A6（勾选门禁、链接打开、样式、`ScaleY` 0/48/72/108 的排版）需要在 Windows 上装一遍真安装包才能收。
+Pascal 侧的静态核对：花括号 14/14 配平、`begin` 11 / `end;` 11 配平、10 个例程、6 个 `{cm:Legal*}` 键在两种语言下都有定义、3 条 `dontcopy` 路径都存在、UTF-8 BOM 在与 origin/main 合并后仍在。
+
+**查过一处存疑写法**：`Cursor := crHand`。Inno 的脚本引擎是 RemObjects Pascal Script + MiniVCL，光标常量用的是 Lazarus 的名字，不是 Delphi 的 `crHandPoint` —— 两份 Inno 实例代码（其中一份正是「装机时显示协议链接」的同类场景）都写 `crHand`，写法成立。
+
+**向导没人点过。** A3–A6（勾选门禁、链接打开、样式、`ScaleY` 0/48/72/108 的排版）需要在 Windows 上装一遍真安装包才能收，只有负责人能做。
 
 英文语言下用户看到的仍是中文正文 —— 两份协议只有中文版，属已知限制。
 
