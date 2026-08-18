@@ -211,10 +211,44 @@ def _project_for_ai(msg: dict[str, Any], role: str) -> dict[str, Any]:
     """Strip display-only keys, pin ``role``, and fold in ``turn_context``."""
     projected = {k: v for k, v in msg.items() if k not in _DISPLAY_ONLY_KEYS}
     projected["role"] = role
+    if role == "assistant":
+        _rename_reasoning_for_wire(projected)
     turn_context = msg.get(TURN_CONTEXT_KEY)
     if isinstance(turn_context, str) and turn_context.strip():
         projected["content"] = _fold_turn_context(projected.get("content"), turn_context)
     return projected
+
+
+def _rename_reasoning_for_wire(projected: dict[str, Any]) -> None:
+    """Send thinking back under the key providers actually read.
+
+    We store it as ``reasoning`` (``agent.py``), but that name is ours alone:
+    every provider any-llm knows reads ``reasoning_content`` / ``thinking`` /
+    ``think`` / ``chain_of_thought`` (``any_llm.constants.REASONING_FIELD_NAMES``)
+    and any-llm normalizes those names on the way *down* only — request messages
+    are passed through untouched, so a key it does not know reaches the provider
+    verbatim.  DeepSeek's thinking mode then rejects the request outright:
+    ``The `reasoning_content` in the thinking mode must be passed back to the
+    API.``  Measured against the live endpoint with one real wire shape, three
+    times each, the key name being the only variable: ``reasoning`` → 3/3 HTTP
+    400, ``reasoning_content`` → 3/3 OK, key absent → 3/3 HTTP 400.  Sending
+    ``reasoning`` is therefore equivalent to sending nothing.
+
+    Renamed here rather than at the storage site so existing history files need
+    no migration.  An explicit ``reasoning_content`` already on the row wins —
+    it is the provider-shaped value.
+    """
+    value = projected.pop("reasoning", None)
+    if "reasoning_content" in projected or value is None:
+        return
+    if isinstance(value, dict):
+        # any-llm's own ``Reasoning`` shape, should it ever be stored.
+        value = value.get("content")
+        if value is None:
+            return
+    if isinstance(value, str) and not value.strip():
+        return
+    projected["reasoning_content"] = value
 
 
 def _fold_turn_context(content: Any, turn_context: str) -> Any:

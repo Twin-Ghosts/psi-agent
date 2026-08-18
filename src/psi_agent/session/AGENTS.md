@@ -260,6 +260,15 @@ AI 的 tool_calls 通过 SSE 流式传输——多个 chunk 中的 `delta.tool_c
 
 同时累积 `reasoning`（AI 的思考过程）——DeepSeek V4 等 reasoning model 要求 tool call 轮次中 `reasoning` 必须完整回传到 API。
 
+**回传时键名必须是 `reasoning_content`，不是 `reasoning`**（`history_display._rename_reasoning_for_wire`）。
+落盘行用的是内部键名 `reasoning`，而它**不在** `_DISPLAY_ONLY_KEYS` 里，所以会原样出网；
+provider 只认 `reasoning_content`（any-llm 的 `REASONING_FIELD_NAMES` 首项），把
+`reasoning` 原样发上去**等于什么都没发**。拿真实 wire 形态对线上端点实测，键名是唯一变量、
+各三次：`reasoning` → 3/3 HTTP 400，`reasoning_content` → 3/3 成功，键缺失 → 3/3 HTTP 400。
+现网用户没吃到 400（中间层把不认识的键丢了，8/8 成功），代价是**思考过程静默丢失**、上面
+那条「必须完整回传」的约定实际上一直没兑现。改在**投影处**而非落盘处，故已有历史文件无需迁移；
+行上已有显式 `reasoning_content` 时以它为准（那是 provider 形状的值）。
+
 收到 `finish_reason="tool_calls"` 后，按 index 排序生成完整 tool_calls 列表，逐一执行。
 
 **Tool 执行容错**：
@@ -390,7 +399,8 @@ Session 支持将对话历史持久化到 AppData `histories/{session_id}.jsonl`
 4. **冷却门槛**：`_compaction_cooldown_elapsed()` 不过则直接返回（见下）
 5. 构造 `complete_fn`（使用现有 `AiClient` 做流式调用并收集全部 content 的闭包）
 6. `summary = await compact_history(conversation.messages, complete_fn)`
-7. 插入独立的 `compacted` 消息（`role="compacted"`, `kind="compacted"`）到 conversation
+7. **落盘前校验** `_summary_looks_hijacked()`（见下「摘要落盘校验」）：判为劫持则重试一次，
+   仍失败则不写入；通过后插入独立的 `compacted` 消息（`role="compacted"`, `kind="compacted"`）
 8. `commit()` 落盘——历史消息**保留**，不删除；随后记录水位线
    `_tokens_at_last_compaction`（**仅成功时**记，失败没缩小任何东西，下次信号仍应放行）
 9. 下次发送 AI 请求时，`messages_for_ai()` 负责：找到 system prompt 和最后一个 compacted，删除中间消息，将 compacted 内容合并到 system prompt
@@ -412,6 +422,37 @@ async def compact_history(
 这一步安全的前提是默认实现**链式累积**（新摘要在上一份之上更新，故包含而非丢弃更早
 上下文）；若自定义的 `compact_history` 忽略传入的 `compacted` 行，则每压一次就少一层
 历史——这正是「时不时压缩就忘记前面对话」的成因。
+
+### 摘要落盘校验（`_summary_looks_hijacked`，刻意为之，勿"修掉"）
+
+第 7 步落盘前有一道校验。原因是一次现网事故：`compact_history` 把对话原文放进一条**裸
+`user` 消息**，而「请总结」指令孤零零待在 `system` 槽，于是**原文的最后一行成了模型看到的
+最后一条指令**——原文里有 401 处心跳任务「只回 `HEARTBEAT_OK`，不要解释」，模型就照做了。
+一次真实会话 88 条 `compacted` 里，9 条摘要**就是** `HEARTBEAT_OK` 十二个字符，代表 46 万
+字符的对话；且摘要是链式累积的，一旦写进去就被后续每次压缩固化下去。
+
+两侧一起改才闸得住：
+
+- **提示词侧**（各 workspace `system.py`）：原文用 `<transcript>` 围栏包裹、声明为待总结的
+  数据、「请总结」在围栏**之后**复述，与劫持指令争同一个尾部位置；原文里的 `</transcript>`
+  转义掉，防止逃逸。
+- **落盘侧**（本层）：`_summary_looks_hijacked(summary, source_chars)` 判为劫持则重试一次，
+  仍失败则**不写入**——宁可这回合不压缩（下回合会重试），也不能把整段对话换成模型的一句
+  回话。
+
+两条判据都是拿那 88 条实测定出来的，别凭直觉调：
+
+- `MIN_SUMMARY_CHARS = 200` **只在** `source_chars >= MIN_SOURCE_CHARS = 2000` 时生效。
+  绝对下限会误杀短对话——短对话的摘要本来就该短（首版无条件生效，直接让 3 条既有测试变红）。
+- 标记词只做**前缀**匹配（`HIJACK_ECHO_PREFIXES`）。改成子串匹配会误杀好摘要：那 88 条里有
+  20 条含 `[SEND:`，其中最长的 9 条是正常总结「我把文件发给你了」这类对话的合法摘要。
+  判据是「摘要不能**就是**一条指令」，不是「摘要不能**提到**指令」。
+- 只量 `[Recent turns]` 之前那段：其后是逐字保留的近期原文，会把塌缩的摘要稀释掉看不出来。
+  该段为**空是合法的**（没有比逐字窗口更早的内容时，`compact_history` 只返回尾部）。
+
+这不是完备检测：又长、又不以已知套话开头的劫持仍会漏过。它只保证**灾难性形态**——整段对话
+被一句话取代并永久链式固化——不会静默落盘。详见
+`docs/onboarding/压缩摘要被注入劫持修复交付文档.md`。
 
 ### 压缩冷却（`COMPACTION_COOLDOWN_FRACTION = 0.1`，刻意为之，勿"修掉"）
 

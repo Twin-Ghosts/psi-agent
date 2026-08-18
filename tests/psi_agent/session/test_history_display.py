@@ -79,14 +79,16 @@ def test_messages_for_ai_keeps_assistant_rows_with_content_or_tool_calls() -> No
         }
     ]
 
+    # ``reasoning`` goes out as ``reasoning_content`` — the only name providers
+    # read.  See ``test_assistant_reasoning_goes_out_as_reasoning_content``.
     assert messages_for_ai(
         [
             {"role": "assistant", "content": "answer", "reasoning": "internal"},
             {"role": "assistant", "reasoning": "internal", "tool_calls": tool_calls},
         ]
     ) == [
-        {"role": "assistant", "content": "answer", "reasoning": "internal"},
-        {"role": "assistant", "reasoning": "internal", "tool_calls": tool_calls},
+        {"role": "assistant", "content": "answer", "reasoning_content": "internal"},
+        {"role": "assistant", "reasoning_content": "internal", "tool_calls": tool_calls},
     ]
 
 
@@ -118,3 +120,56 @@ def test_extract_send_paths() -> None:
     assert extract_send_paths("see\n[Send:/tmp/a.html]\n[send: b.md ]") == ["/tmp/a.html", "b.md"]
     assert extract_send_paths("[RECV:/x]") == []
     assert extract_send_paths("") == []
+
+
+def test_assistant_reasoning_goes_out_as_reasoning_content() -> None:
+    """We store ``reasoning``; providers only read ``reasoning_content``.
+
+    Measured against the live endpoint, the key name is the only thing that
+    decides acceptance: ``reasoning`` → HTTP 400, ``reasoning_content`` → OK.
+    """
+    projected = messages_for_ai(
+        [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "答案", "reasoning": "先想清楚再答。", "kind": KIND_CHAT},
+        ]
+    )
+    assert projected == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "答案", "reasoning_content": "先想清楚再答。"},
+    ]
+
+
+def test_reasoning_rename_preserves_tool_call_only_turns() -> None:
+    """A tool-call turn carries no ``content``; renaming must not drop it."""
+    calls = [{"id": "call_1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]
+    projected = messages_for_ai(
+        [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "tool_calls": calls, "reasoning": "该调工具了。"},
+            {"role": "tool", "tool_call_id": "call_1", "name": "f", "content": "ok"},
+        ]
+    )
+    assert projected[1] == {"role": "assistant", "tool_calls": calls, "reasoning_content": "该调工具了。"}
+    assert projected[2]["role"] == "tool"
+
+
+def test_reasoning_rename_edge_cases() -> None:
+    # An explicit provider-shaped value wins over our own key.
+    both = messages_for_ai([{"role": "assistant", "content": "a", "reasoning": "ours", "reasoning_content": "theirs"}])
+    assert both == [{"role": "assistant", "content": "a", "reasoning_content": "theirs"}]
+
+    # any-llm's ``Reasoning`` shape, should it ever reach storage.
+    nested = messages_for_ai([{"role": "assistant", "content": "a", "reasoning": {"content": "深思"}}])
+    assert nested == [{"role": "assistant", "content": "a", "reasoning_content": "深思"}]
+
+    # Empty / blank thinking is not worth a wire field.
+    for blank in ("", "   ", None):
+        assert messages_for_ai([{"role": "assistant", "content": "a", "reasoning": blank}]) == [
+            {"role": "assistant", "content": "a"}
+        ]
+
+    # Non-assistant roles keep their keys untouched.
+    assert messages_for_ai([{"role": "user", "content": "a", "reasoning": "x"}]) == [
+        {"role": "user", "content": "a", "reasoning": "x"}
+    ]

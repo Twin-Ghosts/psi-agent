@@ -53,10 +53,98 @@ compaction cannot shrink the system prompt, so each pass costs an LLM call and
 erodes older context without lowering ``prompt_tokens``.
 """
 
+MIN_SUMMARY_CHARS = 200
+"""Below this, a *large* history's summary is treated as a failed compaction.
+
+A compaction that summarizes hundreds of turns cannot legitimately come back as
+one line.  In a real 3660-row history, 9 of 88 summaries were exactly
+``HEARTBEAT_OK`` — the model had answered the transcript instead of summarizing
+it, and the result was written to the ``compacted`` row and carried forward from
+then on.  Rejecting the write costs one un-compacted turn; accepting it silently
+discards the conversation.
+
+Only meaningful together with ``MIN_SOURCE_CHARS``: a short conversation has a
+legitimately short summary, so the floor cannot be absolute.
+"""
+
+MIN_SOURCE_CHARS = 2000
+"""How much conversation must exist before a short summary is suspicious.
+
+Guards the length floor against firing on small histories, where "three turns in,
+one sentence out" is the correct result rather than a hijack.  The field failures
+were nowhere near this line — 121,830 characters of transcript reduced to 12 —
+so the gap between legitimate and catastrophic is orders of magnitude, not a
+close call.
+"""
+
+HIJACK_ECHO_PREFIXES = ("HEARTBEAT_OK",)
+"""Canned replies that, when they *open* a summary, mean the model complied.
+
+Matched only as a prefix, and only ever as a supplement to the length floor.
+Measured against the 88 ``compacted`` rows of the field log: the floor alone
+caught 19 of the 31 rows containing a hijack marker and missed 12, including a
+1200-character summary whose chained ``<existing-summary>`` fence had the
+poisoned ``HEARTBEAT_OK`` at its head.  Prefix-matching catches all 11 such rows.
+
+Substring matching was measured and rejected: 20 rows contain ``[SEND:`` and the
+9 longest are legitimate summaries *of* file-delivery turns.  Banning the marker
+outright would have thrown those away — a summary is allowed to describe
+instructions, it just must not be one.
+"""
+
 _CURRENT_TOOL_AI_SOCKET: ContextVar[str | None] = ContextVar(
     "psi_agent_current_tool_ai_socket",
     default=None,
 )
+
+
+RECENT_TURNS_MARKER = "\n[Recent turns]\n"
+"""Separator ``compact_history`` puts between the summary and the verbatim tail.
+
+The tail is raw conversation text, so it would mask a collapsed summary from any
+length check applied to the whole return value.
+"""
+
+
+def _summary_looks_hijacked(summary: str, source_chars: int) -> bool:
+    """Whether a compaction summary collapsed instead of summarizing.
+
+    Catches the failure mode observed in the field: the model treated the
+    transcript as the live request and answered it, so the "summary" of hundreds
+    of turns came back as a single line — ``HEARTBEAT_OK``, 12 characters.
+
+    Two signals, both measured against the field log's 88 ``compacted`` rows:
+    the summary is implausibly short for how much went in, or it *opens* with a
+    canned reply, which is what a compliance echo looks like even when the
+    surrounding text is long.  Together they flag all 11 rows carrying a
+    ``HEARTBEAT_OK`` summary with no false positive among the long legitimate
+    ones.
+
+    ``source_chars`` is how much conversation was handed to the compaction: the
+    length test only applies once there is enough input that a one-liner cannot
+    be the right answer.  Only the part before the verbatim recent tail is
+    measured, and an *empty* summary part is legitimate — with nothing older than
+    the verbatim window, ``compact_history`` returns the tail alone.
+
+    Not a full detector.  A hijacked response that is both long and does not
+    begin with a known canned reply still gets through; the point is that the
+    catastrophic case — an entire conversation replaced by one line, then chained
+    forward forever — cannot be written silently.
+    """
+    head = summary.split(RECENT_TURNS_MARKER, 1)[0].strip()
+    if not head:
+        return False
+    if source_chars >= MIN_SOURCE_CHARS and len(head) < MIN_SUMMARY_CHARS:
+        return True
+    # A chained summary wraps the previous one in a fence; the echo then sits
+    # just inside it rather than at character zero.
+    probe = head[:120].replace("<existing-summary>", "").replace("</existing-summary>", "").strip()
+    return probe.startswith(HIJACK_ECHO_PREFIXES)
+
+
+def _conversation_chars(messages: list[dict[str, Any]]) -> int:
+    """Rough size of what a compaction was asked to summarize."""
+    return sum(len(m["content"]) for m in messages if isinstance(m.get("content"), str))
 
 
 def current_tool_ai_socket() -> str | None:
@@ -726,6 +814,16 @@ class SessionAgent:
             if not summary:
                 logger.debug("Compaction returned empty summary, skipping")
                 return
+            source_chars = _conversation_chars(self._conversation.messages)
+            if _summary_looks_hijacked(summary, source_chars):
+                logger.warning(f"Compaction summary looks hijacked ({len(summary)} chars), retrying once")
+                summary = await compaction_fn(self._conversation.messages, complete_fn)
+                if not summary or _summary_looks_hijacked(summary, source_chars):
+                    # Writing it would replace the whole conversation with the
+                    # model's answer to the transcript, permanently.  Skipping
+                    # leaves history un-compacted, which the next turn retries.
+                    logger.error("Compaction summary still looks hijacked after retry, not writing it")
+                    return
             logger.info(f"Compaction summary generated ({len(summary)} chars)")
 
             self._conversation.add({"role": "compacted", "content": summary, "kind": KIND_COMPACTED})
