@@ -211,16 +211,22 @@ def entry_card(
     # rookie_sop_digest 确实只报「第 2 天结束仍未完成」的人, 事先告知比事后被问公平。
     # 措辞用「了解原因」而非「上报」: 卡住多半有正当理由(等权限、等人带),
     # HR 要做的是解开堵点而不是问责。
-    if not progress.all_done and _day_index(rows, today) >= 2:
-        elements.append(
-            {
-                "tag": "markdown",
-                "content": (
-                    "🔴 **今天是最后一天**——若今天收尾时仍未完成，HR 会来了解原因。"
-                    "卡在哪里直接说，缺权限、缺人带都能帮你推。"
-                ),
-            }
-        )
+    # 两档都要写清时限 —— 只给颜色不给话, 新人不知道「绿」意味着什么时候之前做完。
+    # 绿(Day 1): 明天之内完成; 红(Day 2 起): 今天没完成 HR 会来问是否遇到困难。
+    # 措辞刻意用「了解原因 / 遇到困难」而非「上报、通报」: 卡住多半有正当理由
+    # (等权限、等人带), HR 要做的是解开堵点而不是问责, 所以后半句直接给出路。
+    if not progress.all_done:
+        if _day_index(rows, today) >= 2:
+            urgency = (
+                "🔴 **今天是最后一天**——若今天收尾时仍未完成，HR 会来了解你是否遇到困难。"
+                "卡在哪里直接说，缺权限、缺人带都能帮你推。"
+            )
+        else:
+            urgency = (
+                "🟢 **请在明天之内完成**——今天先把能做的做掉，明天收尾。"
+                "若到明天还没完成，HR 会来了解你是否遇到困难。"
+            )
+        elements.append({"tag": "markdown", "content": urgency})
         elements.append({"tag": "hr"})
 
     modules: list[str] = []
@@ -492,9 +498,17 @@ def digest_card(
             icon = "⚠️"
             tail = f"逾期 {row.get('逾期项数')} 项（{row.get('逾期项')}）"
             attention.append(f"{name} 逾期 {row.get('逾期项数')} 项")
+        elif int(row.get("入职第N天") or 0) >= 2:
+            # 第 2 天起还没做完就该提醒 —— 这才是 active_rookies 的入选条件。
+            # 原先只看「有没有逾期项」: 清单多数项的 window_days 是 3-7 天, 第 2 天时
+            # 大部分项还没到截止日, 于是 0/28 的人也被判成「正常」、卡片是蓝的,
+            # HR 完全看不出严重性(用户反馈「2 天后没完成的没有红色提醒」)。
+            icon = "🔴"
+            tail = f"入职第 {row.get('入职第N天')} 天仍未完成（{row.get('进度')}），需了解原因"
+            attention.append(f"{name} 第 {row.get('入职第N天')} 天仍未完成（{row.get('进度')}）")
         else:
             icon = "🕐"
-            tail = f"入职第 {row.get('入职第N天')} 天，正常"
+            tail = f"入职第 {row.get('入职第N天')} 天，进行中"
         lines.append(f"{icon} **{name}**　{row.get('进度')}　{tail}")
 
     elements.append({"tag": "hr"})
@@ -519,4 +533,14 @@ def digest_card(
                 ],
             }
         )
-    return _shell("新人入职进度日报", elements, "orange" if attention else "blue"), {}
+    # 有人第 2 天起仍未完成 → 红; 仅有逾期项 → 橙; 都没有 → 蓝。
+    # HR 要的是「一眼看出今天有没有人需要我去问」, 所以最严重的那一档必须是红色。
+    overdue_only = any(int(r.get("逾期项数") or 0) > 0 for r in overview_rows)
+    stalled = any(
+        int(r.get("入职第N天") or 0) >= 2
+        and str(r.get("状态") or "") != "已出新手村"
+        and int(r.get("逾期项数") or 0) == 0
+        for r in overview_rows
+    )
+    template = "red" if stalled else ("orange" if overdue_only else "blue")
+    return _shell("新人入职进度提醒", elements, template), {}

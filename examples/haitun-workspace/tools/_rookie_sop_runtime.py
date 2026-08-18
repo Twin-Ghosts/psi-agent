@@ -7,7 +7,7 @@ workspace 的 .psi/rookie_sop/base.json (与 feishu_auth 把 token 放
 
 from __future__ import annotations
 
-# ruff: noqa: E402, RUF001, PLC0415
+# ruff: noqa: RUF002, E402, RUF001, PLC0415
 import json
 import sys
 from datetime import date
@@ -137,8 +137,66 @@ def should_send_cards(*, is_first_send: bool, force_resend: bool) -> bool:
     return is_first_send or force_resend
 
 
+async def _base_url(app_token: str) -> str:
+    """多维表格的正式链接(带租户域名); 查不到时回退通用域名。
+
+    刻意不硬编码 https://feishu.cn/base/... —— 每个租户有自己的域名(本租户是
+    genuineknowledge.feishu.cn), 通用域名拼出来的链接 HR 点开可能进不去。
+    实测: 同一个 app_token, 飞书 metas/batch_query 返回的才是能打开的那个。
+    (文档链接早先踩过同一个坑, 见 _rookie_sop_docapi.fetch_doc_url。)
+    """
+    import feishu_api as _api
+
+    try:
+        res = _store._parse_result(
+            await _api.feishu_api(
+                "POST",
+                "/open-apis/drive/v1/metas/batch_query",
+                body_json=json.dumps(
+                    {"request_docs": [{"doc_token": app_token, "doc_type": "bitable"}], "with_url": True},
+                    ensure_ascii=False,
+                ),
+            )
+        )
+        for meta in _store._items_of(res) or ((res.get("data") or {}).get("metas") or []):
+            url = str((meta or {}).get("url") or "").strip()
+            if url:
+                return url
+    except Exception:  # 查链接失败不该让建库/发卡失败
+        pass
+    return f"https://feishu.cn/base/{app_token}"
+
+
 async def ensure_base(cfg: dict[str, Any], workspace: str = "") -> dict[str, Any]:
-    """首次运行时建 base + 明细表 + 总览表; 之后复用状态文件里的 id。"""
+    """全组织共用一个 base（总览表一人一行、明细表一人 N 行）。
+
+    坐标优先取配置里的 ``shared_base`` —— 刻意不按人存: state 在每个人自己的
+    workspace 里, 于是每个新人首次发卡都发现「我这儿没有 app_token」而各建一个新库。
+    实测踩过: 16 个人建出 16 个互不相干的库, HR 打开只看得到最早那两个人, 19:00 的
+    异常提醒也只扫得到一个库。库坐标是全组织共享的事实, 不该跟着人走。
+
+    配置留空时才建新库, 并把 id 回填进 state ——首次上线用得到; 拿到 id 后填进
+    ``config/rookie_sop.yaml`` 的 ``shared_base`` 就固定下来了。
+    """
+    shared = cfg.get("shared_base")
+    if isinstance(shared, dict):
+        app_token = str(shared.get("app_token") or "").strip()
+        overview_id = str(shared.get("overview_table_id") or "").strip()
+        detail_id = str(shared.get("detail_table_id") or "").strip()
+        if app_token and overview_id and detail_id:
+            # 私有数据(文档/卡片映射)仍留在各人 state 里, 只把库坐标换成共享的
+            state = await load_state(workspace)
+            state.update(
+                {
+                    "app_token": app_token,
+                    "overview_table_id": overview_id,
+                    "detail_table_id": detail_id,
+                    "table_url": await _base_url(app_token),
+                }
+            )
+            await save_state(state, workspace)
+            return state
+
     state = await load_state(workspace)
     if state.get("app_token") and state.get("detail_table_id") and state.get("overview_table_id"):
         return state
@@ -210,7 +268,7 @@ async def ensure_base(cfg: dict[str, Any], workspace: str = "") -> dict[str, Any
         "app_token": app_token,
         "detail_table_id": detail_table_id,
         "overview_table_id": overview_table_id,
-        "table_url": f"https://feishu.cn/base/{app_token}",
+        "table_url": await _base_url(app_token),
     }
     await save_state(state, workspace)
     # 自带空表没删掉不影响功能, 但要让人知道 —— 否则 HR 打开会先看到一张空表,

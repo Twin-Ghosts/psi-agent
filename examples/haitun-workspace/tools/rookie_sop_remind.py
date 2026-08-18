@@ -19,11 +19,13 @@ if str(TOOLS_DIR) not in sys.path:
 
 import _rookie_sop_card as _card
 import _rookie_sop_config as _cfg
+import _rookie_sop_docapi as _docapi
 import _rookie_sop_progress as _p
 import _rookie_sop_runtime as _rt
 import _rookie_sop_store as _store
 import rookie_sop_sync_doc as _sync
-from feishu_message import feishu_message_send_card
+from feishu_api import feishu_api
+from feishu_message import feishu_message_edit_card, feishu_message_send_card
 from schedule_manage import schedule_manage
 
 
@@ -125,6 +127,23 @@ async def rookie_sop_remind(open_id: str = "") -> str:
     cfg = await _store.load_config()
     name = next((str(r.get("姓名") or "") for r in rows if r.get("姓名")), target)
 
+    # 顺手把入口卡重绘一遍 —— 它的主题色按「入职第几天」定(Day 1 绿、Day 2 起红),
+    # 但颜色只在有人重绘时才会变。原先只有 rookie_sop_sync_doc 会重绘, 而那个高频
+    # 同步过了入职当天就自删, 于是第二天的卡永远停在发出时的绿色。
+    # 实测: 罗霖第 3 天、进度 5/28, entry_card 算出的是 red, 可他手上那张还是绿的。
+    # 放在这里(每天 9:00 催办前)最省事: 催办本来就要跑, 顺带刷一次颜色。
+    entry_note = ""
+    entry_mid = str((state.get("entry_cards") or {}).get(target) or "")
+    if entry_mid:
+        doc_id = next((d for d, owner in (state.get("docs") or {}).items() if str(owner) == target), "")
+        doc_link = await _docapi.fetch_doc_url(feishu_api, doc_id) if doc_id else ""
+        entry_card, _entry_handlers = _card.entry_card(name, rows, doc_link, today)
+        edited = _store._parse_result(
+            await feishu_message_edit_card(entry_mid, json.dumps(entry_card, ensure_ascii=False), target)
+        )
+        if edited.get("ok") is not True:
+            entry_note = f"entry card redraw failed: {edited.get('message') or edited.get('error')}"
+
     if kind == "graduate":
         card, handlers = _card.graduation_card(name, progress.total)
     else:
@@ -194,6 +213,9 @@ async def rookie_sop_remind(open_id: str = "") -> str:
     }
     if doc_sync:
         result["doc_sync"] = doc_sync
+    # 入口卡没刷成功要报出来 —— 静默就意味着新人手上那张卡的颜色永远不对, 而没人知道
+    if entry_note:
+        result["entry_card"] = entry_note
     if schedule_result:
         result["schedule"] = schedule_result
     if hr_feedback:

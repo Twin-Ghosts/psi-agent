@@ -3033,11 +3033,13 @@ def test_link_items_spell_out_that_the_link_must_be_opened() -> None:
     assert "https://wiki.example/culture" in rendered
 
 
-def test_entry_card_warns_about_hr_followup_only_on_the_last_day() -> None:
-    """卡片转红且未做完时才提醒「HR 会来了解原因」。
+def test_entry_card_spells_out_the_deadline_in_both_tiers() -> None:
+    """两档都要写清时限, 只给颜色不给话新人不知道「绿」意味着什么时候之前做完。
 
-    rookie_sop_digest 确实只报「第 2 天结束仍未完成」的人, 事先说清比事后被问公平。
-    但第 1 天说、或已经做完了还说, 都只是徒增压力。
+    Day 1 绿: 「请在明天之内完成」; Day 2 起红: 「今天是最后一天」。
+    两档都点明「HR 会来了解你是否遇到困难」—— 措辞刻意不是「上报/通报」: 卡住多半
+    有正当理由(等权限、等人带), HR 要做的是解开堵点而不是问责。
+    做完了就一句都不说 —— 那只是徒增压力, 没有信息量。
     """
     c = _load("_rookie_sop_card")
     onboard = date(2026, 8, 13)
@@ -3054,18 +3056,31 @@ def test_entry_card_warns_about_hr_followup_only_on_the_last_day() -> None:
             }
         ]
 
-    def has_warning(card: dict[str, Any]) -> bool:
-        return "HR 会来了解原因" in json.dumps(card, ensure_ascii=False)
+    def text_of(card: dict[str, Any]) -> str:
+        return json.dumps(card, ensure_ascii=False)
 
     day1, _ = c.entry_card("王炜博", rows(), "https://doc", onboard)
     day2, _ = c.entry_card("王炜博", rows(), "https://doc", onboard + timedelta(days=1))
     day2_done, _ = c.entry_card("王炜博", rows("已完成"), "https://doc", onboard + timedelta(days=1))
 
-    assert has_warning(day1) is False, "第 1 天不该施压"
-    assert has_warning(day2) is True
-    assert day2["header"]["template"] == "red"
-    assert has_warning(day2_done) is False, "做完了就不该再提 HR"
+    # Day 1: 绿 + 明天之内
+    assert day1["header"]["template"] == "green"
+    assert "请在明天之内完成" in text_of(day1)
+    assert "今天是最后一天" not in text_of(day1)
 
+    # Day 2: 红 + 今天最后一天
+    assert day2["header"]["template"] == "red"
+    assert "今天是最后一天" in text_of(day2)
+
+    # 两档都说清 HR 会来问, 且不用问责口吻
+    for card in (day1, day2):
+        assert "HR 会来了解你是否遇到困难" in text_of(card)
+        assert "上报" not in text_of(card)
+        assert "通报" not in text_of(card)
+
+    # 做完了不提时限也不提 HR
+    assert "明天之内" not in text_of(day2_done)
+    assert "HR 会来了解" not in text_of(day2_done)
 
 def test_remind_card_day_two_mentions_hr_will_ask_why() -> None:
     """第 2 天的催办卡同样点明这条规则, 且措辞是「了解原因」不是「上报」。
@@ -3122,3 +3137,44 @@ def test_resend_keeps_the_old_doc_when_the_card_cannot_be_relinked() -> None:
 
     assert "stale_docs = []" in src, "relink 失败时要清空待删列表"
     assert 'result["old_card_relink"] = relink_note' in src, "relink 失败要报出来"
+
+
+def test_digest_card_turns_red_when_someone_is_stalled_past_day_one() -> None:
+    """第 2 天起仍未完成就该红 —— 那才是 active_rookies 的入选条件。
+
+    原先只看「有没有逾期项」: 清单多数项的 window_days 是 3-7 天, 第 2 天时大部分项
+    还没到截止日, 于是 0/28 的人也被判成「正常」、卡片是蓝的, HR 完全看不出严重性
+    (用户反馈「2 天后没完成的没有红色提醒」)。
+    """
+    c = _load("_rookie_sop_card")
+
+    stalled = [{"姓名": "李子祥", "入职第N天": 5, "进度": "0/28", "完成率": 0, "逾期项数": 0, "状态": "进行中"}]
+    card, _ = c.digest_card(stalled, "https://base", "8月18日")
+    text = json.dumps(card, ensure_ascii=False)
+
+    assert card["header"]["template"] == "red"
+    assert "仍未完成" in text
+    assert "正常" not in text, "0/28 且第 5 天不该被说成正常"
+    assert "需要关注" in text
+
+
+def test_digest_card_stays_calm_on_day_one() -> None:
+    """第 1 天还在办手续, 不该让 HR 觉得出事了。"""
+    c = _load("_rookie_sop_card")
+
+    fresh = [{"姓名": "新人", "入职第N天": 1, "进度": "0/28", "完成率": 0, "逾期项数": 0, "状态": "进行中"}]
+    card, _ = c.digest_card(fresh, "https://base", "8月18日")
+
+    assert card["header"]["template"] == "blue"
+    assert "进行中" in json.dumps(card, ensure_ascii=False)
+
+
+def test_digest_card_reports_graduates_without_alarm() -> None:
+    """已出新手村的不该触发红色 —— 完成本身不需要 HR 处理。"""
+    c = _load("_rookie_sop_card")
+
+    done = [{"姓名": "赵胜迪", "入职第N天": 5, "进度": "28/28", "完成率": 100, "逾期项数": 0, "状态": "已出新手村"}]
+    card, _ = c.digest_card(done, "https://base", "8月18日")
+
+    assert card["header"]["template"] == "blue"
+    assert "出新手村" in json.dumps(card, ensure_ascii=False)

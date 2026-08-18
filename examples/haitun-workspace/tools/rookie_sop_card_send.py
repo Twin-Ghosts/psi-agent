@@ -204,6 +204,11 @@ async def rookie_sop_card_send(
     # 两条路径靠 fresh_start 区分: HR 走 rookie_sop_card_send(默认 True),
     # 催办走 rookie_sop_remind 自己的 remind_card, 压根不经过这里。
     existing_doc = "" if fresh_start else _existing_doc_of(state, resolved_open_id)
+    # 待弃用的旧文档。**必须在分支外先初始化** —— 下面无条件读它, 只在 fresh_start
+    # 分支里赋值会让 fresh_start=False 那条路直接 UnboundLocalError。
+    # (实测踩过: 用 fresh_start=False 批量重发 6 个人, 6 个全挂在这一行; 好在异常
+    #  发生在任何写入之前, 没人的进度被动过。)
+    stale_docs: list[str] = []
     if fresh_start:
         reset = await _store.reset_progress(
             bitable, app_token, detail_table, open_id=resolved_open_id
@@ -311,6 +316,8 @@ async def rookie_sop_card_send(
     sent_result = _store._parse_result(sent_raw)
     sent: list[str] = []
     failed: list[dict[str, str]] = []
+    # 分支外初始化: 卡没发出去 / 没标加急时下面仍要读它(与 stale_docs 踩过的同一个坑)
+    urgent_note = ""
     if sent_result.get("ok") is not True:
         failed.append(
             {
@@ -334,6 +341,23 @@ async def rookie_sop_card_send(
                 resolved_open_id: card_mid,
             }
             await _rt.save_state(state, target_workspace)
+
+        # 标为加急 —— 飞书会给应用内强提醒弹窗, 普通卡片混在日常消息里太容易被划过去
+        # (用户反馈「很多人都没看见推送的卡片」)。
+        # 用 urgent_app 而不是 urgent_phone: 应用内弹窗已经足够醒目, 打电话给新人
+        # 发一份入职清单不成比例。
+        # 加急失败不算发卡失败 —— 卡本身已经送到了, 只是少一次弹窗, 所以只记不拦。
+        if card_mid:
+            urged = _store._parse_result(
+                await feishu_api(
+                    "PATCH",
+                    f"/open-apis/im/v1/messages/{card_mid}/urgent_app",
+                    query_json=json.dumps({"user_id_type": "open_id"}, ensure_ascii=False),
+                    body_json=json.dumps({"user_id_list": [resolved_open_id]}, ensure_ascii=False),
+                )
+            )
+            if urged.get("ok") is not True:
+                urgent_note = str(urged.get("message") or urged.get("error") or "urgent_app failed")
 
     # 每人一份催办定时任务, 落在这个新人自己的 Session workspace 里。结果不能丢:
     # schedule_manage 失败时返回 "[Error] ..." 字符串而不是抛异常, 吞掉它就等于
@@ -399,6 +423,9 @@ async def rookie_sop_card_send(
     # 旧卡改不动就没删旧文档 —— 必须报出来, 否则会留下一份无人知晓的孤儿文档
     if relink_note:
         result["old_card_relink"] = relink_note
+    # 加急没成功要报出来: 卡是送到了, 但少了那次弹窗, 新人很可能又划过去
+    if urgent_note:
+        result["urgent"] = urgent_note
     if failed:
         result["cards_failed"] = failed
     if truncated:
