@@ -144,6 +144,7 @@ psi-agent
 ├── ai                        # 统一 AI 后端（支持 50+ provider）
 ├── gateway                   # 生命周期管理 + REST API + Web Console
 ├── session                    # Session + workspace 管理
+├── dolphin-memory-sync        # 重放已落盘的 memory MCP outbox
 └── channel
     ├── repl                   # 交互式 REPL
     ├── cli                    # 单次消息
@@ -191,8 +192,14 @@ AI 和 Session 组件无需关心通信介质——由 `_sockets.py` 统一处�
 | `PSI_TELEGRAM_PROXY` | Telegram SOCKS5 代理 |
 | `PSI_FEISHU_APP_ID` | 飞书 app ID |
 | `PSI_FEISHU_APP_SECRET` | 飞书 app secret |
+| `PSI_MEMORY_TOKEN` | memory MCP bearer token (仅从环境读取, 不写入 workspace) |
 
 CLI 参数优先于环境变量。AI 参数（provider、model、api_key、base_url）及 channel 认证参数均可选，未传时回退到环境变量。Socket 路径参数（--session-socket、--channel-socket、--ai-socket）为必填。
+
+`dolphin-memory-sync` 使用 `--service-url`、`--session-id`、`--project-id` 指定 memory MCP 和会话,
+并从 AppData 的 `memory-outbox/<service>/<session>.jsonl` 读取 pending Turn。它只在收到结构化
+成功 receipt 后标记记录 committed; transport/unavailable 保留 pending, conflict/forbidden/integrity
+错误停止该会话队列。命令不会记录或输出消息正文和 token。
 
 ## 定义你自己的 Agent
 

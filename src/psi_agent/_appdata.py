@@ -74,6 +74,11 @@ def appdata_history_path(appdata_root: str, session_id: str) -> anyio.Path:
     return anyio.Path(appdata_root) / "histories" / f"{session_id}.jsonl"
 
 
+def appdata_memory_outbox_path(appdata_root: str, service_name: str, session_id: str) -> anyio.Path:
+    """Memory connector path: ``{appdata}/memory-outbox/{service}/{session}.jsonl``."""
+    return anyio.Path(appdata_root) / "memory-outbox" / service_name / f"{session_id}.jsonl"
+
+
 async def resolve_history_read_path(
     *,
     appdata_root: str,

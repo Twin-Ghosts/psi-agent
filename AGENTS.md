@@ -287,6 +287,17 @@ SSE 流中的特殊字段：
 - **`@pytest.mark.schedule`**：标记需要 >30s 的 schedule 相关测试，`pytest -m "not schedule"` 跳过
 - **所有 async 操作使用 anyio**: 禁止在 async 上下文中直接调用 `subprocess`、`time.sleep`、`pathlib.Path` 方法。详见上方"关键注意事项"第 4 条
 
+### Memory MCP completed-Turn connector
+
+`psi_agent.memory` 是可选的外部 memory MCP connector, 不依赖 ontology-memory 包。`MemoryTurnConnector`
+适配现有 `system_after_turn` hook, 仅接受 user/assistant `content` 为非空字符串的 completed Turn;
+多模态或缺失正文会跳过并记录有限诊断。它使用 AnyIO 原子 JSONL replacement 写入
+`{appdata}/memory-outbox/{service_name}/{session_id}.jsonl` 后再发送 `memory_add_batch`。每个 Turn 的
+稳定 source IDs 是 `<source-name>:<session-id>:<turn-index>` 及其 `:user`/`:assistant` 消息 ID,
+不是 hash。成功结构化 receipt 才会标记 committed; unavailable/transport 保留 pending,
+conflict/forbidden/integrity 停止该 session 队列。`dolphin-memory-sync` 只做 pending 重放, token
+来自 `PSI_MEMORY_TOKEN` 或显式 token 参数, 正文和 token 不写日志。
+
 ### 集成测试 Mock Server
 
 - `MockAIServer` 在 conftest.py 中定义，通过 pytest fixture 提供

@@ -13,6 +13,7 @@ from psi_agent.channel.feishu import ChannelFeishu
 from psi_agent.channel.repl import ChannelRepl
 from psi_agent.channel.telegram import ChannelTelegram
 from psi_agent.gateway import Gateway
+from psi_agent.memory.cli import DolphinMemorySync
 from psi_agent.router import Router
 from psi_agent.session import Session
 
@@ -24,7 +25,18 @@ ChannelGroup = Annotated[
     conf.subcommand(name="channel", description="User interface channels"),
 ]
 
-Command = Run | Ai | Session | ChannelGroup | Gateway | Router
+Command = (
+    Run
+    | Ai
+    | Session
+    | ChannelGroup
+    | Gateway
+    | Router
+    | Annotated[
+        DolphinMemorySync,
+        conf.subcommand(name="dolphin-memory-sync", description="Replay pending completed Turns to memory MCP"),
+    ]
+)
 
 
 def main() -> None:
