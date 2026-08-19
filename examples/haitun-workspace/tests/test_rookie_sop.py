@@ -3238,3 +3238,20 @@ def test_remind_takes_a_workspace_and_uses_it_for_state() -> None:
     src = inspect.getsource(rm.rookie_sop_remind)
     assert "_rt.load_state(workspace)" in src
     assert "_rt.load_state()" not in src, "不能无参调用 —— 会读到触发方的 state"
+
+
+def test_fresh_start_rereads_rows_after_resetting_progress() -> None:
+    """清零后必须重取 rows, 再拿它去建文档。
+
+    上面那份 rows 是清零**之前**读的; provision_doc 用它渲染文档, 用旧值就会把已
+    勾选状态照搬进新文档 —— 表清干净了、文档还是满的。
+    (实测踩过: fresh_start 重发后表里 28 未完成, 新文档却仍显示 27/32 已勾。)
+    """
+    cs = _load("rookie_sop_card_send")
+    src = inspect.getsource(cs.rookie_sop_card_send)
+
+    reset_at = src.index("reset_progress(")
+    provision_at = src.index("provision_doc(")
+    # 清零与建文档之间必须再取一次 rows
+    between = src[reset_at:provision_at]
+    assert "fetch_detail(" in between, "清零后没有重取 rows, 新文档会照搬旧勾选"

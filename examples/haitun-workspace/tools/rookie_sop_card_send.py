@@ -217,6 +217,10 @@ async def rookie_sop_card_send(
             return json.dumps(
                 {"ok": False, "error": f"reset progress failed: {reset.get('error')}"}, ensure_ascii=False
             )
+        # 清零后必须重取 rows —— 上面那份是清零**之前**读的, 下面 provision_doc 用它
+        # 渲染文档, 用旧值就会把已勾选状态照搬进新文档: 表清干净了、文档还是满的。
+        # (实测踩过: fresh_start 重发后表里 28 未完成, 新文档却仍显示 27/32 已勾。)
+        rows, truncated = await _store.fetch_detail(bitable, app_token, detail_table, resolved_open_id)
         # 旧文档留着会让新人对着一份已勾满的清单, 且它的 block_map 还在 state 里,
         # 同步会把旧勾选又写回表 —— 所以连同映射一起弃用, 下面会重建一份。
         #
