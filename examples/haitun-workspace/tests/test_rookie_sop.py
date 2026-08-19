@@ -1481,12 +1481,22 @@ def test_decide_remind_pushes_on_day_2_and_flags_hr_notify() -> None:
 
 
 def test_decide_remind_stops_from_day_3_even_if_incomplete() -> None:
-    """第 3 天起不再推 —— 即便还有未完成项, 也不是「一直催到做完」。"""
+    """第 3 天起不再**发卡**, 但仍要同步(sync_only); 第 8 天起才彻底停。
+
+    发卡两天与同步七天是两件事: 不发卡是为了不天天打扰新人; 仍同步是因为高频那份
+    (每 10 分钟)只覆盖前两天, 若这一档也停掉, 第 3 天起新人勾什么都不会进表,
+    卡面与 HR 那张总览表就此冻结。
+    """
     rm = _load("rookie_sop_remind")
     p = _load("_rookie_sop_progress")
     rows = [_row("wifi", p.STATUS_TODO, date(2026, 8, 20))]
 
-    got = rm.decide_remind(rows, date(2026, 8, 7), day_index=3)
+    # 第 3-7 天: 只同步, 保留定时
+    for d in (3, 5, 7):
+        got = rm.decide_remind(rows, date(2026, 8, 7), day_index=d)
+        assert got["kind"] == "sync_only", f"day {d} 应只同步"
+    # 第 8 天起: 彻底停, 调用方据此自删
+    got = rm.decide_remind(rows, date(2026, 8, 7), day_index=8)
 
     assert got["kind"] == "stop"
 
@@ -1650,8 +1660,12 @@ def test_rookie_sop_remind_day2_skips_hr_feedback_when_hr_notify_id_is_empty(mon
     assert out["hr_feedback"] == {"ok": False, "sent": False, "reason": expected_reason}
 
 
-def test_rookie_sop_remind_stops_and_self_deletes_from_day_3(monkeypatch: Any) -> None:
-    """入职第 3 天起: 不发卡(哪怕还有未完成项), 而是删掉自己这份定时。"""
+def test_rookie_sop_remind_syncs_without_sending_from_day_3(monkeypatch: Any) -> None:
+    """入职第 3 天起: 不发卡, 但**保留定时**继续每天同步一次。
+
+    发卡两天与同步七天是两件事。若这里也自删, 第 3 天起新人勾什么都不会进表 ——
+    高频那份(每 10 分钟)只覆盖前两天, 这一档是它之后唯一的兜底。
+    """
     rm = _load("rookie_sop_remind")
     p = _load("_rookie_sop_progress")
     today = date.today()
@@ -1679,14 +1693,11 @@ def test_rookie_sop_remind_stops_and_self_deletes_from_day_3(monkeypatch: Any) -
 
     out = json.loads(anyio.run(lambda: rm.rookie_sop_remind("ou_x")))
 
-    assert out == {
-        "ok": True,
-        "sent": False,
-        "kind": "stop",
-        "reason": "past day 2, no more pushes; schedule self-deleted",
-        "schedule": "Schedule deleted: 'rookie-remind-ou_x'",
-    }
-    assert schedule_calls == [{"action": "delete", "schedule_name": "rookie-remind-ou_x"}]
+    assert out["ok"] is True
+    assert out["sent"] is False
+    assert out["kind"] == "sync_only"
+    # 关键: 第 3-7 天不能删定时, 否则进度就此冻结
+    assert schedule_calls == [], "第 3-7 天不该动定时"
 
 
 def test_rookie_sop_remind_graduates_and_self_deletes_regardless_of_day(monkeypatch: Any) -> None:
@@ -1724,7 +1735,9 @@ def test_rookie_sop_remind_graduates_and_self_deletes_regardless_of_day(monkeypa
     assert out["ok"] is True
     assert out["kind"] == "graduate"
     assert len(sent) == 1
-    assert schedule_calls == [{"action": "delete", "schedule_name": "rookie-remind-ou_x"}]
+    assert len(schedule_calls) == 1
+    assert schedule_calls[0]["action"] == "delete"
+    assert schedule_calls[0]["schedule_name"] == "rookie-remind-ou_x"
 
 
 def test_active_rookies_only_reports_day_two_and_later_unfinished() -> None:
@@ -2656,8 +2669,11 @@ def test_doc_url_falls_back_when_feishu_cannot_be_asked() -> None:
     assert url == "https://feishu.cn/docx/doc123"
 
 
-def test_sync_doc_deletes_its_own_high_frequency_schedule_after_day_one(monkeypatch: Any) -> None:
-    """入职当天之后, 高频同步定时要自删 —— 否则就是每 10 分钟一次的永久空轮询。
+def test_sync_doc_deletes_its_own_high_frequency_schedule_after_day_two(monkeypatch: Any) -> None:
+    """入职**第 2 天之后**, 高频同步定时要自删 —— 否则就是每 10 分钟一次的永久空轮询。
+
+    高频档覆盖前两天(第 2 天是最后一天, 那天的勾选最需要及时反映到卡面和 HR 那张
+    表上)。第 3-7 天降为每天 9:00 一次, 由 rookie_sop_remind 的 sync_only 档承接。
 
     定时任务是发卡时建的, 没人会记得回收; 留着它一年就是五万次无意义调用。
     删除用的名字必须与创建时一致(rookie-docsync-<后8位>), 否则删的是不存在的
@@ -2686,9 +2702,9 @@ def test_sync_doc_deletes_its_own_high_frequency_schedule_after_day_one(monkeypa
         return {"ok": True, "blocks": []}
 
     monkeypatch.setattr(s._docapi, "read_blocks", _fake_read)
-    # 入职日是昨天 → 已过当天, 该自删
-    yesterday = date.today() - timedelta(days=1)
-    rows = [{"记录键": "ou_x:wifi", "项": "连上 WiFi", "状态": "未完成", "入职日": yesterday, "截止日": yesterday}]
+    # 入职日是 3 天前 → day_index=4, 已过前两天, 该自删
+    onboard = date.today() - timedelta(days=3)
+    rows = [{"记录键": "ou_x:wifi", "项": "连上 WiFi", "状态": "未完成", "入职日": onboard, "截止日": onboard}]
     monkeypatch.setattr(s._rt, "bitable_adapter", lambda: _FakeBitable(rows))
 
     async def _fake_fetch(*args: Any, **kwargs: Any) -> tuple[list[dict[str, Any]], bool]:
@@ -3178,3 +3194,47 @@ def test_digest_card_reports_graduates_without_alarm() -> None:
 
     assert card["header"]["template"] == "blue"
     assert "出新手村" in json.dumps(card, ensure_ascii=False)
+
+
+def test_schedules_are_created_under_the_rookies_own_workspace() -> None:
+    """定时必须建到**新人自己**的 workspace, 不是发指令那个 HR 的。
+
+    schedule_manage 默认写调用方目录 —— HR 发卡时本工具跑在 HR 的会话里, 定时就落在
+    HR 名下。后果不只是位置不对: 定时触发的工具会去读 HR 的 state, 同步报
+    「no block map for document ...」, 催办查的更是另一个人的多维表格。
+    实测踩过两轮, 每发一张新卡就多一个错落的定时。
+    """
+    cs = _load("rookie_sop_card_send")
+    src = inspect.getsource(cs.rookie_sop_card_send)
+
+    # 两个 schedule_manage 调用都要显式指定 workspace
+    assert src.count("workspace=target_workspace") == 2, "催办与同步两个定时都要传"
+    # tool_args 里带的 workspace 也必须是新人的(定时触发时框架不建路径上下文)
+    assert '"workspace": target_workspace' in src
+    assert "str(_paths.resolve_workspace())" not in src, "不能再用调用方的 workspace"
+
+
+def test_schedule_manage_can_target_another_workspace() -> None:
+    """schedule_manage 要能被指定目标 workspace, 否则代人建定时无从落对位置。"""
+    sm = _load("schedule_manage")
+    sig = inspect.signature(sm.schedule_manage)
+
+    assert "workspace" in sig.parameters
+    assert sig.parameters["workspace"].default == ""
+    # 目录解析要真的用上它, 不能收了参数却不传
+    assert "_schedules_dir(workspace)" in inspect.getsource(sm.schedule_manage)
+
+
+def test_remind_takes_a_workspace_and_uses_it_for_state() -> None:
+    """催办也要接 workspace 并传给 load_state。
+
+    它由定时触发, 而框架的 _fire_tool 不建路径上下文 —— 不传就会读到触发方的 state,
+    那是另一个人的多维表格: 催办内容会完全错(不是数据旧, 是查错了库)。
+    """
+    rm = _load("rookie_sop_remind")
+    sig = inspect.signature(rm.rookie_sop_remind)
+
+    assert "workspace" in sig.parameters
+    src = inspect.getsource(rm.rookie_sop_remind)
+    assert "_rt.load_state(workspace)" in src
+    assert "_rt.load_state()" not in src, "不能无参调用 —— 会读到触发方的 state"

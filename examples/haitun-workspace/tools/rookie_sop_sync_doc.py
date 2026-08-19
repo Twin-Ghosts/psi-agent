@@ -169,15 +169,17 @@ async def rookie_sop_sync_doc(
         )
         overview_updated = recomputed.get("ok") is True
 
-    # 高频同步只在**入职当天**跑: 那天新人最活跃, 值得每 10 分钟对齐一次。
-    # 过了当天就把这个定时删掉 —— 之后靠每日 9:00 催办前那次同步兜底。
     # 刻意让工具自己删而不是靠外部清理: 定时任务是发卡时建的, 没人会记得回收它;
     # 留着它就是每 10 分钟一次的空轮询, 一年下来五万次。
     # (与 rookie_sop_remind._delete_own_schedule 同一套约定, 名字必须对上, 否则
     #  删的是个不存在的名字, 任务永远留着。)
     onboard = next((r["入职日"] for r in rows if isinstance(r.get("入职日"), date)), None)
     schedule_note = ""
-    if onboard is not None and today > onboard:
+    day_index = ((today - onboard).days + 1) if onboard is not None else 0
+    # 高频同步覆盖**前两天**(不只入职当天): 第 2 天是最后一天, 那天的勾选最需要及时
+    # 反映到卡面和 HR 那张表上。第 3 天起降为每天 9:00 一次(催办顺带同步+重绘),
+    # 所以这里把自己删掉。
+    if onboard is not None and day_index > 2:
         schedule_note = await schedule_manage(
             action="delete", schedule_name=f"rookie-docsync-{target[-8:]}"
         )

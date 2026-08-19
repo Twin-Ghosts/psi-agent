@@ -28,13 +28,26 @@ from feishu_api import feishu_api
 from feishu_message import feishu_message_edit_card, feishu_message_send_card
 from schedule_manage import schedule_manage
 
+# 催办持续一周: 前两天由 rookie-docsync 每 10 分钟同步+重绘, 第 3 天起降为每天
+# 9:00 一次(本工具顺带同步与重绘), 满一周停推并自删定时。
+
+
+# 发卡只有前两天(用户明确定过): Day 1 提醒、Day 2 提醒并让 HR 知道。
+REMIND_DAYS = 2
+# 但进度同步要多活五天 —— 第 3-7 天不发卡、每天 9:00 只跑一次同步+重绘。
+# 高频同步(rookie-docsync, 每 10 分钟)只覆盖前两天, 若这一档也停掉, 第 3 天起新人
+# 勾什么都不会进表, 卡面与 HR 那张总览表就此冻结。第 8 天起才自删定时。
+SYNC_DAYS = 7
+
 
 def decide_remind(rows: list[dict[str, Any]], today: date, day_index: int) -> dict[str, Any]:
-    """四条分支: 毕业 / 催办(第 1 天) / 催办+上报 HR(第 2 天) / 停止(第 3 天起)。
+    """五条分支: 毕业 / 催办(第1天) / 催办+上报HR(第2天) / 只同步(第3-7天) / 停止(第8天起)。
 
-    只推两天, 不是「只要没做完就一直推」——第 3 天起就算还有未完成项也不再发卡,
-    调用方(rookie_sop_remind)据此把自己的定时任务删掉, 不能让它继续到点转、
-    每次都返回"无事可做"却仍占着一个每天要跑一次的定时。
+    发卡只有两天, 但同步窗口有七天 —— 这是两件事:
+      - 发卡: Day 1、Day 2 各一次。第 3 天起不再打扰新人。
+      - 同步: 第 3-7 天每天 9:00 仍跑一次(kind=sync_only), 让进度继续进表、卡面继续
+        更新; 高频那份(每 10 分钟)只覆盖前两天, 这一档是它之后的兜底。
+    第 8 天起 kind=stop, 调用方据此自删定时 —— 不能让它永远到点转。
 
     "催办+上报" 不代表 HR 反馈卡真的会发出去——那要看 hr_notify_id 是否配置,
     这里只表达"这次催办事件本身值得让 HR 知道", 是否真的通知是调用方的事。
@@ -45,20 +58,33 @@ def decide_remind(rows: list[dict[str, Any]], today: date, day_index: int) -> di
     if day_index <= 1:
         return {"kind": "remind", "progress": progress, "notify_hr": False}
     if day_index == 2:
+        # 第 2 天的催办值得让 HR 知道 —— 那正是 rookie_sop_digest 的入选条件
+        # (入职第 2 天结束仍未完成)。
         return {"kind": "remind", "progress": progress, "notify_hr": True}
-    # 刻意为之: 第 3 天起不再推 —— 只推两天, 之后是否还没做完是 HR 反馈卡该管的事,
-    # 不该让新人天天收到催办卡到无穷。
+    if day_index <= SYNC_DAYS:
+        # 第 3-7 天: **不发卡, 只同步**。发卡只有两天(用户明确定过) —— 之后是否还没
+        # 做完是 HR 反馈卡该管的事, 不该让新人天天收到催办卡到无穷。但进度还得继续
+        # 更新: 高频同步(每 10 分钟)只覆盖前两天, 若这里也一并停掉, 第 3 天起新人
+        # 勾什么都不会进表, 卡面和 HR 那张表就此冻结。所以这一档保留定时、只跑同步。
+        return {"kind": "sync_only", "progress": progress}
+    # 第 8 天起彻底停: 到这一步还没做完, 靠定时也不会变, 该由 HR 当面解决。
+    # 不停的话就是一个永远到点转的定时。
     return {"kind": "stop", "progress": progress}
 
 
-async def _delete_own_schedule(target: str) -> str:
+async def _delete_own_schedule(target: str, workspace: str = "") -> str:
     """删掉这个人的 rookie-remind-<后8位> 定时 —— 命名约定必须与创建时一致
     (rookie_sop_card_send.py), 否则删的是个不存在的名字, 任务永远留着。
     """
-    return await schedule_manage(action="delete", schedule_name=f"rookie-remind-{target[-8:]}")
+    # workspace 必须显式传: 定时在**新人自己**名下, 而本工具由定时触发时没有路径
+    # 上下文(_fire_tool 不建 runtime_scope), 不传就会去调用方目录删一个不存在的
+    # 名字 —— 定时永远留着, 每天空转一次。
+    return await schedule_manage(
+        action="delete", schedule_name=f"rookie-remind-{target[-8:]}", workspace=workspace
+    )
 
 
-async def rookie_sop_remind(open_id: str = "") -> str:
+async def rookie_sop_remind(open_id: str = "", workspace: str = "") -> str:
     """Remind one new hire of overdue / due-today onboarding items, or graduate them.
 
     Fired by that person's ``rookie-remind-<suffix>`` schedule with ``fire=tool``, so no
@@ -77,7 +103,10 @@ async def rookie_sop_remind(open_id: str = "") -> str:
     if not target:
         return json.dumps({"ok": False, "error": "open_id is required"}, ensure_ascii=False)
 
-    state = await _rt.load_state()
+    # workspace 显式传入 —— 定时触发时框架不建路径上下文(schedule_registry._fire_tool
+    # 裸调工具), 不传就会读到**触发方**的 state: 那是另一个人的多维表格, 催办内容
+    # 会完全错(不是数据旧, 是查错了库)。
+    state = await _rt.load_state(workspace)
     app_token = str(state.get("app_token") or "")
     detail_table = str(state.get("detail_table_id") or "")
     if not app_token or not detail_table:
@@ -109,10 +138,24 @@ async def rookie_sop_remind(open_id: str = "") -> str:
     kind = decision["kind"]
     progress = decision["progress"]
 
+    if kind == "sync_only":
+        # 第 3-7 天: 不发卡, 但上面的同步已经跑过了(它在 fetch_detail 之前), 所以
+        # 这里只需如实报告、**保留定时** —— 删掉它进度就此冻结。
+        result = {
+            "ok": True,
+            "sent": False,
+            "kind": kind,
+            "reason": "past day 2: progress synced, no card sent (schedule kept until day 7)",
+            "progress": f"{progress.done}/{progress.total}",
+        }
+        if doc_sync:
+            result["doc_sync"] = doc_sync
+        return json.dumps(result, ensure_ascii=False)
+
     if kind == "stop":
         # 第 3 天起不再推 —— 删掉自己这份定时, 而不是继续到点转、天天返回"无事可做"。
         # 删不掉也不算硬失败(人可能已经毕业时被删过一次), 但要如实报告, 不能吞。
-        schedule_result = await _delete_own_schedule(target)
+        schedule_result = await _delete_own_schedule(target, workspace)
         result = {
             "ok": True,
             "sent": False,
@@ -186,7 +229,7 @@ async def rookie_sop_remind(open_id: str = "") -> str:
     if kind == "graduate":
         # 结果也不能吞: 万一真删不掉(比如名字对不上), 调用方要能看到
         # "[Error] ..." 而不是一个假的 ok=true。
-        schedule_result = await _delete_own_schedule(target)
+        schedule_result = await _delete_own_schedule(target, workspace)
         if schedule_result.startswith("[Error]"):
             return json.dumps(
                 {

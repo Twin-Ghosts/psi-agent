@@ -369,9 +369,17 @@ async def rookie_sop_card_send(
         cron="0 9 * * *",
         fire="tool",
         tool="rookie_sop_remind",
-        tool_args=json.dumps({"open_id": resolved_open_id}, ensure_ascii=False),
+        # workspace 也要写进参数: 定时触发时框架不建路径上下文, 工具不传就会读到
+        # 触发方的 state(另一个人的多维表格)。
+        tool_args=json.dumps(
+            {"open_id": resolved_open_id, "workspace": target_workspace}, ensure_ascii=False
+        ),
         visibility="silent",
         description=f"{resolved_name} 入职 SOP 每日催办",
+        # 建到**新人自己**的 workspace, 不是 HR 的 —— 默认会落在调用方(HR)名下,
+        # 那样定时触发时工具读的是 HR 的 state: 同步报「no block map」、催办查的
+        # 是另一个人的多维表格。实测踩过两轮。
+        workspace=target_workspace,
     )
     schedule_failed = schedule_result.startswith("[Error]") and "already exists" not in schedule_result
 
@@ -401,12 +409,15 @@ async def rookie_sop_card_send(
             {
                 "open_id": resolved_open_id,
                 "document_id": str(doc["document_id"]),
-                "workspace": str(_paths.resolve_workspace()),
+                # 必须是新人的 workspace —— 这里原先用 resolve_workspace() 取到的是
+                # HR 的目录(发卡跑在 HR 会话里), 定时到点就去 HR 那儿找数据。
+                "workspace": target_workspace,
             },
             ensure_ascii=False,
         ),
         visibility="silent",
         description=f"{resolved_name} 入职清单同步（当天每 10 分钟，之后自删）",
+        workspace=target_workspace,
     )
     sync_failed = sync_schedule.startswith("[Error]") and "already exists" not in sync_schedule
 
