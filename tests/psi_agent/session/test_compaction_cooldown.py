@@ -56,6 +56,36 @@ def test_gate_opens_once_growth_reaches_required() -> None:
     assert agent._compaction_cooldown_elapsed(THRESHOLD + REQUIRED, THRESHOLD) is True
 
 
+def test_gate_opens_when_context_shrank_below_watermark() -> None:
+    """Negative growth means the last compaction worked, so let the next one run.
+
+    The watermark is the *pre*-compaction count, so a compaction that actually
+    shrank the context guarantees the next turn reports fewer tokens — and
+    ``grown`` can then never climb back to ``required``.  On the live deployment
+    this locked 24 of 25 cooldown rejections in an 18-hour window.
+    """
+    agent = _agent([])
+    agent._tokens_at_last_compaction = THRESHOLD + 90_000
+    assert agent._compaction_cooldown_elapsed(THRESHOLD + 1, THRESHOLD) is True
+
+
+@pytest.mark.anyio
+async def test_shrunken_context_still_compacts_on_next_signal() -> None:
+    """End to end: the second signal is not swallowed after the first shrank things."""
+    calls: list[list[dict[str, Any]]] = []
+    agent = _agent(calls)
+
+    await agent._maybe_compact(THRESHOLD + 200_000, THRESHOLD)
+    assert len(calls) == 1
+    assert agent._tokens_at_last_compaction == THRESHOLD + 200_000
+
+    # Next turn reports far fewer tokens — but still over threshold, so the
+    # signal fired again and compaction must be allowed to run.
+    await agent._maybe_compact(THRESHOLD + 1, THRESHOLD)
+    assert len(calls) == 2
+    assert sum(1 for m in agent._conversation.messages if m["role"] == "compacted") == 2
+
+
 @pytest.mark.parametrize(("tokens", "threshold"), [(0, THRESHOLD), (THRESHOLD, 0), (0, 0)])
 def test_gate_fails_open_without_usable_numbers(tokens: int, threshold: int) -> None:
     """An older AI layer omits the numbers; behaviour must not silently change."""

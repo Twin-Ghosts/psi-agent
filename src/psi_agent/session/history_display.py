@@ -52,6 +52,55 @@ TURN_CONTEXT_KEY = "turn_context"
 
 _DISPLAY_ONLY_KEYS = frozenset({KIND_KEY, CHAT_TYPE_KEY, TURN_CONTEXT_KEY})
 
+MAX_TOOL_RESULT_CHARS = 20_000
+"""Cap on a single tool result, applied both at the write site and on the wire.
+
+One ``feishu_api`` call paginated a whole Feishu group's message history into a
+single row: 2,343,193 characters, with a second call adding 725,043 — together
+90.5% of that session's 3,389,280-character request, which the provider then
+rejected outright (``maximum context length is 1048576 tokens ... requested
+1563214``).  Compaction could not save it: the signal that triggers compaction
+only arrives *after* a stream completes, and this request never got that far, so
+every retry rebuilt the same oversized payload.  The session stayed wedged
+across restarts because the history was already on disk.
+
+20,000 is calibrated against what legitimate tools actually return in that same
+session: the largest non-pathological results were 16,035 characters
+(``search_content``) and 12,752 (``read``).  The cap therefore leaves normal use
+untouched while keeping a runaway result from spending the whole budget.  A tool
+that genuinely needs more should paginate — the truncation notice tells the model
+so, which is why it carries the original length rather than silently cutting.
+"""
+
+
+_TRUNCATION_MARKER = "\n[... 工具结果截断: 原 "
+"""Sentinel that makes truncation idempotent.
+
+The cap is applied twice by design — once at the write site, once on the wire —
+so a row written today is re-projected on every subsequent turn.  Without this
+check the second pass would cut into the *first* pass's notice and append its
+own, and the notice would decay a little further on every turn thereafter.
+"""
+
+
+def truncate_tool_result(text: str, limit: int = MAX_TOOL_RESULT_CHARS) -> str:
+    """Cap a tool result, keeping the head and stating what was dropped.
+
+    The notice is part of the returned string rather than a separate field: the
+    model reads only ``content``, and a silent cut would leave it believing it
+    had the whole result — it would then answer from truncated data instead of
+    narrowing the query.  Head-only (rather than head+tail) because tool output
+    is overwhelmingly front-loaded: JSON opens with the fields that identify the
+    payload, and a page of results is ordered.
+
+    Idempotent: a string this function already produced is returned unchanged,
+    so the write-site cap and the wire cap cannot compound.
+    """
+    if len(text) <= limit or _TRUNCATION_MARKER in text:
+        return text
+    return text[:limit] + f"{_TRUNCATION_MARKER}{len(text)} 字符, 保留前 {limit}。如需完整内容请分页或缩小查询范围]"
+
+
 _WIRE_ROLES = frozenset({"system", "user", "assistant", "tool"})
 
 _LEGACY_ROLE_TO_WIRE: dict[str, str] = {
@@ -213,6 +262,14 @@ def _project_for_ai(msg: dict[str, Any], role: str) -> dict[str, Any]:
     projected["role"] = role
     if role == "assistant":
         _rename_reasoning_for_wire(projected)
+    if role == "tool":
+        # Second line of defence behind the write-site cap in ``agent.py``: rows
+        # written before that cap existed are already on disk (one live session
+        # carried 3M characters in two rows), and any future write path that
+        # skips the cap still cannot put an oversized row on the wire.
+        content = projected.get("content")
+        if isinstance(content, str):
+            projected["content"] = truncate_tool_result(content)
     turn_context = msg.get(TURN_CONTEXT_KEY)
     if isinstance(turn_context, str) and turn_context.strip():
         projected["content"] = _fold_turn_context(projected.get("content"), turn_context)

@@ -29,6 +29,7 @@ from psi_agent.session.history_display import (
     TURN_CONTEXT_KEY,
     message_kind,
     messages_for_ai,
+    truncate_tool_result,
     with_kind,
 )
 from psi_agent.session.protocol import (
@@ -688,13 +689,20 @@ class SessionAgent:
                                         reasoning=f"[Tool Result: {str(result)[:1000]}]",
                                         kind=REASONING_KIND_TOOL_RESULT,
                                     )
+                                    raw_result = str(result)
+                                    stored_result = truncate_tool_result(raw_result)
+                                    if len(stored_result) != len(raw_result):
+                                        logger.warning(
+                                            f"Tool result truncated ({func_name!r}): "
+                                            f"{len(raw_result)} -> {len(stored_result)} chars"
+                                        )
                                     self._conversation.add(
                                         with_kind(
                                             {
                                                 "role": "tool",
                                                 "tool_call_id": tc.get("id", ""),
                                                 "name": func_name,
-                                                "content": str(result),
+                                                "content": stored_result,
                                             },
                                             turn_response_kind,
                                         )
@@ -854,6 +862,21 @@ class SessionAgent:
         required = int(threshold * COMPACTION_COOLDOWN_FRACTION)
         grown = prompt_tokens - last
         if grown >= required:
+            return True
+        if grown < 0:
+            # The watermark is the *pre*-compaction count, so a successful
+            # compaction guarantees the next turn reports fewer tokens and
+            # ``grown`` goes negative — permanently, since it can then never
+            # reach ``required`` again.  Measured on the live deployment: 24 of
+            # 25 cooldown rejections in 18 hours were negative growth, i.e. the
+            # gate was refusing to compact *because the last compaction had
+            # worked*.  Shrinkage is evidence the mechanism works, and the
+            # signal only fires while ``prompt_tokens`` is still over the
+            # threshold, so this is exactly when compaction should run.
+            logger.info(
+                f"Compaction allowed: prompt_tokens fell {-grown} below the last "
+                f"compaction's watermark, so the previous pass did shrink the context."
+            )
             return True
         logger.info(
             f"Compaction skipped by cooldown: prompt_tokens grew {grown} since last "
