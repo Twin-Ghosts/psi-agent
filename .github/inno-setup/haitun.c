@@ -6,7 +6,6 @@
 #include <shellapi.h>
 #include <string.h>
 #include <stdio.h>
-#include <wchar.h>
 
 #define MAX_ENV 32767
 #define PATH_BUF 32768
@@ -32,10 +31,7 @@ static int   g_env_len;
 static WCHAR g_local_version[64];
 static WCHAR g_version_url[MAX_UPDATE_URL];
 static WCHAR g_installer_url[MAX_UPDATE_URL];
-static WCHAR g_update_base_url[MAX_UPDATE_URL];
 static DWORD g_update_interval_ms = HAITUN_UPDATE_INTERVAL_MS;
-static int g_self_update_mode = 0;
-static HANDLE g_app_process = NULL;
 
 /* ---- helpers ---- */
 
@@ -266,14 +262,10 @@ static void configure_updater(void)
     const WCHAR *base = get_env_value(L"HAITUN_UPDATE_BASE_URL");
     const WCHAR *interval = get_env_value(L"HAITUN_UPDATE_INTERVAL_HOURS");
     const WCHAR *installer = get_env_value(L"HAITUN_UPDATE_INSTALLER_NAME");
-    const WCHAR *mode = get_env_value(L"HAITUN_UPDATE_MODE");
 
     g_local_version[0] = L'\0';
     g_version_url[0] = L'\0';
     g_installer_url[0] = L'\0';
-    g_update_base_url[0] = L'\0';
-    g_self_update_mode = (mode && mode[0] &&
-                          lstrcmpiW(mode, L"self-update") == 0) ? 1 : 0;
 
     if (v && v[0])
         lstrcpynW(g_local_version, v, 64);
@@ -288,7 +280,6 @@ static void configure_updater(void)
     if (base && base[0] && starts_with_https(base)) {
         const WCHAR *installer_name =
             (installer && installer[0]) ? installer : L"HaiTun_Agent_Setup.exe";
-        lstrcpynW(g_update_base_url, base, MAX_UPDATE_URL);
         join_url(g_version_url, MAX_UPDATE_URL, base, L"version.txt");
         join_url(g_installer_url, MAX_UPDATE_URL, base, installer_name);
     }
@@ -311,131 +302,6 @@ static void launch_installer_file(const WCHAR *path)
         return;
     }
     ShellExecuteW(NULL, L"open", g_installer_url, NULL, NULL, SW_SHOWNORMAL);
-}
-
-/* ---- self-update flow ---- */
-
-static void get_updates_root(WCHAR *out, int cch)
-{
-    WCHAR local[MAX_PATH];
-    out[0] = L'\0';
-    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL,
-                                    SHGFP_TYPE_CURRENT, local))) {
-        wsprintfW(out, L"%s\\HaiTun Agent\\updates", local);
-    }
-}
-
-static int swap_requested_exists(void)
-{
-    WCHAR path[MAX_PATH];
-    get_updates_root(path, MAX_PATH);
-    lstrcatW(path, L"\\swap-requested.json");
-    return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
-}
-
-static void run_self_update(void)
-{
-    WCHAR cmd[CMD_BUF];
-    STARTUPINFOW si = {sizeof(si)};
-    PROCESS_INFORMATION pi = {0};
-
-    lstrcpyW(cmd, L"\"");
-    lstrcatW(cmd, g_dir);
-    lstrcatW(cmd, L"\\psi-agent.exe\" self-update --base-url \"");
-    lstrcatW(cmd, g_update_base_url);
-    lstrcatW(cmd, L"\" --yes");
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE,
-                       CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
-                       g_env, g_dir, &si, &pi)) {
-        WaitForSingleObject(pi.hProcess, INFINITE);
-        if (pi.hThread) CloseHandle(pi.hThread);
-        if (pi.hProcess) CloseHandle(pi.hProcess);
-    }
-}
-
-static void delete_tree(const WCHAR *path)
-{
-    WCHAR search[PATH_BUF];
-    WCHAR child[PATH_BUF];
-    WIN32_FIND_DATAW fd;
-    HANDLE h;
-
-    lstrcpyW(search, path);
-    lstrcatW(search, L"\\*");
-    h = FindFirstFileW(search, &fd);
-    if (h == INVALID_HANDLE_VALUE) {
-        RemoveDirectoryW(path);
-        return;
-    }
-    do {
-        if (lstrcmpW(fd.cFileName, L".") == 0 ||
-            lstrcmpW(fd.cFileName, L"..") == 0)
-            continue;
-        wsprintfW(child, L"%s\\%s", path, fd.cFileName);
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-            delete_tree(child);
-        else
-            DeleteFileW(child);
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
-    RemoveDirectoryW(path);
-}
-
-/* Called once the new psi-agent.exe was successfully spawned: the update is
- * considered complete, so the old version backup can be deleted. */
-static void cleanup_after_update(void)
-{
-    WCHAR root[MAX_PATH];
-    WCHAR pending[MAX_PATH + 64];
-    WCHAR backup[PATH_BUF];
-    HANDLE h;
-    DWORD size = 0;
-    DWORD read = 0;
-    char buf[4096];
-    WCHAR prefix[PATH_BUF];
-    int n;
-    int removed = 0;
-
-    get_updates_root(root, MAX_PATH);
-    if (!root[0])
-        return;
-    wsprintfW(pending, L"%s\\cleanup-pending.txt", root);
-    h = CreateFileW(pending, GENERIC_READ, FILE_SHARE_READ, NULL,
-                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE)
-        return;
-    size = GetFileSize(h, NULL);
-    if (size != INVALID_FILE_SIZE && size > 0 &&
-        size < (DWORD)sizeof(buf) &&
-        ReadFile(h, buf, size, &read, NULL) && read > 0) {
-        buf[read] = '\0';
-        MultiByteToWideChar(CP_UTF8, 0, buf, -1, backup, PATH_BUF);
-        n = lstrlenW(backup);
-        while (n > 0 && (backup[n - 1] == L'\r' || backup[n - 1] == L'\n'))
-            backup[--n] = L'\0';
-        wsprintfW(prefix, L"%s\\backups\\", root);
-        if (backup[0] && _wcsnicmp(backup, prefix, lstrlenW(prefix)) == 0) {
-            delete_tree(backup);
-            removed = (GetFileAttributesW(backup) == INVALID_FILE_ATTRIBUTES);
-        }
-    }
-    CloseHandle(h);
-    if (removed)
-        DeleteFileW(pending);
-}
-
-/* Delete the old-version backup only after the new gateway has been running
- * for a grace period. A crash within the window keeps the backup for
- * rollback. */
-static DWORD WINAPI cleanup_delay_thread(LPVOID unused)
-{
-    (void)unused;
-    Sleep(60000);
-    if (g_app_process && WaitForSingleObject(g_app_process, 0) == WAIT_TIMEOUT)
-        cleanup_after_update();
-    return 0;
 }
 
 /* ---- download progress window ---- */
@@ -558,17 +424,6 @@ static DWORD WINAPI update_check_thread(LPVOID unused)
                 WCHAR temp_path[MAX_PATH];
                 HRESULT hr;
                 HWND progress;
-                /* New flow: psi-agent.exe self-update downloads, verifies and
-                 * stages the release. If it leaves swap-requested.json, stop
-                 * the gateway and let haitun-updater.exe swap directories;
-                 * otherwise fall back to the legacy installer download. */
-                if (g_self_update_mode && g_update_base_url[0] && g_app_process) {
-                    run_self_update();
-                    if (swap_requested_exists()) {
-                        TerminateProcess(g_app_process, 0);
-                        return 0;
-                    }
-                }
                 if (GetTempPathW(MAX_PATH, temp_dir) && temp_dir[0]) {
                     wsprintfW(temp_path, L"%sHaiTun-Agent-Setup-%s.exe", temp_dir, latest);
                     progress = show_download_progress(latest);
@@ -599,6 +454,8 @@ static DWORD WINAPI update_check_thread(LPVOID unused)
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
 {
+    HANDLE hAppProcess = NULL;
+
     /* 1. get our own directory */
     DWORD dlen = GetModuleFileNameW(NULL, g_dir, MAX_PATH);
     if (!dlen || dlen >= MAX_PATH) return 1;
@@ -732,16 +589,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
         si.hStdOutput = hOut;
         si.hStdError  = hErr;
 
-        if (CreateProcessW(NULL, cmd, NULL, NULL, TRUE,
-                           CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
-                           g_env, g_dir, &si, &pi)) {
-            g_app_process = pi.hProcess;
-            HANDLE hCleanup = CreateThread(NULL, 0, cleanup_delay_thread,
-                                           NULL, 0, NULL);
-            if (hCleanup)
-                CloseHandle(hCleanup);
-        }
+        CreateProcessW(NULL, cmd, NULL, NULL, TRUE,
+                       CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                       g_env, g_dir, &si, &pi);
         if (pi.hThread) CloseHandle(pi.hThread);
+        hAppProcess = pi.hProcess;
         if (hOut != INVALID_HANDLE_VALUE) CloseHandle(hOut);
         if (hErr != INVALID_HANDLE_VALUE) CloseHandle(hErr);
         if (hIn != INVALID_HANDLE_VALUE && hIn != GetStdHandle(STD_INPUT_HANDLE))
@@ -757,9 +609,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
     }
 
     /* Keep the launcher alive while the app runs so the updater thread stays up. */
-    if (g_app_process) {
-        WaitForSingleObject(g_app_process, INFINITE);
-        CloseHandle(g_app_process);
+    if (hAppProcess) {
+        WaitForSingleObject(hAppProcess, INFINITE);
+        CloseHandle(hAppProcess);
     }
 
     return 0;

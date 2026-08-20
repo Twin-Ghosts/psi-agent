@@ -119,26 +119,11 @@ jobs:
           HAITUN_DOWNLOAD_BASE_URL: ${{ vars.HAITUN_DOWNLOAD_BASE_URL }}
           HAITUN_UPDATE_INTERVAL_HOURS: ${{ vars.HAITUN_UPDATE_INTERVAL_HOURS }}
           HAITUN_UPDATE_INSTALLER_NAME: ${{ vars.HAITUN_UPDATE_INSTALLER_NAME }}
-          HAITUN_UPDATE_MODE: ${{ vars.HAITUN_UPDATE_MODE }}
         run: |
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments "-arch=amd64"
           & ".github\inno-setup\build-haitun-launcher.ps1"
-      - name: Assemble release layout
-        shell: pwsh
-        run: |
-          $layout = "release-layout"
-          Remove-Item -Recurse -Force $layout -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path $layout | Out-Null
-          Copy-Item -Force -Recurse "examples\haitun-workspace\*" $layout
-          Copy-Item -Force ".github\inno-setup\haitun.exe" $layout
-          Copy-Item -Force ".github\inno-setup\haitun.ico" $layout
-      - name: Upload release layout artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: haitun-agent-release-layout
-          path: release-layout
       - shell: pwsh
         run: |
           Invoke-WebRequest -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl" -OutFile ".github\inno-setup\ChineseSimplified.isl"

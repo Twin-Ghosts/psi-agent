@@ -50,8 +50,6 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "..\..\examples\haitun-workspace\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "haitun.ico"; DestDir: "{app}"
 Source: "haitun.exe"; DestDir: "{app}"
-; 更新 bootstrap 必须放在安装目录之外，切换目录时它才能继续运行。
-Source: "haitun-updater.exe"; DestDir: "{localappdata}\HaiTun Agent\updates"
 ; 协议页要读的三个文件。dontcopy = 只打进安装包供向导页临时解出, 不装到 {app}
 ; —— 产品内那份走 spa-v2/dist（vite 会把 public/* 拷进去）, 装两份必有一份过时。
 ; 这三个是 scripts/gen_legal_html.py 的产物, 改 docs/ 下的 md 后需重新生成。

@@ -104,59 +104,7 @@ jobs:
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download release layout artifact
-        if: steps.check.outputs.skip != 'true'
-        uses: actions/download-artifact@v8
-        with:
-          name: haitun-agent-release-layout
-          path: release-layout
-          run-id: ${{ github.event.workflow_run.id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build manifest and release zip
-        if: steps.check.outputs.skip != 'true'
-        shell: bash
-        env:
-          NEXT_VERSION: ${{ steps.metadata.outputs.version }}
-        run: |
-          python3 .github/inno-setup/build_manifest.py \
-            --layout release-layout \
-            --version "$NEXT_VERSION" \
-            --output release-layout/manifest.json
-          cd release-layout
-          zip -qr "../release-$NEXT_VERSION.zip" .
-          cd ..
-
-      - name: Build delta from previous release
-        if: steps.check.outputs.skip != 'true'
-        id: delta
-        shell: bash
-        env:
-          HAITUN_DOWNLOAD_BASE_URL: ${{ vars.HAITUN_DOWNLOAD_BASE_URL }}
-          NEXT_VERSION: ${{ steps.metadata.outputs.version }}
-        run: |
-          PREV=""
-          if [ -n "$HAITUN_DOWNLOAD_BASE_URL" ]; then
-            PREV="$(curl -fsS "${HAITUN_DOWNLOAD_BASE_URL%/}/latest.json" 2>/dev/null \
-              | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version",""))' \
-              || true)"
-          fi
-          if [ -n "$PREV" ] && [ "$PREV" != "$NEXT_VERSION" ] \
-             && curl -fsS "${HAITUN_DOWNLOAD_BASE_URL%/}/releases/$PREV/manifest.json" \
-                  -o previous-manifest.json 2>/dev/null; then
-            python3 .github/inno-setup/make_delta.py \
-              --layout release-layout \
-              --manifest release-layout/manifest.json \
-              --previous-manifest previous-manifest.json \
-              --from "$PREV" --to "$NEXT_VERSION" \
-              --output "delta-$PREV-$NEXT_VERSION.zip"
-            echo "delta_paths=delta-$PREV-$NEXT_VERSION.zip" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::No previous manifest found; publishing full package only"
-            echo "delta_paths=" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Upload release objects to Aliyun OSS
+      - name: Upload installer and version.txt to Aliyun OSS
         if: steps.check.outputs.skip != 'true'
         shell: bash
         env:
@@ -167,13 +115,6 @@ jobs:
           ALIYUN_OSS_PREFIX: ${{ vars.ALIYUN_OSS_PREFIX }}
           HAITUN_UPDATE_INSTALLER_NAME: ${{ vars.HAITUN_UPDATE_INSTALLER_NAME }}
           HAITUN_VERSION: ${{ steps.metadata.outputs.version }}
-          HAITUN_DOWNLOAD_BASE_URL: ${{ vars.HAITUN_DOWNLOAD_BASE_URL }}
-          INSTALLER_PATH: installer/HaiTun Agent Setup.exe
-          MANIFEST_PATH: release-layout/manifest.json
-          RELEASE_ZIP_PATH: release-${{ steps.metadata.outputs.version }}.zip
-          DELTA_PATHS: ${{ steps.delta.outputs.delta_paths }}
-          MIN_SUPPORTED_VERSION: ${{ vars.HAITUN_MIN_SUPPORTED_VERSION }}
-          RELEASE_NOTES: ${{ github.event.workflow_run.head_commit.message }}
         run: |
           python3 -m pip install --quiet oss2
-          python3 .github/inno-setup/publish_release.py
+          python3 .github/inno-setup/upload_to_oss.py
