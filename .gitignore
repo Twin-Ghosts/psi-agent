@@ -17,3 +17,7 @@ evals/
 
 # 测试/手工跑 Gateway 落下的状态快照。里面有明文 api_key, 绝不能进仓库。
 state/
+# Kanban board data lives on its own branch; only the pointer travels with the code.
+# See .plan/docs/board-branch-decoupling.md and .kanban/board-ref.
+/.kanban/*
+!/.kanban/board-ref
