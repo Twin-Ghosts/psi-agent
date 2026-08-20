@@ -3255,3 +3255,45 @@ def test_fresh_start_rereads_rows_after_resetting_progress() -> None:
     # 清零与建文档之间必须再取一次 rows
     between = src[reset_at:provision_at]
     assert "fetch_detail(" in between, "清零后没有重取 rows, 新文档会照搬旧勾选"
+
+
+def test_docsync_cron_staggers_people_across_minutes() -> None:
+    """同步定时按 open_id 错峰, 不能所有人都用 */10。
+
+    */10 让每个人都在 :00/:10/:20… 同一瞬间点火、各读一次文档, 撞上飞书读接口的
+    频率限制(read doc failed: request trigger frequency limit)。实测 20 人时最近
+    40 次同步有 14 次栽在这上面 —— 能自愈, 但人越多越频繁。
+    """
+    cs = _load("rookie_sop_card_send")
+
+    # 同一个人多次调用必须得到同一分钟 —— 否则每次发卡都白改一遍定时文件
+    one = "ou_a6875df821ff538b9db67c2a5cd5f428"
+    assert cs._docsync_cron(one) == cs._docsync_cron(one)
+
+    # 形如 "m-59/10 * * * *", 且 m 在 0-9
+    cron = cs._docsync_cron(one)
+    minute = cron.split("-", 1)[0]
+    assert cron.endswith("-59/10 * * * *")
+    assert 0 <= int(minute) <= 9
+
+    # 一批人要真的分散开, 不能挤在同一分钟
+    ids = [f"ou_{n:032x}" for n in range(40)]
+    minutes = {cs._docsync_cron(i).split("-", 1)[0] for i in ids}
+    assert len(minutes) >= 8, f"40 个人只分散到 {len(minutes)} 个分钟, 错峰没生效"
+
+
+def test_docsync_cron_is_stable_across_processes() -> None:
+    """必须用 md5 而不是内置 hash() —— 后者带进程级随机种子, 重启后同一个人会换到
+    别的分钟, 定时文件每次发卡都被改一遍。
+    """
+    cs = _load("rookie_sop_card_send")
+    src = inspect.getsource(cs._docsync_cron)
+
+    assert "hashlib.md5" in src
+    # 只看**代码行**: docstring 里会提到「不要用内置 hash()」, 扫全文会误报
+    code = "\n".join(
+        ln for ln in src.splitlines() if not ln.lstrip().startswith("#") and '"""' not in ln
+    )
+    body = code.split('"""')[-1] if '"""' in code else code
+    assert "hashlib.md5(" in body
+    assert "= hash(" not in body and "int(hash(" not in body, "不能用内置 hash()"

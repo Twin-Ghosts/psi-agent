@@ -12,6 +12,7 @@ from __future__ import annotations
 
 # ruff: noqa: E402, RUF001
 import contextlib
+import hashlib
 import json
 import sys
 from datetime import date, datetime
@@ -48,6 +49,23 @@ def _rookie_workspace(open_id: str) -> str:
         return ""
     candidate = root / open_id
     return str(candidate)
+
+
+def _docsync_cron(open_id: str) -> str:
+    """同步定时的 cron: 每 10 分钟一次, 但按 open_id 把起始分钟错开。
+
+    刻意不用 ``*/10 * * * *`` —— 那让所有人都在 :00/:10/:20… 同一瞬间点火, 每人各
+    读一次文档, 撞上飞书的读接口频率限制:
+    ``read doc failed: request trigger frequency limit``。实测 20 人时最近 40 次
+    同步里 14 次栽在这上面(能自愈, 下一轮补上, 但人越多越频繁)。
+
+    改成 ``m-59/10``: 用 open_id 的稳定哈希取 0-9 的偏移, 于是同一个人每次算出的
+    分钟固定(不会每次发卡都漂移), 而不同人分散在 10 个不同的分钟上。
+    用 md5 而不是内置 hash(): 后者带进程级随机种子, 重启后同一个人会换到别的分钟,
+    定时文件每次发卡都白改一遍。
+    """
+    offset = int(hashlib.md5(open_id.encode("utf-8")).hexdigest(), 16) % 10
+    return f"{offset}-59/10 * * * *"
 
 
 def _existing_doc_of(state: dict[str, Any], open_id: str) -> str:
@@ -400,7 +418,7 @@ async def rookie_sop_card_send(
     sync_schedule = await schedule_manage(
         action="create",
         schedule_name=f"rookie-docsync-{resolved_open_id[-8:]}",
-        cron="*/10 * * * *",
+        cron=_docsync_cron(resolved_open_id),
         fire="tool",
         tool="rookie_sop_sync_doc",
         # 把 document_id 与 workspace 都写死进参数, 不让定时那条路径依赖运行时上下文:
