@@ -15,6 +15,19 @@ sop_doc_url: https://genuineknowledge.feishu.cn/docx/BFs4dmCxkohnMVxP47vc7Exonxf
 hr_notify_id: ou_f330a7e0874e53d4f3d1e08ba1d41853   # 罗霖（HRD）；留空则异常提醒不发
 hr_notify_id_type: open_id
 
+# 全组织共用**同一个**多维表格（总览表一人一行、明细表一人 28 行）。
+#
+# 刻意写在配置里而不是各人的 state 里: state 存在每个人自己的 workspace,
+# 于是每个新人首次发卡都会发现「我这儿没有 app_token」而各建一个新库 ——
+# 实测踩过, 16 个人建出 16 个互不相干的库, HR 打开只看得到最早那两个人,
+# 19:00 的异常提醒也只扫得到一个库。库坐标是全组织共享的事实, 不该按人存。
+#
+# 留空则首次发卡时自动建一个, 并把 id 打印在返回值里 —— 填回这里即可固定。
+shared_base:
+  app_token: VhCVbD84jagQQ6s9qQycrU9QnZO
+  overview_table_id: tbl1wCzB6WZRld7M
+  detail_table_id: tblzziivulX7jiFL
+
 modules:
   # ── 第 0 件事：到办公室先搞定这些 ──────────────────────────
   - name: 到岗准备
