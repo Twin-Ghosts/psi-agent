@@ -51,6 +51,22 @@ def _rookie_workspace(open_id: str) -> str:
     return str(candidate)
 
 
+async def _upsert_schedule(**kwargs: Any) -> str:
+    """建定时; 已存在就改用 patch 把参数刷一遍。
+
+    刻意不只是「已存在就跳过」—— fresh_start 会删旧文档、建新文档, 而定时里的
+    document_id 是创建时写死的。跳过就等于让它继续指向已删的文档, 同步每轮报
+    ``read doc failed: resource deleted``, 那个人的进度从此不再更新。
+    (实测踩过: 22 个定时里 2 个指向已删文档。)
+    """
+    created = await schedule_manage(action="create", **kwargs)
+    if not (created.startswith("[Error]") and "already exists" in created):
+        return created
+    # 已存在: 用 patch 覆盖 cron/tool_args 等, 让它指向当前文档与正确的 workspace
+    patched = await schedule_manage(action="patch", **kwargs)
+    return created if patched.startswith("[Error]") else f"{patched} (patched existing)"
+
+
 def _docsync_cron(open_id: str) -> str:
     """同步定时的 cron: 每 10 分钟一次, 但按 open_id 把起始分钟错开。
 
@@ -385,8 +401,7 @@ async def rookie_sop_card_send(
     # schedule_manage 失败时返回 "[Error] ..." 字符串而不是抛异常, 吞掉它就等于
     # 新人从此收不到提醒却没有任何人知道。重复调用(force_resend 场景)大概率撞见
     # "already exists", 这是预期内的, 不算失败。
-    schedule_result = await schedule_manage(
-        action="create",
+    schedule_result = await _upsert_schedule(
         schedule_name=f"rookie-remind-{resolved_open_id[-8:]}",
         cron="0 9 * * *",
         fire="tool",
@@ -415,8 +430,7 @@ async def rookie_sop_card_send(
     # 为什么只在当天高频: 入职当天新人最活跃, 值得每 10 分钟对齐; 过了当天,
     # rookie_sop_sync_doc 会把这个定时自删, 之后靠 9:00 催办前那次同步兜底 ——
     # 高频窗口因此限制在一天内, 不是长期空轮询。
-    sync_schedule = await schedule_manage(
-        action="create",
+    sync_schedule = await _upsert_schedule(
         schedule_name=f"rookie-docsync-{resolved_open_id[-8:]}",
         cron=_docsync_cron(resolved_open_id),
         fire="tool",

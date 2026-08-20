@@ -3297,3 +3297,32 @@ def test_docsync_cron_is_stable_across_processes() -> None:
     body = code.split('"""')[-1] if '"""' in code else code
     assert "hashlib.md5(" in body
     assert "= hash(" not in body and "int(hash(" not in body, "不能用内置 hash()"
+
+
+def test_resend_patches_existing_schedules_instead_of_skipping_them() -> None:
+    """定时已存在时要 patch 刷新参数, 不能「已存在就跳过」。
+
+    fresh_start 会删旧文档、建新文档, 而定时里的 document_id 是创建时写死的。
+    跳过就等于让它继续指向已删的文档, 同步每轮报
+    「read doc failed: resource deleted」, 那个人的进度从此不再更新。
+    (实测踩过: 22 个定时里 2 个指向已删文档。)
+    """
+    cs = _load("rookie_sop_card_send")
+    src = inspect.getsource(cs.rookie_sop_card_send)
+
+    # 两处建定时都要走 upsert, 不能直接 create
+    assert src.count("_upsert_schedule(") == 2
+    assert 'schedule_manage(\n        action="create"' not in src
+
+    upsert = inspect.getsource(cs._upsert_schedule)
+    assert 'action="create"' in upsert
+    assert 'action="patch"' in upsert, "已存在时必须 patch 覆盖参数"
+
+
+def test_upsert_schedule_reports_create_error_when_patch_also_fails() -> None:
+    """patch 也失败时要如实报错, 不能把 create 的失败悄悄变成成功。"""
+    cs = _load("rookie_sop_card_send")
+    upsert = inspect.getsource(cs._upsert_schedule)
+
+    # 失败路径必须返回原始错误, 而不是伪造一个 ok
+    assert "return created if patched.startswith" in upsert
