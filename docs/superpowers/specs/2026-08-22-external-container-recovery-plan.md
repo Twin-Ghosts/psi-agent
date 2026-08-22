@@ -317,28 +317,54 @@ checkpoint commit，与 `ai/server.py` 无关。
 
 ### 阶段 1 · 本地代码收敛（基线 `origin/main`）
 
-- [x] A 组三个落后文件直接取 main（`agent.py`、`history_display.py`、`cli.py`）
+- [x] A 组两个落后文件直接取 main（`agent.py`、`history_display.py`）——
+      实为空操作，选定 D1 时即已收敛（`cli.py` 不在清单内，见「不符二」）
 - [x] `ai/server.py` 的 deepseek 2 行：**丢弃**（负责人已定，不入库）
 - [x] 参考 `deploy-214-envelope-tombstone` 重做 external-sessions，补测试
-- [x] cherry-pick `7d5c9225`、`1aeb6c34`（**必做**，跨容器文件交接 = V11）
+- [x] 补回 `_private_space.py` 并接上两个消费点（**返工补做**，见记录⑦）
+- [x] `7d5c9225`、`1aeb6c34` 的内容按当前结构重做（无法真 cherry-pick，见记录③）
 - [x] 新增配置项 `FUSION_MEMORY_AUTO_REGISTER_FEISHU`
 - [x] 弃掉本地 commit `46264245`（昨晚的重复实现）
 - [x] 跑测试（注意：Windows 上 5 条 session 测试 + 全量 57 failed 是既有基线，不是回归）
 
-**产出：** 分支 `fix/external-container-recovery`，单个 commit `09a1b319`，
-基于 `d198c435`（= `origin/main` + 4 个 haitun 文档提交）。改 9 个文件、+561/-47 行。
+**产出：** 分支 `fix/external-container-recovery-v2`，两个 commit，基于
+`a9579c7d`（= 当次 fetch 的 `origin/main`，无附加提交）。
+
+| commit | 内容 | 规模 |
+|---|---|---|
+| `5c145150` | external-sessions 重做 + 跨容器文件交接（原 `09a1b319` 移植过来） | 9 文件 +583/-47 |
+| `520a5924` | 补回 `_private_space.py` 及其接线 | 5 文件 +212/-1 |
+
 本阶段纯本地，未碰生产。
+
+> ⚠️ **原分支 `fix/external-container-recovery` 已废弃，不要用它部署。** 它基于
+> `d198c435`，落后当次 `origin/main` 5 个 commit，会把 main 已 revert 的自更新功能
+> （`updater/` 九个文件 + `cli.py` 的 `SelfUpdate` 命令，#703/#705 共净删 955 行）
+> 又带回生产。实测 `git diff origin/main..fix/external-container-recovery --
+> src/psi_agent/cli.py` 为 `+43/-1`。v2 分支上 `cli.py` 为 1010 字节，
+> 与 `a9579c7d` 及生产（md5 `2176b6ab`）三方一致，`updater/` 文件数为 0。
 
 **实际决策与实测结果：**
 
-**① A 组四个文件无需任何操作。** 方案假设要「取 main」，实测 `origin/main` 上
-`agent.py`、`history_display.py`、`cli.py`、`ai/server.py` 与目标状态**已逐字节相同**——
-三个修复本就在 main 里，deepseek 那 2 行本就不在。所谓「收敛」在选定 D1（基线取 main）
-的那一刻就已完成，工作量为零。`git diff origin/main HEAD -- <四个文件>` 输出为空即证。
+**① A 组三个文件无需任何操作，但「四个」这个说法是错的。** 方案假设要「取 main」，
+实测 `origin/main` 上 `agent.py`、`history_display.py`、`ai/server.py` 与目标状态
+**已逐字节相同**——两个修复本就在 main 里，deepseek 那 2 行本就不在。所谓「收敛」在选定
+D1（基线取 main）的那一刻就已完成，工作量为零。
+
+**`cli.py` 不属于此列，原判断有误。** 首次核对时它被算作第四个「已相同」的文件，
+但那次量的是 `d198c435` 而非当次 fetch 的 `origin/main`。实测 `d198c435` 上 `cli.py`
+为 2546 字节、`a9579c7d` 上为 1010 字节，两者不同；生产那份也是 1010 字节
+（md5 `2176b6ab`）。即：以旧基线为准会把 main 已 revert 的 `SelfUpdate` 命令
+连同 `updater/` 九个文件一起带回生产。**这正是「不符二」里那条教训的第二次发作**——
+同一个坑，隔了一轮又踩一次。
 
 **② 弃掉 `46264245` 用 `git reset --hard d198c435`。** 该 commit 是 HEAD 上唯一的代码
 提交，其下 4 个都是 haitun 文档提交，reset 到 `d198c435` 即精确剥掉它而保住文档。
 reset 后 `git diff --stat origin/main HEAD -- src/` 输出为空，确认 `src/` 干净。
+
+> 补记：该做法只剥掉了 `46264245`，但把基线留在了 `d198c435`。正确的收尾是
+> `git cherry-pick` 到 `a9579c7d` 之上（v2 分支即如此重做），否则 `src/` 看着干净、
+> 实际整棵树落后 main 5 个 commit。
 
 **③ 两个 commit 无法真 cherry-pick，按当前结构重做。** `main` 已把 `_route_key`
 抽到 `psi_agent/_feishu_routing.py`（`route_key()` / `is_group_chat()`），而
@@ -365,24 +391,44 @@ reset 后 `git diff --stat origin/main HEAD -- src/` 输出为空，确认 `src/
 `GET /defaults`，那次真实 HTTP 打在无人监听的端口上要等到超时，处理器注册被推到
 `await anyio.sleep(0.1)` 之后。改为显式传 `appdata` 跳过远程解析，测试意图不变。
 
+**⑦ 漏了私密区，返工补做。** 方案 D2 明确要求连 `_private_space` 一起补回，实测第一版
+漏了：`_private_space.py` 在分支上不存在，`PSI_PRIVATE_OPEN_IDS` 在 `src/` 里零命中，
+`_feishu_manager` 也没有该 import。**这与昨晚临时实现「`_private_space` 接线断了」是同一
+状态**，而那恰是记录③里选择重做的理由之一——理由说对了，自己却犯了同一个错。
+
+补做内容（commit `520a5924`）：从 `origin/deploy-214-envelope-tombstone` 取整个
+`_private_space.py`（72 行，未改一字），接上原设计的两个消费点——
+`_feishu_manager._workspace_for` 让白名单用户派生到 `<root>/.private/<open_id>`（群聊不进，
+群是多人共用上下文），`feishu/client._stream_reply` 在发送前按 `blocks_send` 判权
+（主人自己收得到，其他人一律拦），`sender_open_id` 从 `_handle_and_stream` 的
+`ctx.sender_id` 传入。
+
+**⑧ 顺带修了一处会让断言假绿的测试基建。** `test_feishu.py` 的 `_fake_channel` 把
+`channel.stream` 设为裸 `AsyncMock`，只记录调用、**不执行 `markdown` 回调**，于是任何盯
+`_stream_reply._produce` 内部行为的断言都不会真的跑到。新增 `_driving_channel` 真去驱动
+回调——记录⑦的三条断言正是在它下面才暴露出「主人也被自己的文件拦住」这个错
+（改前 `assert 0 == 1`）。
+
 **测试结果：**
 
 | 范围 | 结果 |
 |---|---|
-| `test_feishu_manager.py` + `test_feishu.py`（子树） | **99 passed** |
-| `tests/integration/test_gateway.py` | **10 passed** |
-| `ruff check` / `ruff format --check`（改动的 6 个文件） | 全过 |
-| 全量 | **1408 passed / 57 failed / 5 skipped** |
+| `test_feishu_manager.py` + `test_feishu.py` + `test_gateway.py`（子树，v2 分支） | **116 passed** |
+| 同上，补私密区之前 | 109 passed |
+| `ruff check` / `ruff format --check`（改动的 5 个文件） | 全过 |
+| 全量（v2 分支） | **1360 passed / 57 failed / 5 skipped** |
 
 57 failed 与本机既有基线**逐条相同**，且**全部不在本次改动的文件里**
 （`test__core`、`test_channel_adapter`、`test_server`、`test_schedule_registry` 等）。
 抽查 `test_schedule_tz_valid` 确认是环境缺陷而非回归：
 `ZoneInfoNotFoundError('No time zone found with key Asia/Shanghai')`，本机缺 tzdata。
 
-新增测试 40 条，其中两条专盯「接线断了」这类静默空转：
-`test_handle_passes_external_to_build_chunks`（谓词答案必须传进 `_build_chunks`）与
-`test_run_feishu_wires_is_external_into_message_handler`（谓词必须接进消息处理器实参）——
-这正是原临时实现 `_private_space` 接线断掉却无人发现的那类问题。
+新增测试 47 条（external-sessions 40 + 私密区 7）。其中五条专盯「接线断了」这类静默空转：
+`test_handle_passes_external_to_build_chunks`（谓词答案必须传进 `_build_chunks`）、
+`test_run_feishu_wires_is_external_into_message_handler`（谓词必须接进消息处理器实参），
+以及私密区的三条（白名单派生、群聊不进、未配置是空操作）。
+这正是原临时实现 `_private_space` 接线断掉却无人发现的那类问题——**而记录⑦证明写了这两条
+测试也不够：漏掉整个模块时，没有任何测试会红。** 真正兜住它的是逐项核对方案 D2 的清单。
 
 **踩到的两个环境坑（阶段 3 修文档时可用）：**
 
@@ -418,8 +464,12 @@ reset 后 `git diff --stat origin/main HEAD -- src/` 输出为空，确认 `src/
    实测代码早已完整实现，缺口纯粹是「从未被配置」。故本阶段只把该值记进 git
    （新增 `.env.memory.example`）并在 `AGENTS.md` 点明默认值后果，
    `.env` 实际落地归阶段 2（与 D3 「并入发布窗口」一致）。
-3. **「A 组三个落后文件取 main」实际是空操作。** 详见阶段 1 记录①。这不是决定变更，
-   是对工作量的估计偏高——选定 D1 时这件事就已经做完了。
+3. **「A 组四个落后文件取 main」实际是空操作，且「四个」本身也是错的。** 真实数量是
+   三个（`cli.py` 因基线过期被误列，见「不符二」与记录①），且这三个在选定 D1 时就已收敛。
+   这不是决定变更，是清单本身有错 + 工作量估计偏高。
+4. **私密区不是「顺带」，是必做项，且实测被漏掉过一次。** D2 把它与 external-sessions
+   并列，第一版落地只做了后者。返工补齐见记录⑦。这条记在这里是为了留住教训：
+   方案清单要逐项打勾核对，不能凭「主干功能已通」判定完成。
 
 以上三条都不改变 W 段的任何验收标准，也不改变 D1-D4 的选择。
 
