@@ -317,13 +317,81 @@ checkpoint commit，与 `ai/server.py` 无关。
 
 ### 阶段 1 · 本地代码收敛（基线 `origin/main`）
 
-- [ ] A 组两个落后文件直接取 main（`agent.py`、`history_display.py`）
-- [ ] `ai/server.py` 的 deepseek 2 行：**丢弃**（负责人已定，不入库）
-- [ ] 参考 `deploy-214-envelope-tombstone` 重做 external-sessions，补测试
-- [ ] cherry-pick `7d5c9225`、`1aeb6c34`（**必做**，跨容器文件交接 = V11）
-- [ ] 新增配置项 `FUSION_MEMORY_AUTO_REGISTER_FEISHU`
-- [ ] 弃掉本地 commit `46264245`（昨晚的重复实现）
-- [ ] 跑测试（注意：Windows 上 5 条 session 测试 + 全量 57 failed 是既有基线，不是回归）
+- [x] A 组三个落后文件直接取 main（`agent.py`、`history_display.py`、`cli.py`）
+- [x] `ai/server.py` 的 deepseek 2 行：**丢弃**（负责人已定，不入库）
+- [x] 参考 `deploy-214-envelope-tombstone` 重做 external-sessions，补测试
+- [x] cherry-pick `7d5c9225`、`1aeb6c34`（**必做**，跨容器文件交接 = V11）
+- [x] 新增配置项 `FUSION_MEMORY_AUTO_REGISTER_FEISHU`
+- [x] 弃掉本地 commit `46264245`（昨晚的重复实现）
+- [x] 跑测试（注意：Windows 上 5 条 session 测试 + 全量 57 failed 是既有基线，不是回归）
+
+**产出：** 分支 `fix/external-container-recovery`，单个 commit `09a1b319`，
+基于 `d198c435`（= `origin/main` + 4 个 haitun 文档提交）。改 9 个文件、+561/-47 行。
+本阶段纯本地，未碰生产。
+
+**实际决策与实测结果：**
+
+**① A 组四个文件无需任何操作。** 方案假设要「取 main」，实测 `origin/main` 上
+`agent.py`、`history_display.py`、`cli.py`、`ai/server.py` 与目标状态**已逐字节相同**——
+三个修复本就在 main 里，deepseek 那 2 行本就不在。所谓「收敛」在选定 D1（基线取 main）
+的那一刻就已完成，工作量为零。`git diff origin/main HEAD -- <四个文件>` 输出为空即证。
+
+**② 弃掉 `46264245` 用 `git reset --hard d198c435`。** 该 commit 是 HEAD 上唯一的代码
+提交，其下 4 个都是 haitun 文档提交，reset 到 `d198c435` 即精确剥掉它而保住文档。
+reset 后 `git diff --stat origin/main HEAD -- src/` 输出为空，确认 `src/` 干净。
+
+**③ 两个 commit 无法真 cherry-pick，按当前结构重做。** `main` 已把 `_route_key`
+抽到 `psi_agent/_feishu_routing.py`（`route_key()` / `is_group_chat()`），而
+`7d5c9225`、`1aeb6c34` 是在旧结构（`FeishuManager._route_key` 私有方法、模块内
+`_GROUP_CHAT_TYPES` 常量）上写的，上下文全不匹配。故按 diff 逐处重做而非 `git cherry-pick`，
+内容等价、接线改用 `route_key()`。**V11 对应的代码已全部落地**（handoff 块、`external`
+字段透传、channel 侧缓存、取件说明），端到端仍需两容器实跑验证。
+
+**④ 原临时实现有一处与 `route_key` 不一致的真缺陷。** 昨晚的 `_parse_external_sessions`
+用**裸 `open_id`** 查表并显式 `if not key.startswith("chat:")` 排除群聊；重做版按
+`route_key` 的完整键查表，群聊写 `chat:oc_xxx` 即可命中。原版群聊永远无法路由到外部容器，
+且判定键与 `route_key` 两套，属方案 D2 所指「未 review」的具体体现。
+
+**⑤ `FUSION_MEMORY_AUTO_REGISTER_FEISHU` 代码早已实现，缺的只是配置。** 实测
+`_fusion_memory_config.py:148` 已解析该变量、`:181-186` 已实现 auto-register 分支，
+`README.md` / `AGENTS.md` / `SKILL.md` 三处都已写它。真正的缺口是它**从未被设置**，
+而默认 `False`（`:48`）。故本阶段的「新增配置项」落成两件事：新增
+`examples/haitun-workspace/.env.memory.example` 把该值记进 git（避免重演「只存在于
+服务器文件系统上的配置」），并在 `AGENTS.md` 该变量条目点明默认值的后果。
+**`.env` 实际落地属阶段 2**（需重启，与 D3 一致）。
+
+**⑥ 修了一条移植过来的测试。** `test_run_feishu_wires_is_external_into_message_handler`
+原样移植后失败（`KeyError: 'message'`）：`run_feishu` 在 `appdata` 为空时会先向 gateway
+`GET /defaults`，那次真实 HTTP 打在无人监听的端口上要等到超时，处理器注册被推到
+`await anyio.sleep(0.1)` 之后。改为显式传 `appdata` 跳过远程解析，测试意图不变。
+
+**测试结果：**
+
+| 范围 | 结果 |
+|---|---|
+| `test_feishu_manager.py` + `test_feishu.py`（子树） | **99 passed** |
+| `tests/integration/test_gateway.py` | **10 passed** |
+| `ruff check` / `ruff format --check`（改动的 6 个文件） | 全过 |
+| 全量 | **1408 passed / 57 failed / 5 skipped** |
+
+57 failed 与本机既有基线**逐条相同**，且**全部不在本次改动的文件里**
+（`test__core`、`test_channel_adapter`、`test_server`、`test_schedule_registry` 等）。
+抽查 `test_schedule_tz_valid` 确认是环境缺陷而非回归：
+`ZoneInfoNotFoundError('No time zone found with key Asia/Shanghai')`，本机缺 tzdata。
+
+新增测试 40 条，其中两条专盯「接线断了」这类静默空转：
+`test_handle_passes_external_to_build_chunks`（谓词答案必须传进 `_build_chunks`）与
+`test_run_feishu_wires_is_external_into_message_handler`（谓词必须接进消息处理器实参）——
+这正是原临时实现 `_private_space` 接线断掉却无人发现的那类问题。
+
+**踩到的两个环境坑（阶段 3 修文档时可用）：**
+
+- `uv run` 在 worktree 里会新建一个空 `.venv` 并报 `No module named pytest`。worktree
+  没有自己的虚拟环境，须用主检出的解释器
+  `F:\code\psi-agent\.venv\Scripts\python.exe`。
+- 但该 venv 的 editable 安装指向**主检出的 `src`**，直接跑会 import 到主检出的代码
+  （实测报 `cannot import name 'external_sessions'`，因为改动在 worktree 里）。
+  必须 `PYTHONPATH=<worktree>/src` 覆盖，否则测的不是当前代码。
 
 ### 阶段 2 · 走正式发布流程
 
@@ -340,7 +408,20 @@ checkpoint commit，与 `ai/server.py` 无关。
 
 ### 中途改了哪些决定
 
-> 待追写。
+**阶段 1（2026-08-22）：**
+
+1. **「cherry-pick `7d5c9225`、`1aeb6c34`」改为「按当前结构重做其内容」。** D2 原文假设
+   这两个 commit 可以直接 pick，实测不行——`main` 已把 `_route_key` 抽到
+   `psi_agent/_feishu_routing.py`，两个 commit 是在旧结构上写的，上下文全不匹配。
+   改为逐处重做，内容等价。**验收判据 V11 不变**，只是落地手段变了。
+2. **「新增配置项 `FUSION_MEMORY_AUTO_REGISTER_FEISHU`」的含义收窄。** 原以为要写代码，
+   实测代码早已完整实现，缺口纯粹是「从未被配置」。故本阶段只把该值记进 git
+   （新增 `.env.memory.example`）并在 `AGENTS.md` 点明默认值后果，
+   `.env` 实际落地归阶段 2（与 D3 「并入发布窗口」一致）。
+3. **「A 组三个落后文件取 main」实际是空操作。** 详见阶段 1 记录①。这不是决定变更，
+   是对工作量的估计偏高——选定 D1 时这件事就已经做完了。
+
+以上三条都不改变 W 段的任何验收标准，也不改变 D1-D4 的选择。
 
 ***
 
