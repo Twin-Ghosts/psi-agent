@@ -113,7 +113,7 @@ agent 输出的 `[SEND:]` 路径指向独立容器的卷，主容器的 `/worksp
 |---|---|---|
 | A. 还原成镜像里的原始代码 | 镜像版本恰恰**缺** external-sessions，还原即让罗霖永久降级 | ✗ |
 | B. 以 `deploy-214-envelope-tombstone` 为基线 | 该分支有原实现，但相对当前生产 39 处不同 + 14 个文件缺失，过于陈旧，merge 会大面积回退 | ✗ 仅作参考 |
-| C. **以 `origin/main` 为基线，补回 external-sessions** | 生产 92/99 文件已与 main 逐字节相同，差异面最小；main 还含生产缺失的两个修复 | ✓ **选定** |
+| C. **以 `origin/main` 为基线，补回 external-sessions** | 生产 93/99 文件已与 main 逐字节相同，差异面最小；main 还含生产缺失的两个修复 | ✓ **选定** |
 
 **决策 D2 · external-sessions 用哪份实现**
 
@@ -198,30 +198,38 @@ agent 输出的 `[SEND:]` 路径指向独立容器的卷，主容器的 `/worksp
 W/H 依据的诊断部分写于 8-20（发布文档 §38），开工前已核对代码，**发现三处与诊断不符**：
 
 **不符一 · 偏差规模。** §38 称「线上 src 与本仓任何一次提交都不一致（最佳 89/97）」。
-实测：**容器内 99 个 `.py` 与 `origin/main` 相同 92、不同 7、缺失 0。**
+实测：**容器内 99 个 `.py` 与 `origin/main`（`a9579c7d`）相同 93、不同 6、缺失 0。**
 
 根因是 §38 的核验方法有缺陷——经 ssh 文本通道取文件会被转成 CRLF，导致每个文件 md5 全变，
 产生「全不一致」假象。同一文件 `session/ai_client.py`：ssh 取回 5010 字节 / md5 `7320b26b`，
 容器内按字节读 4894 字节 / md5 `d81a7f3f`，**CR-stripped 后与 `origin/main` 完全相同**。
 我第一次量也踩了同一个坑。**核验必须在容器内按字节做。**
 
-**不符二 · 差异文件清单不对。** §38 列的 7 个文件与实测的 7 个只有 1 个重合
+**不符二 · 差异文件清单不对。** §38 列的 7 个文件与实测的 6 个只有 1 个重合
 （`gateway/_feishu_manager.py`）。实测差异分两组，边界很干净：
 
-A 组 · mtime `Aug 18 16:25`（8-18 构建的工作树，共 4 个）
+A 组 · mtime `Aug 18 16:25`（8-18 构建的工作树，共 3 个）
 
 | 文件 | 差异 | 方向 |
 |---|---|---|
 | `session/agent.py` | 缺 `MIN_SUMMARY_CHARS` / `MIN_SOURCE_CHARS` / `HIJACK_ECHO_PREFIXES` | 线上**落后** main |
 | `session/history_display.py` | 缺 `MAX_TOOL_RESULT_CHARS` 与 `_TRUNCATION_MARKER` | 线上**落后** main |
-| `cli.py` | 缺 `SelfUpdate` 命令（-44 行） | 线上**落后** main |
 | `ai/server.py` | 多 2 行 deepseek 配置（见下） | 线上**独有，未入库** |
 
 B 组 · mtime `Aug 21 20:00`（昨晚 `docker cp`，共 3 个）：
 `gateway/_feishu_manager.py`、`gateway/server.py`、`gateway/__init__.py`。
 
-**结论：真正需要人判断的只有 1 个文件**（`ai/server.py` 那 2 行），
-其余 6 个靠部署 main + 重做 external-sessions 自然收敛。工作量比 §38 描述的小一个量级。
+**`cli.py` 已从本清单移出。** 首次核对时（基线为两天前的 `51ce46e9`）它显示线上缺
+`SelfUpdate` 命令 44 行、判为「线上落后」。开工前重新 fetch 后发现 main 已经 revert 掉了
+自更新功能（`b9017880` revert #694、`0834c1a7` 改为组件化全量更新，`51ce46e9..a9579c7d`
+共 5 个 commit，`src/` 下净删 955 行）。生产 `cli.py` 1010 字节 / md5 `2176b6ab`，
+与 `a9579c7d` **逐字节相同**。所以它从来不是落后，是 main 后来退回到了生产已有的状态。
+
+**教训：基线必须是当次 fetch 的 origin/main，不能用本地缓存的远程引用。** 本次 `.git/FETCH_HEAD`
+停在 8-20 09:48，两天未更新，直接导致一条结论方向判错。这条要写进阶段 3 的附录 A。
+
+**结论：真正需要人判断的只有 1 个文件**（`ai/server.py` 那 2 行，且已定为丢弃），
+其余 5 个靠部署 main + 重做 external-sessions 自然收敛。工作量比 §38 描述的小一个量级。
 
 **不符三 · `_private_space.py` 的位置。** §38 称它「线上在跑，任何提交里都不存在」。
 实测：**运行中的容器 `/app/src` 里没有这个文件**。宿主 `/srv/haitun/psi-agent/src/` 里有一份
@@ -263,7 +271,7 @@ checkpoint commit，与 `ai/server.py` 无关。
 文件系统上的改动。也说明 mtime `Aug 18 16:25` 不可作为作者线索：那次构建把整个工作树的
 时间戳都刷新了，真正该问的是**谁动过生产 `src/`**，范围比一个人大。
 
-**处置（负责人已定）：本次修复直接丢弃这 2 行。** 已向同事确认过。丢弃后 7 个差异文件
+**处置（负责人已定）：本次修复直接丢弃这 2 行。** 已向同事确认过。丢弃后 6 个差异文件
 全部可机械收敛到 main，阶段 1 不再有需要人判断的项。
 
 ***
@@ -309,7 +317,7 @@ checkpoint commit，与 `ai/server.py` 无关。
 
 ### 阶段 1 · 本地代码收敛（基线 `origin/main`）
 
-- [ ] A 组三个落后文件直接取 main（`agent.py`、`history_display.py`、`cli.py`）
+- [ ] A 组两个落后文件直接取 main（`agent.py`、`history_display.py`）
 - [ ] `ai/server.py` 的 deepseek 2 行：**丢弃**（负责人已定，不入库）
 - [ ] 参考 `deploy-214-envelope-tombstone` 重做 external-sessions，补测试
 - [ ] cherry-pick `7d5c9225`、`1aeb6c34`（**必做**，跨容器文件交接 = V11）
@@ -326,7 +334,7 @@ checkpoint commit，与 `ai/server.py` 无关。
 
 ### 阶段 3 · 反过来修文档
 
-- [ ] 修正 §38：换成实测的 92/99，改掉「任何提交都不存在」的结论
+- [ ] 修正 §38：换成实测的 93/99（基线 `a9579c7d`），改掉「任何提交都不存在」的结论
 - [ ] 附录 A 增补：**核验必须在容器内按字节比对**，经 ssh 文本通道会因 CRLF 产生假阳性
 - [ ] §38 标注「未实测」的收敛方法，这次实测了，补结果
 
