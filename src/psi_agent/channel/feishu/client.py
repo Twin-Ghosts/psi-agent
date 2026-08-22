@@ -26,6 +26,7 @@ from lark_channel.core.model import BaseRequest
 from lark_channel.event.custom import CustomizedEventProcessor
 from loguru import logger
 
+from psi_agent import _private_space
 from psi_agent._appdata import resolve_appdata_root
 from psi_agent._feishu_routing import is_group_chat, route_key
 from psi_agent.channel._core import ChannelCore
@@ -437,6 +438,7 @@ async def _stream_reply(
     *,
     reply_to: str | None,
     suppress_silent_reply: bool = False,
+    sender_open_id: str | None = None,
 ) -> None:
     """Stream agent text and files into one Feishu chat."""
 
@@ -479,6 +481,12 @@ async def _stream_reply(
                             checking_silent_reply = True
                     elif isinstance(chunk, FileChunk):
                         logger.debug(f"received FileChunk ({chunk.path})")
+                        # 私密区守卫: 只有主人自己收得到自己的私密文件, 其他人一律拦。
+                        # 放在发送前而非 session 侧 —— channel 手里就有发送者 open_id,
+                        # 按「发送者是不是该私密区的主人」判权比绕一圈更直接。
+                        if _private_space.blocks_send(chunk.path, sender_open_id):
+                            logger.warning(f"private file withheld from {sender_open_id!r}: {chunk.path}")
+                            continue
                         await _send_file(channel, chat_id, chunk.path)
         except Exception:
             await flush_silent_candidate()
@@ -537,7 +545,14 @@ async def _handle_and_stream(
             logger.debug(f"posting {len(chunks)} chunk(s) to ChannelCore")
 
             try:
-                await _stream_reply(channel, core, ctx.chat_id, chunks, reply_to=ctx.message_id)
+                await _stream_reply(
+                    channel,
+                    core,
+                    ctx.chat_id,
+                    chunks,
+                    reply_to=ctx.message_id,
+                    sender_open_id=getattr(ctx, "sender_id", "") or "",
+                )
                 logger.debug("stream completed")
             except Exception as e:
                 logger.error(f"Message handling error — {e!r}")

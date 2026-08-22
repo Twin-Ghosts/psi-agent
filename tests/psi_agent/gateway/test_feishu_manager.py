@@ -432,3 +432,29 @@ def test_is_external_false_when_unset(tmp_path: str, monkeypatch: pytest.MonkeyP
 
     assert fm.is_external("ou_secret") is False
     assert fm.is_external("") is False
+
+
+def test_private_user_workspace_goes_under_private_dir(tmp_path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """白名单用户的 workspace 派生到 ``<root>/.private/<open_id>``。"""
+    monkeypatch.setenv("PSI_PRIVATE_OPEN_IDS", "ou_secret")
+    fm = FeishuManager(_sm=None, _ai_id="ai1", _workspace_root=str(tmp_path))
+
+    assert fm._workspace_for("ou_secret") == os.path.join(str(tmp_path), ".private", "ou_secret")
+    # 非白名单用户不受影响, 仍是 <root>/<open_id>。
+    assert fm._workspace_for("ou_plain") == os.path.join(str(tmp_path), "ou_plain")
+
+
+def test_private_dir_not_used_for_group_chats(tmp_path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """群聊即便 chat_id 撞上白名单也不进私密区 —— 群是多人共用上下文。"""
+    monkeypatch.setenv("PSI_PRIVATE_OPEN_IDS", "oc_secret,ou_secret")
+    fm = FeishuManager(_sm=None, _ai_id="ai1", _workspace_root=str(tmp_path))
+
+    assert fm._workspace_for("chat:oc_secret") == os.path.join(str(tmp_path), "chat-oc_secret")
+
+
+def test_private_space_unset_is_noop(tmp_path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """未配置 PSI_PRIVATE_OPEN_IDS → 派生规则与升级前逐字节一致。"""
+    monkeypatch.delenv("PSI_PRIVATE_OPEN_IDS", raising=False)
+    fm = FeishuManager(_sm=None, _ai_id="ai1", _workspace_root=str(tmp_path))
+
+    assert fm._workspace_for("ou_secret") == os.path.join(str(tmp_path), "ou_secret")

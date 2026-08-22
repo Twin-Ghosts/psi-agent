@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 import anyio
 from loguru import logger
 
+from psi_agent import _private_space
 from psi_agent._feishu_routing import route_key
 from psi_agent.gateway._session_manager import SessionManager
 
@@ -109,10 +110,16 @@ class FeishuManager:
 
         群聊 → ``<root>/chat-<chat_id>``, 私聊 → ``<root>/<open_id>`` (``-`` 同样转义,
         与 ``_session_id`` 一致, 免得两个键指到同一个 workspace 目录)。
+
+        ``PSI_PRIVATE_OPEN_IDS`` 白名单里的人 → ``<root>/.private/<open_id>``, 工具层
+        据此拒绝其他 session 访问 (见 ``psi_agent._private_space``)。群聊不进私密区 ——
+        群是多人共用上下文, 放私密区等于把私密资料摊给全群。
         """
         root = self._workspace_root or os.getcwd()
         if key.startswith("chat:"):
             return os.path.join(root, f"chat-{_sanitize_open_id(key.removeprefix('chat:'))}")
+        if _private_space.is_private_user(key):
+            return _private_space.private_dir(root, _sanitize_open_id(key))
         return os.path.join(root, _sanitize_open_id(key).replace("-", "_"))
 
     def is_external(self, open_id: str, *, chat_id: str = "", chat_type: str = "") -> bool:

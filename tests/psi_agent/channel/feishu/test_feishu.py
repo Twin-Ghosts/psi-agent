@@ -1397,3 +1397,94 @@ async def test_run_feishu_wires_is_external_into_message_handler(monkeypatch):
     predicate = args[-1]
     assert callable(predicate)
     assert predicate("ou_1", chat_id="oc_1", chat_type="p2p") is False
+
+
+def _driving_channel() -> MagicMock:
+    """``stream`` 真去跑 ``_produce`` 回调 —— 默认的 AsyncMock 只记录调用, 回调根本不执行,
+    于是任何盯 ``_produce`` 内部行为的断言都会假绿(实测本文件的 _fake_channel 即如此)。"""
+    channel = _fake_channel()
+
+    async def _stream(chat_id: str, payload: dict, options: dict | None = None) -> None:
+        produce = payload["markdown"]
+        stream = SimpleNamespace(append=AsyncMock())
+        await produce(stream)
+
+    channel.stream = AsyncMock(side_effect=_stream)
+    return channel
+
+
+@pytest.mark.anyio
+async def test_stream_reply_withholds_private_file_from_other_user(monkeypatch, tmp_path):
+    """私密区文件不许发给非主人 —— ``_send_file`` 一次都不该被调用。"""
+    monkeypatch.setenv("PSI_PRIVATE_OPEN_IDS", "ou_owner")
+    secret = tmp_path / ".private" / "ou_owner" / "s.md"
+    await anyio.Path(secret.parent).mkdir(parents=True, exist_ok=True)
+    await anyio.Path(secret).write_bytes(b"x")
+
+    sent = AsyncMock()
+    monkeypatch.setattr(client, "_send_file", sent)
+
+    async def _post(chunks):
+        yield FileChunk(str(secret))
+
+    core = SimpleNamespace(post=_post)
+    await client._stream_reply(_driving_channel(), core, "oc_1", [], reply_to=None, sender_open_id="ou_intruder")
+
+    assert sent.await_count == 0
+
+
+@pytest.mark.anyio
+async def test_stream_reply_sends_private_file_to_its_owner(monkeypatch, tmp_path):
+    """主人自己收得到自己的私密文件 —— 守卫是单向的, 不是一律拦。"""
+    monkeypatch.setenv("PSI_PRIVATE_OPEN_IDS", "ou_owner")
+    secret = tmp_path / ".private" / "ou_owner" / "s.md"
+    await anyio.Path(secret.parent).mkdir(parents=True, exist_ok=True)
+    await anyio.Path(secret).write_bytes(b"x")
+
+    sent = AsyncMock()
+    monkeypatch.setattr(client, "_send_file", sent)
+
+    async def _post(chunks):
+        yield FileChunk(str(secret))
+
+    core = SimpleNamespace(post=_post)
+    await client._stream_reply(_driving_channel(), core, "oc_1", [], reply_to=None, sender_open_id="ou_owner")
+
+    assert sent.await_count == 1
+
+
+@pytest.mark.anyio
+async def test_stream_reply_public_file_unaffected(monkeypatch, tmp_path):
+    """公共区文件照常发, 与升级前零行为差异。"""
+    monkeypatch.setenv("PSI_PRIVATE_OPEN_IDS", "ou_owner")
+    public = tmp_path / "pub.md"
+    await anyio.Path(public).write_bytes(b"x")
+
+    sent = AsyncMock()
+    monkeypatch.setattr(client, "_send_file", sent)
+
+    async def _post(chunks):
+        yield FileChunk(str(public))
+
+    core = SimpleNamespace(post=_post)
+    await client._stream_reply(_driving_channel(), core, "oc_1", [], reply_to=None, sender_open_id="ou_intruder")
+
+    assert sent.await_count == 1
+
+
+@pytest.mark.anyio
+async def test_handle_and_stream_wires_sender_into_stream_reply(monkeypatch, tmp_path):
+    """``_handle_and_stream`` 必须把发送者 open_id 接进 ``_stream_reply``。
+
+    盯的是接线: 守卫写对了但 sender_open_id 没传进来时, 它恒为 None,
+    于是主人自己也被拦、或私密文件照发 —— 两种都是静默错误。
+    """
+    monkeypatch.setattr(client, "_build_chunks", AsyncMock(return_value=[TextChunk("hi")]))
+    stream = AsyncMock()
+    monkeypatch.setattr(client, "_stream_reply", stream)
+    core = ChannelCore(session_socket=str(tmp_path / "x.sock"))
+    ctx = SimpleNamespace(sender_id="ou_owner", chat_id="oc_dm", chat_type="p2p", message_id="om_1")
+
+    await client._handle_and_stream(_fake_channel(), _resolver(core), None, ctx, None)
+
+    assert stream.await_args.kwargs["sender_open_id"] == "ou_owner"
