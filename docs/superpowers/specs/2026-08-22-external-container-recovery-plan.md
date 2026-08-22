@@ -451,7 +451,7 @@ V11 写成「验的是这两个 cherry-pick 是否生效」，实测不成立—
 这正是原临时实现 `_private_space` 接线断掉却无人发现的那类问题——**而记录⑦证明写了这两条
 测试也不够：漏掉整个模块时，没有任何测试会红。** 真正兜住它的是逐项核对方案 D2 的清单。
 
-**踩到的两个环境坑（阶段 3 修文档时可用）：**
+**踩到的三个环境坑（阶段 3 修文档时可用）：**
 
 - `uv run` 在 worktree 里会新建一个空 `.venv` 并报 `No module named pytest`。worktree
   没有自己的虚拟环境，须用主检出的解释器
@@ -459,6 +459,13 @@ V11 写成「验的是这两个 cherry-pick 是否生效」，实测不成立—
 - 但该 venv 的 editable 安装指向**主检出的 `src`**，直接跑会 import 到主检出的代码
   （实测报 `cannot import name 'external_sessions'`，因为改动在 worktree 里）。
   必须 `PYTHONPATH=<worktree>/src` 覆盖，否则测的不是当前代码。
+- **`-o testpaths=` 必须写在路径参数之前，写在后面会静默吞掉路径。** 复核上表的
+  「116 passed」时用 `pytest <三个文件> -o testpaths=` 跑出 **89 passed**，差点把文档里
+  正确的数字改错。89 = 79 + 10，`test_feishu_manager.py` 一个文件没被收进去，而
+  「89 passed」看上去毫无异常。换成 `pytest -o testpaths= <三个文件>` 得 116。
+  三种写法的收集量：正确 116 / 顺序写反 4380（清空 `testpaths` 又丢路径，从 rootdir
+  收全仓含 `examples/`）/ 完全不带 `-o` 1422（回落 `testpaths=["tests"]`）。
+  **判断参数有没有生效只能看数量对不对，三种都不报错。**
 
 ### 阶段 2 · 走正式发布流程
 
