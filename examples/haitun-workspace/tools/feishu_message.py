@@ -621,8 +621,12 @@ async def feishu_image_get(
     endpoint that ``feishu_file_download`` uses).
 
     Where to get ``file_key``:
-    - The image the user just sent is already auto-downloaded and attached to the
-      turn — you usually don't need this tool for it.
+    - The image the user just sent is usually already auto-downloaded and attached
+      to the turn — you don't need this tool for it. **Exception:** if the turn
+      carries a ``<feishu_attachments>`` block instead of a file, nothing was
+      downloaded (the Feishu channel runs in another container, whose filesystem
+      you cannot read). Then this tool is the *only* way to get the bytes: pass
+      the ``message_id`` and ``file_key`` straight from that block.
     - For an image found in history, read the chat/thread with
       ``feishu_thread_read`` (or ``GET /open-apis/im/v1/messages`` via
       ``feishu_api``), then parse the message's

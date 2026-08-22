@@ -288,6 +288,7 @@ async def test_gateway_feishu_route(tmp_path: str) -> None:
                 data = await resp.json()
                 assert data["open_id"] == "ou_alice"
                 assert data["session_id"] == "feishu-ou_alice"
+                assert data["external"] is False  # 本进程托管 → channel 照旧自己下载附件
                 socket1 = data["channel_socket"]
 
             # 二次幂等: 同 socket。
@@ -379,6 +380,57 @@ async def test_gateway_feishu_route_group_chat(tmp_path: str) -> None:
         await runner.cleanup()
         await sm.delete("feishu-chat-oc_team")
         await sm.delete("feishu-ou_alice")
+        await aim.delete("ai1")
+        await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_gateway_feishu_route_reports_external(tmp_path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """外部容器托管的会话: 返回 ``external: true``, 且本进程不建 Session、不查 workspace。
+
+    最后一条是回归点 —— 外部键没有本地 Session, 若仍去 ``get_workspace`` 排定时任务会抛
+    ``LookupError`` → 404, 整条飞书链路断在路由这一步。
+    """
+    monkeypatch.setenv("PSI_FEISHU_EXTERNAL_SESSIONS", "ou_secret=http://psi-luolin:8081")
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+
+    aim = AIManager(_prefix="gw-test", _tg=tg)
+    sm = SessionManager(_aim=aim, _prefix="gw-test", _tg=tg)
+    app = await create_app(aim, sm, TitleManager(), feishu_workspace_root=str(tmp_path))
+    base_url, runner = await _start_app_on_free_port(app)
+
+    try:
+        timeout = ClientTimeout(total=10)
+        async with ClientSession(timeout=timeout) as session:
+            async with session.post(
+                f"{base_url}/ais",
+                json={
+                    "provider": "openai",
+                    "model": "gpt-4o",
+                    "api_key": "sk-test",
+                    "base_url": "https://api.example.com",
+                    "id": "ai1",
+                },
+            ) as resp:
+                assert resp.status == 201
+
+            body = {"open_id": "ou_secret", "ai_id": "ai1"}
+            async with session.post(f"{base_url}/feishu/route", json=body) as resp:
+                assert resp.status == 201
+                data = await resp.json()
+                assert data["external"] is True
+                assert data["channel_socket"] == "http://psi-luolin:8081"
+                assert data["session_id"] == "feishu-ou_secret"
+
+            # 外部键不落本地: 既不 spawn session, 也不进本地路由表。
+            async with session.get(f"{base_url}/sessions") as resp:
+                assert await resp.json() == []
+            async with session.get(f"{base_url}/feishu/routes") as resp:
+                assert await resp.json() == []
+
+    finally:
+        await runner.cleanup()
         await aim.delete("ai1")
         await tg.__aexit__(None, None, None)
 

@@ -1194,3 +1194,206 @@ async def test_gateway_route_provider_group_cache_is_per_chat() -> None:
 
     assert (a, b) == ("/tmp/a.sock", "/tmp/b.sock")
     assert len(http.post_calls) == 2
+
+
+@pytest.mark.anyio
+async def test_gateway_route_provider_caches_external_flag() -> None:
+    """``external`` 随路由一起缓存, 且与 socket 一样是按路由键分开的。"""
+    http = _FakeHttp(
+        [
+            _FakeResp(201, {"channel_socket": "http://box:8081", "external": True}),
+            _FakeResp(201, {"channel_socket": "/tmp/local.sock", "external": False}),
+        ]
+    )
+    provider = client._GatewayRouteProvider("http://127.0.0.1:9000", cast("Any", http))
+
+    # 路由之前一律视作本地 —— 不知道就别声称在外面。
+    assert provider.is_external("ou_secret") is False
+
+    await provider.ensure("ou_secret")
+    await provider.ensure("ou_plain")
+
+    assert provider.is_external("ou_secret") is True
+    assert provider.is_external("ou_plain") is False
+
+
+@pytest.mark.anyio
+async def test_gateway_route_provider_external_defaults_false_on_old_gateway() -> None:
+    """老 gateway 的响应没有 ``external`` 字段 → 当本地处理 (维持升级前行为)。"""
+    http = _FakeHttp([_FakeResp(201, {"channel_socket": "/tmp/ou_1.sock"})])
+    provider = client._GatewayRouteProvider("http://127.0.0.1:9000", cast("Any", http))
+
+    await provider.ensure("ou_1")
+
+    assert provider.is_external("ou_1") is False
+
+
+@pytest.mark.anyio
+async def test_build_chunks_external_hands_off_instead_of_downloading(monkeypatch, tmp_path):
+    """跨容器会话: 一个字节都不下载, 改把 message_id/file_key 交给对端容器自取。
+
+    回归的是「文件明明收到了、对端 agent 却报 not found」—— 附件落在本容器的
+    ``~/Downloads``, 对端容器有独立文件系统, 那个路径在它那儿根本不存在。
+    """
+    monkeypatch.setattr(client.platformdirs, "user_downloads_dir", lambda: str(tmp_path))
+    channel = _fake_channel()
+    channel.download_resource_to_file = AsyncMock(side_effect=AssertionError("must not download"))
+    sources = [
+        _file_source("om_1", "fk_1", "洪德山-简历.pdf"),
+        _file_source("om_2", "fk_2", "b.docx"),
+    ]
+
+    chunks = await client._build_chunks(channel, _batched_ctx(sources), external=True)
+
+    channel.download_resource_to_file.assert_not_awaited()
+    assert not [c for c in chunks if isinstance(c, FileChunk)]
+    handoff = "\n".join(c.text for c in chunks if isinstance(c, TextChunk))
+    assert "<feishu_attachments>" in handoff
+    assert 'message_id="om_1" file_key="fk_1"' in handoff
+    assert 'message_id="om_2" file_key="fk_2"' in handoff
+    assert "洪德山-简历.pdf" in handoff
+    # 不能借用 [RECV:] —— 它的契约是路径本地可读, 跨容器时是假的。
+    assert "[RECV:" not in handoff
+    # 也别在本容器留下没人读的空目录。
+    assert not (tmp_path / ".psi").exists()
+
+
+def test_attachment_handoff_carries_pickup_instructions():
+    """块必须自带取件说明 —— 对端没有别的地方能知道该怎么取。
+
+    实测缺口: 对端 workspace 的 AGENTS.md / TOOLS.md 里没有一处提到
+    ``<feishu_attachments>``, 而 ``feishu_image_get`` 的 ``save_path`` 是必填无默认。
+    只发裸 XML, agent 就得猜工具名和落盘位置; 猜不中就又变成「跟用户说没收到」。
+    """
+    handoff = client._attachment_handoff([_file_source("om_1", "fk_1", "简历.pdf")])
+
+    assert "feishu_image_get" in handoff, "得点名工具, 别让对端猜"
+    assert "save_path" in handoff, "save_path 必填无默认, 必须给出落盘约定"
+    # 说明得解释「为什么没有文件」, 否则 agent 会先去找不存在的路径。
+    assert "不同容器" in handoff or "另一个容器" in handoff
+    # 说明是注释, 不能污染 file 条目的解析。
+    assert handoff.count("<file ") == 1
+
+
+@pytest.mark.anyio
+async def test_build_chunks_external_skips_audio_download(monkeypatch, tmp_path):
+    """语音同理: 不在本容器抓, 只把 audio key 交过去。"""
+    monkeypatch.setattr(client.platformdirs, "user_downloads_dir", lambda: str(tmp_path))
+    channel = _fake_channel()
+    channel.client.im.v1.message_resource.aget = AsyncMock(side_effect=AssertionError("must not download"))
+    ctx = SimpleNamespace(
+        message_id="om_1",
+        content_text='<audio key="ak_1" />',
+        resources=[],
+        raw_content_type="audio",
+        batched_sources=None,
+    )
+
+    chunks = await client._build_chunks(channel, ctx, external=True)
+
+    channel.client.im.v1.message_resource.aget.assert_not_awaited()
+    handoff = "\n".join(c.text for c in chunks if isinstance(c, TextChunk))
+    assert 'file_key="ak_1"' in handoff
+
+
+@pytest.mark.anyio
+async def test_build_chunks_external_text_only_has_no_handoff_block(monkeypatch, tmp_path):
+    """纯文本消息不该凭空多出一个空的 ``<feishu_attachments>`` 块。"""
+    monkeypatch.setattr(client.platformdirs, "user_downloads_dir", lambda: str(tmp_path))
+    channel = _fake_channel()
+    ctx = SimpleNamespace(
+        content_text="你好",
+        message_id="om_1",
+        resources=[],
+        raw_content_type="text",
+        batched_sources=None,
+    )
+
+    chunks = await client._build_chunks(channel, ctx, external=True)
+
+    assert "feishu_attachments" not in "\n".join(c.text for c in chunks if isinstance(c, TextChunk))
+
+
+@pytest.mark.anyio
+async def test_build_chunks_local_still_downloads(monkeypatch, tmp_path):
+    """external=False (其余十几位用户) 走原路径: 照旧下载成 FileChunk, 不出 handoff 块。"""
+    monkeypatch.setattr(client.platformdirs, "user_downloads_dir", lambda: str(tmp_path))
+    channel = _fake_channel()
+
+    async def _download(file_key: str, *, message_id: str, dest_dir: str, **kwargs: Any) -> str:
+        path = anyio.Path(dest_dir) / f"{file_key}.pdf"
+        await path.write_bytes(b"x")
+        return str(path)
+
+    channel.download_resource_to_file = AsyncMock(side_effect=_download)
+
+    chunks = await client._build_chunks(channel, _batched_ctx([_file_source("om_1", "fk_1", "a.pdf")]))
+
+    assert [c for c in chunks if isinstance(c, FileChunk)]
+    assert "feishu_attachments" not in "\n".join(c.text for c in chunks if isinstance(c, TextChunk))
+
+
+@pytest.mark.anyio
+async def test_handle_passes_external_to_build_chunks(monkeypatch, tmp_path):
+    """``_handle_and_stream`` 必须把谓词的答案传给 ``_build_chunks``。
+
+    这条盯的是接线: 谓词写好了但没接进调用点时, external 恒为 False, 修复完全空转。
+    """
+    build = AsyncMock(return_value=[TextChunk("hi")])
+    monkeypatch.setattr(client, "_build_chunks", build)
+    channel = _fake_channel()
+    core = ChannelCore(session_socket=str(tmp_path / "x.sock"))
+    ctx = SimpleNamespace(sender_id="ou_secret", chat_id="oc_dm", chat_type="p2p", message_id="om_1")
+
+    await client._handle_and_stream(channel, _resolver(core), None, ctx, lambda open_id, **kw: True)
+
+    assert build.await_args.kwargs["external"] is True
+
+
+@pytest.mark.anyio
+async def test_run_feishu_wires_is_external_into_message_handler(monkeypatch):
+    """``run_feishu`` 必须把 ``is_external`` 谓词接进消息处理器的实参。
+
+    盯的是接线本身: 谓词与 handoff 都写对、就是没传进去时, 参数默认 None → external
+    恒为 False, 整个修复静默空转 (而所有直接调 ``_handle_and_stream`` 的单测仍全绿)。
+    """
+    channel = MagicMock()
+    channel.on = MagicMock()
+    channel.start_background = AsyncMock()
+    channel.stop_background = AsyncMock()
+    channel.bot_identity = SimpleNamespace(open_id="ou_bot", name="Haitun")
+
+    started: list[tuple] = []
+
+    class _CapturingPortal(_FakePortal):
+        def start_task_soon(self, *args: object, **kwargs: object) -> None:
+            started.append(args)
+
+    monkeypatch.setattr(client, "FeishuChannel", lambda **kw: channel)
+    monkeypatch.setattr(client, "BlockingPortal", lambda: _CapturingPortal())
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            partial(
+                run_feishu,
+                session_socket="/tmp/nonexistent.sock",
+                app_id="a",
+                app_secret="s",
+                gateway_url="http://127.0.0.1:9000",
+                # 显式给 appdata: 否则 run_feishu 会先向 gateway GET /defaults 要它,
+                # 那次真实 HTTP 在没人监听的端口上要等到超时, 处理器注册被推到 sleep 之后。
+                appdata="/tmp/psi-appdata",
+            )
+        )
+        await anyio.sleep(0.1)
+        handlers = {c.args[0]: c.args[1] for c in channel.on.call_args_list}
+        await handlers["message"](SimpleNamespace(sender_id="ou_1", chat_id="oc_1", message_id="om_1"))
+        tg.cancel_scope.cancel()
+
+    assert len(started) == 1
+    args = started[0]
+    assert args[0] is client._handle_and_stream
+    # 末位实参就是谓词: 可调用, 且没路由过的会话答 False。
+    predicate = args[-1]
+    assert callable(predicate)
+    assert predicate("ou_1", chat_id="oc_1", chat_type="p2p") is False

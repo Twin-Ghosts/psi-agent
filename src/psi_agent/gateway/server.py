@@ -470,9 +470,10 @@ async def _feishu_route(request: web.Request) -> web.Response:
     """幂等地把一次飞书会话路由到其 Session, 首次见到时按需 spawn。
 
     body: ``{open_id, chat_id?, chat_type?, ai_id?, workspace?}`` →
-    ``201 {open_id, chat_id, session_id, channel_socket}``。群聊 (``chat_type`` 为 group/topic
-    且 ``chat_id`` 非空) 整群共用一个 Session, 其余按 ``open_id`` 一人一个。channel 拿回
-    ``channel_socket`` 连接即得对应会话。
+    ``201 {open_id, chat_id, session_id, channel_socket, external}``。群聊 (``chat_type`` 为
+    group/topic 且 ``chat_id`` 非空) 整群共用一个 Session, 其余按 ``open_id`` 一人一个。channel
+    拿回 ``channel_socket`` 连接即得对应会话; ``external`` 为真表示该 Session 跑在**别的容器**里,
+    channel 据此不再下载附件到本机 (那边看不见), 改为透传 file_key。
     """
     fm: FeishuManager = request.app["fm"]
     schedm: SchedulerManager = request.app["schedm"]
@@ -490,20 +491,28 @@ async def _feishu_route(request: web.Request) -> web.Response:
             ai_id=body.get("ai_id"),
             workspace=body.get("workspace"),
         )
+        external = fm.is_external(open_id, chat_id=chat_id, chat_type=chat_type)
         # Schedules under this session's workspace belong to its dedicated scheduler
         # Session, not to the user/group session.
+        #
+        # 外部容器托管的会话本进程没有 Session, ``get_workspace`` 会抛 LookupError (转 404) ——
+        # 它的定时任务由那个容器自己加载, 这里无事可做, 故跳过。历史上这里能跑通只是因为
+        # 迁移前留下了一个同名本地 Session 兜住了查询; 那个残留一旦被清掉, 路由就会 404。
         sm: SessionManager = request.app["sm"]
-        await schedm.ensure(
-            sm.get_workspace(session_id),
-            ai_id=sm.get_backend_id(session_id),
-            agent=sm.get_agent(session_id),
-        )
+        if not external:
+            await schedm.ensure(
+                sm.get_workspace(session_id),
+                ai_id=sm.get_backend_id(session_id),
+                agent=sm.get_agent(session_id),
+            )
         return _json(
             {
                 "open_id": open_id,
                 "chat_id": chat_id,
                 "session_id": session_id,
                 "channel_socket": socket,
+                # channel 据此决定附件是自己下载还是透传 file_key 交给对端容器下载。
+                "external": external,
             },
             status=201,
         )
