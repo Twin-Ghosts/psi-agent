@@ -2,9 +2,9 @@
 
 **描述：** 修复独立容器（`psi-agent-luolin` / `psi-agent-chengxx`）里的 agent 生成文件后，飞书侧收不到可点击下载附件的问题。出向链路改为「session 供字节 → channel 上传」，不依赖共享文件系统。
 
-**版本号：** 1.3
+**版本号：** 1.4
 
-**状态：** 开发中（代码与本机验收 V4-V6 完成；V1-V3 需改生产，待用户确认后发布验收）
+**状态：** 已交付（V1/V2/V4/V5/V6 通过，V3 经用户决定不验；已发布生产并完成收尾）
 
 **适用范围：** psi-agent 出向文件链路（`[SEND:]` → 飞书附件），生产为新加坡节点 account.genuineknowledge.cn
 
@@ -293,9 +293,9 @@ guard 已在，无需补）。
 
 | 项 | 结论 | 依据 |
 |---|---|---|
-| **V1** | **未验**（待发布） | 需要改生产（构建镜像 + 重启 gateway），按约定先问用户再动。发布后用一个本次新造的文件名验证 |
-| **V2** | **未验**（待发布） | 同 V1，`psi-agent-luolin` 需独立记一次 |
-| **V3** | **未验**（待发布） | 同 V1，`psi-agent-chengxx` 需独立记一次 |
+| **V1** | **通过** | 见下「V1/V2 明细：生产验收」。新造文件名 `out-test-1944.md`，飞书侧可点击下载，51 Byte 两行内容正确 |
+| **V2** | **通过** | 同一次验收即经 `psi-agent-luolin` 容器出向（临时把自己 open_id 指到该容器），日志 `19:46:18 GET /files serving '/workspace/out-test-1944.md'` |
+| **V3** | **不验** | 用户明确决定跳过 `psi-agent-chengxx`。链路同构且已核验端点可达（`GET /files` 返回 404 = 端点在），但**没有真实飞书消息驱动过该容器**，如实记为未验 |
 | **V4** | **通过** | 见下「V4 明细」 |
 | **V5** | **通过** | 见下「V5 明细」 |
 | **V6** | **通过** | 见下「V6 明细」 |
@@ -346,9 +346,26 @@ guard 已在，无需补）。
 
 新增 5 条用例专覆盖这道守卫：`.private/` 下文件 403；**未配白名单也拦**（与 `owner_of` 刻意分道的那条区别）；公共区软链指进私密区 403（Windows 无权限时 skip，正是 channel 侧判不出的那种写法）；名字里带 `.private` 的公共文件**不误伤**（判的是目录层级）；端点层 403 且不回显文件内容。`_private_space` 既有用例随合跑通过。
 
-### 发布与生产验收（V1-V3）待办
+### V1/V2 明细：生产验收
 
-按 plan「发布与验收」节执行，每一步改生产前先问用户：镜像构建 + 三层核验（第三层必须验镜像内产物，8-18 事故缺的就是这层）→ 先停旧再起新（飞书出向 WS 单连接，不做滚动更新）→ 连带重建 oauth-proxy（`network_mode: "service:gateway"`，不重建则显示 Up 但 8090 已死）→ 临时把自己的 open_id 加进 `PSI_FEISHU_EXTERNAL_SESSIONS` 自测两个容器（**新造文件名**）→ 撤回该临时 env。回退点：`psi-agent-gateway:backup-20260822` / `backup-20260822-174853`（同指 `896467e05f72`），当前生产 `527deff72043`。**不得** `docker compose down -v`（pgvector 数据在命名卷 `deploy_fusion_memory_pgdata`）。
+**发布**：镜像 `psi-agent-gateway:outbound-039fdf70`，停机 **68s**（上一轮 95s）。三层核验在 build 机全过，**第三层在生产独立重跑一次**：真 `import` 成功、两处上限均为 `31457280`、报错文案正确。孤儿文件检查（旧/新 `.py` 清单 `comm -23`）为空，确认 build 机 src 未漂移。回退点 `psi-agent-gateway:rollback-preoutbound-20260824-193837`（`527deff72043`）。
+
+**验收链路的前提先单独证过**：脚本在 luolin 容器造 `/workspace/出向验收-20260824-194402.md`（inode 442586、link count 1，确非 inode 701477 那个硬链接），gateway 侧 `ls` 该路径返回 No such file or directory，而 `GET /files` 取回 HTTP 200 / 108 字节且逐字节相符 —— 「文件系统不通、HTTP 通」这个前提成立。随后用户真实飞书消息验收通过。
+
+**过程中三件事实，记下来**：
+
+- **生产是四个容器同镜像**（gateway / luolin / chengxx / oauth-proxy 都写死 `image: psi-agent-gateway:local`），发一次版会重启四个，不是只重启 gateway。
+- **`docker save`/`load` 后镜像 ID 会变**（build 机 `611bd4741e67` → 生产 `3dc1521172c9`），是两侧 Docker 版本（29.6.2 / 29.7.2）重算 manifest 所致，不是传错。判据只能是第三层内容核验，不能拿 ID 比。
+- **`docker compose restart` 不重读 `env_file`**。撤临时 env 时改完文件重启，容器内 `printenv` 仍是旧值；必须 `up -d` 重建容器才生效（两个 private 容器读各自 workspace 下的 `.env`，本就没这个变量，不受影响）。
+
+**19:46:51 那条上游 400 不是主链路失败**：它与 `Fusion Memory MCP supervisor thread crashed`（`/workspace/tools/_fusion_memory_mcp.py` 的 `memory_health`）同刻，session 本身正常收尾（`19:46:52 Compaction completed`、`model_completed, model_turns=2`）。另立卡片，不属本任务。
+
+### 生产侧收尾（已完成）
+
+- **临时 env 已撤**：`workspace/.env` 第 27 行删掉 `ou_6c30c11b76b15e42a7870e0686733c0f=http://psi-agent-luolin:8081`，与发布前备份 `diff` 为空。重建容器后 gateway 内生效值已是两条映射，`/oauth/callback` 400、`/sessions` 404、四容器 Up。
+- **测试记录已删**：罗霖历史里原始四行（`tool_calls` 与其 `tool` 返回必须成对删，否则后续每次请求 400）。删前按内容特征逐条断言，防定时 trigger 追加导致的行号漂移。删后全行可解析、孤儿 `tool` 消息 0。残留一处文件名在一条 `compacted` 摘要里，但跑真实 `messages_for_ai()` 确认它已被后续两个压缩点顶掉、投影中出现 0 次，属死数据，未改生产的压缩摘要。
+- **两处临时改动仍在**（按 W 段「明确不做」）：硬链接 inode 701477、build 机到生产的多余 ssh 公钥 `haitun1-build-to-prod`，另行撤除。
+- **观察项，归入标记泄漏卡**：最新压缩摘要里 `[SEND:` 出现 27 次 —— 标记会被压缩吞进摘要再喂回模型，是与卡片渲染路径并列的**第二条**泄漏通道。附件发送本身正常。
 
 ***
 
@@ -359,4 +376,5 @@ guard 已在，无需补）。
 | 1.0 | 2026-08-24 | 初版，W/H 开工前落定；开工前核对出 4 处与 8-22 诊断不符 |
 | 1.1 | 2026-08-24 | 补 A（代码落点 / 三向同步 / 本机质量门）与 T（V4-V6 通过并附实测明细，V1-V3 记未验待发布） |
 | 1.2 | 2026-08-24 | 负责人追问耦合度与隔离后：`fetch_file_bytes` 移出 feishu 到 channel 通用层（测试随之搬出，feishu 测试不再 import 任何 session 模块）；私密区守卫下沉一道到源容器侧并补 5 条用例；**改正 1.1 版 V6 的错结论**（跨容器时 channel 侧 `realpath` 会退化，软链绕得过）；改掉「端口只在 docker 网络内可达」这条错鉴权理由并把「同网络 Session 之间无隔离」记为已知缺口 |
+| 1.4 | 2026-08-24 | 发布生产并完成验收收尾：V1/V2 通过（新造文件名 `out-test-1944.md`，停机 68s），V3 经用户决定不验；补 A 段「V1/V2 明细」与「生产侧收尾」，记下三件实测事实（四容器同镜像、`docker save/load` 后镜像 ID 必变、`compose restart` 不重读 `env_file`）；改正一处误判（19:46:51 的上游 400 是 Fusion Memory MCP 崩溃所致，非主链路失败）；标记泄漏发现第二条通道（压缩摘要），另立卡片 |
 | 1.3 | 2026-08-24 | 负责人预判的两点，均判定为对并落实：① **删掉「取字节失败回落到交路径给 SDK」**，改抛 `OutboundFileError`，调用点就地告知用户、不重抛（回落在跨容器下必然失败，只是把我们的错换成 SDK 的**静默**错，用户看到的与修复前一样）；② **30MB 两份字面量加一条跨文件锁**（两侧各自的 `== 30MB` 断言锁不住不一致，而不一致的后果是静默的）。V4 用例数 33 → 36，两条新用例各自单独做了修复前能失败的实测 |
