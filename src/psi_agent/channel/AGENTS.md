@@ -37,6 +37,7 @@ ChannelCore 是所有 Channel（CLI、REPL、Telegram）共享的公共部件：
 - `post(list[InputChunk]) -> AsyncIterator[OutputChunk]`：InputChunk → 字符串 → POST → SSE → OutputChunk
 - 将输入中的 FileChunk 转换为 `[RECV:/path]` 标记（session 端负责读文件）
 - 检测输出中的 `[SEND:/path]` 标记并产生 FileChunk。解码走 `iter_send_paths()`——它同时承载正则与**空路径过滤**：裸 `[SEND:]` 是模型笔误而非传输请求，放过去会让 `_send_file` 拿空 source path 发起上传。该函数定义在顶层 `psi_agent/_send_markers.py`（本模块重导出）：`session/history_display.py` 的 Gateway 投影复用同一函数，放在本层会让 Session import Channel 的私有模块
+- **给出向 FileChunk 盖 `source`（跨容器取字节的地址）**：`_byte_source` —— `session_socket` 是 `http(s)://` 时取其规范化前缀，否则留空。空 = 客户端照旧直接读本地路径；非空 = 该 Session 可能在别的容器里，字节要从 `GET {source}/files?path=...` 回取（见 `session/AGENTS.md` 同名小节）。**（刻意为之）盖在 `post()` 的扫描循环里而不是 `SendMarkerScanner` 里**：scanner 是纯解码，不该知道传输地址；`source` 在 `_types.FileChunk` 上有默认空值，故输入侧所有构造点无需改动
 - 将 SSE 的 `delta.reasoning` 流切分为 `ReasoningChunk`（透传可选 `delta.kind`），与 `content`（`TextChunk`）按到达顺序交错产出；同槽不同 `kind` 在 buffer 内视为不同活动类型（不合并）；`[SEND:...]` 仅扫描 content
 - SSE 内容在 interval 窗口内缓冲合并为单个 TextChunk（默认 1s，可配置）
 - 终端通道（CLI/REPL）设置 interval=0 无需缓冲
@@ -107,6 +108,8 @@ Channel 层是 psi-agent 的用户界面层，负责连接 Session socket 并通
 - `<audio key="..."/>` inline 标签通过 `message_resource.aget()` API 下载
 - 通过 `channel.stream()`  + `stream.append()` 实现卡片流式渲染
 - FileChunk 通过 `channel.send()` 发送文件；用户文件下载至 `Downloads/.psi/<date>/`
+- **出向文件先按图片试、失败再按文件发**：`_send_file` 先发 `{"image": ...}`，SDK 拒了（非图片格式，`code=234011`）再发 `{"file": ...}`。这条探测路径会在生产日志里留下常量级的 `materialize blocked` WARNING，属正常流——**读日志时勿把 WARNING 条数当故障数**
+- **独立容器 Session 的字节回取（`_fetch_bytes`）**：`FileChunk.source` 非空时先 `GET {source}/files?path=...` 拿到 `bytes` 再交给 SDK。**必须交 bytes 而不是路径**：SDK `_coerce.py` 把 `{"source": <str>}` 一律当 `kind="file"`，在 **Gateway 进程内**打开该路径——独立容器部署下那个路径在 Gateway 文件系统里不存在，上传静默失败，飞书侧表现为「一句话回复、没有附件」；`bytes` 则走 `kind="buffer"`，不碰文件系统。走 file 分支时**必须同时给 `file_name`**（buffer 没有文件名可推）。**（刻意为之）取字节失败不抛异常**：记 WARNING 后回落到原路径——同容器部署下这条路本来就能走通，不该因为回取失败就把消息整条丢掉
 - 认证：`--app-id` + `--app-secret` CLI args > `PSI_FEISHU_APP_ID` / `PSI_FEISHU_APP_SECRET` env
 - 用户白名单：`--allowed-user-ids` 参数或 `None`（不限制）
 - 处理状态表情（参考 Hermes）：收到白名单消息后立即在该消息上加 `Typing` 表情（`message_reaction.acreate`），回复完成后移除；处理失败则替换为 `CrossMark`。表情操作失败安全，不影响回复

@@ -213,6 +213,20 @@ result = run.result   # 正常耗尽后非 None
 - 非 Windows 上传 `\\\\.\\pipe\\name` → 抛 `ValueError`，提示改用 Unix socket 或 TCP 地址；否则 aiohttp 的 `isinstance(..., asyncio.ProactorEventLoop)` 门控本身会因该属性在非 Windows 不存在而抛 `AttributeError`。
 - bash 里传管道地址要用四反斜杠 `'\\\\.\\pipe\\...'`，保证程序收到两根反斜杠开头。
 
+## GET /files——出向文件的字节来源
+
+`session/server.py` 除两条 POST 外还挂 `GET /files?path=...`，返回该 workspace 内单个文件的字节（`web.FileResponse`，走 sendfile 不整读进内存）。
+
+**为什么需要**：`[SEND:/path]` 只传路径。Session 与 Channel 同容器时 Channel 直接读该路径即可；独立容器部署（`PSI_FEISHU_EXTERNAL_SESSIONS`）下两侧文件系统不通，Channel 打开必然失败——飞书侧表现为「没有附件」而非报错。此端点让 Channel 能按路径回取字节，见 `channel/AGENTS.md` 同名小节。
+
+| 关注点 | 落点 | 说明 |
+|------|----|------|
+| **纯逻辑与 HTTP 分离** | `session/file_serving.py` `resolve_within_root()` | 路径逃逸判断不依赖 aiohttp，可直接单测；`server.py` 只做 HTTP 壳 |
+| **限 workspace 根内** | 同上 | 先 `resolve()` 再比前缀，`..` 与符号链接一并挡住；`workspace_path` 为空的 session 直接 403（该功能关闭） |
+| **不泄漏根外存在性** | 同上 | 存在性检查**排在**包含性检查之后，根外文件一律 403 而非 404 |
+| **体积上限** | `MAX_FILE_BYTES`（30MB） | 超限 413，与飞书素材上限同量级 |
+| **无鉴权（刻意）** | `server.py` | 与同端口的 `POST /chat/completions` 同级：该端口只在 docker 网络内可达、未发布到宿主。若将来端口对外暴露，两条路由要一起加鉴权，不是只加这条 |
+
 ## Tool 加载约定
 
 - `workspace/tools/*.py` 中的每个 `.py` 文件（不含 `_` 开头）

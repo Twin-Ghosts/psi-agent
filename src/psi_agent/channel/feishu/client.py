@@ -29,6 +29,7 @@ from loguru import logger
 from psi_agent import _private_space
 from psi_agent._appdata import resolve_appdata_root
 from psi_agent._feishu_routing import is_group_chat, route_key
+from psi_agent._sockets import resolve_connector_and_endpoint
 from psi_agent.channel._core import ChannelCore
 from psi_agent.channel._errors import ChannelError
 from psi_agent.channel._types import FileChunk, InputChunk, ReasoningChunk, TextChunk
@@ -97,6 +98,10 @@ class _CoreRegistry:
 
 
 _GATEWAY_TIMEOUT = aiohttp.ClientTimeout(total=10)
+
+# 取一个出向文件的字节。比 ``_GATEWAY_TIMEOUT`` 宽: 那个只传一次路由决策, 这个要传
+# 最多 30MB 过 docker 网络, 且对端可能正忙于同一 Session 的其他回合。
+_FILE_FETCH_TIMEOUT = aiohttp.ClientTimeout(total=120)
 
 
 class _GatewayRouteProvider:
@@ -190,14 +195,71 @@ async def _resolve_shared_appdata(base_url: str, http: aiohttp.ClientSession) ->
     return appdata.strip() if isinstance(appdata, str) else ""
 
 
-async def _send_file(channel: Any, chat_id: str, path: str) -> None:
-    logger.debug(f"path={path}")
-    result = await channel.send(chat_id, {"image": {"source": path}})
+_MAX_OUTBOUND_FILE_BYTES = 30 * 1024 * 1024
+
+
+async def _fetch_bytes(source: str, path: str) -> bytes | None:
+    """从别的容器取一个出向文件的字节; 失败返回 ``None``。
+
+    ``source`` 是那个 Session 的 TCP 地址 (``FileChunk.source``), 它的 ``GET /files``
+    把 workspace 内的文件当字节流交出来。失败**不抛**: 调用方还要退回「直接交路径给
+    SDK」的老路 —— 那条路在本地 Session 下是正确行为, 不该因取字节失败而中断发送。
+    """
+    url = f"{source.rstrip('/')}/files"
+    try:
+        connector, _ = resolve_connector_and_endpoint(source)
+        async with (
+            aiohttp.ClientSession(connector=connector, timeout=_FILE_FETCH_TIMEOUT) as http,
+            http.get(url, params={"path": path}) as resp,
+        ):
+            if resp.status != 200:
+                body = (await resp.text())[:300]
+                logger.error(f"fetch bytes failed HTTP {resp.status} from {url} path={path!r}: {body}")
+                return None
+            data = await resp.read()
+    except Exception as e:
+        logger.error(f"fetch bytes failed from {url} path={path!r} — {e!r}")
+        return None
+    if not data:
+        # 空文件上传必被飞书拒, 且「0 字节附件」对用户毫无用处 —— 当失败处理更诚实。
+        logger.error(f"fetch bytes got empty body from {url} path={path!r}")
+        return None
+    if len(data) > _MAX_OUTBOUND_FILE_BYTES:
+        logger.error(f"fetched file too large ({len(data)} bytes) from {url} path={path!r}")
+        return None
+    logger.debug(f"fetched {len(data)} bytes from {url} path={path!r}")
+    return data
+
+
+async def _send_file(channel: Any, chat_id: str, path: str, source: str = "") -> None:
+    """把一个出向文件发进飞书会话。
+
+    ``source`` 非空 = 文件在**别的容器**里, 本进程读不到该路径 (见 ``FileChunk.source``)。
+    那时先取字节再上传: SDK 的 ``{"source": <bytes>}`` 走 ``MediaSource(kind="buffer")``,
+    完全不碰文件系统。留空则照旧交路径, 由 SDK 自己读 —— 本地 Session 一步 HTTP 都不多走。
+
+    走字节时**必须显式给 ``file_name``**: 走路径时 SDK 从 basename 取名, 走字节时它只有
+    ``"upload"`` 可用, 用户会收到一个名为 upload 的附件 —— 「可点击下载」也就废了一半。
+    """
+    logger.debug(f"path={path} source={source!r}")
+    payload: str | bytes = path
+    if source:
+        data = await _fetch_bytes(source, path)
+        if data is None:
+            # 取字节失败仍试老路: 本地可读时它是对的, 不可读时 SDK 会如实报错。
+            logger.warning(f"falling back to local path for {path!r} after byte fetch failed")
+        else:
+            payload = data
+
+    result = await channel.send(chat_id, {"image": {"source": payload}})
     if result.success:
         logger.debug("OK as image")
         return
     logger.debug("image rejected, trying file")
-    await channel.send(chat_id, {"file": {"source": path}})
+    file_spec: dict[str, Any] = {"source": payload}
+    if isinstance(payload, bytes):
+        file_spec["file_name"] = Path(path).name or "file"
+    await channel.send(chat_id, {"file": file_spec})
 
 
 async def _add_reaction(channel: Any, message_id: str, emoji_type: str) -> str | None:
@@ -487,7 +549,7 @@ async def _stream_reply(
                         if _private_space.blocks_send(chunk.path, sender_open_id):
                             logger.warning(f"private file withheld from {sender_open_id!r}: {chunk.path}")
                             continue
-                        await _send_file(channel, chat_id, chunk.path)
+                        await _send_file(channel, chat_id, chunk.path, chunk.source)
         except Exception:
             await flush_silent_candidate()
             raise

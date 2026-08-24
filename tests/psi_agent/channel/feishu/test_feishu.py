@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import anyio
 import pytest
+from aiohttp import web
 from lark_channel import PolicyConfig
 
 from psi_agent.channel._core import ChannelCore
@@ -32,6 +33,10 @@ from psi_agent.channel.feishu.client import (
     _SeenEvents,
     run_feishu,
 )
+from psi_agent.session.agent import SessionAgent
+from psi_agent.session.ai_client import AiClient
+from psi_agent.session.server import _make_files_handler
+from psi_agent.session.tool_registry import ToolRegistry
 
 
 def _resolver(core: ChannelCore):
@@ -1488,3 +1493,136 @@ async def test_handle_and_stream_wires_sender_into_stream_reply(monkeypatch, tmp
     await client._handle_and_stream(_fake_channel(), _resolver(core), None, ctx, None)
 
     assert stream.await_args.kwargs["sender_open_id"] == "ou_owner"
+
+
+# -- 出向跨容器发文件 -----------------------------------------------------------
+#
+# 独立容器的 agent 生成文件后, channel 跑在 gateway 容器里读不到那个路径 (各挂自己的卷)。
+# 修法是取字节再上传: SDK 的 ``{"source": <bytes>}`` 走 MediaSource(kind="buffer"),
+# 完全不碰文件系统。以下用例盯的就是「有地址取字节 / 无地址照旧交路径」这条分岔。
+
+
+def _ok_channel() -> MagicMock:
+    """``send`` 明确返回成功 —— 默认 AsyncMock 的返回值是 MagicMock, ``result.success``
+    恒真, 于是 file fallback 那条分支永远测不到。"""
+    channel = _fake_channel()
+    channel.send = AsyncMock(return_value=SimpleNamespace(success=True))
+    return channel
+
+
+def _image_rejecting_channel() -> MagicMock:
+    """第一次 (image) 失败、第二次 (file) 成功 —— 复现 md 之类非图片文件的真实路径。"""
+    channel = _fake_channel()
+    channel.send = AsyncMock(side_effect=[SimpleNamespace(success=False), SimpleNamespace(success=True)])
+    return channel
+
+
+@pytest.mark.anyio
+async def test_send_file_without_source_passes_path_and_makes_no_request(monkeypatch):
+    """本地 Session: 照旧把**路径**交给 SDK, 且一次 HTTP 都不发。
+
+    这是「不打扰本地链路」的判据 —— 本地路径本就可读, 多绕一趟 HTTP 纯属倒退。
+    """
+    fetched = AsyncMock()
+    monkeypatch.setattr(client, "_fetch_bytes", fetched)
+    channel = _ok_channel()
+
+    await client._send_file(channel, "oc_1", "/workspace/x.md")
+
+    assert fetched.await_count == 0
+    assert channel.send.await_args.args[1] == {"image": {"source": "/workspace/x.md"}}
+
+
+@pytest.mark.anyio
+async def test_send_file_with_source_uploads_bytes(monkeypatch):
+    """跨容器: 取到的**字节**交给 SDK, 而不是那个本进程读不到的路径。"""
+    monkeypatch.setattr(client, "_fetch_bytes", AsyncMock(return_value=b"BYTES"))
+    channel = _ok_channel()
+
+    await client._send_file(channel, "oc_1", "/workspace/x.md", "http://psi-agent-luolin:8081")
+
+    assert channel.send.await_args.args[1] == {"image": {"source": b"BYTES"}}
+
+
+@pytest.mark.anyio
+async def test_send_file_bytes_fallback_carries_file_name(monkeypatch):
+    """走字节的 file fallback **必须**带 file_name。
+
+    走路径时 SDK 从 basename 取名; 走字节时它只有 ``"upload"`` 可用, 用户会收到一个名为
+    upload 的附件 —— 「可点击下载的附件」也就废了一半。这条盯的正是那个易漏点。
+    """
+    monkeypatch.setattr(client, "_fetch_bytes", AsyncMock(return_value=b"BYTES"))
+    channel = _image_rejecting_channel()
+
+    await client._send_file(channel, "oc_1", "/workspace/交付物.md", "http://psi-agent-chengxx:8081")
+
+    assert channel.send.await_count == 2
+    assert channel.send.await_args.args[1] == {"file": {"source": b"BYTES", "file_name": "交付物.md"}}
+
+
+@pytest.mark.anyio
+async def test_send_file_falls_back_to_path_when_fetch_fails(monkeypatch):
+    """取字节失败仍试本地路径: 本地可读时它是对的, 不可读时由 SDK 如实报错。"""
+    monkeypatch.setattr(client, "_fetch_bytes", AsyncMock(return_value=None))
+    channel = _ok_channel()
+
+    await client._send_file(channel, "oc_1", "/workspace/x.md", "http://psi-agent-luolin:8081")
+
+    assert channel.send.await_args.args[1] == {"image": {"source": "/workspace/x.md"}}
+
+
+@pytest.mark.anyio
+async def test_stream_reply_forwards_file_chunk_source(monkeypatch, tmp_path):
+    """接线: ``FileChunk.source`` 必须一路传到 ``_send_file``。
+
+    断的是这条链最容易断的一节 —— 地址填对了但没传下去时, 表现与完全没修一样。
+    """
+    sent = AsyncMock()
+    monkeypatch.setattr(client, "_send_file", sent)
+
+    async def _post(chunks):
+        yield FileChunk("/workspace/x.md", "http://psi-agent-luolin:8081")
+
+    core = SimpleNamespace(post=_post)
+    await client._stream_reply(_driving_channel(), core, "oc_1", [], reply_to=None, sender_open_id="ou_1")
+
+    assert sent.await_args.args[3] == "http://psi-agent-luolin:8081"
+
+
+@pytest.mark.anyio
+async def test_fetch_bytes_reads_from_session_files_endpoint(tmp_path):
+    """端到端一条: 真起一个 session server, channel 从它取字节, 逐字节比对。
+
+    只 mock 到「另一个容器」这一层为止 —— 中间的 HTTP、路径判定、字节完整性都真跑。
+    """
+    payload = "标题\n正文\n".encode()
+    target = tmp_path / "交付物.md"
+    await anyio.Path(target).write_bytes(payload)
+
+    agent = SessionAgent(
+        ai_client=AiClient("http://nonexistent/v1"),
+        tool_registry=ToolRegistry(),
+        workspace_path=tmp_path,
+    )
+    app = web.Application()
+    app.router.add_get("/files", _make_files_handler(agent))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    try:
+        base = f"http://127.0.0.1:{runner.addresses[0][1]}"
+        assert await client._fetch_bytes(base, str(target)) == payload
+        # 根外的路径取不到字节 (端点 403) → None, 于是调用方退回老路而不是发一个空附件。
+        outside = tmp_path.parent / "outside.md"
+        await anyio.Path(outside).write_bytes(b"nope")
+        assert await client._fetch_bytes(base, str(outside)) is None
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.anyio
+async def test_fetch_bytes_returns_none_when_unreachable():
+    """对端容器连不上时返回 None 而不是抛 —— 发送流程要能继续走到 fallback。"""
+    # 127.0.0.1:1 上不会有服务在听。
+    assert await client._fetch_bytes("http://127.0.0.1:1", "/workspace/x.md") is None

@@ -33,6 +33,18 @@ class ChannelCore:
         provenance = kind.split(":", 1)[1] if ":" in kind else None
         return ReasoningChunk(text=text, kind=provenance or None)
 
+    @property
+    def _byte_source(self) -> str:
+        """出向文件的字节该从哪儿取; 本地 Session 返回 ``""``。
+
+        只有 TCP 地址才填 —— 那是「Session 在另一个容器」的形态 (见生产
+        ``PSI_FEISHU_EXTERNAL_SESSIONS``)。Unix socket / 命名管道意味着同机同文件系统,
+        此时路径本就可读, 填地址只会让客户端多绕一趟 HTTP 去拿它已经能直接读的字节。
+        """
+        if self.session_socket.startswith(("http://", "https://")):
+            return self.session_socket.rstrip("/")
+        return ""
+
     @staticmethod
     def events_endpoint_from_chat(chat_endpoint: str) -> str:
         """Derive ``…/events`` from the chat-completions endpoint on the same socket."""
@@ -124,6 +136,9 @@ class ChannelCore:
                         if incoming_kind == "text":
                             logger.debug(f"delta.content ({len(text)} chars): {text[:1000]!r}")
                             for file_chunk in scanner.feed(text):
+                                # 跨容器时补上取字节的地址; 本地留空 → 客户端照旧直接读路径。
+                                # 填在这里而不是 scanner 里: scanner 是纯解码, 不该知道传输地址。
+                                file_chunk.source = self._byte_source
                                 yield file_chunk
                         else:
                             logger.debug(f"delta.reasoning kind={raw_kind!r} ({len(text)} chars): {text[:1000]!r}")

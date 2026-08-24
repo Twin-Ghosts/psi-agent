@@ -677,3 +677,61 @@ async def test_post_releases_response_on_early_break(monkeypatch):
             break
 
     assert resp.released is True
+
+
+# -- 出向文件的来源地址 ---------------------------------------------------------
+#
+# 跨容器时 [SEND:] 里的路径在 channel 这一侧读不到 (Session 在别的容器, 各挂自己的卷),
+# 所以 FileChunk 要带上「字节从哪儿取」。本地 Session 必须留空, 否则会为已经能直接读的
+# 文件多绕一趟 HTTP。
+
+
+def test_byte_source_filled_for_tcp_session():
+    """TCP 地址 = Session 在别的容器, 要填 (末尾斜杠归一, 免得拼出 //files)。"""
+    assert ChannelCore("http://psi-agent-luolin:8081")._byte_source == "http://psi-agent-luolin:8081"
+    assert ChannelCore("https://host:8443/")._byte_source == "https://host:8443"
+
+
+def test_byte_source_empty_for_local_session():
+    """Unix socket / 命名管道 = 同机同文件系统, 路径本就可读, 留空。"""
+    assert ChannelCore("/tmp/psi/channels/x.sock")._byte_source == ""
+    assert ChannelCore(r"\.\pipe\psi\channels\x")._byte_source == ""
+
+
+@pytest.mark.anyio
+async def test_post_stamps_source_on_send_marker_for_tcp(monkeypatch):
+    """扫出的 FileChunk 必须带上来源地址 —— 少这一步, 下游拿不到字节就退回读本地路径。"""
+    resp = _RecordingResp(
+        [
+            b'data: {"choices":[{"index":0,"delta":{"content":"see [SEND:/workspace/x.md] done"}}]}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+    )
+    core = ChannelCore(session_socket="http://psi-agent-chengxx:8081", interval=0.0)
+    monkeypatch.setattr(core, "_session", _RecordingPostSession(resp), raising=False)
+    monkeypatch.setattr(core, "_endpoint", "http://psi-agent-chengxx:8081/chat/completions", raising=False)
+
+    files = [c async for c in core.post([TextChunk("hi")]) if isinstance(c, FileChunk)]
+
+    assert len(files) == 1
+    assert files[0].path == "/workspace/x.md"
+    assert files[0].source == "http://psi-agent-chengxx:8081"
+
+
+@pytest.mark.anyio
+async def test_post_leaves_source_empty_for_local(monkeypatch):
+    """本地 Session 的 FileChunk 不带地址 —— 与升级前零行为差异。"""
+    resp = _RecordingResp(
+        [
+            b'data: {"choices":[{"index":0,"delta":{"content":"see [SEND:/tmp/x.md] done"}}]}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+    )
+    core = ChannelCore(session_socket="/tmp/x.sock", interval=0.0)
+    monkeypatch.setattr(core, "_session", _RecordingPostSession(resp), raising=False)
+    monkeypatch.setattr(core, "_endpoint", "http://localhost/chat/completions", raising=False)
+
+    files = [c async for c in core.post([TextChunk("hi")]) if isinstance(c, FileChunk)]
+
+    assert len(files) == 1
+    assert files[0].source == ""

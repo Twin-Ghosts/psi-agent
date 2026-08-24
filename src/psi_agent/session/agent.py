@@ -236,6 +236,17 @@ class SessionAgent:
         self._agent_path = agent_path
         self._tokens_at_last_compaction: int | None = None
 
+    @property
+    def workspace_path(self) -> Path | None:
+        """This Session's workspace root, or ``None`` when it has no folder.
+
+        Read-only accessor for ``GET /files`` (``session/server.py``): outbound
+        cross-container file transfer confines every read to this root, and the
+        server holds only the agent. ``None`` makes that endpoint refuse
+        outright — no root, nothing safe to serve.
+        """
+        return self._workspace_path
+
     # -- factory --------------------------------------------------------------
 
     @classmethod
