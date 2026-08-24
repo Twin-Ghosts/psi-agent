@@ -186,3 +186,93 @@ async def test_endpoint_missing_file_is_404(tmp_path: Path) -> None:
             assert resp.status == 404
     finally:
         await runner.cleanup()
+
+
+# -- 私密区不经本端点外流 --
+#
+# 判在这一侧的理由: channel 那道守卫判的是模型输出的路径字符串, 跨容器时那串路径在
+# gateway 上不存在, realpath 退化成字符串规范化。故「软链指进私密区」只有源容器判得出。
+
+
+@pytest.mark.anyio
+async def test_private_space_file_is_403(tmp_path: Path) -> None:
+    """根内但落在 .private/ 下 —— 路径完全合法, 仍不供字节。"""
+    private = tmp_path / ".private" / "ou_owner"
+    private.mkdir(parents=True)
+    target = private / "salary.xlsx"
+    target.write_text("PRIVATE-PAYLOAD", encoding="utf-8")
+
+    with pytest.raises(FileServingError) as excinfo:
+        await resolve_within_root(str(target), tmp_path)
+    assert excinfo.value.status == 403
+
+
+@pytest.mark.anyio
+async def test_private_space_blocked_without_whitelist_configured(tmp_path: Path, monkeypatch) -> None:
+    """白名单没配也要拦。
+
+    这是与 ``_private_space.owner_of`` 刻意分道的地方: 那个未配白名单时返回 None = 放行
+    (它判的是「谁是主人」)。本端点判的是「是不是私密区」—— 配置缺失不该等于把私密目录
+    敞开供字节。
+    """
+    monkeypatch.delenv("PSI_PRIVATE_OPEN_IDS", raising=False)
+    private = tmp_path / ".private" / "ou_whoever"
+    private.mkdir(parents=True)
+    target = private / "notes.md"
+    target.write_text("x", encoding="utf-8")
+
+    with pytest.raises(FileServingError) as excinfo:
+        await resolve_within_root(str(target), tmp_path)
+    assert excinfo.value.status == 403
+
+
+@pytest.mark.anyio
+async def test_symlink_into_private_space_is_403(tmp_path: Path) -> None:
+    """公共区里的软链指进私密区 —— 字符串上看不出, resolve 后拦住。
+
+    这条正是 channel 侧守卫在跨容器时判不出的那种写法。
+    """
+    private = tmp_path / ".private" / "ou_owner"
+    private.mkdir(parents=True)
+    secret = private / "secret.md"
+    secret.write_text("PRIVATE-PAYLOAD", encoding="utf-8")
+
+    link = tmp_path / "innocent.md"
+    try:
+        link.symlink_to(secret)
+    except OSError:
+        pytest.skip("Windows 上无 SeCreateSymbolicLinkPrivilege")
+
+    with pytest.raises(FileServingError) as excinfo:
+        await resolve_within_root(str(link), tmp_path)
+    assert excinfo.value.status == 403
+
+
+@pytest.mark.anyio
+async def test_public_file_named_like_private_is_served(tmp_path: Path) -> None:
+    """判的是**目录层级**, 不是名字里带 .private —— 别把正常文件误伤。"""
+    target = tmp_path / "how-to-use-.private-dirs.md"
+    target.write_text("public doc", encoding="utf-8")
+
+    resolved = await resolve_within_root(str(target), tmp_path)
+    assert resolved.name == target.name
+
+
+@pytest.mark.anyio
+async def test_endpoint_private_file_403_without_leaking(tmp_path: Path) -> None:
+    """端点层同样拦, 且不回显文件内容。"""
+    private = tmp_path / ".private" / "ou_owner"
+    private.mkdir(parents=True)
+    target = private / "payroll.md"
+    target.write_text("CLASSIFIED-PAYLOAD", encoding="utf-8")
+
+    runner, base = await _serve(_agent(tmp_path))
+    try:
+        async with (
+            ClientSession(timeout=ClientTimeout(total=10)) as http,
+            http.get(f"{base}/files", params={"path": str(target)}) as resp,
+        ):
+            assert resp.status == 403
+            assert "CLASSIFIED-PAYLOAD" not in await resp.text()
+    finally:
+        await runner.cleanup()

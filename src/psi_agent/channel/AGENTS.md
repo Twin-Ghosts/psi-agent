@@ -8,6 +8,7 @@ channel/
 ├── _errors.py         # ChannelError 基类（传输/协议/session/附件下载错误统一抛出）
 ├── _markers.py        # [RECV:] 标记 + encode_input + 有状态扫描器 SendMarkerScanner；[SEND:] 解码重导出自 `psi_agent/_send_markers.py`
 ├── _stream.py         # SSE 解析 iter_sse_events + interval 缓冲 StreamBuffer（与传输解耦）
+├── _file_bytes.py     # fetch_file_bytes — 跨容器取出向文件字节（GET {source}/files，与平台无关）
 ├── _core.py           # ChannelCore — 连接管理 + post() 编排
 ├── _event_defs.py     # 加载 agent 包 channel_events/<channel>/（EVENT.yaml + map.py|produce.py）+ 变更指纹
 ├── _event_shapes.py   # 事件载荷 → 纯数据（plainify）与形状/字段路径推导；线上路径与自查工具共用
@@ -109,7 +110,8 @@ Channel 层是 psi-agent 的用户界面层，负责连接 Session socket 并通
 - 通过 `channel.stream()`  + `stream.append()` 实现卡片流式渲染
 - FileChunk 通过 `channel.send()` 发送文件；用户文件下载至 `Downloads/.psi/<date>/`
 - **出向文件先按图片试、失败再按文件发**：`_send_file` 先发 `{"image": ...}`，SDK 拒了（非图片格式，`code=234011`）再发 `{"file": ...}`。这条探测路径会在生产日志里留下常量级的 `materialize blocked` WARNING，属正常流——**读日志时勿把 WARNING 条数当故障数**
-- **独立容器 Session 的字节回取（`_fetch_bytes`）**：`FileChunk.source` 非空时先 `GET {source}/files?path=...` 拿到 `bytes` 再交给 SDK。**必须交 bytes 而不是路径**：SDK `_coerce.py` 把 `{"source": <str>}` 一律当 `kind="file"`，在 **Gateway 进程内**打开该路径——独立容器部署下那个路径在 Gateway 文件系统里不存在，上传静默失败，飞书侧表现为「一句话回复、没有附件」；`bytes` 则走 `kind="buffer"`，不碰文件系统。走 file 分支时**必须同时给 `file_name`**（buffer 没有文件名可推）。**（刻意为之）取字节失败不抛异常**：记 WARNING 后回落到原路径——同容器部署下这条路本来就能走通，不该因为回取失败就把消息整条丢掉
+- **独立容器 Session 的字节回取（`_file_bytes.fetch_file_bytes`）**：`FileChunk.source` 非空时先 `GET {source}/files?path=...` 拿到 `bytes` 再交给 SDK。**（刻意为之）实现在 channel 通用层而非 `feishu/` 下**：`FileChunk` 是所有 channel 共用的，函数本身不认识任何平台的上传 API，放进 feishu 等于给 telegram 将来同样部署时留一份逐字复制。**必须交 bytes 而不是路径**：SDK `_coerce.py` 把 `{"source": <str>}` 一律当 `kind="file"`，在 **Gateway 进程内**打开该路径——独立容器部署下那个路径在 Gateway 文件系统里不存在，上传静默失败，飞书侧表现为「一句话回复、没有附件」；`bytes` 则走 `kind="buffer"`，不碰文件系统。走 file 分支时**必须同时给 `file_name`**（buffer 没有文件名可推）。**（刻意为之）取字节失败不抛异常**：记 WARNING 后回落到原路径——同容器部署下这条路本来就能走通，不该因为回取失败就把消息整条丢掉
+- **私密区守卫两道，判据不同，勿当重复删掉一道**：出向发文件前 `client.py` 调 `_private_space.blocks_send(chunk.path, sender_open_id)`，判的是「**这位飞书发送者**是不是该私密区的主人」——只有 channel 手里有 sender_open_id，这一道只能在这里。另一道在 `session/file_serving.py`，判的是「这文件**是不是**私密区的」，无条件拦。分工的根据是**谁掌握什么事实**：channel 知道发送者是谁但跨容器时拿不到文件系统事实（那串路径在 gateway 上不存在，`realpath` 退化成字符串规范化，软链绕得过）；source Session 有文件系统事实但不知道发送者是谁。两道都保留才既能「主人自己收得到」又能挡住软链绕行
 - 认证：`--app-id` + `--app-secret` CLI args > `PSI_FEISHU_APP_ID` / `PSI_FEISHU_APP_SECRET` env
 - 用户白名单：`--allowed-user-ids` 参数或 `None`（不限制）
 - 处理状态表情（参考 Hermes）：收到白名单消息后立即在该消息上加 `Typing` 表情（`message_reaction.acreate`），回复完成后移除；处理失败则替换为 `CrossMark`。表情操作失败安全，不影响回复

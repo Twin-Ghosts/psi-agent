@@ -23,6 +23,8 @@ from pathlib import Path
 
 import anyio
 
+from psi_agent._private_space import PRIVATE_DIRNAME
+
 # 飞书单文件上限 30MB。超限的文件在这里就拒, 不读进内存 —— 上传反正会被飞书拒,
 # 提前拦住换来的是「不会因为 agent 误传一个几 GB 的文件把容器内存打满」。
 MAX_FILE_BYTES = 30 * 1024 * 1024
@@ -75,4 +77,24 @@ async def resolve_within_root(raw: str, root: Path | None) -> Path:
         raise FileServingError(400, f"not a file: {path!r}")
     if (await resolved.stat()).st_size > MAX_FILE_BYTES:
         raise FileServingError(413, f"file exceeds {MAX_FILE_BYTES} bytes: {path!r}")
+
+    # 私密区一律不经本端点外流。判在这里是因为**只有这一侧有文件系统事实**:
+    # channel 侧那道 `blocks_send` 判的是模型输出的路径字符串, 跨容器时那个路径在
+    # gateway 上并不存在, `realpath` 退化成纯字符串规范化, 于是「软链指进 .private」
+    # 这类写法在那边判不出来, 在这里可以。两道守卫都保留 —— 那道按「发送者是不是主人」
+    # 判权 (本端点无从得知发送者是谁), 这道按「文件是不是私密区的」判, 判据不同不重复。
+    if _in_private_space(resolved_str=file_s, root=_norm(str(root_resolved))):
+        raise FileServingError(403, f"private file not served: {path!r}")
     return Path(resolved)
+
+
+def _in_private_space(*, resolved_str: str, root: str) -> bool:
+    """*resolved_str* 是否落在 workspace 根下的私密目录里。
+
+    只看**已经 resolve 过**的路径, 故软链绕不过。不复用 ``_private_space.owner_of``:
+    那个要配 ``PSI_PRIVATE_OPEN_IDS`` 白名单才生效 (未配时返回 None = 放行), 判的是
+    「谁是主人」; 这里要的是无条件的「是不是私密区」—— 白名单没配好不该变成把私密目录
+    敞开供字节。目录名共用同一常量, 不另起字面量。
+    """
+    rel = resolved_str[len(root) :].lstrip(os.sep) if resolved_str.startswith(root) else resolved_str
+    return _norm(PRIVATE_DIRNAME) in Path(rel).parts

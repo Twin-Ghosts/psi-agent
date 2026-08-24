@@ -2,7 +2,7 @@
 
 **描述：** 修复独立容器（`psi-agent-luolin` / `psi-agent-chengxx`）里的 agent 生成文件后，飞书侧收不到可点击下载附件的问题。出向链路改为「session 供字节 → channel 上传」，不依赖共享文件系统。
 
-**版本号：** 1.0
+**版本号：** 1.2
 
 **状态：** 开发中（代码与本机验收 V4-V6 完成；V1-V3 需改生产，待用户确认后发布验收）
 
@@ -219,20 +219,50 @@ guard 已在，无需补）。
 | 层 | 位置 | 做了什么 |
 |---|---|---|
 | Session（新） | `src/psi_agent/session/file_serving.py:48` `resolve_within_root()` | 路径判定纯逻辑：限 workspace 根内、`resolve()` 后比前缀（挡 `..` 与符号链接）、体积上限 `MAX_FILE_BYTES`（`:28`，30MB）。**存在性检查排在包含性之后**，根外文件一律 403 不泄漏存在性 |
-| Session | `src/psi_agent/session/server.py:18` `_make_files_handler()`、`:66` 注册 `GET /files` | HTTP 壳，`web.FileResponse` + `Content-Disposition: attachment`。与同端口 `POST /chat/completions` 同级无鉴权（端口只在 docker 网络内、未发布到宿主），理由写在函数 docstring |
+| Session | `src/psi_agent/session/server.py:18` `_make_files_handler()` + 注册 `GET /files` | HTTP 壳，`web.FileResponse` + `Content-Disposition: attachment`。不加鉴权，理由见下「隔离与鉴权」 |
+| Session | `file_serving._in_private_space()` | 根内但落在 `.private/` 下一律 403。**只有本侧有文件系统事实**，故这道守卫只能在这里，详见下节 |
 | Session | `src/psi_agent/session/agent.py:240` `workspace_path` 只读 property | handler 需要根路径；原先只有私有 `_workspace_path` |
 | Channel | `src/psi_agent/channel/_types.py:25` `FileChunk.source: str = ""` | 字节可从哪取；默认空值使入向侧所有构造点无需改动 |
 | Channel | `src/psi_agent/channel/_core.py:37` `_byte_source`、`:141` 扫描循环里盖章 | `session_socket` 为 `http(s)://` 时填规范化前缀，否则留空。盖在 `post()` 而非 `SendMarkerScanner` 内：scanner 是纯解码 |
-| Feishu | `src/psi_agent/channel/feishu/client.py:201` `_fetch_bytes()` | `GET {source}/files?path=...` 取字节；非 200 / 异常 / 空体 / 超限一律记日志返回 `None`，**不抛** |
+| Channel（新） | `src/psi_agent/channel/_file_bytes.py` `fetch_file_bytes()` | `GET {source}/files?path=...` 取字节；非 200 / 异常 / 空体 / 超限一律记日志返回 `None`，**不抛**。**放通用层而非 `feishu/`**：`FileChunk` 是所有 channel 共用的，函数不认识任何平台的上传 API，放进 feishu 等于给 telegram 留一份逐字复制 |
 | Feishu | 同上 `:234` `_send_file(channel, chat_id, path, source="")` | `source` 非空则改传 `bytes`（SDK 走 `kind="buffer"` 不碰文件系统）；走 file 分支时补 `file_name`；取字节失败回落原路径 |
 | Feishu | 同上 `:552` 调用点 | 传 `chunk.source`。私有空间守卫（`_private_space.blocks_send`）位置不变，仍在其之前 |
+
+### 隔离与鉴权：一次事实澄清（负责人追问后补）
+
+负责人问：这样改是否等于让 agent 实质拿到别的独立容器的文件，违背私有隔离的目的？**方向对，但「新增了跨容器读取能力」这个结论不成立**，核对结果如下。
+
+**1. `/files` 不是新开的门，是已敞开的门上多开的一条缝。** 改动前 `HEAD~1:server.py:30-31` 就已暴露两条无鉴权路由：`POST /chat/completions`（读 `agent.py:343` 确认无任何鉴权或来源校验）与 `POST /events`。`/chat/completions` 比 `/files` **强得多**——它能驱动那个容器的 agent 执行任意 tool。A 容器要 B 容器的文件，改动前就能发一句 `POST /chat/completions` 让 B 自己读了交出来。`/files` 只是让同样的事少绕一步。
+
+**2. 真问题是既有拓扑的性质：独立容器隔离的是文件系统，从来没隔离网络。** 三容器同在 `psi-agent_default`、彼此 8081 直连可达。我上一轮验过这一点（gateway→两个 session 的 8081 都 HTTP 400 = 活着），但当时只当「方案可行」的证据，没往「反过来 session→session 也通」这一面想。
+
+**3. 我原先写的鉴权理由是错的，已改。** `server.py` docstring 与 `session/AGENTS.md:228` 原文是「该端口只在 docker 网络内可达（未发布到宿主）」——这句话把「宿主访问不到」当成了「不可信方访问不到」，而威胁模型里的不可信方（被 prompt 注入的 agent，手上有 `bash` / `fetch`）**正在那个网络里面**。挡的是外人，挡不住邻居。改后的真实理由是「加了也不改变暴露面」（见上第 1 点），并把缺口显式记进 `session/AGENTS.md`「已知缺口」而不是假装已解决。
+
+**4. 我这次改动确实削弱了一处，已修。** channel 侧守卫 `_private_space.blocks_send`（`client.py:549`）判据是路径字符串，`owner_of` 走 `realpath`。同容器时解析的是真实存在的路径，判定可靠；**跨容器时那路径在 gateway 上不存在，`realpath` 退化成纯字符串规范化**，于是「公共区放个软链指进 `.private/`」这类写法在 channel 侧判不出来。修法是把一道无条件的私密区判定下沉到**源容器侧**（`file_serving._in_private_space`）——那是唯一有文件系统事实的一侧，`resolve()` 之后软链绕不过。
+
+两道守卫都保留，判据不同不重复，分工根据是**谁掌握什么事实**：
+
+| | channel 侧 `blocks_send` | session 侧 `_in_private_space` |
+|---|---|---|
+| 判什么 | 这位飞书发送者**是不是主人** | 这文件**是不是**私密区的 |
+| 凭什么能判 | 只有 channel 手里有 `sender_open_id` | 只有源容器有文件系统事实 |
+| 判不出什么 | 跨容器时的软链绕行 | 发送者是谁（本端点无从得知） |
+
+刻意**不复用** `_private_space.owner_of`：它未配 `PSI_PRIVATE_OPEN_IDS` 时返回 `None` 即放行（因为它判「谁是主人」），而本端点要的是无条件的「是不是私密区」——白名单没配好不该等于把私密目录敞开供字节。已有专门用例覆盖这条区别。
+
+**5. 真正的边界只能在网络层或鉴权层，工具层拦不住**（只要 agent 有 `bash`，任何 URL 过滤都能绕）。两条路都要改部署，本任务不做，记为待办：
+
+- 网络层：compose 里每对 gateway↔Session 一个独立 network，Session 之间不同网（最彻底）
+- 鉴权层：给该端口上的**所有**路由统一加共享密钥，`/chat/completions` 必须一起加
+
+顺带发现一条独立于本任务的：agent 包 `tools/read.py` 走 `resolve_under`，**绝对路径原样直通不做包含判定**，故本容器内的 `.private/` 在工具层目前也不设防。已记进 `session/AGENTS.md`。
 
 ### 三向同步
 
 | 文件 | 补了什么 |
 |---|---|
-| `src/psi_agent/channel/AGENTS.md` | ChannelCore 段加 `_byte_source` 盖章条目（含「为什么不放 scanner」）；Feishu 约定段加两条——图片先试再降级会留常量级 `materialize blocked` WARNING（**勿把条数当故障数**）、`_fetch_bytes` 必须交 bytes 而非路径的根因 |
-| `src/psi_agent/session/AGENTS.md` | 新增「GET /files——出向文件的字节来源」小节：为什么需要、五个关注点的落点表（纯逻辑分离、限根内、不泄漏存在性、体积上限、无鉴权是刻意的） |
+| `src/psi_agent/channel/AGENTS.md` | 目录树加 `_file_bytes.py` 一行；ChannelCore 段加 `_byte_source` 盖章条目（含「为什么不放 scanner」）；Feishu 约定段加三条——图片先试再降级会留常量级 `materialize blocked` WARNING（**勿把条数当故障数**）、`fetch_file_bytes` 必须交 bytes 而非路径的根因（并说明为何在通用层）、**两道私密区守卫的判据分工与「谁掌握什么事实」的根据**（不写下来后人极可能当重复删掉一道） |
+| `src/psi_agent/session/AGENTS.md` | 新增「GET /files——出向文件的字节来源」小节：为什么需要、关注点落点表（纯逻辑分离、限根内、不泄漏存在性、体积上限、私密区不供字节）＋**新增「已知缺口：同网络的 Session 之间没有隔离」**——显式写明「端口只在 docker 网络内」不能当安全依据、不加鉴权的真实理由、两条要改部署的封堵路线、以及 `tools/read.py` 绝对路径直通这条独立缺口 |
 | `src/psi_agent/gateway/AGENTS.md` | **未改**。核对后确认该文件从未记载 `PSI_FEISHU_EXTERNAL_SESSIONS`，无过期表述需要对齐；本次事实归属 session / channel 两层 |
 
 ### 本机质量门
@@ -257,29 +287,44 @@ guard 已在，无需补）。
 
 ### V4 明细：测试覆盖 + 修复前能失败
 
-新增 23 条：`tests/psi_agent/session/test_file_serving.py` 12 条（根内放行；`..` 逃逸 403；符号链接逃逸 403（Windows 无权限时 skip）；root 为 None 403；空路径 400；不存在 404；目录 400；超限 413；常量等于 30MB；端点逐字节一致且 `Content-Disposition` 带中文名；端点逃逸 403 且不泄漏内容；端点缺文件 404）、`tests/psi_agent/channel/feishu/test_feishu.py` 7 条（无 source 时传路径且 `_fetch_bytes` 零调用；有 source 时上传 bytes；bytes 走 file 分支带 `file_name`；取字节失败回落路径；`_stream_reply` 把 `chunk.source` 作第 4 位置参传给 `_send_file`；对**真起的** session server 端到端取字节逐字节一致 + 根外返回 `None`；主机不可达返回 `None`）、`tests/psi_agent/channel/test__core.py` 4 条（TCP 填 `_byte_source` 含尾斜杠规范化；unix socket 与命名管道留空；`post()` 对 TCP 盖章、对本地留空）。
+新增 33 条，分四个文件，按被测层归位：
 
-**修复前能失败已实测**：`git stash` 掉 5 个产品文件改动 + 临时移走新模块 `file_serving.py` 后跑同一批用例——
+- `tests/psi_agent/session/test_file_serving.py` **17 条** —— 路径判定 12 条（根内放行；`..` 逃逸 403；软链逃逸 403（Windows 无权限时 skip）；root 为 None 403；空路径 400；不存在 404；目录 400；超限 413；常量等于 30MB；端点逐字节一致且 `Content-Disposition` 带中文名；端点逃逸 403 且不泄漏内容；端点缺文件 404）＋私密区守卫 5 条（见 V6 明细）
+- `tests/psi_agent/channel/test__file_bytes.py` **7 条**（新文件，随 `fetch_file_bytes` 一起从 feishu 层搬出）—— 对**真起的** session server 端到端取字节逐字节一致；根外返回 `None`；主机不可达返回 `None`；`source` 带尾斜杠仍能取到（别拼出 `//files`）；空 body 当失败；客户端侧体积上限也拦（服务端上限是独立的另一道）；常量等于 30MB
+- `tests/psi_agent/channel/feishu/test_feishu.py` **5 条**（只留「飞书出向怎么用它」）—— 无 source 时传路径且 `fetch_file_bytes` **零调用**；有 source 时上传 bytes；bytes 走 file 分支带 `file_name`；取字节失败回落路径；`_stream_reply` 把 `chunk.source` 作第 4 位置参传给 `_send_file`
+- `tests/psi_agent/channel/test__core.py` **4 条** —— TCP 填 `_byte_source` 含尾斜杠规范化；unix socket 与命名管道留空；`post()` 对 TCP 盖章、对本地留空
+
+解耦的一个副证：搬走后 `test_feishu.py` **不再 import 任何 session 模块**（`web` / `SessionAgent` / `AiClient` / `_make_files_handler` / `ToolRegistry` 五个 import 被 ruff 判为未使用而清掉）。
+
+**修复前能失败已实测，分两轮（第二轮针对本轮新增的守卫，不沿用第一轮结果）。**
+
+第一轮（主体修复）：`git stash` 掉 5 个产品文件改动 + 临时移走新模块 `file_serving.py` 后跑同一批用例——
 
 - feishu 7 条全红（7 failed, 79 passed）
 - `_core` 4 条全红，且失败原因是 `AttributeError: 'FileChunk' object has no attribute 'source'` / `'ChannelCore' object has no attribute '_byte_source'`，即**冲着缺失的产品代码红**，不是撞 Windows 基线
 - `test_file_serving.py` 12 条因 `ModuleNotFoundError: No module named 'psi_agent.session.file_serving'` 整个模块无法收集（比逐条断言更强的红）
 
-恢复改动后同一批用例转绿。
+第二轮（私密区守卫）：产品代码 stash 回 `a62ea2e0`（那版**没有** `_in_private_space`）、新测试留在树上，跑 `-k private` 得 **3 failed, 1 passed, 1 skipped**。红的正是三条要拦的（`.private/` 下 403、未配白名单也拦、端点层 403 不泄漏）；**绿的那条是「名字里带 `.private` 的公共文件不该误伤」——它在加守卫前后都该绿**，是防误伤的哨兵而不是漏网，这一条如果也红说明守卫写宽了。软链那条在 Windows 无权限 skip。
+
+两轮恢复改动后均转绿（当前 `test_file_serving.py` + `test__file_bytes.py` 合跑 22 passed, 2 skipped）。
 
 **（实测坑）** 一次 pytest 调用里若有模块收集失败，整个 run 被 `Interrupted` 打断、其余文件不执行，需分文件跑才能看到各自的红。
 
 ### V5 明细：本地出向未被破坏
 
-`test_file_serving.py` + `test_feishu.py` + `test__core.py` 三文件合跑：**17 failed, 103 passed, 1 skipped**。17 条全部在 `test__core.py`，已在未改动的 main 检出上复核为同样的 17 条红（`17 failed, 2 passed`），是 Windows 无 Unix socket 的既有基线，非本次回归（对齐根 AGENTS.md 与既往记录）。1 skipped 是符号链接用例在 Windows 无 `SeCreateSymbolicLinkPrivilege`。
+四文件合跑（`test_file_serving.py` + `test__file_bytes.py` + `test_feishu.py` + `test__core.py`）：**17 failed, 112 passed, 2 skipped**。17 条全部在 `test__core.py`，失败于 `NotImplementedError`（asyncio 无 `create_unix_connection`），已在未改动的 main 检出上复核为同样的 17 条红（`17 failed, 2 passed`），是 Windows 既有基线，非本次回归（对齐根 AGENTS.md 与既往记录）。2 skipped 都是软链用例在 Windows 无 `SeCreateSymbolicLinkPrivilege`。
 
-「不产生额外 HTTP 请求」由 `test_send_file_without_source_passes_path_and_makes_no_request` 显式断言 `_fetch_bytes` 调用次数为 0，而非仅看结果相同。
+「不产生额外 HTTP 请求」由 `test_send_file_without_source_passes_path_and_makes_no_request` 显式断言 `fetch_file_bytes` 调用次数为 0，而非仅看结果相同。
 
 **（实测坑）** 在 worktree 里跑必须给 `PYTHONPATH` 指向本 worktree 的 `src`，否则 `psi_agent` 解析到主检出 `F:\code\psi-agent\src\psi_agent`，新模块表现为「明明存在却 ModuleNotFoundError」。命令见 plan。
 
 ### V6 明细：私密区守卫
 
-`_private_space` 相关既有用例随上述合跑通过。结构上守卫未被绕过：`client.py:552` 调用点的守卫判断在 `_send_file` **之前**、位置与判据均未改动；`_fetch_bytes` 只在 `_send_file` 内部、守卫放行之后才可能执行。`_private_space.owner_of` 用 realpath + parts 判定，对跨容器路径字符串同样成立（已读代码确认，未改）。
+**本条 1.1 版的结论有错，1.2 版改正。** 1.1 写的是「`owner_of` 用 realpath + parts 判定，对跨容器路径字符串同样成立」——前半句对，结论错：`realpath` 在**跨容器**时解析的是一个 gateway 上并不存在的路径，退化成纯字符串规范化，因此「公共区放个软链指进 `.private/`」这类写法在 channel 侧判不出来。这是我这次改动实际削弱的一处。
+
+**修法与现状**：channel 侧那道守卫保持原样（`client.py:549`，判「发送者是不是主人」，位置在 `_send_file` **之前**未动，取字节只在守卫放行之后才可能执行）；另加一道无条件的私密区判定到**源容器侧** `file_serving._in_private_space()`——那是唯一有文件系统事实的一侧，`resolve()` 之后软链绕不过。两道判据不同不重复，分工表见 A 段「隔离与鉴权」。
+
+新增 5 条用例专覆盖这道守卫：`.private/` 下文件 403；**未配白名单也拦**（与 `owner_of` 刻意分道的那条区别）；公共区软链指进私密区 403（Windows 无权限时 skip，正是 channel 侧判不出的那种写法）；名字里带 `.private` 的公共文件**不误伤**（判的是目录层级）；端点层 403 且不回显文件内容。`_private_space` 既有用例随合跑通过。
 
 ### 发布与生产验收（V1-V3）待办
 
@@ -293,3 +338,4 @@ guard 已在，无需补）。
 |---|---|---|
 | 1.0 | 2026-08-24 | 初版，W/H 开工前落定；开工前核对出 4 处与 8-22 诊断不符 |
 | 1.1 | 2026-08-24 | 补 A（代码落点 / 三向同步 / 本机质量门）与 T（V4-V6 通过并附实测明细，V1-V3 记未验待发布） |
+| 1.2 | 2026-08-24 | 负责人追问耦合度与隔离后：`fetch_file_bytes` 移出 feishu 到 channel 通用层（测试随之搬出，feishu 测试不再 import 任何 session 模块）；私密区守卫下沉一道到源容器侧并补 5 条用例；**改正 1.1 版 V6 的错结论**（跨容器时 channel 侧 `realpath` 会退化，软链绕得过）；改掉「端口只在 docker 网络内可达」这条错鉴权理由并把「同网络 Session 之间无隔离」记为已知缺口 |

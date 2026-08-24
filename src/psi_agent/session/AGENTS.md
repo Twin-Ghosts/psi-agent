@@ -225,7 +225,21 @@ result = run.result   # 正常耗尽后非 None
 | **限 workspace 根内** | 同上 | 先 `resolve()` 再比前缀，`..` 与符号链接一并挡住；`workspace_path` 为空的 session 直接 403（该功能关闭） |
 | **不泄漏根外存在性** | 同上 | 存在性检查**排在**包含性检查之后，根外文件一律 403 而非 404 |
 | **体积上限** | `MAX_FILE_BYTES`（30MB） | 超限 413，与飞书素材上限同量级 |
-| **无鉴权（刻意）** | `server.py` | 与同端口的 `POST /chat/completions` 同级：该端口只在 docker 网络内可达、未发布到宿主。若将来端口对外暴露，两条路由要一起加鉴权，不是只加这条 |
+| **私密区不供字节** | `file_serving._in_private_space()` | 根内但落在 `.private/` 下的文件一律 403。**判在本侧是因为只有本侧有文件系统事实**——channel 那道 `blocks_send` 判的是模型输出的路径字符串，跨容器时那串路径在 gateway 上不存在、`realpath` 退化成字符串规范化，「软链指进私密区」只有源容器判得出。刻意**不复用** `_private_space.owner_of`：那个未配 `PSI_PRIVATE_OPEN_IDS` 时返回 None 即放行（它判「谁是主人」），本端点要的是无条件的「是不是私密区」——白名单没配好不该等于把私密目录敞开 |
+| **无鉴权（刻意，但理由别记错）** | `server.py` | 见下「已知缺口」 |
+
+### 已知缺口：同网络的 Session 之间没有隔离
+
+**不要把「端口只在 docker 网络内可达」当作安全依据。** 生产上 8081 确实未映射到宿主，但三个容器同在 `psi-agent_default`、彼此 8081 直连可达，而威胁模型里的不可信方（被 prompt 注入的 agent，手上有 `bash` / `fetch`）**正在那个网络里面**。这句话挡的是外人，挡不住邻居。
+
+不给 `/files` 单独加鉴权的真实理由是**加了也不改变暴露面**：同端口的 `POST /chat/completions` 同样无鉴权，且能驱动本容器 agent 执行任意 tool——邻居想要本容器的文件，让本容器 agent 自己读了交出来即可，比 `/files` 更强。单给这一条加密钥只是把绕路变长一步。
+
+即：独立容器隔离的是**文件系统**，从来没隔离**网络**。这是既有部署拓扑的性质，不是 `/files` 引入的。真要堵，只有两条路，都要改部署：
+
+- 网络层：compose 里每对 gateway↔Session 一个独立 network，Session 之间不同网（最彻底）
+- 鉴权层：给该端口上的**所有**路由统一加共享密钥，`/chat/completions` 必须一起加
+
+相关的另一处（独立于跨容器问题）：agent 包里 `tools/read.py` 走 `resolve_under`，**绝对路径原样直通不做包含判定**，故本容器内的 `.private/` 在工具层目前也不设防。要收就与 `file_serving.resolve_within_root` 对齐。
 
 ## Tool 加载约定
 
