@@ -11,6 +11,7 @@ import pytest
 from lark_channel import PolicyConfig
 
 from psi_agent.channel._core import ChannelCore
+from psi_agent.channel._file_bytes import OutboundFileError
 from psi_agent.channel._types import FileChunk, TextChunk
 from psi_agent.channel.feishu import ChannelFeishu, client
 from psi_agent.channel.feishu._card_action import (
@@ -1556,14 +1557,69 @@ async def test_send_file_bytes_fallback_carries_file_name(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_send_file_falls_back_to_path_when_fetch_fails(monkeypatch):
-    """取字节失败仍试本地路径: 本地可读时它是对的, 不可读时由 SDK 如实报错。"""
+async def test_send_file_raises_instead_of_falling_back_when_fetch_fails(monkeypatch):
+    """跨容器取字节失败 → 抛 ``OutboundFileError``, **一次 send 都不发**。
+
+    刻意不回落到「交路径给 SDK」: 那条路在跨容器下必然失败 (路径在本容器不存在, 正是
+    本 bug 的成因), 走一遍只是把我们的错误换成 SDK 的静默失败 —— 用户看到的还是一句话
+    回复没有附件, 与修复前无区别。断言 send 零调用, 才能锁住「没有偷偷试一把」。
+    """
     monkeypatch.setattr(client, "fetch_file_bytes", AsyncMock(return_value=None))
     channel = _ok_channel()
 
-    await client._send_file(channel, "oc_1", "/workspace/x.md", "http://psi-agent-luolin:8081")
+    with pytest.raises(OutboundFileError) as excinfo:
+        await client._send_file(channel, "oc_1", "/workspace/x.md", "http://psi-agent-luolin:8081")
 
+    assert channel.send.await_count == 0
+    # 报错要点到文件名, 用户才知道是哪个文件没发出来。
+    assert "x.md" in str(excinfo.value)
+
+
+@pytest.mark.anyio
+async def test_send_file_local_path_unaffected_by_fetch_failure(monkeypatch):
+    """``source`` 为空 (本地 Session) 时不受影响: 照旧交路径, 且根本不调取字节。"""
+    fetched = AsyncMock(return_value=None)
+    monkeypatch.setattr(client, "fetch_file_bytes", fetched)
+    channel = _ok_channel()
+
+    await client._send_file(channel, "oc_1", "/workspace/x.md")
+
+    assert fetched.await_count == 0
     assert channel.send.await_args.args[1] == {"image": {"source": "/workspace/x.md"}}
+
+
+@pytest.mark.anyio
+async def test_stream_reply_reports_outbound_file_failure_to_user(monkeypatch, tmp_path):
+    """附件发不出去要**告诉用户**, 且不中断整条回复。
+
+    静默正是本 bug 的症状, 所以失败必须可见; 但就地告知而非抛出 —— 一个附件失败不该
+    让用户连文字也收不到。断言: 错误文本发了 (且点到文件名), 后面的 chunk 照旧流出。
+    """
+    monkeypatch.setattr(
+        client,
+        "_send_file",
+        AsyncMock(side_effect=OutboundFileError("/workspace/交付物.md")),
+    )
+    appended: list[str] = []
+    channel = _fake_channel()
+    channel.send = AsyncMock(return_value=SimpleNamespace(success=True))
+
+    async def _stream(chat_id: str, payload: dict, options: dict | None = None) -> None:
+        stream = SimpleNamespace(append=AsyncMock(side_effect=lambda t: appended.append(t)))
+        await payload["markdown"](stream)
+
+    channel.stream = AsyncMock(side_effect=_stream)
+
+    async def _post(chunks):
+        yield FileChunk("/workspace/交付物.md", source="http://psi-agent-luolin:8081")
+        yield TextChunk("后面还有")
+
+    core = SimpleNamespace(post=_post)
+    await client._stream_reply(channel, core, "oc_1", [], reply_to=None, sender_open_id="ou_1")
+
+    texts = [c.args[1].get("text", "") for c in channel.send.await_args_list if isinstance(c.args[1], dict)]
+    assert any("交付物.md" in t for t in texts), f"没把失败告诉用户: {texts}"
+    assert "后面还有" in "".join(appended), "一个附件失败不该中断后续内容"
 
 
 @pytest.mark.anyio

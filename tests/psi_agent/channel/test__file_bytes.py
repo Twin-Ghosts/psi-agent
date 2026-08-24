@@ -13,6 +13,7 @@ from aiohttp import web
 from psi_agent.channel._file_bytes import MAX_FILE_BYTES, fetch_file_bytes
 from psi_agent.session.agent import SessionAgent
 from psi_agent.session.ai_client import AiClient
+from psi_agent.session.file_serving import MAX_FILE_BYTES as SESSION_MAX_FILE_BYTES
 from psi_agent.session.server import _make_files_handler
 from psi_agent.session.tool_registry import ToolRegistry
 
@@ -118,5 +119,18 @@ async def test_oversize_response_returns_none(tmp_path, monkeypatch):
 
 
 def test_max_bytes_is_30mb():
-    """写死 30MB, 与 session 侧上限同量级; 改动要显式。"""
+    """写死 30MB; 改动要显式。"""
     assert MAX_FILE_BYTES == 30 * 1024 * 1024
+
+
+def test_max_bytes_agrees_with_session_side() -> None:
+    """两侧上限必须相等 —— 这条是唯一锁住它们的东西。
+
+    上限刻意写两份 (channel 不该 import session 包, 且两侧是各自独立的一道防线:
+    服务端拒绝供字节 / 客户端拒绝接收), 代价就是能改一个忘一个。各自那条
+    ``== 30MB`` 的断言锁不住这个: 改动方只会改自己那侧的字面量与断言, 两条依旧全绿,
+    而**不一致的后果是静默的** —— 谁小谁生效, 大的那侧白设。故在此显式比对。
+
+    真要改上限: 两处常量与本条断言一起改, 本测试红是提醒而非阻碍。
+    """
+    assert MAX_FILE_BYTES == SESSION_MAX_FILE_BYTES

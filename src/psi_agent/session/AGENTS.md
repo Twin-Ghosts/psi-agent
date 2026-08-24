@@ -224,7 +224,7 @@ result = run.result   # 正常耗尽后非 None
 | **纯逻辑与 HTTP 分离** | `session/file_serving.py` `resolve_within_root()` | 路径逃逸判断不依赖 aiohttp，可直接单测；`server.py` 只做 HTTP 壳 |
 | **限 workspace 根内** | 同上 | 先 `resolve()` 再比前缀，`..` 与符号链接一并挡住；`workspace_path` 为空的 session 直接 403（该功能关闭） |
 | **不泄漏根外存在性** | 同上 | 存在性检查**排在**包含性检查之后，根外文件一律 403 而非 404 |
-| **体积上限** | `MAX_FILE_BYTES`（30MB） | 超限 413，与飞书素材上限同量级 |
+| **体积上限** | `MAX_FILE_BYTES`（30MB） | 超限 413，与飞书素材上限同量级。上限刻意写两份（这里 + `channel/_file_bytes.py`，channel 不该 import session 包，且两侧是各自独立的一道防线：服务端拒绝供字节 / 客户端拒绝接收）。代价是能改一个忘一个，且**不一致的后果是静默的**——谁小谁生效、大的那侧白设，所以由 `tests/psi_agent/channel/test__file_bytes.py::test_max_bytes_agrees_with_session_side` 显式比对两个字面量；改上限时两侧一起改 |
 | **私密区不供字节** | `file_serving._in_private_space()` | 根内但落在 `.private/` 下的文件一律 403。**判在本侧是因为只有本侧有文件系统事实**——channel 那道 `blocks_send` 判的是模型输出的路径字符串，跨容器时那串路径在 gateway 上不存在、`realpath` 退化成字符串规范化，「软链指进私密区」只有源容器判得出。刻意**不复用** `_private_space.owner_of`：那个未配 `PSI_PRIVATE_OPEN_IDS` 时返回 None 即放行（它判「谁是主人」），本端点要的是无条件的「是不是私密区」——白名单没配好不该等于把私密目录敞开 |
 | **无鉴权（刻意，但理由别记错）** | `server.py` | 见下「已知缺口」 |
 

@@ -2,7 +2,7 @@
 
 **描述：** 修复独立容器（`psi-agent-luolin` / `psi-agent-chengxx`）里的 agent 生成文件后，飞书侧收不到可点击下载附件的问题。出向链路改为「session 供字节 → channel 上传」，不依赖共享文件系统。
 
-**版本号：** 1.2
+**版本号：** 1.3
 
 **状态：** 开发中（代码与本机验收 V4-V6 完成；V1-V3 需改生产，待用户确认后发布验收）
 
@@ -225,7 +225,8 @@ guard 已在，无需补）。
 | Channel | `src/psi_agent/channel/_types.py:25` `FileChunk.source: str = ""` | 字节可从哪取；默认空值使入向侧所有构造点无需改动 |
 | Channel | `src/psi_agent/channel/_core.py:37` `_byte_source`、`:141` 扫描循环里盖章 | `session_socket` 为 `http(s)://` 时填规范化前缀，否则留空。盖在 `post()` 而非 `SendMarkerScanner` 内：scanner 是纯解码 |
 | Channel（新） | `src/psi_agent/channel/_file_bytes.py` `fetch_file_bytes()` | `GET {source}/files?path=...` 取字节；非 200 / 异常 / 空体 / 超限一律记日志返回 `None`，**不抛**。**放通用层而非 `feishu/`**：`FileChunk` 是所有 channel 共用的，函数不认识任何平台的上传 API，放进 feishu 等于给 telegram 留一份逐字复制 |
-| Feishu | 同上 `:234` `_send_file(channel, chat_id, path, source="")` | `source` 非空则改传 `bytes`（SDK 走 `kind="buffer"` 不碰文件系统）；走 file 分支时补 `file_name`；取字节失败回落原路径 |
+| Feishu | 同上 `:194` `_send_file(channel, chat_id, path, source="")` | `source` 非空则改传 `bytes`（SDK 走 `kind="buffer"` 不碰文件系统）；走 file 分支时补 `file_name`；**取字节失败抛 `OutboundFileError`，不回落**（见下「为什么不回落」） |
+| Feishu | 同上 `:516` `_stream_reply._produce` | 捕获 `OutboundFileError`：记 ERROR + 向会话发一句「文件发送失败: <名>」，**不重抛**——这里在卡片流式渲染里，抛出去会中断整条回复，一个附件失败不该让用户连文字也收不到；其余 chunk 继续处理 |
 | Feishu | 同上 `:552` 调用点 | 传 `chunk.source`。私有空间守卫（`_private_space.blocks_send`）位置不变，仍在其之前 |
 
 ### 隔离与鉴权：一次事实澄清（负责人追问后补）
@@ -250,6 +251,20 @@ guard 已在，无需补）。
 
 刻意**不复用** `_private_space.owner_of`：它未配 `PSI_PRIVATE_OPEN_IDS` 时返回 `None` 即放行（因为它判「谁是主人」），而本端点要的是无条件的「是不是私密区」——白名单没配好不该等于把私密目录敞开供字节。已有专门用例覆盖这条区别。
 
+### 为什么不回落到「交路径给 SDK」（负责人预判点 ①）
+
+负责人预判：取字节失败后回落到交路径，跨容器时这条路必然失败，那正是 bug 本身；留着它只是把我们的错误换成 SDK 的错误，用户那边还是静默失败。**这条判断成立，1.2 版里的回落已删。**
+
+核对依据：回落只在 `source` 非空时才可能触发，而 `source` 非空的定义就是「这个路径在本进程的文件系统里没有意义」。所以回落的成功概率不是「低」而是**零**——除非两个容器恰好在同一路径上各有一个同名文件，那反而是更坏的结果（发出去的是**另一个**文件的内容，静默发错比不发更难查）。而 SDK 那侧的失败形态恰好是静默的：`sender.py:430` 抛出后被 lark 的 `send` 收成 `result.success = False`，我们的代码接着试 file 分支、同样失败，最终既没有附件也没有任何用户可见的提示——**与修复前一模一样的症状**。
+
+改后：`_send_file` 抛 `OutboundFileError`（带文件名的中文消息），`_produce` 里就地捕获、记 ERROR、向会话发这句话。**刻意不重抛**：那里在卡片流式渲染的回调里，抛出去会中断整条回复，一个附件失败不该让用户连文字也收不到；多个文件失败就各报一次。`source` 为空（同容器 Session）根本不进这条分支，行为与改动前逐字节相同、一步 HTTP 都不多走（V5 显式断言 `fetch_file_bytes` 零调用）。
+
+### 30MB 两份字面量的跨文件锁（负责人预判点 ②）
+
+负责人预判：30MB 在两个文件里各写一份，没有测试锁住它们相等，以后容易改一个忘一个。**成立，已补锁。**
+
+上限刻意写两份而不是 import 共用：channel 不该依赖 session 包（否则前面刚做的解耦白做），且两侧是**各自独立的一道防线**——服务端拒绝供字节 / 客户端拒绝接收，任一侧单独失效另一侧仍然有效。代价就是能改一个忘一个。两侧各自那条 `== 30 * 1024 * 1024` 的断言**锁不住这个**：改动方只会改自己那侧的字面量与断言，两条依旧全绿。而**不一致的后果是静默的**——谁小谁生效，大的那侧白设，没有任何报错。故加 `test_max_bytes_agrees_with_session_side` 直接比对两个字面量（这是测试里唯一一处允许 channel 测试 import session 常量的地方，目的正是跨层比对）。
+
 **5. 真正的边界只能在网络层或鉴权层，工具层拦不住**（只要 agent 有 `bash`，任何 URL 过滤都能绕）。两条路都要改部署，本任务不做，记为待办：
 
 - 网络层：compose 里每对 gateway↔Session 一个独立 network，Session 之间不同网（最彻底）
@@ -261,13 +276,13 @@ guard 已在，无需补）。
 
 | 文件 | 补了什么 |
 |---|---|
-| `src/psi_agent/channel/AGENTS.md` | 目录树加 `_file_bytes.py` 一行；ChannelCore 段加 `_byte_source` 盖章条目（含「为什么不放 scanner」）；Feishu 约定段加三条——图片先试再降级会留常量级 `materialize blocked` WARNING（**勿把条数当故障数**）、`fetch_file_bytes` 必须交 bytes 而非路径的根因（并说明为何在通用层）、**两道私密区守卫的判据分工与「谁掌握什么事实」的根据**（不写下来后人极可能当重复删掉一道） |
-| `src/psi_agent/session/AGENTS.md` | 新增「GET /files——出向文件的字节来源」小节：为什么需要、关注点落点表（纯逻辑分离、限根内、不泄漏存在性、体积上限、私密区不供字节）＋**新增「已知缺口：同网络的 Session 之间没有隔离」**——显式写明「端口只在 docker 网络内」不能当安全依据、不加鉴权的真实理由、两条要改部署的封堵路线、以及 `tools/read.py` 绝对路径直通这条独立缺口 |
+| `src/psi_agent/channel/AGENTS.md` | 目录树加 `_file_bytes.py` 一行；ChannelCore 段加 `_byte_source` 盖章条目（含「为什么不放 scanner」）；Feishu 约定段加三条——图片先试再降级会留常量级 `materialize blocked` WARNING（**勿把条数当故障数**）、`fetch_file_bytes` 必须交 bytes 而非路径的根因（并说明为何在通用层）、**两道私密区守卫的判据分工与「谁掌握什么事实」的根据**（不写下来后人极可能当重复删掉一道）。1.3 又把「取字节失败回落到原路径」那句**改成**「抛 `OutboundFileError` 不回落」＋调用点就地告知不重抛的理由 |
+| `src/psi_agent/session/AGENTS.md` | 新增「GET /files——出向文件的字节来源」小节：为什么需要、关注点落点表（纯逻辑分离、限根内、不泄漏存在性、体积上限、私密区不供字节）＋**新增「已知缺口：同网络的 Session 之间没有隔离」**——显式写明「端口只在 docker 网络内」不能当安全依据、不加鉴权的真实理由、两条要改部署的封堵路线、以及 `tools/read.py` 绝对路径直通这条独立缺口。1.3 又在「体积上限」一行补上**两份字面量的由来、不一致后果是静默的、以及锁住它们的那条用例名**（改上限时两侧一起改） |
 | `src/psi_agent/gateway/AGENTS.md` | **未改**。核对后确认该文件从未记载 `PSI_FEISHU_EXTERNAL_SESSIONS`，无过期表述需要对齐；本次事实归属 session / channel 两层 |
 
 ### 本机质量门
 
-- `ruff check src tests` → `All checks passed!`；`ruff format src tests` 已格式化。过程中修掉的都是自己新代码的问题：3 处 SIM117（嵌套 `async with`）、5 处 PLC0415（函数内 import，已提到文件顶部，`web` 一并补上）。**教训**：先前只对改动文件跑 lint 漏掉了这 8 条，全量 `src tests` 才暴露
+- `ruff check src tests` → `All checks passed!`；`ruff format --check src tests` → 全部已格式化。过程中修掉的都是自己新代码的问题：3 处 SIM117（嵌套 `async with`）、5 处 PLC0415（函数内 import，已提到文件顶部，`web` 一并补上）。**教训（两条，都是「只查改动文件」漏掉的）**：① 先前只对改动文件跑 `ruff check` 漏掉了那 8 条，全量 `src tests` 才暴露；② `ruff format` 也要跑 `--check` 全量——1.3 收尾时它才报出 `_file_bytes.py` 未格式化，而 `ruff check` 那侧是全绿的，两个命令查的不是一回事
 - 测试见 T 段
 
 ***
@@ -287,16 +302,16 @@ guard 已在，无需补）。
 
 ### V4 明细：测试覆盖 + 修复前能失败
 
-新增 33 条，分四个文件，按被测层归位：
+新增 36 条，分四个文件，按被测层归位：
 
 - `tests/psi_agent/session/test_file_serving.py` **17 条** —— 路径判定 12 条（根内放行；`..` 逃逸 403；软链逃逸 403（Windows 无权限时 skip）；root 为 None 403；空路径 400；不存在 404；目录 400；超限 413；常量等于 30MB；端点逐字节一致且 `Content-Disposition` 带中文名；端点逃逸 403 且不泄漏内容；端点缺文件 404）＋私密区守卫 5 条（见 V6 明细）
-- `tests/psi_agent/channel/test__file_bytes.py` **7 条**（新文件，随 `fetch_file_bytes` 一起从 feishu 层搬出）—— 对**真起的** session server 端到端取字节逐字节一致；根外返回 `None`；主机不可达返回 `None`；`source` 带尾斜杠仍能取到（别拼出 `//files`）；空 body 当失败；客户端侧体积上限也拦（服务端上限是独立的另一道）；常量等于 30MB
-- `tests/psi_agent/channel/feishu/test_feishu.py` **5 条**（只留「飞书出向怎么用它」）—— 无 source 时传路径且 `fetch_file_bytes` **零调用**；有 source 时上传 bytes；bytes 走 file 分支带 `file_name`；取字节失败回落路径；`_stream_reply` 把 `chunk.source` 作第 4 位置参传给 `_send_file`
+- `tests/psi_agent/channel/test__file_bytes.py` **8 条**（新文件，随 `fetch_file_bytes` 一起从 feishu 层搬出）—— 对**真起的** session server 端到端取字节逐字节一致；根外返回 `None`；主机不可达返回 `None`；`source` 带尾斜杠仍能取到（别拼出 `//files`）；空 body 当失败；客户端侧体积上限也拦（服务端上限是独立的另一道）；常量等于 30MB；**两侧上限相等**（`test_max_bytes_agrees_with_session_side`，1.3 新增，见上「30MB 两份字面量的跨文件锁」）
+- `tests/psi_agent/channel/feishu/test_feishu.py` **7 条**（只留「飞书出向怎么用它」）—— 无 source 时传路径且 `fetch_file_bytes` **零调用**；有 source 时上传 bytes；bytes 走 file 分支带 `file_name`；`_stream_reply` 把 `chunk.source` 作第 4 位置参传给 `_send_file`；以下 3 条为 1.3 新增/改写：**取字节失败抛 `OutboundFileError` 且 `send` 零调用**（原「回落路径」那条的替代，断言零调用才能锁住「没有偷偷试一把」，并断言消息里点到文件名）；`source` 为空时**不受影响**（照旧交路径、`fetch_file_bytes` 零调用）；`_stream_reply` 把失败**告诉用户**且后续 chunk 继续流出
 - `tests/psi_agent/channel/test__core.py` **4 条** —— TCP 填 `_byte_source` 含尾斜杠规范化；unix socket 与命名管道留空；`post()` 对 TCP 盖章、对本地留空
 
 解耦的一个副证：搬走后 `test_feishu.py` **不再 import 任何 session 模块**（`web` / `SessionAgent` / `AiClient` / `_make_files_handler` / `ToolRegistry` 五个 import 被 ruff 判为未使用而清掉）。
 
-**修复前能失败已实测，分两轮（第二轮针对本轮新增的守卫，不沿用第一轮结果）。**
+**修复前能失败已实测，分三轮（后两轮各针对当轮新增的行为，不沿用前一轮结果）。**
 
 第一轮（主体修复）：`git stash` 掉 5 个产品文件改动 + 临时移走新模块 `file_serving.py` 后跑同一批用例——
 
@@ -306,13 +321,18 @@ guard 已在，无需补）。
 
 第二轮（私密区守卫）：产品代码 stash 回 `a62ea2e0`（那版**没有** `_in_private_space`）、新测试留在树上，跑 `-k private` 得 **3 failed, 1 passed, 1 skipped**。红的正是三条要拦的（`.private/` 下 403、未配白名单也拦、端点层 403 不泄漏）；**绿的那条是「名字里带 `.private` 的公共文件不该误伤」——它在加守卫前后都该绿**，是防误伤的哨兵而不是漏网，这一条如果也红说明守卫写宽了。软链那条在 Windows 无权限 skip。
 
-两轮恢复改动后均转绿（当前 `test_file_serving.py` + `test__file_bytes.py` 合跑 22 passed, 2 skipped）。
+第三轮（1.3 的「不回落」，两条新用例各自单独验，因为它们盯的是**两个不同位置**的代码）：
+
+- 把 `_send_file` 里的 `raise OutboundFileError(path)` 临时改回 `if data is not None: payload = data`（即 1.2 版的回落），跑 `-k "raises_instead_of_falling_back or reports_outbound_file_failure or local_path_unaffected"` 得 **1 failed, 2 passed**，红的正是 `test_send_file_raises_instead_of_falling_back_when_fetch_fails`，失败原因 `Failed: DID NOT RAISE OutboundFileError` —— 冲着缺失的行为红。另两条本就该在两版下都绿（一条盯 `source` 为空不受影响，一条盯调用点）。
+- 恢复后再临时去掉调用点的 `try/except OutboundFileError`（让异常沿 `_produce` 逃出去 = 静默/中断的旧形态），跑 `-k reports_outbound_file_failure` 得 **1 failed**。
+
+三轮恢复改动后均转绿。三文件合跑（`test_file_serving.py` + `test__file_bytes.py` + `test_feishu.py`）**109 passed, 2 skipped**。
 
 **（实测坑）** 一次 pytest 调用里若有模块收集失败，整个 run 被 `Interrupted` 打断、其余文件不执行，需分文件跑才能看到各自的红。
 
 ### V5 明细：本地出向未被破坏
 
-四文件合跑（`test_file_serving.py` + `test__file_bytes.py` + `test_feishu.py` + `test__core.py`）：**17 failed, 112 passed, 2 skipped**。17 条全部在 `test__core.py`，失败于 `NotImplementedError`（asyncio 无 `create_unix_connection`），已在未改动的 main 检出上复核为同样的 17 条红（`17 failed, 2 passed`），是 Windows 既有基线，非本次回归（对齐根 AGENTS.md 与既往记录）。2 skipped 都是软链用例在 Windows 无 `SeCreateSymbolicLinkPrivilege`。
+四文件合跑（`test_file_serving.py` + `test__file_bytes.py` + `test_feishu.py` + `test__core.py`）：**17 failed, 115 passed, 2 skipped**（1.3 新增 3 条后的数字）。17 条全部在 `test__core.py`，失败于 `NotImplementedError`（asyncio 无 `create_unix_connection`），已在未改动的 main 检出上复核为同样的 17 条红（`17 failed, 2 passed`），是 Windows 既有基线，非本次回归（对齐根 AGENTS.md 与既往记录）。2 skipped 都是软链用例在 Windows 无 `SeCreateSymbolicLinkPrivilege`。
 
 「不产生额外 HTTP 请求」由 `test_send_file_without_source_passes_path_and_makes_no_request` 显式断言 `fetch_file_bytes` 调用次数为 0，而非仅看结果相同。
 
@@ -339,3 +359,4 @@ guard 已在，无需补）。
 | 1.0 | 2026-08-24 | 初版，W/H 开工前落定；开工前核对出 4 处与 8-22 诊断不符 |
 | 1.1 | 2026-08-24 | 补 A（代码落点 / 三向同步 / 本机质量门）与 T（V4-V6 通过并附实测明细，V1-V3 记未验待发布） |
 | 1.2 | 2026-08-24 | 负责人追问耦合度与隔离后：`fetch_file_bytes` 移出 feishu 到 channel 通用层（测试随之搬出，feishu 测试不再 import 任何 session 模块）；私密区守卫下沉一道到源容器侧并补 5 条用例；**改正 1.1 版 V6 的错结论**（跨容器时 channel 侧 `realpath` 会退化，软链绕得过）；改掉「端口只在 docker 网络内可达」这条错鉴权理由并把「同网络 Session 之间无隔离」记为已知缺口 |
+| 1.3 | 2026-08-24 | 负责人预判的两点，均判定为对并落实：① **删掉「取字节失败回落到交路径给 SDK」**，改抛 `OutboundFileError`，调用点就地告知用户、不重抛（回落在跨容器下必然失败，只是把我们的错换成 SDK 的**静默**错，用户看到的与修复前一样）；② **30MB 两份字面量加一条跨文件锁**（两侧各自的 `== 30MB` 断言锁不住不一致，而不一致的后果是静默的）。V4 用例数 33 → 36，两条新用例各自单独做了修复前能失败的实测 |

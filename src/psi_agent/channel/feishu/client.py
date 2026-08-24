@@ -31,7 +31,7 @@ from psi_agent._appdata import resolve_appdata_root
 from psi_agent._feishu_routing import is_group_chat, route_key
 from psi_agent.channel._core import ChannelCore
 from psi_agent.channel._errors import ChannelError
-from psi_agent.channel._file_bytes import fetch_file_bytes
+from psi_agent.channel._file_bytes import OutboundFileError, fetch_file_bytes
 from psi_agent.channel._types import FileChunk, InputChunk, ReasoningChunk, TextChunk
 from psi_agent.channel.feishu._agent_events import register_feishu_agent_events
 
@@ -200,16 +200,20 @@ async def _send_file(channel: Any, chat_id: str, path: str, source: str = "") ->
 
     走字节时**必须显式给 ``file_name``**: 走路径时 SDK 从 basename 取名, 走字节时它只有
     ``"upload"`` 可用, 用户会收到一个名为 upload 的附件 —— 「可点击下载」也就废了一半。
+
+    **``source`` 非空而取字节失败时抛 ``OutboundFileError``, 不回落到交路径。** 回落在这里
+    是有害的: 那条路在跨容器下**必然**失败 (路径在本容器不存在, 正是本 bug 的成因), 走一遍
+    只是把「我们的错误」换成「SDK 的错误」, 而 SDK 那侧的失败恰恰是静默的 —— 用户看到的还是
+    一句话回复没有附件, 与修复前一模一样。宁可让调用方如实告诉用户「文件没发出去」。
+    ``source`` 为空 (本地 Session) 不受影响: 那时交路径本来就是正确路径, 一步 HTTP 都不多走。
     """
     logger.debug(f"path={path} source={source!r}")
     payload: str | bytes = path
     if source:
         data = await fetch_file_bytes(source, path)
         if data is None:
-            # 取字节失败仍试老路: 本地可读时它是对的, 不可读时 SDK 会如实报错。
-            logger.warning(f"falling back to local path for {path!r} after byte fetch failed")
-        else:
-            payload = data
+            raise OutboundFileError(path)
+        payload = data
 
     result = await channel.send(chat_id, {"image": {"source": payload}})
     if result.success:
@@ -509,7 +513,15 @@ async def _stream_reply(
                         if _private_space.blocks_send(chunk.path, sender_open_id):
                             logger.warning(f"private file withheld from {sender_open_id!r}: {chunk.path}")
                             continue
-                        await _send_file(channel, chat_id, chunk.path, chunk.source)
+                        try:
+                            await _send_file(channel, chat_id, chunk.path, chunk.source)
+                        except OutboundFileError as e:
+                            # 如实告诉用户这个文件没发出去, 而不是让它静默消失 (静默正是本 bug
+                            # 的症状)。就地告知而非抛出: 这里在卡片流式渲染的 _produce 里,
+                            # 抛出去会中断整条回复 —— 一个附件失败不该让用户连文字也收不到。
+                            # 其余 chunk 继续处理, 多个文件失败就各报一次。
+                            logger.error(f"outbound file failed — {e}")
+                            await channel.send(chat_id, {"text": str(e)})
         except Exception:
             await flush_silent_candidate()
             raise
