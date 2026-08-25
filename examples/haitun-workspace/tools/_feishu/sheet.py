@@ -9,6 +9,7 @@ entrypoints keep importing it and nothing else has to change.
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import json
 import re
@@ -333,6 +334,31 @@ async def _first_sheet_id(token: str, user_key: str) -> tuple[str, str]:
     raise RuntimeError("spreadsheet has no worksheet")
 
 
+async def _sheet_row_count(token: str, sheet_id: str, user_key: str) -> int:
+    """How many rows the worksheet actually has, from its own metadata.
+
+    This is the only trustworthy end of a paged read: asking for rows past the end of a
+    worksheet does **not** return an empty array — Feishu answers with a full block of
+    blank-padded rows, so "did I get fewer rows than I asked for" never becomes true and a
+    caller looping on it walks to row 50000 and beyond. Returns 0 when the count cannot be
+    determined, which callers must treat as "no metadata bound" rather than "empty sheet".
+    """
+    meta = await _core._invoke(_build_sheet_meta_request(token), user_key=user_key)
+    if not meta.get("ok"):
+        return 0
+    sheets = meta.get("data", {}).get("sheets", []) if isinstance(meta.get("data"), dict) else []
+    for sh in sheets if isinstance(sheets, list) else []:
+        if not isinstance(sh, dict):
+            continue
+        if str(sh.get("sheet_id") or sh.get("sheetId") or "") != sheet_id:
+            continue
+        grid = sh.get("grid_properties") or sh.get("gridProperties") or {}
+        if isinstance(grid, dict):
+            with contextlib.suppress(TypeError, ValueError):
+                return int(grid.get("row_count") or grid.get("rowCount") or 0)
+    return 0
+
+
 async def read_sheet_grid_impl(
     token: str, range_: str = "", max_rows: int = 50, start_row: int = 1, user_key: str = ""
 ) -> dict[str, Any]:
@@ -360,22 +386,45 @@ async def read_sheet_grid_impl(
             sheet_id, _ = await _first_sheet_id(token, user_key)
     except RuntimeError as e:
         return _core._error(str(e))
-    block_range = f"{sheet_id}!A{start_row}:ZZ{start_row + max_rows - 1}"
+    total_rows = await _sheet_row_count(token, sheet_id, user_key)
+    if total_rows and start_row > total_rows:
+        # 越界读不是错误(翻页的最后一步天然会问到这里),但必须回空并且 has_more=False。
+        return {
+            "ok": True,
+            "sheet": sheet_id,
+            "range": f"{sheet_id}!A{start_row}:ZZ{start_row + max_rows - 1}",
+            "start_row": start_row,
+            "row_count": 0,
+            "sheet_row_count": total_rows,
+            "has_more": False,
+            "next_start_row": None,
+            "truncated": False,
+            "rows": [],
+        }
+    last_row = start_row + max_rows - 1
+    if total_rows:
+        last_row = min(last_row, total_rows)
+    block_range = f"{sheet_id}!A{start_row}:ZZ{last_row}"
     res = await _core._invoke(_build_sheet_values_request(token, block_range), user_key=user_key)
     if not res.get("ok"):
         return res
     value_range = res.get("data", {}).get("valueRange", {}) if isinstance(res.get("data"), dict) else {}
     raw_rows = value_range.get("values") or []
     rows = [[_flatten_sheet_cell(c) for c in (raw_row if isinstance(raw_row, list) else [])] for raw_row in raw_rows]
-    has_more = len(rows) >= max_rows
+    # 结束条件以工作表自己的行数为准。飞书对越界区间返回**补空的满行**而不是空数组,
+    # 所以「回的行数少于要的行数」永远不成立 —— 只靠它翻页会一路走到第 50000 行开外
+    # (实测 198 行的表读到 51200 行仍 has_more=True)。拿不到元数据行数时退回旧判据。
+    next_row = start_row + len(rows)
+    has_more = (next_row <= total_rows) if total_rows else (len(rows) >= max_rows)
     return {
         "ok": True,
         "sheet": sheet_id,
         "range": value_range.get("range", block_range),
         "start_row": start_row,
         "row_count": len(rows),
+        **({"sheet_row_count": total_rows} if total_rows else {}),
         "has_more": has_more,
-        "next_start_row": start_row + len(rows) if has_more else None,
+        "next_start_row": next_row if has_more else None,
         "truncated": has_more,
         "rows": rows,
     }

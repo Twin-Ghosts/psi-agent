@@ -410,6 +410,82 @@ async def test_missing_todo_table_reports_actual_tables(monkeypatch: pytest.Monk
     assert "Sheet1" in out["table_error"]
 
 
+# ── 分块读表的翻页终止(采集这一步靠它) ────────────────────────────────────────
+#
+# 这组测试存在的理由是一个实测到的死循环:采集技能要求「跟着 has_more 读到底」,而
+# Feishu 对**越界区间返回补空的满行**而不是空数组,所以「回的行数少于要的行数」这个
+# 判据永远不成立 —— 一张 198 行的表被读到第 51200 行仍然 has_more=True。终止条件必须
+# 以工作表自己的 row_count 为准。
+
+
+def _grid_meta(sheet_id: str, row_count: int) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "code": 0,
+        "data": {"sheets": [{"sheet_id": sheet_id, "title": "Sheet1", "grid_properties": {"row_count": row_count}}]},
+    }
+
+
+def _grid_values(sheet_id: str, rows: list[list[str]], rng: str) -> dict[str, Any]:
+    return {"ok": True, "code": 0, "data": {"valueRange": {"range": f"{sheet_id}!{rng}", "values": rows}}}
+
+
+@pytest.mark.asyncio
+async def test_grid_read_stops_at_the_sheets_real_row_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """198 行的表读到第 151 行就该收尾 —— 靠元数据行数,不靠「回了几行」。"""
+    padded = [["", ""] for _ in range(50)]  # 飞书对越界区间回的就是这种补空满行
+    cap = _Invoke([_grid_meta("46a582", 198), _grid_values("46a582", padded, "A151:ZZ198")])
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    out = await _impl.read_sheet_grid_impl(token="shtX", range_="46a582", max_rows=50, start_row=151)
+    assert out["ok"] is True
+    assert out["sheet_row_count"] == 198
+    assert out["has_more"] is False, "读到表尾就必须停,否则调用方会一路翻到 5 万行"
+    assert out["next_start_row"] is None
+    # 请求区间被夹到真实末行,不再问 A151:ZZ200。
+    assert cap.requests[-1].paths["range"] == "46a582!A151:ZZ198"
+
+
+@pytest.mark.asyncio
+async def test_grid_read_past_the_end_returns_empty_not_padding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """越界不是错误(翻页最后一步天然会问到),但必须回空且 has_more=False。"""
+    cap = _Invoke([_grid_meta("46a582", 198)])
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    out = await _impl.read_sheet_grid_impl(token="shtX", range_="46a582", max_rows=50, start_row=1000)
+    assert out["ok"] is True
+    assert out["rows"] == [] and out["row_count"] == 0
+    assert out["has_more"] is False
+    # 越界时连值请求都不该发出去。
+    assert len(cap.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_grid_read_still_pages_while_rows_remain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """修翻页终止不能顺手把翻页本身关掉:表还没读完时 has_more 必须为真。"""
+    rows = [["x"] for _ in range(50)]
+    cap = _Invoke([_grid_meta("46a582", 198), _grid_values("46a582", rows, "A1:ZZ50")])
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    out = await _impl.read_sheet_grid_impl(token="shtX", range_="46a582", max_rows=50, start_row=1)
+    assert out["has_more"] is True
+    assert out["next_start_row"] == 51
+
+
+@pytest.mark.asyncio
+async def test_grid_read_without_metadata_falls_back_to_row_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """拿不到元数据行数时退回旧判据,而不是把整张表当空的。"""
+    rows = [["x"] for _ in range(50)]
+    cap = _Invoke(
+        [
+            {"ok": True, "code": 0, "data": {"sheets": [{"sheet_id": "46a582", "title": "Sheet1"}]}},
+            _grid_values("46a582", rows, "A1:ZZ50"),
+        ]
+    )
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    out = await _impl.read_sheet_grid_impl(token="shtX", range_="46a582", max_rows=50, start_row=1)
+    assert out["row_count"] == 50
+    assert "sheet_row_count" not in out
+    assert out["has_more"] is True
+
+
 # ── 三个技能 ──────────────────────────────────────────────────────────────────
 
 
