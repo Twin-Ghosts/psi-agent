@@ -4,7 +4,7 @@
 
 **版本号：** 1.0
 
-**状态：** 待评审
+**状态：** 代码已实现，本机质量门通过；V7/V8（生产实测 + 镜像核验）待上线后验证
 
 **适用范围：** psi-agent 日志基础设施（`src/psi_agent/_logging.py`），生产为新加坡节点 account.genuineknowledge.cn 的 `psi-agent-gateway` 容器
 
@@ -193,10 +193,10 @@ Python 标准 `logging` 的常规做法是 `logging.getLogger("pkg.mod").setLeve
 
 | 文件 | 改动 |
 |---|---|
-| `src/psi_agent/_logging.py` | 新增 `_debug_modules()` 解析环境变量、`_debug_log_path()` 解析落盘路径、`_file_handler_id` 守卫；`setup_logging` 在有定向模块时额外装文件 sink |
-| `src/psi_agent/ai/server.py` | `SSE chunk` 行抬高截断上限；新增 `delta keys:` 字段清单行 |
-| `tests/psi_agent/test_logging.py` | 新增定向调级、轮转参数、one-shot 不重复装、未配置零副作用四组用例 |
-| `tests/psi_agent/ai/test_server.py` | 新增字段清单行的 (a)/(b) 两种 delta 形态用例 |
+| `src/psi_agent/_logging.py` | 新增 `debug_modules()` 解析环境变量、`debug_log_path()` 解析落盘路径、`_file_handler_id` 守卫、`_setup_debug_file_sink()`；`setup_logging` 在有定向模块时额外装文件 sink（**在** stderr 安装之后） |
+| `src/psi_agent/ai/server.py` | `_CHUNK_LOG_LIMIT` 抬高截断上限至 8000；新增 `_describe_delta()` 与 `delta keys:` 字段清单行 |
+| `tests/psi_agent/test_logging.py` | 12 条新增：未配置零副作用、白名单过滤、stderr 级别不变、one-shot、轮转参数、顺序回归、解析与路径优先级 |
+| `tests/psi_agent/ai/test_server.py` | 10 条新增：(a)/(b) 判据、超长 content 不截断、不回显原文、未知字段、tool_calls 计数、5 种畸形载荷、端到端每 chunk 一条 |
 | `AGENTS.md` | 「日志约定」修正失效描述 + 补定向调级与环境变量说明 |
 
 **路径解析。** 因 `setup_logging` 早于且不能 await `resolve_appdata_root`，文件 sink 自己算一遍：`PSI_DEBUG_LOG_PATH`（显式绝对路径）→ `PSI_APPDATA/logs/psi-debug.log` → `platformdirs.user_data_dir("Haitun")/logs/psi-debug.log`。中间那档与 `_appdata.py:29` 的 env 分支同源，故容器里配了 `PSI_APPDATA` 就自动落在挂载卷上。给显式路径变量是为了兜住「`PSI_APPDATA` 指向容器层」的情形 —— 那会占宿主机磁盘。
@@ -260,3 +260,12 @@ V7（`psi-debug.log` 里真的出现目标字段）与 V8（镜像内产物核�
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | 1.0 | 2026-08-25 | 初稿：定向 DEBUG + 文件轮转 + SSE 字段清单行 |
+| 1.1 | 2026-08-25 | 实现完成。补记一处实现期发现的顺序缺陷（见下）；`retention` 定为 10（负责人要求，从 3 上调，理由是「还没查到就没了」）|
+
+### 实现期补记：`logger.remove()` 的顺序
+
+初稿把 `_setup_debug_file_sink()` 放在 `setup_logging` 开头，先于 stderr 分支。实测立刻暴露：裸 `logger.remove()` 清掉的是**所有** handler，所以文件 sink 装好后被下一行删掉，而守卫 `_file_handler_id` 已置位 → 一次性语义让它再也装不回来，**且不报任何错**。表现是「配了 `PSI_DEBUG_MODULES`，文件被创建了，但永远是空的」。
+
+修法是把 `logger.remove()` 连同 stderr 安装整体前移到文件 sink 之前。已加回归测试 `test_stderr_removal_does_not_wipe_the_file_sink` 钉住顺序，并写入 `AGENTS.md` 约束第 2 条。
+
+这条值得记下来的原因：它是「静默失效」类缺陷，且恰好发生在一个**为了消除静默失效而做的功能**里 —— 若没有 V2 那条断言落盘内容（而不是只断言 handler id 非空）的测试，它会一路带到生产，在下次泄漏复现时才以「日志开了但是空的」的形式暴露。
