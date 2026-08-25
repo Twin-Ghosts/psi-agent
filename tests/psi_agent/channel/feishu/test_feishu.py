@@ -569,7 +569,7 @@ async def test_build_chunks_fails_closed_and_names_missing_files(monkeypatch, tm
     monkeypatch.setattr(client.platformdirs, "user_downloads_dir", lambda: str(tmp_path))
     channel = _fake_channel()
     sources = [
-        _file_source("om_1", "fk_1", "贺雅诗.pdf"),
+        _file_source("om_1", "fk_1", "李四.pdf"),
         _file_source("om_2", "fk_2", "丁丽君.pdf"),
         _file_source("om_3", "fk_3", "王鑫旺.pdf"),
     ]
@@ -587,7 +587,7 @@ async def test_build_chunks_fails_closed_and_names_missing_files(monkeypatch, tm
         await client._build_chunks(channel, _batched_ctx(sources))
 
     message = str(excinfo.value)
-    assert "贺雅诗.pdf" in message
+    assert "李四.pdf" in message
     assert "丁丽君.pdf" in message
     assert "王鑫旺.pdf" not in message
 

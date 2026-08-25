@@ -165,7 +165,7 @@ def test_search_user_gets_a_user_token_without_being_asked(monkeypatch: pytest.M
         monkeypatch,
         method="GET",
         uri="/open-apis/search/v1/user",
-        query_json=json.dumps({"query": "罗霖"}),
+        query_json=json.dumps({"query": "张三"}),
     )
     assert cap.kwargs[0]["prefer"] == "user"
     assert cap.request.token_types == {AccessTokenType.TENANT, AccessTokenType.USER}

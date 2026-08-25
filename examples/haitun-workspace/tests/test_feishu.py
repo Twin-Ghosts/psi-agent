@@ -680,7 +680,7 @@ async def test_sheet_read_builds_get_request(monkeypatch: pytest.MonkeyPatch) ->
 async def test_sheet_read_flattens_mentions_and_rich_text(monkeypatch: pytest.MonkeyPatch) -> None:
     grid = [
         [
-            {"type": "mention", "name": "牛志宇", "text": "@牛志宇", "token": "7662722911182015754"},
+            {"type": "mention", "name": "张三", "text": "@张三", "token": "7662722911182015754"},
             [
                 {"type": "text", "text": "大目标：", "segmentStyle": {"bold": True}},  # noqa: RUF001
                 {"type": "text", "text": "做最牛的 Agent", "segmentStyle": {"bold": False}},
@@ -691,7 +691,7 @@ async def test_sheet_read_flattens_mentions_and_rich_text(monkeypatch: pytest.Mo
     monkeypatch.setattr(_impl, "_invoke", cap)
     result = await _impl.read_sheet_range_impl("sht1", "S1!B7:C7")
     # a mention cell reads as its visible text, not raw JSON
-    assert result["rows"] == [["@牛志宇", "大目标：做最牛的 Agent"]]  # noqa: RUF001
+    assert result["rows"] == [["@张三", "大目标：做最牛的 Agent"]]  # noqa: RUF001
 
 
 @pytest.mark.asyncio

@@ -63,7 +63,7 @@ def _qdict(req: Any) -> dict[str, str]:
 
 @pytest.mark.asyncio
 async def test_get_builds_request_with_paths_and_queries(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"user": {"name": "罗霖"}})
+    cap = _CapturedInvoke({"user": {"name": "张三"}})
     monkeypatch.setattr(_impl, "_invoke", cap)
 
     res = await _api.call_api_impl(
