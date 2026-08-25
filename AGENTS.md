@@ -216,7 +216,33 @@ SSE 流中的特殊字段：
 - DEBUG 必须覆盖：每个 SSE chunk、tool 执行、锁获取/释放
 - 格式：`时间 | 级别 | 模块:函数:行号 - 消息`
 - Channel 客户端使用 `rich.console.Console` 做终端输出，**禁止使用 `print()`**
-- **`setup_logging` 一次性生效（刻意设计）**：用全局 `_handler_id` 守卫，首次调用安装 handler，后续调用直接返回旧 handler，**不会**重新应用 `verbose`。因此“谁先调用谁定级别”。在 `psi-agent run`（批量模式）下，`Run.run()` 先于所有子组件调用 `setup_logging(verbose=True)`，故批量模式始终为 DEBUG，各组件配置里的 `verbose` 字段被有意忽略。单独启动某个组件（`psi-agent ai/session/channel ...`）时，则由该组件自己的 `verbose` 决定级别。
+- **`setup_logging` 一次性生效（刻意设计）**：用全局 `_handler_id` 守卫，首次调用安装 handler，后续调用直接返回旧 handler，**不会**重新应用 `verbose`。因此“谁先调用谁定级别”。在 `psi-agent run`（批量模式）下，`Run.run()` 先于所有子组件调用 `setup_logging(verbose=False)`（`_run.py`），故**批量模式把级别钉在 INFO**，各组件配置里的 `verbose` 字段一律被忽略——生产走的正是批量模式，所以生产**没有任何路径能开出全局 DEBUG**，要定向观测请用下面的 `PSI_DEBUG_MODULES`。单独启动某个组件（`psi-agent ai/session/channel ...`）时，则由该组件自己的 `verbose` 决定级别。（历史：这里曾是 `verbose=True`，PR #625 改成 `False`，而本文档与 `_logging.py` docstring 都直到 2026-08-25 才跟上——期间一直错写“批量模式始终为 DEBUG”。）
+
+### 定向 DEBUG（按模块调级，不全局开）
+
+`stderr` 之外还有第二个 sink：一个**自带轮转的文件**，只收指定模块的 DEBUG。用于观测上游模型原始 SSE 之类的场景，不必把整个进程调成 DEBUG。设计与背景见 `docs/superpowers/specs/2026-08-25-targeted-debug-logging-design.md`。
+
+| 环境变量 | 作用 |
+|---|---|
+| `PSI_DEBUG_MODULES` | 模块名白名单，逗号或分号分隔。**留空即不安装文件 sink**，行为与没有此功能时逐字节一致 |
+| `PSI_DEBUG_LOG_PATH` | 显式落盘文件路径（可选），优先于下面的推导 |
+
+落盘路径优先级：`PSI_DEBUG_LOG_PATH` → `PSI_APPDATA/logs/psi-debug.log` → `platformdirs` 用户数据目录。轮转参数写死在 `_logging.py`：**20 MB × 10 份、gz 压缩**，即单容器磁盘上限约 200 MB。
+
+排查 thinking 泄漏时的典型配置：
+
+```
+PSI_DEBUG_MODULES=psi_agent.ai.server,psi_agent.channel._core
+```
+
+四条约束，改动前请先读：
+
+1. **stderr 级别绝不受这个变量影响。** 部署环境的 docker log driver 是 `json-file` 且 **opts 为空——即 `docker logs` 那份没有任何轮转**。所以定向 DEBUG 只进文件 sink，让 `docker logs` 的量保持不变。别把定向 DEBUG 接回 stderr。
+2. **`setup_logging` 里 `logger.remove()` 必须先于文件 sink 安装。** 裸 `remove()` 会清掉**所有** handler；顺序颠倒会在装完文件 sink 后立刻把它删掉，而守卫 `_file_handler_id` 已置位，于是整个进程再也装不上——且不报错。已有回归测试钉住。
+3. **两个 sink 各用独立守卫**（`_handler_id` / `_file_handler_id`）。它们的输入不同：stderr 看调用方的 `verbose`，文件看进程环境。共用守卫会让“谁先调用”意外决定文件 sink 装不装。
+4. **`_logging.py` 刻意不 import `_appdata.py`**：后者是 async 模块，而 `_logging` 处在依赖图最底层且零项目内依赖。代价是 appname 字面量 `"Haitun"` 在两处重复，靠交叉注释锁住。另外 `setup_logging` 是同步的、且在 `resolve_appdata_root()` **之前**执行（见 `gateway/__init__.py`），所以它**看不到 `--appdata` 命令行参数**，只认环境变量。
+
+**隐私风险（开启前必读）**：`psi-debug.log` 里会有**真实对话内容与用户 open_id**，且刻意**不做脱敏**——打码与“看模型原始输出”直接矛盾，自我对话本身就是要看的东西。纪律：默认关闭；**查完即关**；文件不得复制出生产机、不得贴入工单或聊天；只在需要的那一个容器开（生产一机 7 容器，全开是 1.4 G）。靠 `retention=10` 自动删除旧文件兜底。
 
 ## 关键注意事项（踩坑经验）
 
@@ -246,7 +272,7 @@ SSE 流中的特殊字段：
 
 9. **Hash 的 key 必须和查找时一致**：如果 load 时用 `file_path → hash` 存储，refresh 时就不能用 `tool_name → hash` 查找。key 的语义必须全程一致，否则永远命中不了。
 
-10. **每 chunk 都要有 DEBUG 日志**：无论是 AI 返回的 SSE chunk 还是 Channel 发出的 SSE chunk，每经过协议边界都要记录。这匹配 `ai/server.py` 的 `logger.debug(f"SSE chunk: ...")` 模式。
+10. **每 chunk 都要有 DEBUG 日志**：无论是 AI 返回的 SSE chunk 还是 Channel 发出的 SSE chunk，每经过协议边界都要记录。这匹配 `ai/server.py` 的 `logger.debug(f"SSE chunk: ...")` 模式。**原文行会截断**（`_CHUNK_LOG_LIMIT`），所以 `ai/server.py` 另有一条 `delta keys: ...` 字段清单行（`_describe_delta`）：它只记字段名、长度与存在性，长度由**字段数**而非内容大小决定，故永不截断。这条线是为了让「某个 key 从未出现」与「某个 key 被截断挤掉」可分辨——两者在截断后的原文里长得一模一样。判断字段归属请用这条，别拿正则去捞原文。
 
 11. **单个 caller 的 private 方法应内联**：只有一个调用点的私有方法没有存在理由——将其逻辑直接展开到调用处，减少阅读时的跳转。(如 `_build` → inline 到 `ensure`)
 

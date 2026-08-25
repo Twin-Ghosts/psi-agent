@@ -11,6 +11,60 @@ from loguru import logger
 
 from psi_agent.protocol import make_compaction_signal, make_error_chunk
 
+# Raised from 1000 so a long ``content`` no longer pushes sibling keys out of
+# the line. ``_describe_delta`` is the actual safeguard — see below.
+_CHUNK_LOG_LIMIT = 8000
+
+# Every field a provider might carry reasoning in, plus the ones we consume.
+# ``session/ai_client.py`` reads ``reasoning`` only, so a provider emitting
+# ``reasoning_content`` or ``thinking`` would be silently dropped — telling that
+# apart from "the model never emitted reasoning at all" is exactly what the
+# census line is for.
+_DELTA_FIELDS = ("content", "reasoning", "reasoning_content", "thinking", "role")
+
+
+def _describe_delta(data: str) -> str:
+    """One never-truncated line naming which delta fields exist, and how long.
+
+    Truncating the raw chunk is not merely lossy, it destroys the judgement:
+    a key sitting past the cutoff and a key that was never sent look identical.
+    This line is bounded by the *number* of fields rather than their size, so it
+    survives any ``content`` length.
+
+    Values are never echoed — only names, lengths, and presence.
+    """
+    try:
+        parsed = json.loads(data)
+    except json.JSONDecodeError:
+        return "unparseable"
+    if not isinstance(parsed, dict):
+        return f"non-object payload ({type(parsed).__name__})"
+    choices = parsed.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return "no choices"
+    first = choices[0]
+    if not isinstance(first, dict):
+        return f"non-object choice ({type(first).__name__})"
+    delta = first.get("delta")
+    if not isinstance(delta, dict):
+        return f"no delta ({type(delta).__name__})"
+
+    parts: list[str] = []
+    for field in _DELTA_FIELDS:
+        if field not in delta or delta[field] is None:
+            parts.append(f"{field}=ABSENT")
+            continue
+        value = delta[field]
+        parts.append(f"{field}={len(value)}ch" if isinstance(value, str) else f"{field}={value!r}")
+    tool_calls = delta.get("tool_calls")
+    parts.append(f"tool_calls={len(tool_calls) if isinstance(tool_calls, list) else 0}")
+    # Any reasoning-ish key we do not know about yet.
+    extra = [k for k in delta if k not in {*_DELTA_FIELDS, "tool_calls"}]
+    if extra:
+        parts.append(f"other={sorted(extra)}")
+    parts.append(f"finish_reason={first.get('finish_reason')!r}")
+    return " ".join(parts)
+
 
 async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
     logger.info("Received chat completion request")
@@ -108,7 +162,8 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
                     f"Compaction needed: prompt_tokens={chunk.usage.prompt_tokens} > threshold={max_context_tokens}"
                 )
             data = chunk.model_dump_json()
-            logger.debug(f"SSE chunk: {data[:1000]}")
+            logger.debug(f"delta keys: {_describe_delta(data)}")
+            logger.debug(f"SSE chunk: {data[:_CHUNK_LOG_LIMIT]}")
             await response.write(f"data: {data}\n\n".encode())
         if compaction_needed:
             signal = json.dumps(

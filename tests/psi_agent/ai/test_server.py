@@ -8,8 +8,9 @@ from typing import Any
 import anyio
 import pytest
 from aiohttp import ClientSession, ClientTimeout, web
+from loguru import logger
 
-from psi_agent.ai.server import handle_chat_completions
+from psi_agent.ai.server import _describe_delta, handle_chat_completions
 
 
 class _FakeChunk:
@@ -173,3 +174,92 @@ async def test_handler_omits_client_args_without_http_client(tmp_path: Path, mon
         await runner.cleanup()
 
     assert "client_args" not in received
+
+
+def _delta_payload(delta: dict[str, Any]) -> str:
+    return json.dumps({"id": "x", "choices": [{"index": 0, "delta": delta, "finish_reason": None}]})
+
+
+def test_census_distinguishes_content_only_from_reasoning_content() -> None:
+    """V6: the census line must separate hypothesis (a) from (b).
+
+    (a) the model never used a reasoning channel — self-talk came straight out
+    of ``content``; (b) it emitted ``reasoning_content`` and ``ai_client.py``,
+    which reads ``reasoning`` only, dropped it. Both look identical in the
+    stored history, which is why the raw stream needs its own judgement.
+    """
+    only_content = _describe_delta(_delta_payload({"content": "wait, let me think about this", "role": "assistant"}))
+    assert "content=29ch" in only_content
+    assert "reasoning=ABSENT" in only_content
+    assert "reasoning_content=ABSENT" in only_content
+    assert "thinking=ABSENT" in only_content
+
+    only_reasoning_content = _describe_delta(_delta_payload({"reasoning_content": "hmm, the user wants"}))
+    assert "reasoning_content=19ch" in only_reasoning_content
+    assert "reasoning=ABSENT" in only_reasoning_content
+    assert "content=ABSENT" in only_reasoning_content
+
+
+def test_census_is_not_truncated_by_a_long_content() -> None:
+    """The whole point: a huge ``content`` must not hide the reasoning keys.
+
+    The raw-chunk line truncates; this one is bounded by field *count*, so a key
+    that was never sent stays distinguishable from one pushed past a cutoff.
+    """
+    payload = _delta_payload({"content": "x" * 50_000, "reasoning_content": "the-tell"})
+    census = _describe_delta(payload)
+
+    assert len(census) < 200
+    assert "content=50000ch" in census
+    assert "reasoning_content=8ch" in census
+
+
+def test_census_never_echoes_message_text() -> None:
+    """Only names, lengths and presence — the census must not repeat content."""
+    census = _describe_delta(_delta_payload({"content": "sensitive-user-secret"}))
+    assert "sensitive-user-secret" not in census
+
+
+def test_census_reports_unknown_delta_fields() -> None:
+    """An unrecognised reasoning-ish key must not vanish silently."""
+    census = _describe_delta(_delta_payload({"content": "hi", "reasoning_detail": "x"}))
+    assert "other=['reasoning_detail']" in census
+
+
+def test_census_counts_tool_calls() -> None:
+    census = _describe_delta(_delta_payload({"tool_calls": [{"id": "a"}, {"id": "b"}]}))
+    assert "tool_calls=2" in census
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ("not json at all", "unparseable"),
+        ("[1, 2]", "non-object payload (list)"),
+        ('{"choices": []}', "no choices"),
+        ('{"choices": [1]}', "non-object choice (int)"),
+        ('{"choices": [{"delta": null}]}', "no delta (NoneType)"),
+    ],
+)
+def test_census_survives_malformed_payloads(payload: str, expected: str) -> None:
+    """A logging helper must never be the thing that breaks the stream."""
+    assert _describe_delta(payload) == expected
+
+
+@pytest.mark.anyio
+async def test_census_is_logged_for_each_chunk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The census must actually reach the log, once per chunk."""
+    messages: list[str] = []
+    sink_id = logger.add(lambda m: messages.append(m.record["message"]), level="DEBUG")
+    stream = _TrackingStream([_FakeChunk()])
+    runner, socket_path = await _serve_handler(tmp_path, monkeypatch, stream)
+    try:
+        await _drain(socket_path)
+    finally:
+        await runner.cleanup()
+        logger.remove(sink_id)
+
+    census_lines = [m for m in messages if m.startswith("delta keys:")]
+    assert len(census_lines) == 1
+    assert "content=2ch" in census_lines[0]
+    assert "reasoning=ABSENT" in census_lines[0]
