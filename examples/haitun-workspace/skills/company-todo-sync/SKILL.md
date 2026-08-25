@@ -59,9 +59,18 @@ boss 是根节点:**不写 todo、不收派发**,只收整体统计。
 请假事实**直接来自飞书审批** —— 工具枚举该定义下窗口内的实例,逐条读出申请人与起止日期。
 不需要任何人再把请假填进表格。
 
-`approval_code` 是**一次性配置**,不是每周期的人工动作:从飞书审批后台取,或
-`feishu_api` GET `/open-apis/approval/v4/tasks/query` 取一条样本,返回里的
-`definition_code`(有的给 `process_code`)就是它。把它记在 wiki 的配置页上,别每次问人。
+`approval_code` 是**审批模板**的编号(不是某一次申请的编号),所以它是**一次性配置**,
+不是每周期的人工动作。本租户已探明的三个:
+
+| 模板 | approval_code |
+|---|---|
+| 请假(Leave) | `99EEC396-536A-4C7A-8B2D-412584E35CE3` |
+| 补卡(Clock-in/out Correction) | `09D3F0F3-2A0B-4E05-B40D-9D5565D2A27B` |
+| 报销(Reimbursement) | `5F444354-FFC3-4509-8817-D02A18B414CD` |
+
+判假用**请假**那个。换租户或模板被重建时重新探一次:`feishu_api` GET
+`/open-apis/approval/v4/tasks/query`(带 `user_id`、`topic=3` 我发起的),返回里每条的
+`definition_code`(有的给 `process_code`)就是它 —— 别用 `process_id`,那是实例编号。
 
 判定口径在工具里固定,**不要自己心算日历**。按结果分三种处理:
 
