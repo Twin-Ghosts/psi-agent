@@ -1348,6 +1348,7 @@ async def test_handle_passes_external_to_build_chunks(monkeypatch, tmp_path):
 
     await client._handle_and_stream(channel, _resolver(core), None, ctx, lambda open_id, **kw: True)
 
+    assert build.await_args is not None, "_build_chunks 根本没被 await"
     assert build.await_args.kwargs["external"] is True
 
 
@@ -1428,7 +1429,7 @@ async def test_stream_reply_withholds_private_file_from_other_user(monkeypatch, 
     async def _post(chunks):
         yield FileChunk(str(secret))
 
-    core = SimpleNamespace(post=_post)
+    core = cast(ChannelCore, SimpleNamespace(post=_post))
     await client._stream_reply(_driving_channel(), core, "oc_1", [], reply_to=None, sender_open_id="ou_intruder")
 
     assert sent.await_count == 0
@@ -1448,7 +1449,7 @@ async def test_stream_reply_sends_private_file_to_its_owner(monkeypatch, tmp_pat
     async def _post(chunks):
         yield FileChunk(str(secret))
 
-    core = SimpleNamespace(post=_post)
+    core = cast(ChannelCore, SimpleNamespace(post=_post))
     await client._stream_reply(_driving_channel(), core, "oc_1", [], reply_to=None, sender_open_id="ou_owner")
 
     assert sent.await_count == 1
@@ -1467,7 +1468,7 @@ async def test_stream_reply_public_file_unaffected(monkeypatch, tmp_path):
     async def _post(chunks):
         yield FileChunk(str(public))
 
-    core = SimpleNamespace(post=_post)
+    core = cast(ChannelCore, SimpleNamespace(post=_post))
     await client._stream_reply(_driving_channel(), core, "oc_1", [], reply_to=None, sender_open_id="ou_intruder")
 
     assert sent.await_count == 1
@@ -1488,6 +1489,7 @@ async def test_handle_and_stream_wires_sender_into_stream_reply(monkeypatch, tmp
 
     await client._handle_and_stream(_fake_channel(), _resolver(core), None, ctx, None)
 
+    assert stream.await_args is not None, "_stream_reply 根本没被 await"
     assert stream.await_args.kwargs["sender_open_id"] == "ou_owner"
 
 
@@ -1614,7 +1616,7 @@ async def test_stream_reply_reports_outbound_file_failure_to_user(monkeypatch, t
         yield FileChunk("/workspace/交付物.md", source="http://psi-agent-luolin:8081")
         yield TextChunk("后面还有")
 
-    core = SimpleNamespace(post=_post)
+    core = cast(ChannelCore, SimpleNamespace(post=_post))
     await client._stream_reply(channel, core, "oc_1", [], reply_to=None, sender_open_id="ou_1")
 
     texts = [c.args[1].get("text", "") for c in channel.send.await_args_list if isinstance(c.args[1], dict)]
@@ -1634,9 +1636,10 @@ async def test_stream_reply_forwards_file_chunk_source(monkeypatch, tmp_path):
     async def _post(chunks):
         yield FileChunk("/workspace/x.md", "http://psi-agent-luolin:8081")
 
-    core = SimpleNamespace(post=_post)
+    core = cast(ChannelCore, SimpleNamespace(post=_post))
     await client._stream_reply(_driving_channel(), core, "oc_1", [], reply_to=None, sender_open_id="ou_1")
 
+    assert sent.await_args is not None, "_send_file 根本没被 await"
     assert sent.await_args.args[3] == "http://psi-agent-luolin:8081"
 
 

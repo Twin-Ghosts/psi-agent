@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import anyio
 from aiohttp import web
+from aiohttp.typedefs import Handler
 from loguru import logger
 
 from psi_agent._sockets import create_site
@@ -15,7 +16,7 @@ if TYPE_CHECKING:
     from psi_agent.session.agent import SessionAgent
 
 
-def _make_files_handler(agent: SessionAgent) -> web.Handler:
+def _make_files_handler(agent: SessionAgent) -> Handler:
     """``GET /files?path=…`` —— 把 workspace 内的文件当字节流交出去。
 
     出向跨容器发文件用: channel 在 gateway 容器里, 读不到本容器的文件系统, 于是取字节
