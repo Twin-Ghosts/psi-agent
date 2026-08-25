@@ -1,0 +1,262 @@
+# 定向 DEBUG 日志：让模型原始输出下次可观测
+
+**描述：** 给 `_logging.py` 加按模块定向调级能力，DEBUG 只进一个自带轮转的文件 sink，`docker logs` 保持 INFO 不变。目标是下次 thinking 泄漏复现时能直接看到上游 SSE 的原始字段，从而分辨「模型从 `content` 直出自我对话」与「模型走 `reasoning_content` 而我们只读 `reasoning` 丢了」。**本任务只做可观测性，不修泄漏本身。**
+
+**版本号：** 1.0
+
+**状态：** 待评审
+
+**适用范围：** psi-agent 日志基础设施（`src/psi_agent/_logging.py`），生产为新加坡节点 account.genuineknowledge.cn 的 `psi-agent-gateway` 容器
+
+**关键词：** 可观测性、per-module 日志级别、loguru filter、日志轮转、reasoning 字段归属
+
+**创建人：** @zsd
+
+**审核人：** @待补
+
+**关联文档：**
+
+- 《真知开发执行 SOP》v1.0 —— 本文档 W/H/A/T 结构依据（文档在飞书，仓库内无副本）
+- `docs/superpowers/specs/2026-08-22-external-container-recovery-plan.md` —— 8-18 事故与三层核验要求的出处
+- `AGENTS.md`「日志约定」—— 本任务修正其中一条已失效的描述
+
+***
+
+## 结论先行
+
+1. **加一个环境变量 `PSI_DEBUG_MODULES`**，填模块名（逗号分隔）就把这些模块的 DEBUG 写进文件，不填则与今天逐字节等价。改它只需重启容器，不重建镜像。
+2. **DEBUG 只进 `{appdata}/logs/psi-debug.log`**，20MB × 10 份自动轮转压缩，磁盘上限 200MB。`docker logs` 仍是 INFO，一行不多 —— docker json-file 没有轮转，绝不能让它涨。
+3. **SSE 日志额外打一行永不截断的字段清单**，因为现有日志截断到 1000 字符，content 一长 `reasoning` 键就被截掉，而「键不存在」与「键被截断」正是本次要分辨的东西。
+4. **顺带修一个文档与代码不一致**：`_logging.py` docstring 与 `AGENTS.md:219` 都写「批量模式恒 DEBUG」，但 `_run.py:115` 早在 PR #625（`ea53f35b`）就改成了 `verbose=False`。生产跑的正是批量模式 —— 这是现场三处日志全空的直接原因之一。
+5. **不做脱敏**，靠默认关闭 + 自动删除 + 文档写明风险控制。打码与「看模型原始输出」直接矛盾。
+
+***
+
+## W —— 是什么
+
+### 1. 解决谁的什么痛点
+
+2026-08-25 排查同事 `ou_e2c20a4f83edc6ff46f04f6d5298767c` 的 thinking 泄漏（生产 `psi-agent-gateway` 容器，模型 deepseek-v4-flash），52 条 assistant 消息的 `content` 里混着英文自我对话，且无一条带 `reasoning` 字段。
+
+排查的结论不是「找到了根因」，而是**原始模型输出物理上已经不存在了**。三处能记它的地方当时全是关着的：
+
+| 位置 | 记的是什么 | 级别 | 当时 |
+|---|---|---|---|
+| `ai/server.py:111` | `SSE chunk: {data[:1000]}` —— 上游 provider 的原始 chunk | DEBUG | 没记 |
+| `channel/_core.py:137` | `delta.content` | DEBUG | 没记 |
+| `channel/_core.py:144` | `delta.reasoning` | DEBUG | 没记 |
+
+litellm 侧同样记不到：显式配了 `turn_off_message_logging: true`，且故意不接 Postgres（config 里写明不配 `DATABASE_URL`）。
+
+**为什么生产是 INFO 而不是 DEBUG。** 生产入口是 `psi-agent run config.yml`，走 `_run.py:115` 的 `setup_logging(verbose=False)`。`_logging.py` 的 docstring 和 `AGENTS.md:219` 都还写着「批量模式始终为 DEBUG，各组件配置里的 `verbose` 字段被有意忽略」—— 这句话在 PR #625（`ea53f35b`）把 `verbose=True` 改成 `verbose=False` 之后就失效了，两处文档没跟上。**当前没有任何路径能让生产开出 DEBUG**：`_run.py` 先调用并锁定 INFO，one-shot 守卫让后续组件的 `verbose` 全部变成 no-op。
+
+**连带发现一个更该先补的缺口。** `channel/_core.py:102` 的发送路径日志也是 DEBUG，所以当前配置下**无法知道任何一条消息实际发给用户的是什么**。这比泄漏本身更基础 —— 泄漏是偶发的，「发出去的内容无记录」是常态。
+
+**为什么不能直接全局开 DEBUG。** 两个硬约束：
+
+- 该容器 24 小时已产生 45228 行 INFO 日志，全局 DEBUG 的量级不可接受。
+- **日志完全没有轮转**：docker log driver 是 `json-file` 且 opts 为空，`/etc/docker/daemon.json` 不存在。当前最大单容器日志 28MB，磁盘 40G 用了 51%（19G 可用），内存只剩约 2.6G。开着无上限涨的 DEBUG 会写爆磁盘。
+
+现有 `_logging.py` 只有一个全局二元开关，没有任何 per-module 控制：
+
+```python
+def setup_logging(*, verbose: bool = False) -> int:
+    global _handler_id
+    if _handler_id is not None:
+        return _handler_id          # one-shot: 首个调用者赢
+    logger.remove()
+    level = "DEBUG" if verbose else "INFO"
+    _handler_id = logger.add(sys.stderr, level=level, format=...)
+    return _handler_id
+```
+
+补充一条排除项：容器环境变量里的 `PSI_LOG_LEVEL=INFO` 是 **litellm 容器**的变量，psi-agent 代码里 grep 不到任何地方读它。改它无效。
+
+### 2. 做完什么样算完（验收标准，可判定）
+
+| 编号 | 验收标准 | 判定方式 |
+|---|---|---|
+| V1 | `PSI_DEBUG_MODULES` 未配置时，行为与改动前逐字节等价：不创建任何文件、不多装 sink | 单测：未配置时 `logger` 的 handler 数与改动前相同；`{appdata}/logs/` 不存在 |
+| V2 | 配置后，仅指定模块的 DEBUG 进文件；未指定模块的 DEBUG 不进 | 单测：配 `psi_agent.ai.server`，该模块 DEBUG 落盘，`psi_agent.session.agent` 的 DEBUG 不落盘 |
+| V3 | stderr 级别不受 `PSI_DEBUG_MODULES` 影响 | 单测：配了定向模块后，stderr sink 仍为 INFO（`verbose=False` 时） |
+| V4 | one-shot 与批量模式语义不被破坏 | 现有 `tests/psi_agent/test_logging.py` 两条全绿；新增一条断言二次调用不重复装文件 sink |
+| V5 | 文件 sink 带轮转与保留上限 | 单测断言传给 `logger.add` 的 `rotation`/`retention`/`compression` 参数值 |
+| V6 | SSE 字段清单行能分辨 (a)/(b) 两种假设 | 单测：构造只有 `content` 的 delta → 断言输出含 `reasoning=ABSENT`；构造只有 `reasoning_content` 的 delta → 断言含 `reasoning_content=<n>ch` 且 `reasoning=ABSENT` |
+| V7 | 生产开启后，`psi-debug.log` 里真的出现目标字段 | 上线后进容器 `grep 'delta keys' /…/logs/psi-debug.log`，人工确认三个字段名可见 |
+| V8 | 镜像内产物与 git 一致 | 三层核验（见 A 段），第三层验镜像内 `_logging.py` 含新代码 |
+| V9 | `uv run ty check .` 不引入新诊断 | main 基线 0 条（Windows 本机额外 2 条 `os.killpg` 平台差异不计） |
+
+### 3. 明确不做什么
+
+- **不修 thinking 泄漏。** 根因未坐实，方案待定。本任务的产出是「下次能看见」，不是「已修好」。
+- **不改 `session/ai_client.py` 读 `reasoning` 的行为。** 那正是待验假设 (b) 的对象，改了就毁掉判据。
+- **不碰 docker json-file / daemon.json。** 轮转做在应用侧，理由见 H 段方案比较。这也意味着 stderr 那一份仍无轮转 —— 但因为 stderr 级别不变，它的增速也不变，不构成新增风险。
+- **不做 per-module 的任意级别 DSL**（如 `psi_agent.ai=TRACE,psi_agent.channel=DEBUG`）。当前只有一个消费者，只需要 DEBUG。
+- **不做日志脱敏。** 见 H 段第 6 节。
+- **不改 `_run.py:115` 的 `verbose=False`。** 那是 #625 有意为之，本任务只修跟不上的文档。
+
+***
+
+## H —— 怎么做
+
+### 4. 有哪几种做法，为什么选这个
+
+**决策一：轮转放哪一侧。**
+
+| | 应用侧 loguru（选中） | docker json-file log-opts |
+|---|---|---|
+| 改动位置 | 仓库内 | 仓库外（宿主机配置） |
+| 可测 / 可走 CI | 是 | 否 |
+| 生效代价 | 随镜像走 | daemon.json 需重启 dockerd → 全部 7 容器停机；单容器 log-opt 需 recreate |
+| 覆盖 stderr | 否 | 是 |
+
+选应用侧：能测、能随 PR 交付、不影响其余 6 个容器。代价是 stderr 那份仍无轮转 —— 由「stderr 级别不变」这条设计消解。
+
+**决策二：定向 DEBUG 输到哪个 sink。**
+
+选**只进文件，stderr 保持原级别**。若定向 DEBUG 也进 stderr，docker json-file 就会无上限涨，直接违反「没有轮转就不要开 DEBUG」这条前置约束。分工的结果：
+
+```
+setup_logging(verbose)
+  │
+  ├─ sink 1: stderr    level = DEBUG if verbose else INFO   ← 现状不动
+  │                    → docker logs（无轮转，故绝不让它涨）
+  │
+  └─ sink 2: file      level = "DEBUG"                       ← 新增，默认不装
+                       filter = {模块: "DEBUG"} 白名单
+                       rotation="20 MB", retention=10, compression="gz"
+                       → {appdata}/logs/psi-debug.log
+```
+
+代价：看定向日志要进容器 `tail` 文件，不能只用 `docker logs`。已接受。
+
+**决策三：定向模块怎么表达。**
+
+| | 环境变量给模块名列表（选中） | 复用 `verbose` 加第二个布尔 | 完整 DSL |
+|---|---|---|---|
+| 表达力 | 任意模块前缀，逗号分隔 | 只能全开全关 | per-module 不同级别 |
+| 撞 one-shot 语义 | 不撞（env 与 `verbose` 正交） | 撞（仍是全局） | 不撞 |
+| 本次够用 | 够 | 不够（等于全局 DEBUG，45228 行的代价回来了） | 过剩 |
+
+选环境变量列表。loguru 的 `filter` 参数原生支持 `dict[str, str | bool]` 形式的 per-module 级别映射，不需要自己写匹配逻辑 —— `setup_logging` 只做「解析逗号分隔 → 转成 filter dict」。
+
+**决策四：怎么保证能分辨 (a)/(b)。**
+
+现有 `logger.debug(f"SSE chunk: {data[:1000]}")` 的问题不是「截断上限太小」，而是**截断本身破坏了判据**：`content` 较长时，delta 字典里排在其后的 `reasoning` 键会被截掉，而「键不存在」（假设 a）与「键被截断」（观测不足）在日志里长得一模一样。单纯把 1000 改大只是把这个陷阱推远，没有消除它。
+
+所以额外打一行**永不截断的字段清单**：
+
+```
+delta keys: content=1843ch reasoning=ABSENT reasoning_content=ABSENT thinking=ABSENT tool_calls=0
+```
+
+判据变成一条 `grep`：
+
+- 假设 (a) 坐实：`content=<n>ch` 且三个 reasoning 口子全 `ABSENT` → 模型没走 reasoning 通道，自我对话直接从 `content` 出来。
+- 假设 (b) 坐实：`reasoning_content=<n>ch` 而 `reasoning=ABSENT` → 模型走了 `reasoning_content`，`ai_client.py:104` 只读 `reasoning` 把它丢了。
+
+原有全文行保留（同时抬高上限），供人工确认「这就是泄漏的那段文本」。
+
+**本任务只让它可观测，不给结论。** 现有倾向 (a) 的依据是间接的：8-18 抓过同一模型的 SSE，40 个含思考的 turn 里 `reasoning` 与 `reasoning_content` 逐字节相同，故只读 `reasoning` 不丢东西。但那不是这次泄漏的直接观测。
+
+### 5. 别人怎么做的，我这样是否更好
+
+Python 标准 `logging` 的常规做法是 `logging.getLogger("pkg.mod").setLevel(DEBUG)` —— per-logger 级别是内建能力。loguru 刻意不做 logger 树，改用 sink 上的 `filter`，官方文档给的等价写法正是 `filter={"module.name": "DEBUG"}`。本方案直接用这个官方机制，没有自造。
+
+环境变量驱动日志级别是通行实践（`RUST_LOG`、`DEBUG=express:*`、loguru 自己的 `LOGURU_LEVEL`）。差别在于本方案是**白名单而非级别覆盖**：只有列进来的模块才进文件 sink，避免「开一个模块顺带开全部」。
+
+未采用 `LOGURU_LEVEL` 等 loguru 内建环境变量：它们只在 loguru 首次导入时影响默认 handler，而本项目 `setup_logging` 第一件事就是 `logger.remove()` 清掉默认 handler，两者不衔接。
+
+### 开工前核对诊断（触发式要求）
+
+任务描述给的行号来自 2026-08-25，动手前已逐一核对 main（`b1bbad23`）：
+
+| 描述中的位置 | 核对结果 |
+|---|---|
+| `ai/server.py:111` `SSE chunk: {data[:1000]}` | 一致 |
+| `channel/_core.py:137` `delta.content` | 一致 |
+| `channel/_core.py:144` `delta.reasoning` | 一致 |
+| `channel/_core.py:102` 发送路径 DEBUG | 一致 |
+| `session/ai_client.py:104` 只读 `reasoning` | 一致 |
+| `_logging.py` 单一二元开关 + one-shot | 一致 |
+| 「batch 模式恒 DEBUG」 | **不一致** —— `_run.py:115` 实为 `verbose=False`，见 W 段 |
+
+额外查明：仓库内**没有任何** docker/compose/daemon.json 文件，部署配置全在仓库外 —— 这独立佐证了决策一（轮转必须做在应用侧才可能进 PR）。
+
+另一个影响实现的发现：`gateway/__init__.py` 里 `setup_logging` 在 `:127`，而 `resolve_appdata_root` 在 `:138`，**前者早于后者**，且 `setup_logging` 是同步函数而 `resolve_appdata_root` 是 async。所以文件 sink 无法复用已解析的 appdata 根，也看不到 `--appdata` CLI 参数。处理办法见下节。
+
+***
+
+## A —— 执行过程
+
+### 代码落点
+
+| 文件 | 改动 |
+|---|---|
+| `src/psi_agent/_logging.py` | 新增 `_debug_modules()` 解析环境变量、`_debug_log_path()` 解析落盘路径、`_file_handler_id` 守卫；`setup_logging` 在有定向模块时额外装文件 sink |
+| `src/psi_agent/ai/server.py` | `SSE chunk` 行抬高截断上限；新增 `delta keys:` 字段清单行 |
+| `tests/psi_agent/test_logging.py` | 新增定向调级、轮转参数、one-shot 不重复装、未配置零副作用四组用例 |
+| `tests/psi_agent/ai/test_server.py` | 新增字段清单行的 (a)/(b) 两种 delta 形态用例 |
+| `AGENTS.md` | 「日志约定」修正失效描述 + 补定向调级与环境变量说明 |
+
+**路径解析。** 因 `setup_logging` 早于且不能 await `resolve_appdata_root`，文件 sink 自己算一遍：`PSI_DEBUG_LOG_PATH`（显式绝对路径）→ `PSI_APPDATA/logs/psi-debug.log` → `platformdirs.user_data_dir("Haitun")/logs/psi-debug.log`。中间那档与 `_appdata.py:29` 的 env 分支同源，故容器里配了 `PSI_APPDATA` 就自动落在挂载卷上。给显式路径变量是为了兜住「`PSI_APPDATA` 指向容器层」的情形 —— 那会占宿主机磁盘。
+
+刻意**不** import `_appdata.py`：那是 async 模块，且 `_logging.py` 目前零项目内依赖，保持它在依赖图底层。代价是 `"Haitun"` 这个 appname 字面量出现在两处，用注释交叉引用锁住。
+
+**两个独立守卫。** `_handler_id` 照旧守 stderr sink；新增 `_file_handler_id` 独立守文件 sink。不共用是因为触发条件不同 —— stderr 由 caller 的 `verbose` 决定，文件由进程环境决定。共用一个守卫会让「首个调用者的 verbose」意外决定文件 sink 装不装。
+
+**未配置即不存在。** `PSI_DEBUG_MODULES` 空或未设时不调用 `logger.add`，也不创建目录 —— 「默认关」不是一个配置值，而是一个不存在的 sink。这让 V1 可以断言得很硬。
+
+### 三向同步
+
+- **AGENTS.md**：「日志约定」删掉失效的「批量模式始终为 DEBUG」，改为陈述实际语义（`_run.py` 先调用并锁定 INFO，故各组件 `verbose` 恒被忽略）；新增定向调级段落，写明两个环境变量、落盘路径优先级、轮转参数、以及**日志含真实对话与 open_id 的风险**。
+- **本文档**：设计目标与实现方案。
+- **代码**：`_logging.py` docstring 同步修正 one-shot 段落中关于批量模式的描述。
+
+### 隐私与使用纪律
+
+开启后 `psi-debug.log` 里会有**真实对话内容与 open_id**，不做脱敏 —— 打码与「看模型原始输出」直接矛盾，自我对话本身就是要看的东西。靠三件事控制：
+
+1. 默认关闭，需显式配置环境变量。
+2. `retention=10` 自动删除旧文件，磁盘上限 200MB/容器。
+3. 本节写明纪律：**查完即关**；文件不得复制出生产机、不得贴入工单或聊天；只在 `psi-agent-gateway` 一个容器开（7 个容器全开是 1.4G）。
+
+### 上线与回滚
+
+**停机估计。** 改动只在 Python 源码，无 schema、无协议变更。生产代码烤进镜像，故需重建镜像 + 重启容器，参照近期同类操作（PR #726 实测 68s）估 **60–90s**。若只是事后调整定向模块列表，则无需重建镜像，改环境变量重启容器即可（约 10s）。
+
+**三层核验**（8-18 事故缺的正是第三层，build 机 `src` 会漂移）：
+
+1. build 机 `git log` / `git status` 确认工作树与目标 commit 一致；
+2. 构建产物校验；
+3. **进镜像验产物** —— `docker run --rm <image> grep PSI_DEBUG_MODULES /app/src/psi_agent/_logging.py`（实际路径以镜像布局为准），确认新代码在镜像里。
+
+**回滚。** 两级：
+
+- 一级（不重启进程无法生效，但零风险）：删掉 `PSI_DEBUG_MODULES` 重启容器 → 回到与改动前逐字节等价的行为。
+- 二级：回滚镜像到上一 tag。
+
+因「未配置即不装 sink」，一级回滚已覆盖绝大多数风险场景 —— 新代码在最坏情况下也只是一段不被执行的分支。
+
+***
+
+## T —— 测试与验收
+
+### 本机质量门
+
+- `uv run pytest -o testpaths= tests/psi_agent/test_logging.py tests/psi_agent/ai/test_server.py` —— **`-o testpaths=` 必须写在路径之前**，否则路径参数被静默忽略，只是数字变大而不报错。
+- `uv run ty check .` —— main 基线实测 0 条诊断，不得引入新的。Windows 本机会多 2 条 `os.killpg` 平台差异，不计。
+- 本机 `python` 是 3.7.9，低于仓库要求的 >=3.14，必须经 `uv run` 走项目环境。仓库代码用了 PEP 758 的 `except A, B` 语法，用低版本解释器读会报语法错误 —— 那不是缺陷。
+- Windows 上 5 条 session 测试因 asyncio 子进程 `NotImplementedError` 恒失败，是基线不是回归。
+
+### 待生产验证项
+
+V7（`psi-debug.log` 里真的出现目标字段）与 V8（镜像内产物核验）只能在上线后判定，本机无法覆盖。文档交付时须如实标注其状态。
+
+***
+
+## 版本历史
+
+| 版本 | 日期 | 变更 |
+|---|---|---|
+| 1.0 | 2026-08-25 | 初稿：定向 DEBUG + 文件轮转 + SSE 字段清单行 |
