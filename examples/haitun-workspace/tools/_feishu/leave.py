@@ -1,105 +1,94 @@
-"""公司 TODO 体系的请假事实源 —— 读「请假表」子表并判定命中日期。
+"""公司 TODO 体系的请假事实源 —— 枚举假勤审批实例并判定命中日期。
 
-为什么请假要读表格而不是查审批:飞书开放平台的 ``/approval/v4/instances`` 只有
-「建实例」和「按 instance_id 单查」,没有按人枚举的接口;考勤接口返回的是打卡结果
-(正常/迟到/早退/缺卡),不是请假单。所以「谁在哪天请假」这条事实在当前接口下拿不到,
-方案把它变成和 todo 同源的一条人工填报:同一个 spreadsheet 里加一张「请假表」子表。
+请假事实直接来自**飞书审批**:`GET /open-apis/approval/v4/instances` 按
+``approval_code`` + 时间窗枚举出实例 code,再逐个读详情拿申请人与起止日期。
+``feishu-leave-audit-board`` 一直走的就是这条路。
 
 为什么是工具而不是技能里的一段话:日期区间重叠判定是纯逻辑。写在技能里等于让模型
 每个周期心算一次日历,错一次就给休假的人派活并记逾期 —— 错误方向恰好是「加重考核」
 且不会立刻暴露。工具把「哪天算请假」固定下来,判定唯一。
 
-漏填等于视为未请假(不做打卡反推兜底:缺卡同时对应出差/外勤/忘打卡/请假,反推会把
-前三种误判成请假并静默顺延截止日,那个错误方向是「放宽考核」,比漏判更难发现)。
+**只算已通过的申请**(见 ``_APPROVED``)。审批中的不算:人还得上班,派活是对的;等它批
+下来,下一个周期的 audit 自然会看到。没走审批流程的请假(口头请假、HR 后台直接改的)
+这里查不到,按未请假处理、由本人当场申诉 —— 这跟原先靠人工填「请假表」相比少了一个
+「必须有人记得填」的失败点。
 """
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import json
 from typing import Any
 
 import _feishu_impl as _core
+from lark_channel.core.enum import AccessTokenType, HttpMethod
+from lark_channel.core.model import BaseRequest
 
-from _feishu.sheet import _build_sheet_meta_request, _build_sheet_values_request, _flatten_sheet_cell
+#: 算「这天请假」的审批状态。实例详情的 status 是字符串枚举,列表/任务里的
+#: process_status 是数字(2 = approved),两种都认。
+_APPROVED = {"APPROVED", "approved", "2", 2}
 
-#: 「请假表」子表的表名标记 —— 工作表标题命中任一个就算请假表。
-_LEAVE_SHEET_MARKERS = ("请假", "leave", "休假")
-
-#: 表头列语义 -> 认列用的标记。顺序即优先级,前面的先命中。
-_LEAVE_HEADER_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("name", ("姓名", "名字", "负责人", "name", "owner")),
-    ("start", ("开始日期", "开始时间", "起始", "start")),
-    ("end", ("结束日期", "结束时间", "截止", "end")),
-    ("kind", ("类型", "假别", "kind", "type")),
-    ("full_day", ("整天", "全天", "是否整天", "full_day")),
-    ("note", ("备注", "说明", "note", "remark")),
-)
-
-#: 认得出的日期写法。飞书表格里手填日期的形态很杂,统一归一到 ISO。
+#: 认得出的日期写法。审批表单里的日期控件多半是 ISO 或带时间的 ISO,但表单是人配的,
+#: 手填控件什么写法都可能出现,所以沿用一组宽容的格式。
 _DATE_FORMATS = ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%m-%d", "%m/%d", "%m.%d")
+
+#: 审批表单里「起止日期」控件的取名习惯。顺序即优先级。
+_START_MARKERS = ("开始", "起始", "start", "from")
+_END_MARKERS = ("结束", "截止", "终止", "end", "to")
+_RANGE_MARKERS = ("请假时间", "假期", "日期区间", "起止", "range", "dayrange")
+_KIND_MARKERS = ("假别", "假期类型", "类型", "kind", "type", "leave")
+_REASON_MARKERS = ("事由", "原因", "备注", "说明", "reason", "note")
 
 #: 单次查询的最大跨度(天)。防止 date_from/date_to 写反或写成整年时逐日展开炸掉输出。
 _MAX_SPAN_DAYS = 366
 
-#: 请假表的读取行数上限。一个周期的请假记录远小于这个数;超了就是表结构不对。
-_MAX_LEAVE_ROWS = 500
+#: 一次最多读多少条实例详情。一个周期的假勤申请远小于这个数;超了就报 truncated,
+#: 而不是悄悄只算前面几条(那会把请假的人算成没请假)。
+_MAX_INSTANCES = 200
+
+#: 列实例的页大小上限(飞书规定 100)。
+_PAGE_SIZE = 100
 
 
 def _parse_date(text: str) -> datetime.date | None:
-    """把一个单元格里的日期写法归一成 ``date``;认不出来返回 None(而不是猜)。"""
+    """把一个日期写法归一成 ``date``;认不出来返回 None(而不是猜)。"""
     raw = str(text or "").strip()
     if not raw:
         return None
-    # 「2026-08-05 10:00」这类带时间的写法:只取日期部分。
+    # 「2026-08-05 10:00」「2026-08-05T10:00:00+08:00」这类带时间的写法:只取日期部分。
     raw = raw.replace("日", "").split(" ")[0].split("T")[0]
     year = datetime.date.today().year
     for fmt in _DATE_FORMATS:
         # 无年份的写法(8.14)先把当前年份补进去再解析,而不是解析完再 replace(year=...):
         # 后者在 3.15 会改行为(CPython #70647),且闰日 2.29 在默认的 1900 年直接解析失败。
-        text, pattern = (raw, fmt) if "%Y" in fmt else (f"{year}-{raw}", f"%Y-{fmt}")
+        text_, pattern = (raw, fmt) if "%Y" in fmt else (f"{year}-{raw}", f"%Y-{fmt}")
         try:
-            parsed = datetime.datetime.strptime(text, pattern)
+            parsed = datetime.datetime.strptime(text_, pattern)
         except ValueError:
             continue
         return parsed.date()
     return None
 
 
-def _classify_leave_header(header: str) -> str:
-    """把请假表的一个表头单元格判成 name/start/end/kind/full_day/note/other。"""
-    low = str(header or "").strip().casefold()
-    if not low:
-        return "other"
-    for kind, markers in _LEAVE_HEADER_RULES:
-        if any(marker in low for marker in markers):
-            return kind
-    return "other"
+def _epoch_ms(day: datetime.date, *, end_of_day: bool = False) -> str:
+    """把一天换成 Unix 毫秒字符串。飞书的 start_time/end_time 两个都要且都是字符串。"""
+    moment = datetime.datetime.combine(day, datetime.time.max if end_of_day else datetime.time.min)
+    return str(int(moment.timestamp() * 1000))
 
 
-def _header_map(cells: list[Any]) -> dict[str, int]:
-    """表头行 -> {语义: 列下标}。同一语义重复出现时取最左那列。"""
-    mapping: dict[str, int] = {}
-    for index, cell in enumerate(cells):
-        kind = _classify_leave_header(_flatten_sheet_cell(cell))
-        if kind != "other" and kind not in mapping:
-            mapping[kind] = index
-    return mapping
-
-
-def _cell(row: list[Any], index: int | None) -> str:
-    """按列下标取值;越界或列不存在都返回空串,不抛。"""
-    if index is None or index < 0 or index >= len(row):
-        return ""
-    return _flatten_sheet_cell(row[index])
-
-
-def _is_full_day(text: str) -> bool:
-    """「是否整天」列的取值判定。空着按整天算 —— 请假默认整天,半天要显式写。"""
-    raw = str(text or "").strip().casefold()
-    if not raw:
-        return True
-    return raw not in {"否", "no", "false", "n", "0", "半天", "非整天"}
+def _build_list_instances_request(approval_code: str, start_ms: str, end_ms: str, page_token: str = "") -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.GET
+    req.uri = "/open-apis/approval/v4/instances"
+    req.add_query("approval_code", approval_code)
+    req.add_query("start_time", start_ms)
+    req.add_query("end_time", end_ms)
+    req.add_query("page_size", _PAGE_SIZE)
+    if page_token:
+        req.add_query("page_token", page_token)
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    return req
 
 
 def _overlap_days(
@@ -113,47 +102,96 @@ def _overlap_days(
     return [(lo + datetime.timedelta(days=offset)).isoformat() for offset in range((hi - lo).days + 1)]
 
 
-async def _resolve_leave_sheet(token: str, sheet_name: str, user_key: str) -> tuple[str, str, str]:
-    """定位请假表的 sheet_id。返回 (sheet_id, title, error)。
+def _widgets(form: Any) -> list[dict[str, Any]]:
+    """审批实例详情里的 ``form`` 是 JSON 字符串;解析成控件列表,形状不对就给空表。"""
+    parsed: Any = form
+    if isinstance(form, str):
+        with contextlib.suppress(ValueError):
+            parsed = json.loads(form)
+    if not isinstance(parsed, list):
+        return []
+    return [w for w in parsed if isinstance(w, dict)]
 
-    ``sheet_name`` 给了就按标题精确/包含匹配;没给就在所有工作表里找标题含「请假」的
-    那张。都找不到时返回错误并**列出实际的工作表标题** —— 让人一眼看出是没建子表
-    还是名字不一样,而不是回一句「读不到」。
+
+def _label(widget: dict[str, Any]) -> str:
+    return str(widget.get("name") or widget.get("custom_id") or widget.get("id") or "").casefold()
+
+
+def _flatten_value(value: Any) -> str:
+    """把控件 value 拍平成文本。日期区间控件的 value 常是 dict 或 list。"""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, dict):
+        for key in ("start", "startTime", "start_time", "value", "text"):
+            if value.get(key):
+                return _flatten_value(value[key])
+    if isinstance(value, list):
+        return " ".join(_flatten_value(v) for v in value if v)
+    return ""
+
+
+def _range_bounds(value: Any) -> tuple[str, str]:
+    """从一个「日期区间」控件的 value 里取出 (起, 止) 两个原始串。
+
+    飞书的 dayRange/dateInterval 控件 value 形状不统一:可能是
+    ``{"start": ..., "end": ...}``、``[{...start}, {...end}]``,也可能是
+    ``"2026-08-05 ~ 2026-08-07"`` 这样一个串。三种都认。
     """
-    meta = await _core._invoke(_build_sheet_meta_request(token), user_key=user_key)
-    if not meta.get("ok"):
-        return "", "", str(meta.get("error") or meta.get("message") or "sheet meta query failed")
-    data = meta.get("data") if isinstance(meta.get("data"), dict) else {}
-    sheets = data.get("sheets", []) if isinstance(data, dict) else []
-    titles: list[str] = []
-    wanted = sheet_name.strip().casefold()
-    fallback: tuple[str, str] | None = None
-    for sheet in sheets if isinstance(sheets, list) else []:
-        if not isinstance(sheet, dict):
-            continue
-        sheet_id = str(sheet.get("sheet_id") or sheet.get("sheetId") or "")
-        title = str(sheet.get("title") or "")
-        if not sheet_id:
-            continue
-        titles.append(title)
-        low = title.casefold()
-        if wanted:
-            if low == wanted:
-                return sheet_id, title, ""
-            if wanted in low and fallback is None:
-                fallback = (sheet_id, title)
-        elif fallback is None and any(marker in low for marker in _LEAVE_SHEET_MARKERS):
-            fallback = (sheet_id, title)
-    if fallback:
-        return fallback[0], fallback[1], ""
-    hint = "、".join(titles) if titles else "(该表格没有工作表)"
-    if wanted:
-        return "", "", f"没有名为 {sheet_name!r} 的工作表。实际的工作表: {hint}"
-    return "", "", f"没找到「请假表」子表(标题含请假/休假/leave)。实际的工作表: {hint}"
+    if isinstance(value, dict):
+        start = value.get("start") or value.get("startTime") or value.get("start_time") or ""
+        end = value.get("end") or value.get("endTime") or value.get("end_time") or ""
+        if start or end:
+            return _flatten_value(start), _flatten_value(end)
+    if isinstance(value, list) and len(value) >= 2:
+        return _flatten_value(value[0]), _flatten_value(value[1])
+    text = _flatten_value(value)
+    for sep in ("~", "至", "—", "->", " - "):
+        if sep in text:
+            head, _, tail = text.partition(sep)
+            return head.strip(), tail.strip()
+    return text, ""
+
+
+def _leave_span(form: Any) -> tuple[str, str, str, str]:
+    """从审批表单里抽出 (起, 止, 假别, 事由) 四个原始串。
+
+    先找成对的「开始/结束」控件;没有再找单个「日期区间」控件。都抽不到就回空串,
+    由调用方归进 needs_fix —— 抽不到日期的申请**不静默丢**,丢了等于把「请了假」
+    变成「没请假」,错误方向是加重考核。
+    """
+    start = end = kind = reason = ""
+    range_value: Any = None
+    for widget in _widgets(form):
+        label = _label(widget)
+        value = widget.get("value")
+        if not start and any(m in label for m in _START_MARKERS):
+            start = _flatten_value(value)
+        elif not end and any(m in label for m in _END_MARKERS):
+            end = _flatten_value(value)
+        elif range_value is None and any(m in label for m in _RANGE_MARKERS):
+            range_value = value
+        elif not kind and any(m in label for m in _KIND_MARKERS):
+            kind = _flatten_value(value)
+        elif not reason and any(m in label for m in _REASON_MARKERS):
+            reason = _flatten_value(value)
+        # 控件类型本身就说明是日期区间时也收下(表单可能没按习惯命名)。
+        if range_value is None and str(widget.get("type") or "").casefold() in {"dayrange", "dateinterval"}:
+            range_value = value
+    if (not start or not end) and range_value is not None:
+        head, tail = _range_bounds(range_value)
+        start = start or head
+        end = end or tail
+    return start, end, kind, reason
 
 
 def _wanted_names(names_json: str) -> tuple[set[str], str | None]:
-    """解析 names_json 过滤名单。空 = 不过滤,返回表里所有人。"""
+    """解析 names_json 过滤名单。空 = 不过滤,返回窗口内所有请假的人。
+
+    名单里可以写姓名也可以写 open_id:审批详情回的申请人是 id,姓名要另外解析,所以
+    两种都允许,匹配时任一命中即算。
+    """
     raw = names_json.strip()
     if not raw:
         return set(), None
@@ -162,88 +200,54 @@ def _wanted_names(names_json: str) -> tuple[set[str], str | None]:
     except ValueError as exc:
         return set(), f"names_json is not valid JSON: {exc}"
     if not isinstance(parsed, list) or any(not isinstance(item, str) for item in parsed):
-        return set(), 'names_json must be a JSON array of strings, e.g. \'["张三","李四"]\''
+        return set(), 'names_json must be a JSON array of strings, e.g. \'["ou_abc","张三"]\''
     return {item.strip() for item in parsed if item.strip()}, None
 
 
-def _leave_record(
-    row: list[Any],
-    columns: dict[str, int],
-    date_from: datetime.date,
-    date_to: datetime.date,
-    row_number: int,
-) -> dict[str, Any] | None:
-    """把请假表的一行转成一条记录。返回 None = 整行为空,跳过。
+async def _list_instance_codes(approval_code: str, start_ms: str, end_ms: str, user_key: str) -> tuple[list[str], str]:
+    """列出窗口内该定义下的所有实例 code。返回 (codes, error)。
 
-    日期缺失或认不出来时**不静默丢**:返回一条带 ``needs_fix`` 的记录,让报表能提示
-    补填。静默丢等于把「填错了」变成「没请假」,方向又是加重考核。
+    翻页翻到底才敢说「就这些」—— 半页就下结论会把后面那些请假的人算成没请假。
     """
-    name = _cell(row, columns.get("name")).strip()
-    start_text = _cell(row, columns.get("start"))
-    end_text = _cell(row, columns.get("end"))
-    if not name and not start_text and not end_text:
-        return None
-
-    record: dict[str, Any] = {
-        "name": name,
-        "row": row_number,
-        "start": start_text.strip(),
-        "end": end_text.strip(),
-        "kind": _cell(row, columns.get("kind")).strip(),
-        "note": _cell(row, columns.get("note")).strip(),
-        "full_day": _is_full_day(_cell(row, columns.get("full_day"))),
-    }
-    problems: list[str] = []
-    if not name:
-        problems.append("缺姓名")
-    start = _parse_date(start_text)
-    # 结束日期空着按「当天请假」算:填了开始没填结束是最常见的填法。
-    end = _parse_date(end_text) if end_text.strip() else start
-    if start is None:
-        problems.append(f"开始日期认不出({start_text.strip() or '空'})")
-    # 只在结束日期真填了东西时才报它:空着是合法写法(当天一天),而它认不出来时
-    # end 继承的是 start 的 None,报「结束日期认不出()」纯属误导。
-    if end is None and end_text.strip():
-        problems.append(f"结束日期认不出({end_text.strip()})")
-    if start and end and end < start:
-        problems.append("结束日期早于开始日期")
-        start, end = end, start
-
-    if problems:
-        record["needs_fix"] = problems
-        record["hit_dates"] = []
-        record["hit_days"] = 0
-        return record
-
-    assert start is not None and end is not None  # 上面已把 None 的情形归进 problems
-    record["start"] = start.isoformat()
-    record["end"] = end.isoformat()
-    hits = _overlap_days(start, end, date_from, date_to)
-    record["hit_dates"] = hits
-    record["hit_days"] = len(hits)
-    return record
+    codes: list[str] = []
+    page_token = ""
+    while True:
+        request = _build_list_instances_request(approval_code, start_ms, end_ms, page_token)
+        res = await _core._invoke(request, user_key=user_key)
+        if not res.get("ok"):
+            return [], str(res.get("error") or res.get("message") or "列审批实例失败")
+        data = res.get("data") if isinstance(res.get("data"), dict) else {}
+        # 返回在 instance_code_list 键下(不是 items),而且只有 code 没有内容。
+        page = data.get("instance_code_list") or []
+        codes.extend(str(code) for code in page if code)
+        page_token = str(data.get("page_token") or "")
+        if not data.get("has_more") or not page_token or len(codes) >= _MAX_INSTANCES:
+            return codes, ""
 
 
 async def query_leave_impl(
-    sheet_token: str,
-    sheet_name: str = "",
+    approval_code: str,
     date_from: str = "",
     date_to: str = "",
     names_json: str = "",
     user_key: str = "",
 ) -> dict[str, Any]:
-    """读「请假表」子表,判定 ``[date_from, date_to]`` 窗口内每人命中的请假日期。
+    """枚举假勤审批实例,判定 ``[date_from, date_to]`` 窗口内每人命中的请假日期。
 
     判定口径(固定,不由模型决定):
-    - 区间是**闭区间**,两端都算请假;
+    - 窗口与请假区间都是**闭区间**,两端都算请假;
+    - **只算已通过**的申请;审批中/被拒/撤回的不算(审批中的人还得上班);
     - 结束日期空着 = 当天请假一天;
-    - 「是否整天」空着 = 整天(半天要显式写「否」/「半天」);
-    - 日期认不出来或缺姓名的行进 ``needs_fix``,不静默丢弃;
-    - 表里没有的人 = 没请假(漏填按未请假处理)。
+    - 抽不到日期的申请进 ``needs_fix``,不静默丢弃;
+    - 没走审批流程的请假查不到 = 按未请假处理,由本人当场申诉。
     """
-    token = sheet_token.strip()
-    if not token:
-        return _core._error("sheet_token is required (the segment in a feishu.cn/sheets/<token> URL).")
+    code = approval_code.strip()
+    if not code:
+        return _core._error(
+            "approval_code is required: 假勤审批的定义码。从飞书审批后台取,"
+            "或用 feishu_api GET /open-apis/approval/v4/tasks/query 取一条样本,"
+            "它返回里的 definition_code (有的给 process_code) 就是它。"
+        )
     start_date = _parse_date(date_from)
     if start_date is None:
         return _core._error(f"date_from 认不出来: {date_from!r}。用 ISO 日期,如 2026-08-05。")
@@ -260,82 +264,104 @@ async def query_leave_impl(
     if problem:
         return _core._error(problem)
 
-    sheet_id, sheet_title, error = await _resolve_leave_sheet(token, sheet_name, user_key)
+    # 窗口按「申请的提交时间」筛,而请假区间可能早于或晚于提交。往前后各放宽 60 天,
+    # 免得漏掉「上月底提交、这周生效」的申请 —— 真正的判定在下面按区间交集做。
+    margin = datetime.timedelta(days=60)
+    codes, error = await _list_instance_codes(
+        code, _epoch_ms(start_date - margin), _epoch_ms(end_date + margin, end_of_day=True), user_key
+    )
     if error:
-        return _core._error(error)
+        return _core._error(f"列审批实例失败: {error}")
 
-    block_range = f"{sheet_id}!A1:ZZ{_MAX_LEAVE_ROWS}"
-    res = await _core._invoke(_build_sheet_values_request(token, block_range), user_key=user_key)
-    if not res.get("ok"):
-        return res
-    data = res.get("data") if isinstance(res.get("data"), dict) else {}
-    value_range = data.get("valueRange", {}) if isinstance(data, dict) else {}
-    raw_rows = value_range.get("values") or []
-    rows = [(raw_row if isinstance(raw_row, list) else []) for raw_row in raw_rows]
-    if not rows:
-        return _core._error(f"工作表「{sheet_title}」是空的,连表头都没有。")
-
-    columns = _header_map(rows[0])
-    missing = [kind for kind in ("name", "start") if kind not in columns]
-    if missing:
-        headers = "、".join(_flatten_sheet_cell(c) for c in rows[0] if _flatten_sheet_cell(c)) or "(空表头)"
-        labels = {"name": "姓名", "start": "开始日期"}
-        want = "、".join(labels[kind] for kind in missing)
-        return _core._error(f"「{sheet_title}」的表头缺少必需列: {want}。实际表头: {headers}")
-
-    records: list[dict[str, Any]] = []
+    on_leave: dict[str, dict[str, Any]] = {}
     needs_fix: list[dict[str, Any]] = []
-    for offset, row in enumerate(rows[1:], start=2):
-        record = _leave_record(row, columns, start_date, end_date, offset)
-        if record is None:
+    skipped_not_approved = 0
+    for instance_code in codes[:_MAX_INSTANCES]:
+        detail = await _core.get_approval_instance_impl(instance_code)
+        if not detail.get("ok"):
+            needs_fix.append(
+                {
+                    "instance_code": instance_code,
+                    "applicant": "",
+                    "needs_fix": [f"读详情失败: {detail.get('error') or detail.get('message') or '未知错误'}"],
+                }
+            )
             continue
-        if wanted and record["name"] not in wanted:
+        if detail.get("status") not in _APPROVED:
+            skipped_not_approved += 1
             continue
-        if record.get("needs_fix"):
-            needs_fix.append(record)
-            continue
-        records.append(record)
 
-    # 按人汇总:一个人可能有多条请假记录(分段请假),命中日期取并集。
-    by_person: dict[str, dict[str, Any]] = {}
-    for record in records:
-        person = by_person.setdefault(
-            record["name"],
-            {"name": record["name"], "hit_dates": [], "leaves": [], "hit_days": 0, "full_period": False},
+        applicant = str(detail.get("applicant") or "")
+        start_text, end_text, kind, reason = _leave_span(detail.get("form"))
+        start = _parse_date(start_text)
+        # 结束日期空着按「当天请假」算:只请一天时表单常常只填一个日期。
+        end = _parse_date(end_text) if end_text.strip() else start
+        problems: list[str] = []
+        if not applicant:
+            problems.append("详情里没有申请人")
+        if start is None:
+            problems.append(f"开始日期抽不到({start_text.strip() or '空'})")
+        if end is None and end_text.strip():
+            problems.append(f"结束日期认不出({end_text.strip()})")
+        if start and end and end < start:
+            problems.append("结束日期早于开始日期")
+            start, end = end, start
+        if problems:
+            needs_fix.append(
+                {
+                    "instance_code": instance_code,
+                    "applicant": applicant,
+                    "kind": kind,
+                    "start": start_text.strip(),
+                    "end": end_text.strip(),
+                    "needs_fix": problems,
+                }
+            )
+            continue
+
+        assert start is not None and end is not None  # 上面已把 None 的情形归进 problems
+        hits = _overlap_days(start, end, start_date, end_date)
+        if not hits:
+            continue
+        if wanted and applicant not in wanted:
+            continue
+        person = on_leave.setdefault(
+            applicant,
+            {"applicant": applicant, "hit_dates": [], "leaves": [], "hit_days": 0, "full_period": False},
         )
         person["leaves"].append(
             {
-                "start": record["start"],
-                "end": record["end"],
-                "kind": record["kind"],
-                "full_day": record["full_day"],
-                "note": record["note"],
-                "hit_dates": record["hit_dates"],
+                "instance_code": instance_code,
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "kind": kind,
+                "reason": reason,
+                "hit_dates": hits,
             }
         )
-        for day in record["hit_dates"]:
+        for day in hits:
             if day not in person["hit_dates"]:
                 person["hit_dates"].append(day)
-    for person in by_person.values():
+
+    for person in on_leave.values():
         person["hit_dates"].sort()
         person["hit_days"] = len(person["hit_dates"])
-        # 整周期请假 = 窗口里每一天都命中 ⇒ 派发环节整块跳过(不派卡、不建任务)。
+        # 整周期请假 ⇒ 派发环节整块跳过(不派卡、不建任务)。
         person["full_period"] = person["hit_days"] == span
 
-    on_leave = [person for person in by_person.values() if person["hit_days"] > 0]
-    on_leave.sort(key=lambda person: (-person["hit_days"], person["name"]))
+    people = sorted(on_leave.values(), key=lambda p: (-p["hit_days"], p["applicant"]))
     return {
         "ok": True,
-        "sheet": sheet_id,
-        "sheet_title": sheet_title,
+        "approval_code": code,
         "date_from": start_date.isoformat(),
         "date_to": end_date.isoformat(),
         "span_days": span,
         "queried_names": sorted(wanted) if wanted else [],
-        "on_leave": on_leave,
-        "on_leave_names": [person["name"] for person in on_leave],
-        "full_period_names": [person["name"] for person in on_leave if person["full_period"]],
-        "rows_scanned": max(len(rows) - 1, 0),
+        "on_leave": people,
+        "on_leave_applicants": [p["applicant"] for p in people],
+        "full_period_applicants": [p["applicant"] for p in people if p["full_period"]],
+        "instances_scanned": len(codes[:_MAX_INSTANCES]),
+        "skipped_not_approved": skipped_not_approved,
         "needs_fix": needs_fix,
-        "truncated": len(rows) >= _MAX_LEAVE_ROWS,
+        "truncated": len(codes) >= _MAX_INSTANCES,
     }

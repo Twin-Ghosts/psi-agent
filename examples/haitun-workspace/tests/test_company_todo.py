@@ -4,11 +4,14 @@ What earns these tests their own file is that both new tools exist to make a *de
 unique — the kind of decision that, left to a model, is silently wrong in the direction of
 punishing people:
 
-- ``feishu_leave_query`` decides which days count as leave. Overlapping-interval arithmetic
-  redone every cycle eventually assigns work to somebody on holiday and books them overdue.
-  So the closed-interval rule, the blank-结束日期 default, and the "unparseable row goes to
-  needs_fix rather than vanishing" rule are each pinned here. A row that vanishes turns
-  "filled in wrong" into "not on leave" — same wrong direction.
+- ``feishu_leave_query`` decides which days count as leave, from 假勤 approval instances.
+  Overlapping-interval arithmetic redone every cycle eventually assigns work to somebody on
+  holiday and books them overdue, so the closed-interval rule, the blank-end-date default,
+  and the "unreadable application goes to needs_fix rather than vanishing" rule are each
+  pinned here — a vanished application turns "did file leave" into "did not", the same wrong
+  direction. The status filter gets its own tests because counting pending applications as
+  leave would silently loosen the whole review, and only counting the string form of
+  ``APPROVED`` would miss the numeric one the list endpoints return.
 - ``feishu_mentor_ledger_ensure`` decides whether a ledger already exists. Its idempotency
   is a *lookup*, so the test that matters is the negative one: a second run must issue no
   create call at all. And because revoking access is irreversible, unexpected collaborators
@@ -23,6 +26,7 @@ from __future__ import annotations
 
 import ast
 import importlib
+import json
 import re
 import sys
 from pathlib import Path
@@ -40,8 +44,7 @@ _impl: Any = importlib.import_module("_feishu_impl")
 
 SKILLS = ("company-todo-sync", "company-todo-review", "company-todo-audit")
 
-SHEET_TOKEN = "shtcnLeave01"
-LEAVE_SHEET_ID = "lv0001"
+APPROVAL_CODE = "7CE7B5C4-leave"
 FOLDER = "fldcnTodo01"
 MENTOR = "ou_mentor_li"
 BOSS = "ou_boss_wang"
@@ -71,113 +74,190 @@ class _Invoke:
         return [str(req.uri) for req in self.requests]
 
 
-def _meta(*titles: str) -> dict[str, Any]:
-    sheets = [{"sheet_id": LEAVE_SHEET_ID if "请假" in t else f"sh{i}", "title": t} for i, t in enumerate(titles)]
-    return {"ok": True, "code": 0, "data": {"sheets": sheets}}
+def _codes(*codes: str) -> dict[str, Any]:
+    return {"ok": True, "code": 0, "data": {"instance_code_list": list(codes), "has_more": False}}
 
 
-def _values(rows: list[list[str]]) -> dict[str, Any]:
-    return {"ok": True, "code": 0, "data": {"valueRange": {"range": f"{LEAVE_SHEET_ID}!A1:F9", "values": rows}}}
+def _form(start: str, end: str, kind: str = "年假", reason: str = "") -> str:
+    widgets = [
+        {"id": "w1", "name": "假别", "type": "radioV2", "value": kind},
+        {"id": "w2", "name": "开始日期", "type": "date", "value": start},
+        {"id": "w3", "name": "结束日期", "type": "date", "value": end},
+        {"id": "w4", "name": "事由", "type": "textarea", "value": reason},
+    ]
+    return json.dumps(widgets, ensure_ascii=False)
 
 
-_LEAVE_HEADER = ["姓名", "开始日期", "结束日期", "类型", "是否整天", "备注"]
+def _detail(applicant: str, form: str, status: str = "APPROVED") -> dict[str, Any]:
+    return {"ok": True, "instance_code": "x", "status": status, "applicant": applicant, "form": form}
 
 
-# ── 请假判定 ──────────────────────────────────────────────────────────────────
+def _details(monkeypatch: pytest.MonkeyPatch, *replies: dict[str, Any]) -> list[str]:
+    """Stub the instance-detail read, returning the queue of codes it was asked for."""
+    asked: list[str] = []
+    queue = list(replies)
+
+    async def fake(instance_id: str, user_id_type: str = "open_id") -> dict[str, Any]:
+        asked.append(instance_id)
+        return queue.pop(0) if queue else {"ok": False, "message": "no more"}
+
+    monkeypatch.setattr(_impl, "get_approval_instance_impl", fake)
+    return asked
+
+
+# ── 请假判定(数据源是假勤审批实例) ───────────────────────────────────────────
 
 
 @pytest.mark.asyncio
 async def test_leave_window_is_closed_on_both_ends(monkeypatch: pytest.MonkeyPatch) -> None:
     """Both endpoints count. An off-by-one here books somebody overdue on a day off."""
-    cap = _Invoke(
-        [
-            _meta("TODO LIST", "请假表"),
-            _values([_LEAVE_HEADER, ["张三", "2026-08-05", "2026-08-07", "年假", "", ""]]),
-        ]
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    out = await _impl.query_leave_impl(SHEET_TOKEN, date_from="2026-08-05", date_to="2026-08-07")
+    monkeypatch.setattr(_impl, "_invoke", _Invoke([_codes("c1")]))
+    _details(monkeypatch, _detail("ou_zhang", _form("2026-08-05", "2026-08-07")))
+    out = await _impl.query_leave_impl(APPROVAL_CODE, date_from="2026-08-05", date_to="2026-08-07")
     assert out["ok"] is True
     person = out["on_leave"][0]
     assert person["hit_dates"] == ["2026-08-05", "2026-08-06", "2026-08-07"]
     assert person["hit_days"] == 3
     # 整周期请假 ⇒ 派发环节整块跳过(不派卡、不建任务)。
     assert person["full_period"] is True
-    assert out["full_period_names"] == ["张三"]
+    assert out["full_period_applicants"] == ["ou_zhang"]
+
+
+@pytest.mark.asyncio
+async def test_only_approved_applications_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """审批中的人还得上班,派活是对的;被拒和撤回的更不算。全算进去等于放宽考核。"""
+    monkeypatch.setattr(_impl, "_invoke", _Invoke([_codes("c1", "c2", "c3", "c4")]))
+    _details(
+        monkeypatch,
+        _detail("ou_pending", _form("2026-08-05", "2026-08-07"), status="PENDING"),
+        _detail("ou_rejected", _form("2026-08-05", "2026-08-07"), status="REJECTED"),
+        _detail("ou_revoked", _form("2026-08-05", "2026-08-07"), status="REVERTED"),
+        _detail("ou_ok", _form("2026-08-06", "2026-08-06")),
+    )
+    out = await _impl.query_leave_impl(APPROVAL_CODE, date_from="2026-08-05", date_to="2026-08-07")
+    assert out["on_leave_applicants"] == ["ou_ok"]
+    # 一堆待审批要能看见,否则跟「没人请假」长得一样。
+    assert out["skipped_not_approved"] == 3
+
+
+@pytest.mark.asyncio
+async def test_numeric_approved_status_also_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """列表/任务接口回的是数字 process_status(2 = 通过);两种表示法都得认。"""
+    monkeypatch.setattr(_impl, "_invoke", _Invoke([_codes("c1")]))
+    _details(monkeypatch, _detail("ou_num", _form("2026-08-06", "2026-08-06"), status=2))
+    out = await _impl.query_leave_impl(APPROVAL_CODE, date_from="2026-08-05", date_to="2026-08-07")
+    assert out["on_leave_applicants"] == ["ou_num"]
 
 
 @pytest.mark.asyncio
 async def test_blank_end_date_means_one_day(monkeypatch: pytest.MonkeyPatch) -> None:
-    """填了开始没填结束是最常见的填法;它是「当天请假一天」,不是「请假到永远」。"""
-    cap = _Invoke([_meta("请假表"), _values([_LEAVE_HEADER, ["李四", "2026-08-06", "", "事假", "", ""]])])
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    out = await _impl.query_leave_impl(SHEET_TOKEN, date_from="2026-08-05", date_to="2026-08-07")
+    """只请一天时表单常常只填一个日期;那是「当天一天」,不是「请假到永远」。"""
+    monkeypatch.setattr(_impl, "_invoke", _Invoke([_codes("c1")]))
+    _details(monkeypatch, _detail("ou_li", _form("2026-08-06", "")))
+    out = await _impl.query_leave_impl(APPROVAL_CODE, date_from="2026-08-05", date_to="2026-08-07")
     person = out["on_leave"][0]
     assert person["hit_dates"] == ["2026-08-06"]
     assert person["full_period"] is False
 
 
 @pytest.mark.asyncio
-async def test_unparseable_row_goes_to_needs_fix_not_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
-    """静默丢掉填错的行 = 把「填错了」变成「没请假」,方向又是加重考核。"""
-    cap = _Invoke(
-        [
-            _meta("请假表"),
-            _values(
-                [
-                    _LEAVE_HEADER,
-                    ["王五", "下周一", "", "事假", "", ""],
-                    ["", "2026-08-06", "2026-08-06", "病假", "", "忘了写名字"],
-                    ["赵六", "2026-08-06", "2026-08-06", "病假", "否", "半天"],
-                ]
-            ),
-        ]
+async def test_date_range_widget_is_understood(monkeypatch: pytest.MonkeyPatch) -> None:
+    """假勤表单常用一个「请假时间」区间控件,而不是成对的开始/结束控件。"""
+    widgets = json.dumps(
+        [{"id": "w1", "name": "请假时间", "type": "dayRange", "value": {"start": "2026-08-06", "end": "2026-08-07"}}],
+        ensure_ascii=False,
     )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    out = await _impl.query_leave_impl(SHEET_TOKEN, date_from="2026-08-05", date_to="2026-08-07")
-    assert out["on_leave_names"] == ["赵六"]
-    assert len(out["needs_fix"]) == 2, "认不出日期的行和缺姓名的行都要报出来"
-    assert [row["name"] for row in out["needs_fix"]] == ["王五", ""]
-    assert any("开始日期认不出" in " ".join(row["needs_fix"]) for row in out["needs_fix"])
-    assert any("缺姓名" in " ".join(row["needs_fix"]) for row in out["needs_fix"])
-    # 「是否整天」写「否」= 半天,空着才是整天。
-    assert out["on_leave"][0]["leaves"][0]["full_day"] is False
+    monkeypatch.setattr(_impl, "_invoke", _Invoke([_codes("c1")]))
+    _details(monkeypatch, _detail("ou_range", widgets))
+    out = await _impl.query_leave_impl(APPROVAL_CODE, date_from="2026-08-05", date_to="2026-08-07")
+    assert out["on_leave"][0]["hit_dates"] == ["2026-08-06", "2026-08-07"]
 
 
 @pytest.mark.asyncio
-async def test_person_absent_from_sheet_is_not_on_leave(monkeypatch: pytest.MonkeyPatch) -> None:
-    """漏填按未请假处理 —— 宁可漏填时报逾期,由本人当场申诉。"""
-    cap = _Invoke([_meta("请假表"), _values([_LEAVE_HEADER, ["张三", "2026-08-06", "2026-08-06", "年假", "", ""]])])
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    out = await _impl.query_leave_impl(SHEET_TOKEN, date_from="2026-08-05", date_to="2026-08-07", names_json='["孙七"]')
+async def test_unreadable_dates_go_to_needs_fix_not_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """静默丢掉抽不到日期的申请 = 把「请了假」变成「没请假」,方向又是加重考核。"""
+    monkeypatch.setattr(_impl, "_invoke", _Invoke([_codes("c1", "c2")]))
+    _details(
+        monkeypatch,
+        _detail("ou_bad", json.dumps([{"id": "w1", "name": "备注", "type": "textarea", "value": "下周想休"}])),
+        _detail("ou_good", _form("2026-08-06", "2026-08-06")),
+    )
+    out = await _impl.query_leave_impl(APPROVAL_CODE, date_from="2026-08-05", date_to="2026-08-07")
+    assert out["on_leave_applicants"] == ["ou_good"]
+    assert len(out["needs_fix"]) == 1
+    assert out["needs_fix"][0]["applicant"] == "ou_bad"
+    assert any("开始日期抽不到" in reason for reason in out["needs_fix"][0]["needs_fix"])
+
+
+@pytest.mark.asyncio
+async def test_leave_outside_the_window_is_not_a_hit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """窗口按提交时间放宽取的实例,所以区间在窗口外的申请必须靠交集判掉。"""
+    monkeypatch.setattr(_impl, "_invoke", _Invoke([_codes("c1")]))
+    _details(monkeypatch, _detail("ou_last_month", _form("2026-07-01", "2026-07-03")))
+    out = await _impl.query_leave_impl(APPROVAL_CODE, date_from="2026-08-05", date_to="2026-08-07")
     assert out["on_leave"] == []
-    assert out["on_leave_names"] == []
+    assert out["needs_fix"] == []
 
 
 @pytest.mark.asyncio
-async def test_missing_leave_sheet_lists_actual_titles(monkeypatch: pytest.MonkeyPatch) -> None:
-    """找不到子表时要说出实际有哪些表,否则分不清「没建」还是「名字不一样」。"""
-    cap = _Invoke([_meta("TODO LIST", "汇总")])
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    out = await _impl.query_leave_impl(SHEET_TOKEN, date_from="2026-08-05")
-    assert out["ok"] is False
-    assert "TODO LIST" in out["message"] and "汇总" in out["message"]
+async def test_two_applications_merge_into_one_person(monkeypatch: pytest.MonkeyPatch) -> None:
+    """分段请假是两条申请一个人;命中日期取并集,不是各报一次。"""
+    monkeypatch.setattr(_impl, "_invoke", _Invoke([_codes("c1", "c2")]))
+    _details(
+        monkeypatch,
+        _detail("ou_split", _form("2026-08-05", "2026-08-05", kind="事假")),
+        _detail("ou_split", _form("2026-08-07", "2026-08-07", kind="年假")),
+    )
+    out = await _impl.query_leave_impl(APPROVAL_CODE, date_from="2026-08-05", date_to="2026-08-07")
+    assert len(out["on_leave"]) == 1
+    person = out["on_leave"][0]
+    assert person["hit_dates"] == ["2026-08-05", "2026-08-07"]
+    assert [leave["kind"] for leave in person["leaves"]] == ["事假", "年假"]
+    assert person["full_period"] is False, "中间那天没请假,不能算整周期"
 
 
 @pytest.mark.asyncio
-async def test_header_missing_required_column_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _Invoke([_meta("请假表"), _values([["类型", "备注"], ["年假", "x"]])])
+async def test_person_without_an_application_is_not_on_leave(monkeypatch: pytest.MonkeyPatch) -> None:
+    """没走审批 = 按未请假处理,由本人当场申诉。"""
+    monkeypatch.setattr(_impl, "_invoke", _Invoke([_codes("c1")]))
+    _details(monkeypatch, _detail("ou_zhang", _form("2026-08-06", "2026-08-06")))
+    out = await _impl.query_leave_impl(
+        APPROVAL_CODE, date_from="2026-08-05", date_to="2026-08-07", names_json='["ou_sun"]'
+    )
+    assert out["on_leave"] == []
+    assert out["on_leave_applicants"] == []
+
+
+@pytest.mark.asyncio
+async def test_instances_query_carries_code_and_millisecond_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """start_time/end_time 是 Unix 毫秒**字符串**,两个飞书都要;写错就是空结果。"""
+    cap = _Invoke([_codes()])
     monkeypatch.setattr(_impl, "_invoke", cap)
-    out = await _impl.query_leave_impl(SHEET_TOKEN, date_from="2026-08-05")
+    _details(monkeypatch)
+    await _impl.query_leave_impl(APPROVAL_CODE, date_from="2026-08-05", date_to="2026-08-07")
+    req = cap.requests[0]
+    assert req.uri == "/open-apis/approval/v4/instances"
+    query = dict(req.queries)
+    assert query["approval_code"] == APPROVAL_CODE
+    assert query["start_time"].isdigit() and query["end_time"].isdigit()
+    assert int(query["start_time"]) < int(query["end_time"])
+
+
+@pytest.mark.asyncio
+async def test_missing_approval_code_says_where_to_get_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _Invoke([])
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    out = await _impl.query_leave_impl("", date_from="2026-08-05")
     assert out["ok"] is False
-    assert "姓名" in out["message"] and "开始日期" in out["message"]
+    assert "tasks/query" in out["message"], "要告诉人 approval_code 从哪来"
+    assert cap.requests == []
 
 
 @pytest.mark.asyncio
 async def test_reversed_window_is_refused_before_any_call(monkeypatch: pytest.MonkeyPatch) -> None:
     cap = _Invoke([])
     monkeypatch.setattr(_impl, "_invoke", cap)
-    out = await _impl.query_leave_impl(SHEET_TOKEN, date_from="2026-08-07", date_to="2026-08-05")
+    out = await _impl.query_leave_impl(APPROVAL_CODE, date_from="2026-08-07", date_to="2026-08-05")
     assert out["ok"] is False
     assert cap.requests == [], "参数不合法时不该打出任何请求"
 
