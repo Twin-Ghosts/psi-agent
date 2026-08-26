@@ -88,7 +88,9 @@ def _form(start: str, end: str, kind: str = "年假", reason: str = "") -> str:
     return json.dumps(widgets, ensure_ascii=False)
 
 
-def _detail(applicant: str, form: str, status: str = "APPROVED") -> dict[str, Any]:
+def _detail(applicant: str, form: str, status: str | int = "APPROVED") -> dict[str, Any]:
+    """One instance detail. ``status`` takes both shapes Feishu uses: the string enum from
+    the detail endpoint and the numeric ``process_status`` from the list endpoints."""
     return {"ok": True, "instance_code": "x", "status": status, "applicant": applicant, "form": form}
 
 

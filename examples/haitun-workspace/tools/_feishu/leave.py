@@ -216,7 +216,8 @@ async def _list_instance_codes(approval_code: str, start_ms: str, end_ms: str, u
         res = await _core._invoke(request, user_key=user_key)
         if not res.get("ok"):
             return [], str(res.get("error") or res.get("message") or "列审批实例失败")
-        data = res.get("data") if isinstance(res.get("data"), dict) else {}
+        payload = res.get("data")
+        data: dict[str, Any] = payload if isinstance(payload, dict) else {}
         # 返回在 instance_code_list 键下(不是 items),而且只有 code 没有内容。
         page = data.get("instance_code_list") or []
         codes.extend(str(code) for code in page if code)
