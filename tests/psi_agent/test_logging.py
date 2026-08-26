@@ -25,6 +25,17 @@ def _reset_logging_state(monkeypatch: pytest.MonkeyPatch) -> Any:
     _logging._file_handler_id = None
 
 
+def _read_debug_log(root: Path) -> str:
+    """Concatenate the per-PID debug logs under *root*.
+
+    The filename carries the writer's PID, so the exact name is only known at
+    runtime — glob rather than name it.
+    """
+    files = sorted((root / "logs").glob("psi-debug-*.log"))
+    assert files, f"no debug log written under {root / 'logs'}"
+    return "\n".join(f.read_text(encoding="utf-8") for f in files)
+
+
 def test_setup_logging_default_info() -> None:
     handler_id = setup_logging(verbose=False)
     assert isinstance(handler_id, int)
@@ -70,7 +81,7 @@ def test_file_sink_takes_only_listed_modules(tmp_path: Path, monkeypatch: pytest
 
     # ``enqueue=True`` hands records to a worker; remove() flushes and joins it.
     logger.remove()
-    text = (tmp_path / "logs" / "psi-debug.log").read_text(encoding="utf-8")
+    text = _read_debug_log(tmp_path)
     assert "from-a-listed-module" in text
     assert "from-an-unlisted-module" not in text
 
@@ -141,7 +152,31 @@ def test_stderr_removal_does_not_wipe_the_file_sink(tmp_path: Path, monkeypatch:
     logger.debug("survives-setup")
     logger.remove()
 
-    assert "survives-setup" in (tmp_path / "logs" / "psi-debug.log").read_text(encoding="utf-8")
+    assert "survives-setup" in _read_debug_log(tmp_path)
+
+
+def test_log_filename_is_per_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two processes in one container must not share a log file.
+
+    Production's ``launch-gateway.sh`` runs ``psi-agent gateway`` and
+    ``psi-agent channel feishu`` side by side, and the two modules worth
+    observing sit in different processes. Sharing a path drops lines —
+    ``enqueue=True`` only serialises writers within a process, and after
+    rotation the losers write on into a renamed inode. Measured: 586 of 600
+    lines survived with two processes and no rotation at all.
+    """
+    monkeypatch.setenv("PSI_APPDATA", str(tmp_path))
+    monkeypatch.setenv("PSI_DEBUG_MODULES", "tests.psi_agent.test_logging")
+
+    assert debug_log_path().endswith(f"psi-debug-{os.getpid()}.log")
+
+    setup_logging(verbose=False)
+    logger.debug("pid-scoped")
+    logger.remove()
+
+    written = list((tmp_path / "logs").glob("psi-debug-*.log"))
+    assert len(written) == 1
+    assert str(os.getpid()) in written[0].name
 
 
 @pytest.mark.parametrize(
@@ -162,14 +197,18 @@ def test_debug_modules_parsing(raw: str, expected: list[str], monkeypatch: pytes
 
 def test_debug_log_path_priority(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Explicit path wins over AppData; AppData wins over platformdirs."""
+    pid = os.getpid()
     monkeypatch.setenv("PSI_APPDATA", str(tmp_path))
-    assert debug_log_path() == os.path.join(str(tmp_path), "logs", "psi-debug.log")
+    assert debug_log_path() == os.path.join(str(tmp_path), "logs", f"psi-debug-{pid}.log")
 
     monkeypatch.setenv("PSI_DEBUG_LOG_PATH", "/var/log/psi/explicit.log")
     assert debug_log_path() == "/var/log/psi/explicit.log"
 
+    monkeypatch.setenv("PSI_DEBUG_LOG_PATH", "/var/log/psi/psi-{pid}.log")
+    assert debug_log_path() == f"/var/log/psi/psi-{pid}.log"
+
     monkeypatch.delenv("PSI_DEBUG_LOG_PATH")
     monkeypatch.delenv("PSI_APPDATA")
     fallback = debug_log_path()
-    assert fallback.endswith(os.path.join("logs", "psi-debug.log"))
+    assert fallback.endswith(os.path.join("logs", f"psi-debug-{pid}.log"))
     assert "Haitun" in fallback

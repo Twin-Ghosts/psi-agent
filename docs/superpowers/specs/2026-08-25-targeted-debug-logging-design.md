@@ -2,9 +2,9 @@
 
 **描述：** 给 `_logging.py` 加按模块定向调级能力，DEBUG 只进一个自带轮转的文件 sink，`docker logs` 保持 INFO 不变。目标是下次 thinking 泄漏复现时能直接看到上游 SSE 的原始字段，从而分辨「模型从 `content` 直出自我对话」与「模型走 `reasoning_content` 而我们只读 `reasoning` 丢了」。**本任务只做可观测性，不修泄漏本身。**
 
-**版本号：** 1.0
+**版本号：** 1.2
 
-**状态：** 代码已实现，本机质量门通过；V7/V8（生产实测 + 镜像核验）待上线后验证
+**状态：** 代码已实现，本机质量门通过；V7/V8（生产实测 + 镜像核验）与 V10 的多进程并发那一半待上线后验证
 
 **适用范围：** psi-agent 日志基础设施（`src/psi_agent/_logging.py`），生产为新加坡节点 account.genuineknowledge.cn 的 `psi-agent-gateway` 容器
 
@@ -25,7 +25,7 @@
 ## 结论先行
 
 1. **加一个环境变量 `PSI_DEBUG_MODULES`**，填模块名（逗号分隔）就把这些模块的 DEBUG 写进文件，不填则与今天逐字节等价。改它只需重启容器，不重建镜像。
-2. **DEBUG 只进 `{appdata}/logs/psi-debug.log`**，20MB × 10 份自动轮转压缩，磁盘上限 200MB。`docker logs` 仍是 INFO，一行不多 —— docker json-file 没有轮转，绝不能让它涨。
+2. **DEBUG 只进 `{appdata}/logs/psi-debug-<pid>.log`**，每份 20MB、保留 10 份、gz 压缩，单进程磁盘上限 200MB。**一个进程一个文件**：生产 gateway 容器里 `gateway` 与 `channel feishu` 并排跑，而要观测的两个模块分居其中；共用一个路径实测 600 行只落盘 586 行。`docker logs` 仍是 INFO，一行不多 —— docker json-file 没有轮转，绝不能让它涨。
 3. **SSE 日志额外打一行永不截断的字段清单**，因为现有日志截断到 1000 字符，content 一长 `reasoning` 键就被截掉，而「键不存在」与「键被截断」正是本次要分辨的东西。
 4. **顺带修一个文档与代码不一致**：`_logging.py` docstring 与 `AGENTS.md:219` 都写「批量模式恒 DEBUG」，但 `_run.py:115` 早在 PR #625（`ea53f35b`）就改成了 `verbose=False`。生产跑的正是批量模式 —— 这是现场三处日志全空的直接原因之一。
 5. **不做脱敏**，靠默认关闭 + 自动删除 + 文档写明风险控制。打码与「看模型原始输出」直接矛盾。
@@ -82,9 +82,10 @@ def setup_logging(*, verbose: bool = False) -> int:
 | V4 | one-shot 与批量模式语义不被破坏 | 现有 `tests/psi_agent/test_logging.py` 两条全绿；新增一条断言二次调用不重复装文件 sink |
 | V5 | 文件 sink 带轮转与保留上限 | 单测断言传给 `logger.add` 的 `rotation`/`retention`/`compression` 参数值 |
 | V6 | SSE 字段清单行能分辨 (a)/(b) 两种假设 | 单测：构造只有 `content` 的 delta → 断言输出含 `reasoning=ABSENT`；构造只有 `reasoning_content` 的 delta → 断言含 `reasoning_content=<n>ch` 且 `reasoning=ABSENT` |
-| V7 | 生产开启后，`psi-debug.log` 里真的出现目标字段 | 上线后进容器 `grep 'delta keys' /…/logs/psi-debug.log`，人工确认三个字段名可见 |
+| V7 | 生产开启后，日志里真的出现目标字段 | 上线后进容器 `grep 'delta keys' /…/logs/psi-debug-*.log`，人工确认三个字段名可见 |
 | V8 | 镜像内产物与 git 一致 | 三层核验（见 A 段），第三层验镜像内 `_logging.py` 含新代码 |
 | V9 | `uv run ty check .` 不引入新诊断 | main 基线 0 条（Windows 本机额外 2 条 `os.killpg` 平台差异不计） |
+| V10 | 同容器多进程各写各的文件，不互相丢行 | 单测：断言路径以本进程 PID 结尾，且写入后 `logs/` 下只有一个文件、文件名含 `os.getpid()` |
 
 ### 3. 明确不做什么
 
@@ -125,7 +126,7 @@ setup_logging(verbose)
   └─ sink 2: file      level = "DEBUG"                       ← 新增，默认不装
                        filter = {模块: "DEBUG"} 白名单
                        rotation="20 MB", retention=10, compression="gz"
-                       → {appdata}/logs/psi-debug.log
+                       → {appdata}/logs/psi-debug-<pid>.log（一进程一文件）
 ```
 
 代价：看定向日志要进容器 `tail` 文件，不能只用 `docker logs`。已接受。
@@ -193,13 +194,17 @@ Python 标准 `logging` 的常规做法是 `logging.getLogger("pkg.mod").setLeve
 
 | 文件 | 改动 |
 |---|---|
-| `src/psi_agent/_logging.py` | 新增 `debug_modules()` 解析环境变量、`debug_log_path()` 解析落盘路径、`_file_handler_id` 守卫、`_setup_debug_file_sink()`；`setup_logging` 在有定向模块时额外装文件 sink（**在** stderr 安装之后） |
+| `src/psi_agent/_logging.py` | 新增 `debug_modules()` 解析环境变量、`debug_log_path()` 解析落盘路径（文件名带 PID）、`_file_handler_id` 守卫、`_setup_debug_file_sink()`；`setup_logging` 在有定向模块时额外装文件 sink（**在** stderr 安装之后） |
 | `src/psi_agent/ai/server.py` | `_CHUNK_LOG_LIMIT` 抬高截断上限至 8000；新增 `_describe_delta()` 与 `delta keys:` 字段清单行 |
 | `tests/psi_agent/test_logging.py` | 12 条新增：未配置零副作用、白名单过滤、stderr 级别不变、one-shot、轮转参数、顺序回归、解析与路径优先级 |
 | `tests/psi_agent/ai/test_server.py` | 10 条新增：(a)/(b) 判据、超长 content 不截断、不回显原文、未知字段、tool_calls 计数、5 种畸形载荷、端到端每 chunk 一条 |
 | `AGENTS.md` | 「日志约定」修正失效描述 + 补定向调级与环境变量说明 |
 
-**路径解析。** 因 `setup_logging` 早于且不能 await `resolve_appdata_root`，文件 sink 自己算一遍：`PSI_DEBUG_LOG_PATH`（显式绝对路径）→ `PSI_APPDATA/logs/psi-debug.log` → `platformdirs.user_data_dir("Haitun")/logs/psi-debug.log`。中间那档与 `_appdata.py:29` 的 env 分支同源，故容器里配了 `PSI_APPDATA` 就自动落在挂载卷上。给显式路径变量是为了兜住「`PSI_APPDATA` 指向容器层」的情形 —— 那会占宿主机磁盘。
+**路径解析。** 因 `setup_logging` 早于且不能 await `resolve_appdata_root`，文件 sink 自己算一遍：`PSI_DEBUG_LOG_PATH`（显式路径，可含 `{pid}`）→ `PSI_APPDATA/logs/psi-debug-<pid>.log` → `platformdirs.user_data_dir("Haitun")/logs/psi-debug-<pid>.log`。中间那档与 `_appdata.py:29` 的 env 分支同源，故容器里配了 `PSI_APPDATA` 就自动落在挂载卷上。给显式路径变量是为了兜住「`PSI_APPDATA` 指向容器层」的情形 —— 那会占宿主机磁盘。
+
+**一个进程一个文件（V10）。** 动手部署时才发现生产 `launch-gateway.sh` 在**一个容器里起两个进程**（`psi-agent gateway` 与 `psi-agent channel feishu`，`docker top` 已确认），而要观测的 `psi_agent.ai.server` 与 `psi_agent.channel._core` 恰好分居其中。两进程写同一路径会静默丢行：`enqueue=True` 只在单进程内串行化，轮转后落败的一方还会继续往被改名的 inode 里写。写了个探针实测，**600 行只落盘 586 行，且轮转都没触发**。于是文件名带上 PID。
+
+PID 由本项目自己拼，不用占位符：loguru 的 file sink 只替换 `{time}`（`loguru._file_sink.FileSink._create_path` 里 `self._path.format_map({"time": ...})`），我一开始误以为支持 `{process}`，首次写入直接 `KeyError`，6 条测试挂在这上面。显式路径里的 `{pid}` 用 `str.replace` 而非 `format` 替换 —— 运维给的路径不是格式串，里面偶然出现的花括号不该抛异常。
 
 刻意**不** import `_appdata.py`：那是 async 模块，且 `_logging.py` 目前零项目内依赖，保持它在依赖图底层。代价是 `"Haitun"` 这个 appname 字面量出现在两处，用注释交叉引用锁住。
 
@@ -215,11 +220,11 @@ Python 标准 `logging` 的常规做法是 `logging.getLogger("pkg.mod").setLeve
 
 ### 隐私与使用纪律
 
-开启后 `psi-debug.log` 里会有**真实对话内容与 open_id**，不做脱敏 —— 打码与「看模型原始输出」直接矛盾，自我对话本身就是要看的东西。靠三件事控制：
+开启后 `psi-debug-<pid>.log` 里会有**真实对话内容与 open_id**，不做脱敏 —— 打码与「看模型原始输出」直接矛盾，自我对话本身就是要看的东西。靠三件事控制：
 
 1. 默认关闭，需显式配置环境变量。
-2. `retention=10` 自动删除旧文件，磁盘上限 200MB/容器。
-3. 本节写明纪律：**查完即关**；文件不得复制出生产机、不得贴入工单或聊天；只在 `psi-agent-gateway` 一个容器开（7 个容器全开是 1.4G）。
+2. `retention=10` 自动删除旧文件，磁盘上限 200MB **每进程**。
+3. 本节写明纪律：**查完即关**；文件不得复制出生产机、不得贴入工单或聊天；只在 `psi-agent-gateway` 一个容器开 —— 该容器两个进程，即约 400MB；7 个容器全开会到 2.8G 量级。
 
 ### 上线与回滚
 
@@ -251,7 +256,9 @@ Python 标准 `logging` 的常规做法是 `logging.getLogger("pkg.mod").setLeve
 
 ### 待生产验证项
 
-V7（`psi-debug.log` 里真的出现目标字段）与 V8（镜像内产物核验）只能在上线后判定，本机无法覆盖。文档交付时须如实标注其状态。
+V7（日志里真的出现目标字段）与 V8（镜像内产物核验）只能在上线后判定，本机无法覆盖。文档交付时须如实标注其状态。
+
+V10 的单测只验「本进程写本进程的文件」这一半 —— 真的两个进程并发写、互不丢行，要到生产 gateway 容器里 `ls logs/` 见到两个 PID 文件才算实证。
 
 ***
 
@@ -261,6 +268,7 @@ V7（`psi-debug.log` 里真的出现目标字段）与 V8（镜像内产物核�
 |---|---|---|
 | 1.0 | 2026-08-25 | 初稿：定向 DEBUG + 文件轮转 + SSE 字段清单行 |
 | 1.1 | 2026-08-25 | 实现完成。补记一处实现期发现的顺序缺陷（见下）；`retention` 定为 10（负责人要求，从 3 上调，理由是「还没查到就没了」）|
+| 1.2 | 2026-08-26 | 部署前发现生产一容器两进程，改为一进程一文件（V10）。原单文件版已随 `7f45d2fe` 合入 main，本次单独修正 |
 
 ### 实现期补记：`logger.remove()` 的顺序
 

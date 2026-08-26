@@ -19,11 +19,23 @@ _APPDATA_ENV = "PSI_APPDATA"
 _APPDATA_APPNAME = "Haitun"
 
 _LOG_DIRNAME = "logs"
-_LOG_FILENAME = "psi-debug.log"
+# One file per process, deliberately: the PID goes in the name. A container
+# often runs several psi-agent processes (production's ``launch-gateway.sh``
+# starts ``gateway`` and ``channel feishu`` side by side, and the two modules
+# worth observing live in different ones). Pointing them at one path loses
+# lines: ``enqueue=True`` only serialises writers inside a single process, and
+# after rotation the losers keep writing to a renamed inode. Measured 586 of
+# 600 lines surviving with two processes and no rotation at all.
+#
+# The PID is interpolated by us, not by loguru: its file sink only substitutes
+# ``{time}`` (see ``loguru._file_sink.FileSink._create_path``), so a literal
+# ``{process}`` in the path raises ``KeyError`` on the first write.
+_LOG_FILENAME_TEMPLATE = "psi-debug-{pid}.log"
 
 # docker's json-file driver has no rotation in this deployment, so the stderr
 # sink must never carry DEBUG. The file sink rotates itself: 20 MB per file, 10
-# files kept, gzipped — a 200 MB ceiling per container.
+# files kept, gzipped — a 200 MB ceiling *per process*, since each process gets
+# its own file (see ``_LOG_FILENAME_TEMPLATE``).
 _ROTATION = "20 MB"
 _RETENTION = 10
 _COMPRESSION = "gz"
@@ -56,7 +68,13 @@ def debug_log_path() -> str:
     """Where the DEBUG file sink writes.
 
     Priority: ``PSI_DEBUG_LOG_PATH`` (explicit file path) → ``PSI_APPDATA``
-    ``/logs/psi-debug.log`` → ``platformdirs`` user-data dir.
+    ``/logs/psi-debug-<pid>.log`` → ``platformdirs`` user-data dir.
+
+    The returned path always names one process: the derived forms end in the
+    caller's PID, and an explicit ``PSI_DEBUG_LOG_PATH`` may contain a ``{pid}``
+    placeholder, which is substituted here. Without it the override is used
+    verbatim — fine for a single writer, lossy for several (see
+    ``_LOG_FILENAME_TEMPLATE``).
 
     The explicit override exists because ``PSI_APPDATA`` may point inside the
     container layer, where a rotating log eats host disk. It also compensates
@@ -65,12 +83,15 @@ def debug_log_path() -> str:
     which means the ``--appdata`` CLI argument is invisible here. Only the env
     var is.
     """
+    pid = os.getpid()
     explicit = os.environ.get(_DEBUG_LOG_PATH_ENV, "").strip()
     if explicit:
-        return explicit
+        # ``replace`` rather than ``format``: an operator-supplied path is not a
+        # format string, and a stray brace in it must not raise.
+        return explicit.replace("{pid}", str(pid))
     appdata = os.environ.get(_APPDATA_ENV, "").strip()
     root = appdata or platformdirs.user_data_dir(appname=_APPDATA_APPNAME, appauthor=False)
-    return os.path.join(root, _LOG_DIRNAME, _LOG_FILENAME)
+    return os.path.join(root, _LOG_DIRNAME, _LOG_FILENAME_TEMPLATE.format(pid=pid))
 
 
 def setup_logging(*, verbose: bool = False) -> int:

@@ -225,9 +225,9 @@ SSE 流中的特殊字段：
 | 环境变量 | 作用 |
 |---|---|
 | `PSI_DEBUG_MODULES` | 模块名白名单，逗号或分号分隔。**留空即不安装文件 sink**，行为与没有此功能时逐字节一致 |
-| `PSI_DEBUG_LOG_PATH` | 显式落盘文件路径（可选），优先于下面的推导 |
+| `PSI_DEBUG_LOG_PATH` | 显式落盘文件路径（可选），优先于下面的推导。可含 `{pid}` 占位符，由本项目替换 |
 
-落盘路径优先级：`PSI_DEBUG_LOG_PATH` → `PSI_APPDATA/logs/psi-debug.log` → `platformdirs` 用户数据目录。轮转参数写死在 `_logging.py`：**20 MB × 10 份、gz 压缩**，即单容器磁盘上限约 200 MB。
+落盘路径优先级：`PSI_DEBUG_LOG_PATH` → `PSI_APPDATA/logs/psi-debug-<pid>.log` → `platformdirs` 用户数据目录。轮转参数写死在 `_logging.py`：**每份 20 MB、保留 10 份、gz 压缩**，即单进程磁盘上限约 200 MB。
 
 排查 thinking 泄漏时的典型配置：
 
@@ -235,14 +235,15 @@ SSE 流中的特殊字段：
 PSI_DEBUG_MODULES=psi_agent.ai.server,psi_agent.channel._core
 ```
 
-四条约束，改动前请先读：
+五条约束，改动前请先读：
 
 1. **stderr 级别绝不受这个变量影响。** 部署环境的 docker log driver 是 `json-file` 且 **opts 为空——即 `docker logs` 那份没有任何轮转**。所以定向 DEBUG 只进文件 sink，让 `docker logs` 的量保持不变。别把定向 DEBUG 接回 stderr。
 2. **`setup_logging` 里 `logger.remove()` 必须先于文件 sink 安装。** 裸 `remove()` 会清掉**所有** handler；顺序颠倒会在装完文件 sink 后立刻把它删掉，而守卫 `_file_handler_id` 已置位，于是整个进程再也装不上——且不报错。已有回归测试钉住。
 3. **两个 sink 各用独立守卫**（`_handler_id` / `_file_handler_id`）。它们的输入不同：stderr 看调用方的 `verbose`，文件看进程环境。共用守卫会让“谁先调用”意外决定文件 sink 装不装。
 4. **`_logging.py` 刻意不 import `_appdata.py`**：后者是 async 模块，而 `_logging` 处在依赖图最底层且零项目内依赖。代价是 appname 字面量 `"Haitun"` 在两处重复，靠交叉注释锁住。另外 `setup_logging` 是同步的、且在 `resolve_appdata_root()` **之前**执行（见 `gateway/__init__.py`），所以它**看不到 `--appdata` 命令行参数**，只认环境变量。
+5. **一个进程一个文件，文件名带 PID。** 一个容器里常有多个 psi-agent 进程：生产的 `launch-gateway.sh` 是 `psi-agent gateway` 与 `psi-agent channel feishu` 并排跑，而要观测的两个模块恰好分居其中。共用一个路径会**丢行**——`enqueue=True` 只在单进程内串行化，轮转后落败的一方还会继续往被改名的 inode 里写。实测两进程写 600 行、轮转都没触发，磁盘上只剩 586 行。PID 由本项目自己拼进文件名：loguru 的 file sink **只替换 `{time}`**（见 `loguru._file_sink.FileSink._create_path`），路径里留个 `{process}` 会在首次写入时 `KeyError`。
 
-**隐私风险（开启前必读）**：`psi-debug.log` 里会有**真实对话内容与用户 open_id**，且刻意**不做脱敏**——打码与“看模型原始输出”直接矛盾，自我对话本身就是要看的东西。纪律：默认关闭；**查完即关**；文件不得复制出生产机、不得贴入工单或聊天；只在需要的那一个容器开（生产一机 7 容器，全开是 1.4 G）。靠 `retention=10` 自动删除旧文件兜底。
+**隐私风险（开启前必读）**：`psi-debug-<pid>.log` 里会有**真实对话内容与用户 open_id**，且刻意**不做脱敏**——打码与“看模型原始输出”直接矛盾，自我对话本身就是要看的东西。纪律：默认关闭；**查完即关**；文件不得复制出生产机、不得贴入工单或聊天；只在需要的那一个容器开。磁盘上限按**进程**算，不是按容器：gateway 容器有两个进程，开一个容器就是约 400 MB；生产一机 7 容器全开会到 2.8 G 量级。靠 `retention=10` 自动删除旧文件兜底。
 
 ## 关键注意事项（踩坑经验）
 
