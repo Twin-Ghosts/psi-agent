@@ -20,6 +20,32 @@ derivation, YAML frontmatter, timestamps, link indexing). Do not hand-craft wiki
 files with the generic `write`/`edit`/`bash` tools — let the tools keep the
 format and link graph consistent.
 
+## 两个库:个人的 与 全组织共享的
+
+每个用户的 Session 有自己的 workspace,所以一页写在谁的目录里就只有谁看得到 ——
+个人笔记本该如此,但**组织级**的知识每人各存一份就毫无意义:甲写的页乙查不到。
+所以有两个库:
+
+| | 在哪 | 谁看得到 |
+|---|---|---|
+| 个人库 | `<workspace>/wiki/` | 只有本人的 Session |
+| **共享库** | `PSI_WIKI_SHARED_DIR` 指的目录 | **所有人**,可读**也可写** |
+
+- **读操作**(`wiki_read` / `_search` / `_list` / `_links`)自动跨两库,不必指定去哪找。
+  返回里每页带 `scope`(`personal` / `shared`),据此就知道它是不是全员可见。
+- **写操作**跟着页面走:`wiki_write` 的 `scope="auto"`(默认)会就地改那一页 ——
+  改共享页就是为所有人改掉,不会分叉出一份私有副本悄悄遮蔽它。
+- **新页默认进个人库**。要发布成全员可见,显式传 `scope="shared"` —— 这是一个动作,
+  不是随手记笔记的副作用。
+- 同名时**个人页遮蔽共享页**:workspace 是本人控制的东西。
+- 没配共享库时 `scope="shared"` 会**报错**而不是静默写成个人页(否则你以为发布了、
+  别人却查不到)。
+
+什么该进共享库:组织结构与汇报关系、跨人的口径与约定、团队级 SOP、公司周期性事实。
+什么留个人库:自己的草稿、只与本人相关的上下文、还没定稿的判断。
+
+**删共享页影响所有人** —— `wiki_delete` 的返回会告诉你删掉的是哪一边,删之前看清楚。
+
 The pattern has **three layers**: raw sources (read, never rewrite) → the
 `wiki/*.md` pages (the durable synthesis layer) → the **schema layer** in
 [SCHEMA.md](SCHEMA.md), which defines page anatomy, naming/linking rules, the

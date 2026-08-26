@@ -40,6 +40,7 @@ async def wiki_write(
     tags: str = "",
     aliases: str = "",
     overwrite: bool = True,
+    scope: str = "auto",
 ) -> str:
     """Create or update a Markdown wiki page in the knowledge base.
 
@@ -50,15 +51,26 @@ async def wiki_write(
     derived from ``title``; writing the same title again updates that page and
     preserves its original creation time.
 
+    Pages live in one of two libraries: the caller's own (private to this Session) and
+    an **org-wide shared** one that every Session reads. Editing follows the page —
+    correcting a shared page corrects it for everybody rather than forking a private
+    copy that would silently shadow it.
+
     Args:
         title: The page title. Its slug (lowercased, dash-joined) is the filename.
         content: The page body in Markdown. Use ``[[Title]]`` to link other pages.
         tags: Comma- or space-separated tags for filtering/search (e.g. "transformers, attention").
         aliases: Comma- or space-separated alternate names that ``wiki_search`` also matches.
         overwrite: When False, refuse to replace an existing page (default True).
+        scope: Which library to write to. ``auto`` (default) edits an existing page where
+            it already lives and creates new pages as personal; ``shared`` publishes to the
+            org-wide library — use it for knowledge that is about the organization rather
+            than about you (org charts, shared conventions, team-wide SOPs); ``personal``
+            forces your own workspace. ``shared`` requires the deployment to configure a
+            shared library, else it errors instead of quietly writing a private page.
 
     Returns:
-        JSON with ok, slug, path, created (bool), title, tags, links — or
+        JSON with ok, slug, path, scope, created (bool), title, tags, links — or
         ok=false with a message on failure.
     """
     result = await _w.wiki_write_impl(
@@ -67,6 +79,7 @@ async def wiki_write(
         tags=tags,
         aliases=aliases,
         overwrite=overwrite,
+        scope=scope,
     )
     return _w.dumps_result(result)
 
