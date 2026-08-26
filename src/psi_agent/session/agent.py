@@ -247,6 +247,16 @@ class SessionAgent:
         """
         return self._workspace_path
 
+    @property
+    def session_id(self) -> str:
+        """This Session's id — the identity ``session.live_agent`` registers under.
+
+        Read-only accessor for ``serve_session``: the id lives on the Conversation,
+        and out-of-band resumes address an agent by the same id a tool reads from
+        ``runtime_context.get_session_id()``.
+        """
+        return self._conversation.session_id
+
     # -- factory --------------------------------------------------------------
 
     @classmethod

@@ -24,11 +24,20 @@ back as the user takes to approve, so the only question is *who* waits. Never th
 a tool call runs inside the Session's turn lock, so a tool that waits for minutes makes
 everything the user says queue behind it — that is what "the bot is dead" looks like.
 ``feishu_auth_collect`` therefore hands the waiting to a task detached from the turn and
-returns immediately; when the code lands, that task exchanges it and DMs the user. Use it
-on every path where the code is still outstanding — after a ``link_auto`` link, and in the
-``<feishu_card_action>`` turn right after a card tap. ``feishu_auth_check`` looks once and
-returns, for the turn where the user reports back. No tool waits inside the turn — that is
-deliberate, not an omission.
+returns immediately. Use it on every path where the code is still outstanding — after a
+``link_auto`` link, and in the ``<feishu_card_action>`` turn right after a card tap.
+``feishu_auth_check`` looks once and returns, for the turn where the user reports back. No
+tool waits inside the turn — that is deliberate, not an omission.
+
+**Finishing the work the authorization was for** — a granted token is not the point; the
+document the user wanted under their own name is. The background collector therefore does
+not merely announce success: it **starts a new turn** on the same session
+(``psi_agent.session.live_agent``) carrying a ``<feishu_auth_granted>`` block, and that
+turn redoes the blocked step as the user and reports the result. Two consequences for the
+turn that *starts* a collector: it must not promise "I'll continue once you approve" —
+something else keeps that promise — and it must not narrate the wait at all, because a
+"waiting for your authorization" line typically arrives after the finished reply and
+reads as a contradiction.
 
 **How to ask** — call ``feishu_auth_request`` and let it choose. There are three ways to
 ask, in descending order of how little the user has to do, and it returns the first one
@@ -217,12 +226,19 @@ async def feishu_auth_collect(user_key: str = "", timeout_seconds: int = 600) ->
     and the bot looks dead. This hands the waiting to a task detached from the turn, so
     the turn ends immediately and the conversation stays responsive.
 
-    **Finish your turn right after this returns.** When the code arrives the background
-    task exchanges it for the token by itself and DMs the user that they can continue —
-    you do not need to be waiting for that to happen. Call it again any time to read the
-    progress (``status``: ``watching``/``granted``/``failed``/``timeout``); a second call
-    never starts a second collector, because the relay hands the code out once and two
-    collectors would race for it.
+    **Finish your turn right after this returns, and do not narrate the wait.** When the
+    code arrives the background task exchanges it for the token and then **starts a fresh
+    turn that finishes the task the authorization was for**, so the user gets the thing
+    they asked for rather than a receipt. Telling them "I'm waiting for your
+    authorization" is not just redundant, it usually lands *after* that finished reply
+    (approval takes seconds), leaving two contradictory messages in the chat. Say nothing
+    about waiting: end a card-callback turn with zero assistant text, and on the
+    ``link_auto`` path send just the link and what it is for.
+
+    Call it again any time to read the progress (``status``:
+    ``watching``/``granted``/``failed``/``timeout``); a second call never starts a second
+    collector, because the relay hands the code out once and two collectors would race
+    for it.
 
     On ``background=False`` the wait could not be detached: end the turn anyway and use
     ``feishu_auth_check`` in a later turn instead of blocking here.

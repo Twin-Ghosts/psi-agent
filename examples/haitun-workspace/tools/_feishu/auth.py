@@ -22,6 +22,9 @@ import _oauth_receiver as _oauth_rx
 import anyio
 from loguru import logger
 
+from psi_agent.session import live_agent
+from psi_agent.session.runtime_context import get_session_id
+
 # Granted alongside every request so a token can be refreshed instead of
 # re-authorized; never itself a capability the caller has to ask for.
 _OFFLINE_SCOPE = "offline_access"
@@ -638,21 +641,71 @@ async def auth_check_impl(user_key: str = "") -> dict[str, Any]:
     return await _core.auth_complete_impl(got.get("code", ""), user_key)
 
 
-async def _notify_auth_outcome(user_key: str, state: _auth_watch.WatchState) -> None:
-    """把后台收码的结果私聊告诉用户。
+_RESUME_EVENT = "feishu_auth_granted"
 
-    后台任务不在任何对话轮次里, 没有「工具返回值」可以让模型转述, 所以这条消息是用户
-    唯一的信号: 不发, 授权就是悄悄成功 (或悄悄失败) 的, 用户只会以为机器人没反应。
+_RESUME_INSTRUCTION = (
+    "这位用户的飞书授权刚刚到账, 你现在有他的 user_access_token 了。"
+    "**接着做他原来要你做的那件事** —— 就是上面为之请求授权的那件 —— 用他的身份重做一遍, "
+    "并把结果告诉他。别只说「授权成功」就停下: 用户等的是那件事做完, 不是一句回执。"
+    "若那件事已经做完了 (比如你已经重建过文档), 只回一句简短确认即可, 不要重复做。"
+    "本轮没有人在旁听你的输出, 所以要说的话必须用 feishu_message_send 私聊发给他 "
+    "(receive_id 用他的 open_id), 直接返回文本他收不到。"
+)
+
+
+def _resume_turn_content(user_key: str, state: _auth_watch.WatchState) -> str:
+    """给续跑那一轮的消息: 说明发生了什么 + 要它接着做原来的事。"""
+    return (
+        live_agent.resume_payload(
+            _RESUME_EVENT,
+            {
+                "user_key": user_key,
+                "open_id": user_key,
+                "status": state.status,
+                "detail": state.message,
+            },
+        )
+        + "\n"
+        + _RESUME_INSTRUCTION
+    )
+
+
+async def _notify_auth_outcome(user_key: str, state: _auth_watch.WatchState) -> None:
+    """收码收完之后收尾: 成功就**接着把原来那件事做完**, 没成功才只报一句。
+
+    后台任务不在任何对话轮次里, 所以它既没有模型也没有工具循环 —— 光发一条「授权成功」
+    等于把用户真正要的那件事 (把文档建在他名下) 永久留在上一轮里没人做, 用户被告知
+    「我接着做」却什么也没发生。所以成功路径要的不是一条消息而是**一个回合**: 借
+    ``live_agent`` 在原 session 上起一轮, 让模型带着上文和工具自己做完并回话。
+
+    失败/超时没有「接着做」可言, 仍旧只私聊说明, 让用户决定要不要再来一次。
+
+    起不了回合时 (没有在服务的 live agent, 例如单进程直连或 session 已停) 退回原来的
+    私聊回执: 说一句总比彻底静默好, 但要如实说需要用户再招呼一声。
     """
-    if not user_key.startswith("ou_"):
-        # 只有 open_id 能私聊。default 槽位 (本机单用户) 没有收件人, 不必也无法回告。
-        return
     if state.status == _auth_watch.STATUS_GRANTED:
-        text = "授权成功 ✅ 已经拿到你的授权, 刚才没做完的事我接着做。"
+        session_id = get_session_id()
+        resumed = False
+        if session_id:
+            try:
+                resumed = await live_agent.resume_session_turn(
+                    session_id,
+                    _resume_turn_content(user_key, state),
+                )
+            except Exception as exc:  # 续跑失败不能连回执也吞掉, 否则用户什么都收不到
+                logger.error(f"Feishu auth resume turn failed for {user_key!r}: {exc!r}")
+        if resumed:
+            # 那一轮自己会把话说给用户 (它有 feishu_message_send), 这里再发一条就是双回复。
+            return
+        logger.warning(f"Feishu auth granted for {user_key!r} but no turn could be resumed; falling back to a DM")
+        text = "授权成功 ✅ 已经拿到你的授权。回我一句, 我就接着把刚才那件事做完。"
     elif state.status == _auth_watch.STATUS_TIMEOUT:
         text = "还没收到你的授权 —— 授权页上的「同意授权」可能没点到, 或者页面没跳回来。回我一句我再发一张新的授权卡。"
     else:
         text = f"授权没能完成: {state.message} 回我一句我们再试一次。"
+    if not user_key.startswith("ou_"):
+        # 只有 open_id 能私聊。default 槽位 (本机单用户) 没有收件人, 不必也无法回告。
+        return
     await _core.send_message_impl(user_key, text, "open_id")
 
 
@@ -661,7 +714,11 @@ async def auth_collect_impl(user_key: str = "", timeout_seconds: int = 600) -> d
 
     等待绝不能放在工具调用里: 工具调用发生在
     SessionAgent 的 turn 内, turn 持锁, 于是用户在这几分钟里说的话全排队 (表现就是
-    「机器人卡死」); 这边起一个脱离本轮的任务去等, 工具立刻返回, 码回来时后台私聊回告。
+    「机器人卡死」); 这边起一个脱离本轮的任务去等, 工具立刻返回。码回来后由
+    ``_notify_auth_outcome`` 收尾 —— 成功就**起一轮把原来那件事做完**, 不是发一条回执。
+
+    因此本轮**不要播报等待状态**: 码通常几秒就回来, 「正在等你授权」那句话往往比续跑那一轮
+    的回话更晚到, 用户就看到两条自相矛盾的回复。返回值里的 message 把这条讲给模型。
 
     重复调用不会起第二个 watcher: 取件箱取走即删, 两个 watcher 会互相抢码。已经在收的
     直接返回它的进度, 已经收完的返回结果。
@@ -734,10 +791,15 @@ async def auth_collect_impl(user_key: str = "", timeout_seconds: int = 600) -> d
         "already_watching": not started,
         "message": (
             "已在后台等这位用户的授权码, **这一轮就此收尾, 不要再等也不要重复调用** —— "
-            f"最多守 {int(state.remaining)} 秒, 码一到就自动换 token, 并私聊告知用户可以继续. "
-            "这期间用户说什么都能正常回应 (等待不占会话). 想主动确认进度再调一次本工具即可."
+            f"最多守 {int(state.remaining)} 秒, 码一到就自动换 token, 然后**自动起一轮把原来那件事做完**并回话. "
+            "这期间用户说什么都能正常回应 (等待不占会话).\n"
+            "**不要对用户播报等待状态** (「我在后台等你授权」「授权正在等待确认」这类): 码通常几秒就回来, "
+            "这句话往往比续跑那一轮的回话更晚到, 用户就看到两条自相矛盾的回复 —— 先「已授权成功」再「正在等待授权」. "
+            "授权完成后该说什么, 由续跑那一轮来说.\n"
+            "卡片回调那一轮 (<feishu_card_action>): 卡片本身已显示「已选择」, 以**零 assistant 文本**收尾即可. "
+            "刚把 authorize_url 当文本发出去那一轮: 只发链接和它是干什么用的, 同样别加等待播报."
         ),
-        "next_step": "结束本轮; 后台会自己完成授权并回告用户",
+        "next_step": "本轮收尾且不播报等待; 后台会完成授权并自动接着做完原来那件事",
     }
 
 

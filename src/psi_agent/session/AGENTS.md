@@ -362,6 +362,20 @@ provider 只认 `reasoning_content`（any-llm 的 `REASONING_FIELD_NAMES` 首项
 - 多个 schedule 可以并发 sleep，但通过 lock 串行触发
 - 每个 schedule 在加载时独立处理——IO 错误、YAML 解析问题、cron 验证失败都只跳过该 schedule
 
+## 续跑一个回合（`live_agent.py`）
+
+有些活干不完在开始它的那一轮里：飞书授权就是标准例子——授权码何时回来取决于用户何时点「同意授权」，所以等待被交给一个脱离本轮的后台任务（`_feishu_auth_watch.py`），本轮立刻收尾。等它成功时，用户真正要的那件事（把文档建在他名下）还没做，而**已经没有轮次可以做了**：后台任务没有模型、没有工具循环、没有对话。
+
+从后台发一条「授权成功」不能填这个洞——它告诉用户发生了什么，却把原始请求永久留在上一轮没人做；而且机器人自己发的消息不会重新进入 session，没有任何东西会把活捡回来。缺的不是一条消息，而是**一个回合**。
+
+`live_agent` 就是这道窄缝：`serve_session` 期间按 session id 注册活着的 `SessionAgent`，脱离轮次的活用 `resume_session_turn(session_id, content)` 起一轮普通回合。刻意**不做**成通用的「随处跑 agent」：
+
+- **按 session id 索引，不设全局「当前 agent」**：Gateway 一进程多 Session，全局量会续跑到最后注册的那个。调用方传自己从 `runtime_context.get_session_id()` 拿到的 id
+- **注册与「正在服务」同生命周期**（`register` 是上下文管理器）：过期句柄会续跑一个没人听的对话
+- **续跑照样拿 `agent._lock`**：续跑不是特权。真用户的轮次在跑就等它，跳锁会让两轮交错写同一份 conversation
+- **投递是调用方的事**：这里 yield 的 chunk 没人在流式接收（不是任何请求打开的轮次），所以续跑那一轮要说话必须调 `feishu_message_send` 之类的工具——与 `fire: prompt` 的 schedule 同理（见上节）
+- 起不了回合时（无在服务的 live agent）返回 `False`，调用方必须退回它力所能及的方式（通常一条通知），否则活会被静默丢掉
+
 ## Event / Trigger 协议（触发器）
 
 与 schedule 平行：外部推送经 Channel → Session **通用事件管道** → ``TriggerRegistry`` 匹配 agent 包 ``triggers/*/TRIGGER.md`` → ``fire=tool|prompt``。

@@ -20,6 +20,10 @@ if str(TOOLS_DIR) not in sys.path:
 
 _impl: Any = importlib.import_module("_feishu_impl")
 _watch: Any = importlib.import_module("_feishu_auth_watch")
+# 授权那半边的真实命名空间。``_feishu_impl`` 只是把名字再导出一遍, 所以打桩必须打在这里:
+# ``_notify_auth_outcome`` 在**自己模块的 globals** 里解析 live_agent / get_session_id,
+# 打在再导出上不会被它看见 (静默失效, 测试照过)。
+_auth: Any = importlib.import_module("_feishu.auth")
 
 
 async def _instant(value: Any) -> Any:
@@ -1826,6 +1830,133 @@ async def test_auth_collect_survives_a_failing_collector(monkeypatch: pytest.Mon
     assert state.status == _watch.STATUS_FAILED
     assert "relay exploded" in state.message
     assert dms and dms[0][0] == "ou_a"
+
+
+def _granted_pending(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """pending + 一个立刻成功的取码/换码链路 —— 授权成功后的收尾行为专用。"""
+    _pending_gateway(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        _impl._oauth_rx, "poll_gateway", lambda state, timeout_seconds, interval=1.0: _instant({"code": "C"})
+    )
+    monkeypatch.setattr(_impl, "auth_complete_impl", lambda code, user_key="": _instant({"ok": True}))
+
+
+@pytest.mark.asyncio
+async def test_granted_auth_resumes_a_turn_instead_of_only_announcing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """授权到账后必须**接着把原来那件事做完**。
+
+    只发一条「授权成功」是这条链路原来的行为, 它把用户真正要的那件事永久留在上一轮没人做 ——
+    而那条消息还写着「我接着做」。后台任务没有模型也没有工具循环, 所以唯一的出路是起一个回合。
+    """
+    _granted_pending(tmp_path, monkeypatch)
+    monkeypatch.setattr(_impl, "send_message_impl", _record_dm(dms := []))
+    resumed: list[tuple[str, str]] = []
+
+    async def _fake_resume(session_id: str, content: str, *, kind: str = "chat") -> bool:
+        resumed.append((session_id, content))
+        return True
+
+    monkeypatch.setattr(_auth.live_agent, "resume_session_turn", _fake_resume)
+    monkeypatch.setattr(_auth, "get_session_id", lambda: "feishu-ou_a")
+
+    await _impl.auth_collect_impl("ou_a")
+    await _settle(_impl, "ou_a")
+
+    assert _watch.status("ou_a").status == _watch.STATUS_GRANTED
+    assert len(resumed) == 1
+    session_id, content = resumed[0]
+    assert session_id == "feishu-ou_a"
+    # 续跑那一轮得知道是谁授权成功了, 还得被明确要求接着做原来那件事。
+    assert "<feishu_auth_granted>" in content
+    assert "ou_a" in content
+    assert "接着做" in content
+    # 续跑那一轮自己会说话 —— 这里再发一条私聊就正是「两条不同回复」。
+    assert dms == []
+
+
+@pytest.mark.asyncio
+async def test_granted_auth_falls_back_to_a_dm_when_no_turn_can_be_resumed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """没有在服务的 live agent 时 (单进程直连 / session 已停) 不能彻底静默。
+
+    退回私聊, 但必须如实说要用户再招呼一句 —— 不能再承诺「我接着做」, 因为没人会做。
+    """
+    _granted_pending(tmp_path, monkeypatch)
+    monkeypatch.setattr(_impl, "send_message_impl", _record_dm(dms := []))
+    monkeypatch.setattr(_auth.live_agent, "resume_session_turn", lambda *a, **k: _instant(False))
+    monkeypatch.setattr(_auth, "get_session_id", lambda: "feishu-ou_a")
+
+    await _impl.auth_collect_impl("ou_a")
+    await _settle(_impl, "ou_a")
+
+    assert dms and dms[0][0] == "ou_a"
+    assert "回我一句" in dms[0][1]
+
+
+@pytest.mark.asyncio
+async def test_granted_auth_dms_when_resuming_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """续跑本身抛错也不能连回执一起吞掉, 否则用户什么都收不到。"""
+    _granted_pending(tmp_path, monkeypatch)
+    monkeypatch.setattr(_impl, "send_message_impl", _record_dm(dms := []))
+
+    async def _boom(session_id: str, content: str, *, kind: str = "chat") -> bool:
+        raise RuntimeError("resume exploded")
+
+    monkeypatch.setattr(_auth.live_agent, "resume_session_turn", _boom)
+    monkeypatch.setattr(_auth, "get_session_id", lambda: "feishu-ou_a")
+
+    await _impl.auth_collect_impl("ou_a")
+    await _settle(_impl, "ou_a")
+
+    assert _watch.status("ou_a").status == _watch.STATUS_GRANTED
+    assert dms and dms[0][0] == "ou_a"
+
+
+@pytest.mark.asyncio
+async def test_failed_auth_does_not_resume_a_turn(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """超时/失败没有「接着做」可言: 起一轮只会让模型对着一个没成的授权行动。"""
+    _pending_gateway(tmp_path, monkeypatch)
+    monkeypatch.setattr(_impl._oauth_rx, "poll_gateway", lambda state, timeout_seconds, interval=1.0: _instant({}))
+    monkeypatch.setattr(_impl, "send_message_impl", _record_dm(dms := []))
+    resumed: list[str] = []
+    monkeypatch.setattr(
+        _auth.live_agent,
+        "resume_session_turn",
+        lambda session_id, content, **k: (resumed.append(session_id), _instant(True))[1],
+    )
+    monkeypatch.setattr(_auth, "get_session_id", lambda: "feishu-ou_a")
+
+    await _impl.auth_collect_impl("ou_a", 10)
+    await _settle(_impl, "ou_a")
+
+    assert _watch.status("ou_a").status == _watch.STATUS_TIMEOUT
+    assert resumed == []
+    assert dms and dms[0][0] == "ou_a"
+
+
+@pytest.mark.asyncio
+async def test_collect_tells_the_agent_not_to_narrate_the_wait(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """「两条不同回复」的另一半: 本轮播报等待, 往往比续跑的回话更晚到。
+
+    码通常几秒就回来, 所以「授权正在后台等待确认」经常排在「已授权成功」之后, 用户看到的是
+    两条自相矛盾的消息。工具返回值必须把这条讲清楚, 否则模型没有理由不播报。
+    """
+    _pending_gateway(tmp_path, monkeypatch)
+    released = anyio.Event()
+
+    async def _slow_poll(state: str, timeout_seconds: float, interval: float = 1.0) -> dict[str, str]:
+        await released.wait()
+        return {}
+
+    monkeypatch.setattr(_impl._oauth_rx, "poll_gateway", _slow_poll)
+    result = await _impl.auth_collect_impl("ou_a")
+    guidance = result["message"] + result["next_step"]
+    assert "不要对用户播报等待状态" in guidance
+    assert "零 assistant 文本" in guidance
+    released.set()
 
 
 @pytest.mark.asyncio
