@@ -159,6 +159,10 @@ body = {"task": {"summary": "新标题", "due": {...}}, "update_fields": ["summa
    `assignee_related[]` 里每个执行人各带自己的 `completed_at`，多人任务里谁做完了一目了然。
    详情里的 `status` 是整个任务的状态，和单个执行人的完成情况不是一回事。
 
+那个 `completed_at` 是完成度判定里**唯一的 E1 级硬证据**来源。要给出「某人 todo 完成情况」
+的结论时，档位怎么定、取不到 E1 该怎么降档、多人怎么保证同一把尺子，一律以
+[`todo-completion-standard`] 为准 —— 本 skill 只管怎么把数据取出来。
+
 `completed` 只接受字符串 `"true"` / `"false"`，不传表示全都要。
 
 ## 删除是真的删
