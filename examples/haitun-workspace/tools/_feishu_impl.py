@@ -985,6 +985,22 @@ from _feishu.drive import (  # noqa: E402,F401
     export_doc_impl,
     get_message_image_impl,
 )
+from _feishu.leave import (  # noqa: E402,F401
+    _APPROVED,
+    _DATE_FORMATS,
+    _MAX_INSTANCES,
+    _MAX_SPAN_DAYS,
+    _build_list_instances_request,
+    _epoch_ms,
+    _leave_span,
+    _list_instance_codes,
+    _overlap_days,
+    _parse_date,
+    _range_bounds,
+    _wanted_names,
+    _widgets,
+    query_leave_impl,
+)
 from _feishu.message import (  # noqa: E402,F401
     _ANNOUNCEMENT_ERROR_HINTS,
     _AT_TAG_RE,
