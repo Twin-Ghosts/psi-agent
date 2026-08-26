@@ -162,6 +162,32 @@ def test_only_references_real_tools() -> None:
     assert not unknown, f"skill references tool names that don't exist: {sorted(unknown)}"
 
 
+def test_separates_vanishing_from_never_filled() -> None:
+    """A blank cell reads two ways, and confusing them is the heaviest misjudgement.
+
+    An entire period left blank is a fill-check question (it may be approved leave);
+    only an item missing from an otherwise-filled report is a "vanishing". Reading a
+    person's leave-blank period as "nothing closed" is the failure this guards.
+    """
+    body = _body()
+    heading = "### 消失 vs 没填"
+    assert heading in body, "the standard must separate 消失 from 没填 in its own section"
+    # take just that section: from its heading to the next one at the same or higher level
+    rest = body.split(heading, 1)[1]
+    section = re.split(r"\n#{2,3} ", rest, maxsplit=1)[0]
+    assert "company-todo-fill-check" in section, "must route whole-period blanks to fill-check"
+    assert "顺序" in section, "must state fill-check comes before judging a vanished item"
+
+
+def test_fill_check_hands_completion_questions_over() -> None:
+    """The two skills must know about each other, or the seam between them leaks."""
+    fill_check = _body("company-todo-fill-check")
+    assert SKILL in fill_check, "company-todo-fill-check must defer completion verdicts here"
+    assert INFERRED in fill_check, "it must name the verdict a vanished item gets"
+    # a missing report entry is not evidence about whether the work got done
+    assert "缺写" in fill_check
+
+
 def test_upstream_skills_point_here() -> None:
     """Both entry points must route into the standard instead of ruling on their own."""
     board = _body("feishu-todo-board-sync")
