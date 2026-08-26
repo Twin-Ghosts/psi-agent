@@ -30,12 +30,25 @@ import _feishu_impl as _f
 
 
 async def feishu_sheet_read(token: str, range: str, max_chars: int = 20000, user_key: str = "") -> str:
-    """Read one range of a spreadsheet as rows of plain-text cells.
+    """Read one **narrow, already-located** range of a spreadsheet as plain-text cells.
 
     Use this instead of ``feishu_doc_read(file_type="sheet")`` when you need a
     specific area rather than the whole workbook — e.g. scan just the name column
     to find which row a person is on, or check whether one target cell is already
     filled before overwriting it.
+
+    **Not for reading a whole board.** This stops at ``max_chars`` and drops the
+    remaining rows wholesale, returning ``truncated: true`` — on a real 列=日期、行=人
+    board that is the normal outcome, not an edge case. Two rules follow:
+
+    - **A wide range is the wrong first move.** Locate first (name column →
+      person's row number; header row → target column letter), then read just that
+      cell or row. To walk a whole sheet, use ``feishu_sheet_read_grid``, which pages
+      with ``has_more`` / ``next_start_row`` instead of dropping rows.
+    - **Never conclude from a ``truncated: true`` result.** The rows that were cut are
+      absent, not empty — treating them as blank reports people as not having filled
+      anything when their row was never read. Re-read narrower, or switch to
+      ``feishu_sheet_read_grid``, before saying anything about who filled what.
 
     Cells that are mentions (``@somebody``) or styled rich text are flattened to
     their visible text, so a name column reads as ``"张三"`` rather than raw JSON.

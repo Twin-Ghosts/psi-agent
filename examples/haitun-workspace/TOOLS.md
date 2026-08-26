@@ -252,7 +252,18 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
   （`feishu_doc_read(file_type="sheet", ...)` 是整本工作簿一次性倒出来，定位不了单格）。
   返回拍平成纯文本的行数组：**mention 单元格（`@某人`）和带样式的富文本都会拍成可见文字**，
   所以人名列读出来是 `"@张三"` 而不是一坨 JSON（匹配人名时记得去掉开头的 `@`）。
-  用它来「按人名列找出某人在第几行」和「写之前查目标单元格是否已被占」。
+  用它来「按人名列找出某人在第几行」和「写之前查目标单元格是否已被占」——也就是
+  **只读已经定位好的窄区域**。它到 `max_chars`（默认 20000）就**整行整行丢掉剩下的**并回
+  `truncated: true`，在真实看板上这是常态不是边缘情况。所以：
+  **拿宽区域开局是错的**（先定位再取格：人名列 → 那个人的行号，表头行 → 目标列字母），
+  且**`truncated: true` 的结果不许拿来下结论**——被切掉的行是「没读到」不是「空的」，
+  当空的处理就会把人家说成没填。改窄重读，或换下面那个分块读。
+- **分块读整张电子表格（要遍历时用这个，不是上面那个）**：
+  `feishu_sheet_read_grid(token, range, max_rows, start_row, user_key)` 一次回一块行，
+  带确切行号 + `has_more` / `next_start_row`，**不静默丢行**。回答「谁填了什么」「谁没填」
+  「某人有几条」「比较两个人」这类事实性问题一律走它，并且**读到 `has_more` 为 false 才算读完**
+  ——只看一块就作答是这里最常见的正确性 bug（没读到的行看起来跟空格子一模一样）。
+  配合 `feishu_sheet_find_columns` 先定位列，再按需取行。
 - **往电子表格写数据/公式/格式**（表格只能读不能写的缺口已补上）：
   `feishu_sheet_write(token, range, values_json, user_key)` 覆盖写一个区域；
   `feishu_sheet_append(token, range, values_json, insert_data_option, user_key)` 在数据末尾追加行；

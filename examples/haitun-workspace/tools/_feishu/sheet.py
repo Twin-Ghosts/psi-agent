@@ -103,7 +103,7 @@ async def read_sheet_range_impl(token: str, range_: str, max_chars: int = 20000,
                 break
             budget -= spent
         rows.append(cells)
-    return {
+    outcome: dict[str, Any] = {
         "ok": True,
         "token": token.strip(),
         "range": value_range.get("range", range_.strip()),
@@ -111,6 +111,20 @@ async def read_sheet_range_impl(token: str, range_: str, max_chars: int = 20000,
         "row_count": len(rows),
         "truncated": truncated,
     }
+    if truncated:
+        # A bare ``truncated: true`` reads as a detail next to a plausible-looking grid,
+        # and the rows that were cut are *absent* rather than empty — so a caller that
+        # answers anyway reports people as having filled nothing when their row was never
+        # fetched. Say what is missing and what to do instead, in the payload itself.
+        outcome["rows_dropped_after_row"] = len(rows)
+        outcome["warning"] = (
+            f"Truncated at {max_chars} chars: only the first {len(rows)} row(s) of this range are "
+            "present and the rest were dropped, NOT read as empty. Do not draw conclusions about "
+            "who filled what from this result. Either narrow the range (locate the person's row "
+            "first, then read that row/cell) or page the sheet with feishu_sheet_read_grid, which "
+            "reports has_more / next_start_row instead of dropping rows."
+        )
+    return outcome
 
 
 async def _read_sheet(token: str) -> dict[str, Any]:
