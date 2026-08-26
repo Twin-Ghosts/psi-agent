@@ -142,3 +142,23 @@ class TestToolDescriptionsSteerTheChoice:
         described = self._described(feishu_sheet_read_grid.feishu_sheet_read_grid)
         assert "has_more" in described
         assert "locate" in described.lower(), "locate-then-fetch is the recipe that avoids truncation"
+
+
+class TestBothReadersAreDeclared:
+    """The two tools #723 added must appear in the docs the agent is given.
+
+    #723 shipped ``feishu_sheet_read_grid`` and ``feishu_sheet_find_columns`` and updated
+    ``skills/feishu-sheet/SKILL.md``, but neither tool was mentioned in ``TOOLS.md`` or
+    ``AGENTS.md`` — zero occurrences in both. A tool nobody is told about is a tool that
+    does not get used: the paging reader sat unused while eight of the truncating reader's
+    calls ran, seven of them truncated. Declaration is part of shipping a tool, so it is
+    asserted rather than trusted to review.
+    """
+
+    WORKSPACE = Path(__file__).resolve().parents[1]
+
+    @pytest.mark.parametrize("doc_name", ["TOOLS.md", "AGENTS.md"])
+    @pytest.mark.parametrize("tool", ["feishu_sheet_read_grid", "feishu_sheet_find_columns"])
+    def test_tool_is_named(self, doc_name: str, tool: str) -> None:
+        text = (self.WORKSPACE / doc_name).read_text(encoding="utf-8")
+        assert tool in text, f"{tool} is exposed to the model but never declared in {doc_name}"

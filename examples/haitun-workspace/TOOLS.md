@@ -263,7 +263,14 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
   带确切行号 + `has_more` / `next_start_row`，**不静默丢行**。回答「谁填了什么」「谁没填」
   「某人有几条」「比较两个人」这类事实性问题一律走它，并且**读到 `has_more` 为 false 才算读完**
   ——只看一块就作答是这里最常见的正确性 bug（没读到的行看起来跟空格子一模一样）。
-  配合 `feishu_sheet_find_columns` 先定位列，再按需取行。
+  配合下面的 `feishu_sheet_find_columns` 先定位列，再按需取行。
+- **认表头、定位列（任何事实性问题的第一步）**：
+  `feishu_sheet_find_columns(token, header_row, range, user_key)` 读表头行并**在代码里**
+  判定每一列的语义，回 `kind` + 列字母：`date`（周期列如 `7.24` / `8.10日` / `2026-08-14`，
+  并附归一后的 ISO `date` 字段）、`names`（负责人/姓名/名字/owner 列）、`mentor`、
+  `other`（其余列也留着不丢）。
+  **别靠数格子认列**——用眼睛数表头是已被证实的失败模式（列认错、把某人的行读成空的）。
+  表头不在第 1 行就传 `header_row`。拿到列字母后再用上面两个读取工具取行/取格。
 - **往电子表格写数据/公式/格式**（表格只能读不能写的缺口已补上）：
   `feishu_sheet_write(token, range, values_json, user_key)` 覆盖写一个区域；
   `feishu_sheet_append(token, range, values_json, insert_data_option, user_key)` 在数据末尾追加行；
