@@ -8,6 +8,13 @@ import pytest
 
 from psi_agent.session import live_agent
 from psi_agent.session.agent import SessionAgent
+from psi_agent.session.history_display import (
+    KIND_TRIGGER_DISPLAY,
+    KIND_TRIGGER_SILENT,
+    is_displayable_chat_message,
+    message_kind,
+    with_kind,
+)
 from psi_agent.session.protocol import AgentChunk
 
 
@@ -17,6 +24,8 @@ class _FakeAgent:
     def __init__(self, *, block: anyio.Event | None = None) -> None:
         self._lock = anyio.Lock()
         self.turns: list[dict[str, Any]] = []
+        self.response_kinds: list[str | None] = []
+        self.closed = 0
         self._block = block
 
     def run(
@@ -27,10 +36,15 @@ class _FakeAgent:
         response_kind: str | None = None,
     ) -> AsyncGenerator[AgentChunk]:
         async def _gen() -> AsyncGenerator[AgentChunk]:
-            if self._block is not None:
-                await self._block.wait()
-            self.turns.append(user_message)
-            yield AgentChunk(content="done")
+            try:
+                if self._block is not None:
+                    await self._block.wait()
+                self.turns.append(user_message)
+                self.response_kinds.append(response_kind)
+                yield AgentChunk(content="done")
+            finally:
+                # 真 ``run`` 在这里跑 rollback/commit; 计数用来锁住「生成器被显式收尾」。
+                self.closed += 1
 
         return _gen()
 
@@ -87,6 +101,44 @@ async def test_resume_runs_one_turn_carrying_the_content() -> None:
     assert len(agent.turns) == 1
     assert agent.turns[0]["content"] == "carry me"
     assert agent.turns[0]["role"] == "user"
+
+
+@pytest.mark.anyio
+async def test_resume_is_out_of_band_and_never_a_chat_bubble() -> None:
+    """带外回合: 注入块和回答都不该出现在 /history 的聊天气泡里。
+
+    给 ``chat`` 会有两处后果 —— 那段给模型的指令正文像用户亲手打的一样进记录, 而回合已经
+    用工具把话说过一遍, 气泡是第二遍 (正是本次要修掉的双回复的另一种形态)。
+    """
+    agent = _FakeAgent()
+    with live_agent.register("s1", _as_agent(agent)):
+        await live_agent.resume_session_turn("s1", "<feishu_auth_granted>\nopen_id: ou_a\n</feishu_auth_granted>")
+
+    user_row = agent.turns[0]
+    assert message_kind(user_row) == KIND_TRIGGER_SILENT
+    assert agent.response_kinds == [KIND_TRIGGER_SILENT]
+    assert is_displayable_chat_message(user_row) is False
+    assistant_row = with_kind({"role": "assistant", "content": "文档建好了"}, KIND_TRIGGER_SILENT)
+    assert is_displayable_chat_message(assistant_row) is False
+
+
+@pytest.mark.anyio
+async def test_resume_can_be_asked_to_surface_in_the_console() -> None:
+    """要让回答进 Web Console 得显式传 display —— 缺省不显示是刻意的, 不是漏配。"""
+    agent = _FakeAgent()
+    with live_agent.register("s1", _as_agent(agent)):
+        await live_agent.resume_session_turn("s1", "x", kind=KIND_TRIGGER_DISPLAY)
+    assert agent.response_kinds == [KIND_TRIGGER_DISPLAY]
+    assert is_displayable_chat_message(with_kind({"role": "assistant", "content": "done"}, KIND_TRIGGER_DISPLAY))
+
+
+@pytest.mark.anyio
+async def test_resume_closes_the_agent_generator() -> None:
+    """agent loop 自己的收尾 (rollback/commit) 必须在本帧退出前跑完。"""
+    agent = _FakeAgent()
+    with live_agent.register("s1", _as_agent(agent)):
+        await live_agent.resume_session_turn("s1", "x")
+    assert agent.closed == 1
 
 
 @pytest.mark.anyio
