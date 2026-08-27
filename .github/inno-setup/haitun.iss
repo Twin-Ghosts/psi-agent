@@ -63,8 +63,33 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 #ifdef COMPONENT_MSYS
 Source: "..\..\workspace\tob\msys64\*"; DestDir: "{app}\msys64"; Flags: ignoreversion recursesubdirs createallsubdirs
 #else
+; ---- 包内区 (安装器拥有写权) ------------------------------------------------
+; 代码 / tools / skills / systems / prompt 模板 —— 每次安装无条件覆盖为本版内容,
+; 用户不该在这里留东西。判据见 workspace\tob\AGENTS.md「包内 / 包外」一节:
+; 谁有写权决定落点, 安装器写的放包内。
+;
 ; .env 由 CI 打包前从 GitHub Secret SERPER_API_KEY 注入到 workspace\tob\.env，随 workspace 一并安装到 {app}\app。
-Source: "..\..\workspace\tob\*"; DestDir: "{app}\app"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "msys64"
+;
+; 包外区那三项 (SOUL.md / USER.md / schedules) 从这条通配里排除, 单独声明在下面 ——
+; 排除掉不是为了不装, 而是为了让「哪些文件是用户/agent 自己写的」在 .iss 里看得见,
+; 且日后加保护 (B4) 只需改那三条、不必再从通配里往外抠。
+; 注意 Excludes 的模式是按**名字**匹配的, 可能命中任意层级的同名项, 所以这三条
+; 只有在 tob 树下这三个名字唯一时才等价于「排除根上那三项」。已实测确认唯一:
+; find 与 git ls-files 都只命中根上各一份。因此这里不依赖任何锚定语法。
+Source: "..\..\workspace\tob\*"; DestDir: "{app}\app"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "msys64,SOUL.md,USER.md,schedules"
+
+; ---- 包外区 (用户与 agent 拥有写权) ----------------------------------------
+; 海豚被设计成能改写自己的 SOUL.md、积累 USER.md; schedules 归 workspace。
+; 本轮**只做分类落位, 不改保护策略** —— Flags 与上面的包内区保持一致
+; (ignoreversion), 全新安装的落点与内容因此与分包前逐字节相同。
+; 已知未修: {app}\app 会被 [Code] 段的 SwapComponent('app') 整目录换掉
+; (函数定义见本文件 SwapComponent, 调用点在 PrepareToInstall 里的 InstallsApp 分支),
+; 所以升级时这三项的存活情况本轮既不改善也不恶化。给它们加 onlyifdoesntexist、
+; 或把它们挪出 {app}, 都属于 B4「打包部署」, 已被负责人整体推后到本轮之后。
+Source: "..\..\workspace\tob\SOUL.md"; DestDir: "{app}\app"; Flags: ignoreversion
+Source: "..\..\workspace\tob\USER.md"; DestDir: "{app}\app"; Flags: ignoreversion
+Source: "..\..\workspace\tob\schedules\*"; DestDir: "{app}\app\schedules"; Flags: ignoreversion recursesubdirs createallsubdirs
+
 Source: "haitun.ico"; DestDir: "{app}\app"
 Source: "haitun.exe"; DestDir: "{app}\app"
 #ifdef COMPONENT_APP

@@ -34,6 +34,32 @@ user profile, and bootstrap files all live at the workspace root:
 | `HEARTBEAT.md` | Dynamic context. Picked up on the next turn after its **content** changes (`system_prompt_rebuild_checker()` compares a digest), not re-rendered on every turn. |
 | `AGENTS.md` | This file; also loaded as a bootstrap context file. |
 
+## 包内 / 包外 (ToC 独有)
+
+**判据是「谁有写权」。** 安装器写的东西放包内, 用户与 agent 自己写的东西放包外。ToB 没有
+安装器, 结构上不存在这个问题 —— 这一节只对 ToC 的安装形态成立。
+
+| 区 | 内容 | 谁写 |
+|---|---|---|
+| 包内 | `systems/` `tools/` `skills/` `triggers/` `channel_events/` `bin/` `config/` `docs/` `flows/`, 以及 `AGENTS.md` / `IDENTITY.md` / `TOOLS.md` / `BOOTSTRAP.md` / `HEARTBEAT.md` 这些提示词模板 | 安装器 (每次安装覆盖为本版内容) |
+| 包外 | `SOUL.md` `USER.md` `schedules/` | agent 自己改写 / 用户积累 / `schedule_manage` 写 |
+
+`.github/inno-setup/haitun.iss` 的 `[Files]` 段按这张表分成两组 `Source`: 包内区一条通配
+(`Excludes` 掉包外那三项), 包外区三条单列。**本轮只做分类落位, 两组的 `Flags` 一致
+(`ignoreversion`), 全新安装的落点与内容与分包前逐字节相同。**
+
+**已知未修 (不要当成已解决)**: `{app}\app` 会被 `[Code]` 段的 `SwapComponent('app')`
+整目录换掉, 所以升级时包外那三项的存活情况本轮既不改善也不恶化。给它们加保护属于
+「打包部署」, 是后续单独一步。
+
+**这里还有一处结构性的不一致, 本轮未改**〔实测〕: 提示词读 `SOUL.md` / `USER.md` 用的是
+**agent 包根** (`System.__init__` 把 `self._agent_dir` 传给 `_load_soul_md` /
+`_build_volatile`), 而 `write` / `edit` 这些工具的相对路径落在**用户 workspace**
+(`_runtime_paths.resolve_user_path`)。装机形态下两个根不是一个目录 (`--default-agent {app}`
+对 `--default-workspace {Desktop}\haitun交付`), 于是 agent「改写自己的 SOUL.md」写出去的
+那份**不会被下一轮提示词读到** —— 它落在 workspace, 提示词读的是包根。想让自我改写真正
+生效, 得先决定 `SOUL.md` / `USER.md` 归哪个根, 那是一个行为变更, 不属于本步的分类落位。
+
 ## Remote Fusion Memory configuration
 
 These process-start settings connect Haitun to an operator-provisioned remote Fusion Memory MCP
