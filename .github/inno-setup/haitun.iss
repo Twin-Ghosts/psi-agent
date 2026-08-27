@@ -61,15 +61,15 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 #ifdef COMPONENT_MSYS
-Source: "..\..\examples\haitun-workspace\msys64\*"; DestDir: "{app}\msys64"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\..\workspace\tob\msys64\*"; DestDir: "{app}\msys64"; Flags: ignoreversion recursesubdirs createallsubdirs
 #else
-; .env 由 CI 打包前从 GitHub Secret SERPER_API_KEY 注入到 examples\haitun-workspace\.env，随 workspace 一并安装到 {app}\app。
-Source: "..\..\examples\haitun-workspace\*"; DestDir: "{app}\app"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "msys64"
+; .env 由 CI 打包前从 GitHub Secret SERPER_API_KEY 注入到 workspace\tob\.env，随 workspace 一并安装到 {app}\app。
+Source: "..\..\workspace\tob\*"; DestDir: "{app}\app"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "msys64"
 Source: "haitun.ico"; DestDir: "{app}\app"
 Source: "haitun.exe"; DestDir: "{app}\app"
 #ifdef COMPONENT_APP
 #else
-Source: "..\..\examples\haitun-workspace\msys64\*"; DestDir: "{app}\msys64"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\..\workspace\tob\msys64\*"; DestDir: "{app}\msys64"; Flags: ignoreversion recursesubdirs createallsubdirs
 #endif
 #endif
 Source: "rollback.cmd"; DestDir: "{app}"

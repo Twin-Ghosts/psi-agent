@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
-RUNNER = ROOT / "examples" / "haitun-workspace" / "demo_supervisor_scenarios.py"
+RUNNER = ROOT / "workspace" / "tob" / "demo_supervisor_scenarios.py"
 
 
 def _module() -> dict[str, Any]:

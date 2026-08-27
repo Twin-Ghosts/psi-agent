@@ -99,7 +99,7 @@ uv run psi-agent ai openai-completions \
   --base-url <base-url>
 
 uv run psi-agent session \
-  --workspace ./examples/haitun-workspace \
+  --workspace ./workspace/tob \
   --channel-socket ./channel.sock \
   --ai-socket ./ai.sock
 

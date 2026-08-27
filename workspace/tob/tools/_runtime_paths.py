@@ -28,7 +28,7 @@ except ImportError:  # pragma: no cover — standalone import without editable i
 
 
 def package_fallback() -> str:
-    """``examples/haitun-workspace`` when this file lives under ``tools/``."""
+    """``workspace/tob`` when this file lives under ``tools/``."""
     return str(Path(__file__).resolve().parents[1])
 
 

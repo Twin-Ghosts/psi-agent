@@ -14,7 +14,7 @@ Soft default (agent)
 --------------------
 If CLI ``--default-agent`` is empty:
 
-1. Prefer ``cwd/examples/haitun-workspace`` when present (repo-local Gateway).
+1. Prefer ``cwd/workspace/tob`` when present (repo-local Gateway).
 2. Else if *cwd itself* looks like a haitun agent package (``tools/`` + ``skills/``
    directories) — the Inno install layout, where ``{app}`` *is* the workspace —
    use cwd. This keeps ``psi-agent.exe gateway`` usable from the install dir
@@ -109,11 +109,11 @@ async def resolve_default_agent(explicit: str = "") -> str:
         return str(await anyio.Path(raw).resolve())
     cwd = await anyio.Path.cwd()
     # Soft default for developers who start Gateway from the repo root.
-    candidate = cwd / "examples" / "haitun-workspace"
+    candidate = cwd / "workspace" / "tob"
     if await candidate.is_dir():
         return str(await candidate.resolve())
-    # Soft default for Windows install layout: {app} IS haitun-workspace
-    # (tools/ + skills/ at cwd; no examples/ nesting).
+    # Soft default for Windows install layout: {app} IS the tob workspace
+    # (tools/ + skills/ at cwd; no workspace/ nesting).
     if await (cwd / "tools").is_dir() and await (cwd / "skills").is_dir():
         return str(await cwd.resolve())
     return ""

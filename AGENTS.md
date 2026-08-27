@@ -384,11 +384,11 @@ uv build                         # 构建
 
 本仓常被同时 checkout 成多棵工作树并行施工（前端树 / workspace 树 / 参谋树）。约定如下：
 
-- **一棵树只改一个区**：前端树只碰 `src/psi_agent/gateway/spa-v2/`（及必要的 Gateway 壳 / spa v1）；workspace 树主要碰 `examples/haitun-workspace/`，以及必要的 Session / Gateway 服务端。越区改动优先换树，而不是在本树顺手改
+- **一棵树只改一个区**：前端树只碰 `src/psi_agent/gateway/spa-v2/`（及必要的 Gateway 壳 / spa v1）；workspace 树主要碰 `workspace/tob/`，以及必要的 Session / Gateway 服务端。越区改动优先换树，而不是在本树顺手改
 - **同 remote ≠ 同磁盘**：别人把分支合进 `main`，不会自动出现在你的工作树里；要用 `git fetch` 后显式合并
 - **接 `main` 时停在自己的 `feat/…` 上**：`git fetch origin` → 先 commit 或 stash 保护 WIP → `git merge origin/main`。冲突以各层 `AGENTS.md` 为准（保留三区 / AppData / ContextVar 约定后再叠自己的功能）
 - **禁止**擅自 `git reset --hard origin/main`——它会丢掉本树的本地提交，除非用户明确要求
-- **阅读顺序**：根 `AGENTS.md` → `session/AGENTS.md` → `gateway/AGENTS.md` → `examples/haitun-workspace/AGENTS.md` 或 `spa-v2/AGENTS.md`
+- **阅读顺序**：根 `AGENTS.md` → `session/AGENTS.md` → `gateway/AGENTS.md` → `workspace/tob/AGENTS.md` 或 `spa-v2/AGENTS.md`
 - **各区验收命令看本层文档**：Python 侧见上面「开发命令」；前端侧见 `spa-v2/AGENTS.md`「本地开发」（`npm run build` 后经 Gateway 硬刷验收，该目录没有 `npm test`）
 
 ## 改动后自检清单（Definition of Done）

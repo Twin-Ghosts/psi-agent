@@ -19,7 +19,7 @@
 同一个安装包，PyInstaller 全链约 17 分钟，Nuitka 约 2 小时（三平台并行，墙钟取最慢
 那个，99% 花在单条编译命令上）。两者对发版是等价的：`haitun.c` 硬编码
 `psi-agent.exe`，两个 builder 都把 exe 拷到
-`examples/haitun-workspace/psi-agent.exe`，`build-haitun-launcher.ps1` 只从
+`workspace/tob/psi-agent.exe`，`build-haitun-launcher.ps1` 只从
 `haitun.iss` 解析 `MyAppVersion`，不碰 agent exe。两条流水线的
 `haitun-inno-setup` job 结构也完全一致，只差来源 / 产出 artifact 名。
 
@@ -70,9 +70,9 @@ Variables：
 ## 用户侧更新
 
 打包时 `build-haitun-launcher.ps1` 会从 `haitun.iss` 读取版本号，生成
-`examples/haitun-workspace/haitun-update.conf` 和
-`examples/haitun-workspace/haitun-version.txt`，并读取 `MyMsysVersion` 写入
-`examples/haitun-workspace/msys64/msys-version.txt`（手填环境版本，例如 `env-1`）：
+`workspace/tob/haitun-update.conf` 和
+`workspace/tob/haitun-version.txt`，并读取 `MyMsysVersion` 写入
+`workspace/tob/msys64/msys-version.txt`（手填环境版本，例如 `env-1`）：
 
 ```text
 HAITUN_UPDATE_BASE_URL=https://haitun-agent.oss-cn-hangzhou.aliyuncs.com/

@@ -23,7 +23,9 @@ from typing import Any
 
 import pytest
 
-WORKSPACES = sorted(Path("examples").glob("*/systems/system.py"))
+WORKSPACES = sorted(
+    [*Path("examples").glob("*/systems/system.py"), *Path("workspace").glob("*/systems/system.py")]
+)
 
 _SIBLING_MODULES = ("prompt_sections", "prompt_texts", "tool_docs")
 
@@ -46,7 +48,7 @@ def _load(path: Path) -> Any:
     return module
 
 
-# Verbatim from examples/haitun-workspace/HEARTBEAT.md — the text that actually
+# Verbatim from workspace/tob/HEARTBEAT.md — the text that actually
 # hijacked compaction in the observed history.
 HEARTBEAT_TASK = (
     "# Heartbeat Task\n\n"

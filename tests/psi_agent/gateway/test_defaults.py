@@ -52,14 +52,14 @@ async def test_ensure_workspace_dir_creates(tmp_path: Path) -> None:
 @pytest.mark.anyio
 async def test_resolve_default_agent_soft_haitun_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
-    agent = tmp_path / "examples" / "haitun-workspace"
+    agent = tmp_path / "workspace" / "tob"
     await anyio.Path(agent).mkdir(parents=True)
     assert await resolve_default_agent("") == str(await anyio.Path(agent).resolve())
 
 
 @pytest.mark.anyio
 async def test_resolve_default_agent_soft_install_layout_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Inno {app} layout: tools/ + skills/ live at cwd (no examples/ nesting)."""
+    """Inno {app} layout: tools/ + skills/ live at cwd (no workspace/ nesting)."""
     monkeypatch.chdir(tmp_path)
     await anyio.Path(tmp_path / "tools").mkdir()
     await anyio.Path(tmp_path / "skills").mkdir()
@@ -70,11 +70,11 @@ async def test_resolve_default_agent_soft_install_layout_cwd(tmp_path: Path, mon
 async def test_resolve_default_agent_repo_layout_wins_over_cwd_tools(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Repo root may have unrelated tools/; prefer examples/haitun-workspace."""
+    """Repo root may have unrelated tools/; prefer workspace/tob."""
     monkeypatch.chdir(tmp_path)
     await anyio.Path(tmp_path / "tools").mkdir()
     await anyio.Path(tmp_path / "skills").mkdir()
-    agent = tmp_path / "examples" / "haitun-workspace"
+    agent = tmp_path / "workspace" / "tob"
     await anyio.Path(agent).mkdir(parents=True)
     assert await resolve_default_agent("") == str(await anyio.Path(agent).resolve())
 

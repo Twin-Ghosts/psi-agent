@@ -35,7 +35,7 @@ uv run psi-agent ai \
 
 # 2) Session (this workspace)
 uv run psi-agent session \
-  --workspace examples/haitun-workspace \
+  --workspace workspace/tob \
   --ai-socket /tmp/ai.sock --channel-socket /tmp/ch.sock
 
 # 3) REPL
@@ -50,7 +50,7 @@ uv run psi-agent channel repl --session-socket /tmp/ch.sock
   bundled Python parser/compiler and checked `run_flow` executor for Agent and Program Steps;
   Human waits continue through `run_flow_resume`. No separate setup is required. The existing
   `fusion-flow-legacy` Node/Fuclaw runtime remains available for explicit `.flow.ts` work:
-  first use `cd examples/haitun-workspace/skills/fusion-flow-legacy && npm install`.
+  first use `cd workspace/tob/skills/fusion-flow-legacy && npm install`.
   One-off flows go under `flows/<task-slug>/`; saved reusable declarations go under
   `flows/workflows/<slug>/`. `flows/curated/` remains only as a compatibility catalog for
   `flow_manage` and legacy assets.
@@ -134,7 +134,7 @@ Use `memory_health` for explicit status and
 ## Smoke test
 
 ```bash
-uv run python examples/haitun-workspace/systems/system.py
+uv run python workspace/tob/systems/system.py
 ```
 
 ## Windows 安装包

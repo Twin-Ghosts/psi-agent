@@ -36,7 +36,7 @@ class ChannelFeishu:
     """Agent package root containing ``channel_events/`` (event defs for this Channel).
 
     Empty → ``PSI_AGENT`` env, else cwd. Same package as Session ``--agent`` when
-    Feishu shares haitun-workspace. Event defs live here (not under ``src/psi_agent/channel``).
+    Feishu shares the tob workspace. Event defs live here (not under ``src/psi_agent/channel``).
     """
 
     app_id: str = ""
