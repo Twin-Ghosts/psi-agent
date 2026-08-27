@@ -825,11 +825,11 @@ async def test_post_idle_drain_disabled_keeps_legacy_path(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_post_surfaces_bare_channel_error_through_pump(monkeypatch):
-    """Parser errors must stay bare ChannelError, not become an ExceptionGroup.
+async def test_post_surfaces_bare_channel_error_with_idle_drain_on(monkeypatch):
+    """Parser errors must stay a bare ChannelError when idle drain is enabled.
 
-    The parser now runs in a task group, which wraps whatever it raises; callers and
-    the rest of this file catch ``ChannelError`` directly, so a group would slip past
+    Callers and the rest of this file catch ``ChannelError`` directly, so anything
+    that wrapped it (an ``ExceptionGroup`` from a task group, say) would slip past
     every ``except ChannelError`` in the codebase.
     """
     resp = _RecordingResp(
@@ -837,7 +837,7 @@ async def test_post_surfaces_bare_channel_error_through_pump(monkeypatch):
             b'data: {"choices":[{"delta":{"content":"[Upstream Error]: boom"},"finish_reason":"error"}]}\n\n',
         ]
     )
-    # interval>0 is required to take the pump path at all (see _iter_deltas).
+    # interval>0 is required for the idle timeout to be armed at all.
     core = ChannelCore(session_socket="/tmp/x.sock", interval=10.0, idle_drain=5.0)
     monkeypatch.setattr(core, "_session", _RecordingPostSession(resp), raising=False)
     monkeypatch.setattr(core, "_endpoint", "http://localhost/chat/completions", raising=False)
@@ -848,11 +848,15 @@ async def test_post_surfaces_bare_channel_error_through_pump(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_post_early_break_releases_response_with_pump(monkeypatch):
-    """Early break must still unwind cleanly now that a task group is in the path.
+async def test_post_early_break_releases_response_with_idle_drain(monkeypatch):
+    """Early break must unwind cleanly while the idle timeout is armed.
 
-    Yielding out of a generator that owns a task group is the fragile case: if the
-    break left the pump running, ``aclose()`` would raise instead of releasing.
+    Regression for a real defect in the first cut of this feature: the idle timeout
+    was implemented with a pump task, and yielding out of a generator that owns a
+    task group blows up on early close — the cancel scope gets exited from a
+    different task and anyio raises ``RuntimeError: Attempted to exit cancel scope
+    in a different task``, leaving the upstream generator unfinalized. The timeout
+    must therefore sit on the raw byte read with no ``yield`` inside its scope.
     """
     resp = _StallingResp(
         [
@@ -862,15 +866,42 @@ async def test_post_early_break_releases_response_with_pump(monkeypatch):
         stall=30.0,
         tail=[b"data: [DONE]\n\n"],
     )
-    # interval>0 is required to take the pump path at all (see _iter_deltas); a tiny
-    # value still emits per delta, so the loop below gets something to break on.
-    core = ChannelCore(session_socket="/tmp/x.sock", interval=0.01, idle_drain=5.0)
+    # A tiny interval still emits per delta (so there is something to break on) while
+    # keeping interval>0, which is what arms the idle timeout.
+    core = ChannelCore(session_socket="/tmp/x.sock", interval=0.01, idle_drain=0.2)
     monkeypatch.setattr(core, "_session", _RecordingPostSession(resp), raising=False)
     monkeypatch.setattr(core, "_endpoint", "http://localhost/chat/completions", raising=False)
 
     async with aclosing(core.post([TextChunk("hi")])) as gen:
         async for chunk in gen:
             if isinstance(chunk, TextChunk):
+                break
+
+    assert resp.released
+
+
+@pytest.mark.anyio
+async def test_post_early_break_after_idle_tick_unwinds_cleanly(monkeypatch):
+    """Breaking *after* an idle tick has fired must not raise from the cancel scope.
+
+    Tightest form of the regression above: the break has to happen once at least one
+    ``move_on_after`` scope has already been entered and left, which is exactly the
+    state that made the task-group version raise during ``aclose()``.
+    """
+    resp = _StallingResp(
+        [b'data: {"choices":[{"index":0,"delta":{"content":"head"}}]}\n\n'],
+        stall=30.0,
+        tail=[b"data: [DONE]\n\n"],
+    )
+    core = ChannelCore(session_socket="/tmp/x.sock", interval=10.0, idle_drain=0.2)
+    monkeypatch.setattr(core, "_session", _RecordingPostSession(resp), raising=False)
+    monkeypatch.setattr(core, "_endpoint", "http://localhost/chat/completions", raising=False)
+
+    # The only TextChunk that can arrive here is the idle drain of "head".
+    async with aclosing(core.post([TextChunk("hi")])) as gen:
+        async for chunk in gen:
+            if isinstance(chunk, TextChunk):
+                assert chunk.text == "head"
                 break
 
     assert resp.released

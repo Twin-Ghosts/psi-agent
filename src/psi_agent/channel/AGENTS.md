@@ -7,7 +7,7 @@ channel/
 ├── _types.py          # FileChunk, TextChunk, ReasoningChunk, InputChunk, OutputChunk
 ├── _errors.py         # ChannelError 基类（传输/协议/session/附件下载错误统一抛出）
 ├── _markers.py        # [RECV:] 标记 + encode_input + 有状态扫描器 SendMarkerScanner；[SEND:] 解码重导出自 `psi_agent/_send_markers.py`
-├── _stream.py         # SSE 解析 iter_sse_events + interval 缓冲 StreamBuffer（与传输解耦）
+├── _stream.py         # SSE 解析 iter_sse_events（含 IDLE 静默上报）+ interval 缓冲 StreamBuffer（与传输解耦）
 ├── _file_bytes.py     # fetch_file_bytes — 跨容器取出向文件字节（GET {source}/files，与平台无关）
 ├── _core.py           # ChannelCore — 连接管理 + post() 编排
 ├── _event_defs.py     # 加载 agent 包 channel_events/<channel>/（EVENT.yaml + map.py|produce.py）+ 变更指纹
@@ -42,7 +42,11 @@ ChannelCore 是所有 Channel（CLI、REPL、Telegram）共享的公共部件：
 - 将 SSE 的 `delta.reasoning` 流切分为 `ReasoningChunk`（透传可选 `delta.kind`），与 `content`（`TextChunk`）按到达顺序交错产出；同槽不同 `kind` 在 buffer 内视为不同活动类型（不合并）；`[SEND:...]` 仅扫描 content
 - SSE 内容在 interval 窗口内缓冲合并为单个 TextChunk（默认 1s，可配置）
 - 终端通道（CLI/REPL）设置 interval=0 无需缓冲
-- **`idle_drain`（默认 5s）：上游静默时把缓冲尾巴先发出去**。`StreamBuffer` 的 interval 窗口是**惰性**的——只在下一个 `append` 里检查，没有后台定时器。上游在回复末尾长时间不出字时（实测 deepseek 停 50-70s 才发 `[DONE]`），最后攒的那一段就一直卡在缓冲里，用户看到的是**一句话断在中间**，而 `flush()` 要等到流结束才兜底。`ChannelCore._iter_deltas` 在静默满 `idle_drain` 秒时注入 `_IDLE` 哨兵，`post()` 收到它就调 `StreamBuffer.drain_if_idle()` 把尾巴放出去。**（关键）不能对 `iter_sse_events.__anext__()` 用 `fail_after`**——那会在生成器内部取消读取、把整条流拆掉（与 `gateway.server._write_chat_sse_with_keepalive` 同一个坑：调用方提前收到结束、回复永不落地）。所以解析器跑在自己的任务里、向 memory stream 推送，**超时等的是队列**，到期只花一个 tick。哨兵用 `Enum` 单例而非 `object()`：前者能让 `delta is _IDLE` 之后的分支被类型检查器收窄成 `dict`。`idle_drain<=0` **或** `interval<=0` 时整条 pump 路径跳过、退回原来的裸 `async for`（终端通道与 Gateway chat 桥本就每 token 直出，缓冲里永远没有尾巴可排，起任务纯属白花开销）——故只有批量通道（feishu / telegram）走 pump。解析器异常（`ChannelError`）现在从 pump 任务抛出、会被 task group 包成 `ExceptionGroup`，单异常的组**必须拆开原样重抛**，否则全仓的 `except ChannelError` 一律漏接
+- **`idle_drain`（默认 5s）：上游静默时把缓冲尾巴先发出去**。`StreamBuffer` 的 interval 窗口是**惰性**的——只在下一个 `append` 里检查，没有后台定时器。上游在回复末尾长时间不出字时（实测 deepseek 停 50-70s 才发 `[DONE]`），最后攒的那一段就一直卡在缓冲里，用户看到的是**一句话断在中间**，而 `flush()` 要等到流结束才兜底。做法：`iter_sse_events(lines, idle_timeout)` 在静默满 `idle_timeout` 秒时 yield 一个 `IDLE` 枚举成员，`post()` 收到它就调 `StreamBuffer.drain_if_idle()` 把尾巴放出去。`idle_timeout=0`（默认）逐字节等于旧路径。哨兵用 `Enum` 单例而非 `object()`：前者能让 `delta is IDLE` 之后的分支被类型检查器收窄成 `dict`
+- **（刻意为之）超时只包**裸字节读**，且 `yield` 绝不在 cancel scope 内**——两条都踩过，勿"简化"回去：
+  - **超时不能包在 async generator 的 `__anext__` 上**。取消一个 generator 的 `__anext__` 会**终结**它，流被静默截断——与 `gateway.server._write_chat_sse_with_keepalive` 写明的同一个坑。而 aiohttp 的 `StreamReader` 是**类实现**的异步迭代器，取消它的 `__anext__` 后 reader 完好、下次读接着走（已用真停顿服务器实测）。**推论：`idle_timeout>0` 要求 `lines` 是可续读的 reader**；生产传的一直是 `resp.content`，若换成 generator 必须把 `idle_timeout` 留在 0。`tests/.../test__stream.py::test_sse_idle_timeout_truncates_a_generator_source` 把这条约束做成了可执行断言（它**断言丢数据**，是刻意的负面用例）
+  - **cancel scope 里不能有 `yield`**。跨 `yield` 进入的 scope 在提前退出（`aclose()`）时会由**另一个任务**退出，anyio 直接 `RuntimeError: Attempted to exit cancel scope in a different task`，且上游 generator 不被终结。这一条否掉了「pump 任务 + memory stream + `fail_after` 等队列」那套写法：它把 `yield` 留在了 task group 内部，正常路径全绿、只在**提前 break** 时炸——`test_post_early_break_after_idle_tick_unwinds_cleanly` 钉住此点。因此本层**不引入 task group**，`ChannelError` 也就照旧是裸异常，不会被包成 `ExceptionGroup`
+- `idle_drain` 只在 `interval>0` 时武装（`post()` 里算出 `idle_timeout`）：终端通道（CLI/REPL）与 Gateway chat 桥每 token 直出，缓冲里永远没有尾巴可排，白设一层 cancel scope 无意义。故实际只有批量通道（feishu / telegram）用得上，两者各自透出 `--idle-drain`
 - 内部委托：marker 编解码 → `_markers.py`；SSE 解析与 interval 缓冲 → `_stream.py`（均与 HTTP 传输解耦、可独立单测）
 - 取消安全：`__aexit__` 关闭 aiohttp `ClientSession` 用 `anyio.CancelScope(shield=True)` 保护（与 AI 层一致），cancel 时不泄露连接
 - `post()` 是 async generator（返回 `AsyncGenerator[OutputChunk]`，与 `AiClient.stream` 对齐而非 `AsyncIterator`，使 `aclosing` 可类型检查）；所有 channel 客户端（cli/repl/telegram/feishu）消费时一律用 `async with aclosing(core.post(...))` 包裹（对标 `agent.py`/`channel_adapter.py`/`schedule_registry.py` 的统一约定），确保提前退出 / 被 cancel 时 `post()` 内的 `session.post()` 响应被释放
