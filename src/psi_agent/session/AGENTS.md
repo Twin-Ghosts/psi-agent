@@ -305,6 +305,14 @@ result = run.result   # 正常耗尽后非 None
   - 文件删除 → 其所有 tool 标记 `removed`
   - 文件内 tool 增删 → 分别标记 `added` / `removed`
 - `fresh` 标志保证 skipped 文件不被误删
+- **被取代的 tool 模块要从 `sys.modules` 摘掉**：module name 里嵌了内容 hash，所以**每改一次文件就铸一个
+  新 key**，旧的不摘就常驻到进程结束。实测一个文件改 6 次：修复前 `sys.modules` 里留下 **7 个**
+  `psi_tool_*`，修复后只剩 **1 个**（当前那个）——长跑 Gateway 上原本是无上界增长。
+  `FileEntry.module_name` 记住这个 key，`_do_refresh` 在「文件被替换」和「文件被删」两条路径上调
+  `_evict_module`。hash 未变而复制旧 entry 时**必须把 `module_name` 一起带过去**，否则下次就摘不掉了
+- **只摘 tool 模块，不摘 helper（刻意为之）**：helper 按裸名缓存，仍活着的 tool 还持有它的引用；摘掉
+  只会让下一个导入者另建一份分叉的副本。「helper 不热重载」是记录在案的限制（见上文三个隐患），
+  不是这个摘除想解决的问题
 - `ScheduleRegistry` 以 per-file `ScheduleEntry` 存储（含 hash），`refresh()` 支持 add/update/remove/skip。每个 schedule 有独立 `CancelScope`，update/remove 时取消旧 runner 并启动新 runner。`refresh()` 内部已 try/except，失败时 log warning 返回 `{}`，不修改内部状态，调用方可直接 await 无需自行容错
 - Schedule 刷新的两个时机：
   1. 每次 `run()` 入口（turn 开始），与 tool 一并刷新
