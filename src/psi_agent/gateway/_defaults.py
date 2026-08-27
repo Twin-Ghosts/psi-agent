@@ -11,7 +11,7 @@ these resolvers.
 mkdir, ``tools/`` + ``skills/`` probing) lives in ``psi_agent._workspace_paths``,
 outside this package, so Session-spawning managers can reach it without
 importing a product-line package. Splitting it this way keeps the ToC names
-(``haitun交付``, ``examples/haitun-workspace``) in exactly one place — renaming
+(``haitun交付``, ``workspace/tob``) in exactly one place — renaming
 the workspace touches only ``gateway/``.
 
 AppData path helpers live in ``psi_agent._appdata`` (Session-safe; no circular
@@ -22,7 +22,7 @@ Soft default (agent)
 --------------------
 If CLI ``--default-agent`` is empty:
 
-1. Prefer ``cwd/examples/haitun-workspace`` when present (repo-local Gateway).
+1. Prefer ``cwd/workspace/tob`` when present (repo-local Gateway).
 2. Else if *cwd itself* looks like a haitun agent package (``tools/`` + ``skills/``
    directories) — the Inno install layout, where ``{app}`` *is* the workspace —
    use cwd. This keeps ``psi-agent.exe gateway`` usable from the install dir
@@ -63,7 +63,7 @@ from psi_agent._workspace_paths import (
 # Soft default under the OS Desktop — layered for non-technical users.
 DEFAULT_USER_WORKSPACE_NAME = "haitun交付"
 # Repo-local agent package, relative to cwd (developers starting from repo root).
-DEFAULT_AGENT_REPO_CANDIDATE = "examples/haitun-workspace"
+DEFAULT_AGENT_REPO_CANDIDATE = "workspace/tob"
 
 __all__ = [
     "DEFAULT_AGENT_REPO_CANDIDATE",
@@ -100,6 +100,6 @@ async def resolve_default_agent(explicit: str = "") -> str:
     """Absolute agent package path, or ``\"\"`` for Session workspace fallback.
 
     Thin brand wrapper over ``_workspace_paths.resolve_agent_package``: supplies
-    ``examples/haitun-workspace`` as the repo-local candidate.
+    ``workspace/tob`` as the repo-local candidate.
     """
     return await resolve_agent_package(explicit, repo_candidate=DEFAULT_AGENT_REPO_CANDIDATE)

@@ -645,8 +645,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
 
     /* 7. launch psi-agent.exe with Gateway path defaults + log files.
      *
-     * Install layout: {app} IS the haitun-workspace (tools/skills/systems).
-     * Soft-default in Python only finds examples/haitun-workspace under a
+     * Install layout: {app} IS the tob workspace (tools/skills/systems).
+     * Soft-default in Python only finds workspace/tob under a
      * repo root — so the launcher must pass --default-agent explicitly.
      * Workspace soft-default is Desktop/haitun交付; pass it too so install
      * and CLI stay aligned. Paths are resolved at runtime (g_dir + SHGetFolderPath),

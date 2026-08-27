@@ -97,6 +97,21 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 
 两条都不触发时，提示词**一字不改**沿用。所以**易变内容一律不放提示词里**——放进去就会冻结在首次构建那一刻，改由每回合的 turn context 承载（下一节）。
 
+### 6 个 hook 靠名字对上，写错了不报错
+
+`_load_module()` 用 `getattr(module, name, None)` 逐个查 `system_prompt_builder`、
+`system_prompt_rebuild_checker`、`compact_history`、`turn_context_builder`、
+`system_before_turn`、`system_after_turn`。名字拼错 → `None` → 静默走内核默认值；
+`agent.py` 只在缺 `compact_history` 时打一条 warning，其余 5 个连日志都没有。
+模块 import 失败时返回的也是 6 个 `None`，与「空模块」不可区分。
+
+因此 **12 个 workspace × 6 个 hook 的解析结果钉在
+`tests/psi_agent/session/test_workspace_hook_contract.py` 的 `EXPECTED` 表里**，
+少了、多了都失败。**不是「6 个全非 None」**——那不是本层的契约：builder / checker /
+before / after 有内核默认值，`turn_context_fn` 和 `compaction_fn` 的 `None` 本身承载语义
+（见「契约与容错」）。每个 workspace **必须**解析到的只有 `system_prompt_builder` 和
+`compact_history`，单列断言。workspace 换名或改 hook 名时，同步改 `EXPECTED`。
+
 ## 每回合易变上下文（turn context）
 
 `SystemPrompt.turn_context()` 在 `ensure()` 之后调用，渲染「本回合的现在」——时钟、可能随重新挂载而变的 runtime 行。产物**不进 system prompt**，而是挂在本回合 user 消息的 `turn_context` 键上（`history_display.TURN_CONTEXT_KEY`），只在 `messages_for_ai()` 投影时折进 `content`。

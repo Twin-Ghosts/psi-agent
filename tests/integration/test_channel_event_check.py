@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-HAITUN = Path(__file__).parents[2] / "examples" / "haitun-workspace"
+HAITUN = Path(__file__).parents[2] / "workspace" / "tob"
 
 _BROKEN_MAP = """
 def map_event(raw):

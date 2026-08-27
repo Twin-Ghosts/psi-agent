@@ -11,7 +11,10 @@ const LS_AGENT = 'gw-v2-agent'
 function isLegacyWorkspacePath(path: string): boolean {
   const n = path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
   if (!n || n === 'workspace') return true
-  // Old examples/*-workspace layout (agent pack mistaken for open-folder)
+  // Current agent-pack layout: workspace/tob (was examples/haitun-workspace)
+  if (/\/workspace\/tob$/i.test(n)) return true
+  // Old examples/*-workspace layout (agent pack mistaken for open-folder).
+  // Kept: users upgrading still have these paths saved in localStorage.
   if (/\/examples\/[^/]+-workspace$/i.test(n)) return true
   if (n.endsWith('/haitun-workspace')) return true
   return false

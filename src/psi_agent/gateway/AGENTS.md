@@ -127,7 +127,7 @@ schedules → `{workspace}/schedules/`（归 workspace，非 agent 包 / 非 App
 
 | CLI | 含义 |
 |-----|------|
-| `--default-agent` | 新建 Session 的 Agent 包目录；空则软默认：① `cwd/examples/haitun-workspace`（仓库开发）；② cwd 自身含 `tools/`+`skills/`（Inno 安装布局 `{app}` 即能力包）；仍空则 Session `agent=""`（与 workspace 同根兼容）。Windows 安装包 `haitun.exe` **显式**传 `--default-agent {app}` |
+| `--default-agent` | 新建 Session 的 Agent 包目录；空则软默认：① `cwd/workspace/tob`（仓库开发）；② cwd 自身含 `tools/`+`skills/`（Inno 安装布局 `{app}` 即能力包）；仍空则 Session `agent=""`（与 workspace 同根兼容）。Windows 安装包 `haitun.exe` **显式**传 `--default-agent {app}` |
 | `--default-workspace` | 新建 Session / `GET /defaults` 的用户工作区；空 → 软默认 `{Desktop}/haitun交付`（**只宣布路径**；目录在 `SessionManager.create` / 开始对话时才 mkdir。`platformdirs.user_desktop_dir`）。安装包 `haitun.exe` **显式**传该路径（运行时解析桌面，不写死用户名） |
 | `--appdata` | AppData 记忆区根；空 → `PSI_APPDATA` → `platformdirs`（**禁止**手写死 `%AppData%`） |
 | `--scheduler-ai-id` | 调度 Session 挂载的 AI 实例；空 → 回落 `--feishu-ai-id`；两者都空则有 `schedules/` 的 workspace 只记 warning 不启动调度 |
@@ -415,7 +415,7 @@ Gateway：``list_segments`` / ``get_segment`` 只读；``set_segment_label`` 允
 
 **list_routes() → list[FeishuRoute]**：`[{open_id, chat_id, session_id}]`，供观测（`GET /feishu/routes`）。群聊记录填 `chat_id` 而 `open_id` 留空，私聊反之——一条记录只有一个键有值。
 
-**未定义（已知留白）**：群 Session 的 workspace 只有一份，而 `user_access_token`（UAT）按发送者 `open_id` 存。群里多人时「以谁的身份写文档」由 workspace 侧工具按每条消息的 `sender_open_id` 决定（见 `examples/haitun-workspace/TOOLS.md`），Gateway 不做约定。
+**未定义（已知留白）**：群 Session 的 workspace 只有一份，而 `user_access_token`（UAT）按发送者 `open_id` 存。群里多人时「以谁的身份写文档」由 workspace 侧工具按每条消息的 `sender_open_id` 决定（见 `workspace/tob/TOOLS.md`），Gateway 不做约定。
 
 ## OAuthRelay
 
@@ -829,7 +829,7 @@ psi-agent gateway [--listen http://127.0.0.1:PORT] [--socket-path psi] [--icon P
 
 ### Windows 安装包 launcher（`haitun.exe`）
 
-Inno 安装后 `{app}` **就是** haitun-workspace（`tools/` / `skills/` / `systems/` 在根下），不是仓库的 `examples/haitun-workspace` 嵌套布局。`.github/inno-setup/haitun.c` 编译的 `haitun.exe` 必须显式传：
+Inno 安装后 `{app}` **就是** tob workspace（`tools/` / `skills/` / `systems/` 在根下），不是仓库的 `workspace/tob` 嵌套布局。`.github/inno-setup/haitun.c` 编译的 `haitun.exe` 必须显式传：
 
 ```text
 psi-agent.exe gateway --tray --browser --icon haitun.ico --verbose

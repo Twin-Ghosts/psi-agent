@@ -110,7 +110,7 @@ export default function WorkspaceGate({
                   onChange={(e) => setPath(e.target.value)}
                   placeholder={
                     isAgent
-                      ? '例如 D:\\Haitun\\examples\\haitun-workspace'
+                      ? '例如 D:\\Haitun\\workspace\\tob'
                       : '例如 D:\\Projects\\my-folder'
                   }
                   autoFocus

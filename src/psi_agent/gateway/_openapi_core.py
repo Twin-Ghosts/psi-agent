@@ -650,7 +650,7 @@ CORE_SCHEMAS: dict[str, Any] = {
                 "type": "string",
                 "description": (
                     "Agent package path. Empty → Gateway default "
-                    "(examples/haitun-workspace when present), else Session uses workspace"
+                    "(workspace/tob when present), else Session uses workspace"
                 ),
             },
         },
