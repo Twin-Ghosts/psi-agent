@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib
 import importlib.util
@@ -382,3 +383,27 @@ async def test_skills_index_names_come_from_the_directory(tmp_path: Path, monkey
 
     entries = dict(await module.indexed_skill_entries())
     assert "something-else" not in entries
+
+
+def test_mcp_declaration_parse_survives_a_non_iterable_keep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A literal-but-unusable ``keep`` must be treated as absent, never raised.
+
+    ``keep=5`` parses as a literal and then fails at the set comprehension with
+    ``TypeError``, not ``ValueError``. Letting it escape would propagate out of
+    ``advertised_tool_names()``, where the framework's hook guard converts any
+    exception into "skip this half of the check" — so one typo'd decorator would
+    silently disable the whole tool-exposure assertion.
+    """
+    module = _load_system_module(monkeypatch)
+
+    for source in ("@mcp(dispatch=True, keep=5)\ndef srv(): ...\n", "@mcp(dispatch=True, keep=None)\ndef srv(): ...\n"):
+        declarations = module._mcp_declarations(ast.parse(source))
+        assert declarations == [("srv", True, set())], f"unusable keep should read as empty: {source!r}"
+
+    # Computed (non-literal) values are equally unreadable and equally non-fatal.
+    computed = module._mcp_declarations(ast.parse("@mcp(dispatch=FLAG, keep=NAMES)\ndef srv(): ...\n"))
+    assert computed == [("srv", False, set())]
+
+    # A well-formed declaration still parses, so the suppression is not blanket.
+    good = module._mcp_declarations(ast.parse("@mcp(dispatch=True, keep=('a', 'b'))\ndef srv(): ...\n"))
+    assert good == [("srv", True, {"a", "b"})]

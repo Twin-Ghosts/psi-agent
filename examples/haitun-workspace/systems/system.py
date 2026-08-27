@@ -929,6 +929,14 @@ def _mcp_declarations(tree: ast.Module) -> list[tuple[str, bool, set[str]]]:
     literal keyword values are read; anything computed is treated as absent, which
     biases toward the loud failure (a name missing from the advertised list is
     reported, never silently assumed).
+
+    ``TypeError`` is suppressed alongside ``ValueError`` 刻意为之: a *literal but
+    non-iterable* ``keep`` (``keep=5``, ``keep=None``) parses fine and then fails at
+    the comprehension, and letting that escape would propagate out of
+    ``advertised_tool_names()`` — where the framework's hook guard turns any exception
+    into "skip this half of the check". A typo in one decorator would therefore
+    silently disable the whole tool-exposure assertion, which is the opposite of
+    treating an unreadable value as absent.
     """
     found: list[tuple[str, bool, set[str]]] = []
     for node in tree.body:
@@ -946,7 +954,7 @@ def _mcp_declarations(tree: ast.Module) -> list[tuple[str, bool, set[str]]]:
                         with contextlib.suppress(ValueError):
                             dispatch = bool(ast.literal_eval(kw.value))
                     elif kw.arg == "keep":
-                        with contextlib.suppress(ValueError):
+                        with contextlib.suppress(ValueError, TypeError):
                             keep = {str(k) for k in ast.literal_eval(kw.value)}
             found.append((node.name, dispatch, keep))
             break

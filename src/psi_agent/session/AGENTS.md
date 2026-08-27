@@ -35,6 +35,9 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 1. setup_logging(verbose)
 2. 解析 workspace（空 → cwd）；解析 agent（空 → 同 workspace）
 3. SessionAgent.create(workspace_path=…, agent_path=…, appdata_root=…) → session_id、AiClient、从 agent 加载 tools/schedules/system；history 在 AppData（legacy 双读）
+3b. SystemPrompt.check_exposure() —— 断言提示词宣告的工具/技能 == 运行时实际，
+    不等即抛 ExposureMismatchError（见下方「提示词/运行时暴露一致性检查」）。
+    在 task group 之前，所以启动期失败不会留下半启动的 Session
 4. 启动 anyio.task_group：
    ├── serve_session(agent=agent)  ← 从 agent 读取 channel_socket + handle_request
    └── 每个 schedule 一个 run_one_schedule(schedule, agent) task
@@ -50,6 +53,7 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 - AppData 路径助手在 ``psi_agent._appdata``（与 Gateway 共享；**禁止**经 ContextVar 传递 AppData 根）
 - System prompt 在首次 `run()` 调用时惰性构建（通过 `system_prompt_builder`）
 - `system_prompt_builder` 和 `system_prompt_rebuild_checker` 兼容旧的零参形式；如定义了位置参数，Session 会传入当前原始 `user_message`。这一显式参数只用于本轮动态 prompt，不会改变写入 history 的 `kind` 标记副本
+- `system_prompt_builder` 若声明 `tool_names` 关键字参数（或 `**kwargs`），Session 会把 **`ToolRegistry` 的实际工具名**传进去；没声明的 builder 调用方式**一字不变**（`_accepts_kwarg` 先验签名再决定传不传）。提示词该按这份清单写工具名，而不是自己去数 `tools/*.py` 文件名——**文件名不是工具名**（haitun 实测 95 个文件 / 194 个工具，`feishu_message.py` 一个文件 17 个）
 - 后续请求可调用 `system_prompt_rebuild_checker()`（如果定义），返回 True 则用同一条当前 `user_message` 重建 system prompt
 - 可选 `system_after_turn(user_message, assistant_message)` 在 `finish_reason="stop"` 的最终 assistant 消息已 commit 后执行。它是可恢复的 workspace hook：普通异常记 WARNING，不回滚已成功交付的回合；取消信号仍向外传播。未定义时使用 no-op 默认值
 - 未整段重建时，提示词一字不改；若 agent 包定义了 `turn_context_builder()`，则每回合把易变块挂到**本回合 user 消息**上（见下方「每回合易变上下文」）
