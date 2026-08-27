@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from psi_agent.gateway._auth_manager import AuthManager
+from psi_agent.gateway.desktop._auth_manager import AuthManager
 
 
 async def _manager(tmp_path: Path) -> AuthManager:

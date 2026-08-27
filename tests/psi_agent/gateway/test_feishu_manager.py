@@ -6,7 +6,7 @@ from typing import cast
 import anyio
 import pytest
 
-from psi_agent.gateway._feishu_manager import FeishuManager, _sanitize_open_id, external_sessions
+from psi_agent.gateway.feishu._feishu_manager import FeishuManager, _sanitize_open_id, external_sessions
 from psi_agent.runtime._ai_manager import AIManager
 from psi_agent.runtime._session_manager import SessionManager
 

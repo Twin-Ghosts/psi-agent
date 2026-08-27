@@ -10,8 +10,8 @@ from typing import Any
 from loguru import logger
 from PIL import Image
 
-from psi_agent.gateway._attention import _make_highlight_image, pulse_tray_icon
-from psi_agent.gateway._spa_shell import DEFAULT_APP_NAME
+from psi_agent.gateway.desktop._attention import _make_highlight_image, pulse_tray_icon
+from psi_agent.gateway.desktop._spa_shell import DEFAULT_APP_NAME
 
 
 class GatewayTray:

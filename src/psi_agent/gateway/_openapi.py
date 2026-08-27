@@ -3,9 +3,13 @@
 原先本文件是一个 915 行的整体 dict, 桌面端和飞书端的端点混在同一份里: 谁想只发布
 自己那批端点都做不到, 只能整份发出去。现在按 path key 分成三份, 各自独立演化:
 
-- ``_openapi_core.py``    两条线都注册的端点 (``/ais`` ``/sessions`` ``/titles`` ``/oauth`` …)
-- ``_openapi_desktop.py`` ToC 专属 (``/ui/*`` ``/workspace/*``)
-- ``_openapi_feishu.py``  ToB 专属 (``/feishu/*``)
+- ``_openapi_core.py``      两条线都注册的端点 (``/ais`` ``/sessions`` ``/titles`` ``/oauth`` …)
+- ``desktop/_openapi.py``   ToC 专属 (``/ui/*`` ``/workspace/*``)
+- ``feishu/_openapi.py``    ToB 专属 (``/feishu/*``)
+
+A5: 后两份随各自产品线搬进 ``desktop/`` / ``feishu/`` 子包 —— 一条产品线的 spec 片段
+和它的 manager、路由注册住在一起, 加端点时只动一个目录。装配仍留在骨架层: 它要同时
+认识三份才能拼, 放进任一产品包都会让那个包被另一条线反向依赖。
 
 ``build_openapi_spec()`` 按传入开关组装; ``OPENAPI_SPEC`` 是「全都要」的那份, 与拆分前
 的 path key 集合和每个 key 下的 schema 完全一致 —— 现有 ``GET /openapi.json`` 行为不变。
@@ -18,8 +22,8 @@ import json
 from typing import Any
 
 from psi_agent.gateway._openapi_core import CORE_PATHS, CORE_RESPONSES, CORE_SCHEMAS
-from psi_agent.gateway._openapi_desktop import DESKTOP_PATHS
-from psi_agent.gateway._openapi_feishu import FEISHU_PATHS, FEISHU_SCHEMAS
+from psi_agent.gateway.desktop._openapi import DESKTOP_PATHS
+from psi_agent.gateway.feishu._openapi import FEISHU_PATHS, FEISHU_SCHEMAS
 
 
 def build_openapi_spec(*, desktop: bool = True, feishu: bool = True) -> dict[str, Any]:

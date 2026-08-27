@@ -31,7 +31,7 @@ import anyio
 from loguru import logger
 
 from psi_agent._tls import client_ssl_context
-from psi_agent.gateway._auth_store import AuthStore
+from psi_agent.gateway.desktop._auth_store import AuthStore
 
 # 客户端拿到 401 即视为登录态失效: 清本地凭证、回登录界面。没有静默续期逻辑 ——
 # 云端是滑动过期 (每次请求刷 last_used_at), 60 天内正常使用不会掉线。

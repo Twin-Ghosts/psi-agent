@@ -23,11 +23,17 @@ Gateway 进程
 ├── OAuthRelay         — OAuth 回调中继（state → code 一次性信箱，免用户手工复制授权码）
 ├── GatewayState       — 状态持久化到 AppData `state/latest.json`（legacy cwd 双读）
 ├── aiohttp REST Server  — OpenAPI CRUD + Web UI chat
-├── spa/               — Vue 3 SPA 前端项目 (Vite + SFC)
-├── GatewayWebView     — 原生 webview 窗口 (pywebview)
-├── GatewayTray        — 系统托盘图标 (pystray)
-└── _openapi*.py      — OpenAPI schema 提供（公共 / ToC / ToB 三份 + 装配）
+├── desktop/           — **ToC 专属层**（托盘、webview、登录、盘符、SPA 静态资源）
+│   ├── GatewayWebView   — 原生 webview 窗口 (pywebview)
+│   ├── GatewayTray      — 系统托盘图标 (pystray)
+│   ├── AttentionHub / UIPrefs / WorkspaceManager / AuthManager + AuthStore
+│   ├── spa/             — Vue 3 SPA v1 前端项目 (Vite + SFC)
+│   └── spa-v2/          — React SPA v2（默认）
+├── feishu/            — **ToB 专属层**（`FeishuManager` + `/feishu/*`）
+└── _openapi*.py       — OpenAPI schema：公共片段在骨架，两份产品片段在各自子包，装配留骨架
 ```
+
+**目录分三层**（A5 落位）：骨架层（本目录顶层）只有 `server.py` 骨架 + `_defaults` / `_oauth_manager` / `_state` / `_openapi*` 装配；`desktop/` 与 `feishu/` 各自持产品专属模块。依赖方向单一：**骨架不 import 任何产品包**，产品包由 `register_*_routes()` 往骨架产出的 app 上贴。判据是「这段代码认识哪些概念」而不是「当前谁在调用」——`WorkspaceManager` 认识 Windows 盘符、`_tray` 认识 pystray，飞书容器里一个都用不上。
 
 ## 模块
 
@@ -37,24 +43,24 @@ Gateway 进程
 |------|------|
 | `__init__.py` | `Gateway` dataclass + `run()` 入口 |
 | `_defaults.py` | **只持 ToC 品牌字面量**（`haitun交付` / `examples/haitun-workspace`）+ 两个薄包装 `resolve_default_agent` / `resolve_default_workspace` — CLI / `GET /defaults` 用；机制在包外 ``psi_agent._workspace_paths``（见下方[工作区路径的机制与字面量分家](#工作区路径的机制与字面量分家)）。再导出 ``psi_agent._appdata`` 路径助手与 ``ensure_workspace_dir``（老调用方不破） |
-| `_feishu_manager.py` | `FeishuManager` — 飞书会话 → Session 路由表（私聊按 `open_id`、群聊按 `chat_id`；复用 SessionManager 按需 spawn）+ FeishuRoute |
+| `feishu/_feishu_manager.py` | `FeishuManager` — 飞书会话 → Session 路由表（私聊按 `open_id`、群聊按 `chat_id`；复用 SessionManager 按需 spawn）+ FeishuRoute |
 | `_oauth_manager.py` | `OAuthRelay` — OAuth 回调中继（`state → code` 一次性信箱，带 TTL；供 `GET /oauth/callback` + `GET /oauth/code`），让授权码免用户手工复制 |
-| `_auth_manager.py` | `AuthManager` — 云端账号服务的**转发层** + 登录态持有者；不持供应商密钥、不做授权判定（发码与鉴权全在云端）。两段式注册的 `tempToken` 扣在进程内不下发给页面，改回 `registrationRequired: true`；把云端 `Retry-After` 响应头抄进 body 供倒计时用；云端 `GET /sessions` 回**裸数组**，`_call` 装 `items` 信封、`list_devices` 统一成 `{"devices": [...]}`。`resolve_endpoint()` 定地址（显式参数 > `PSI_AUTH_ENDPOINT` > 内置默认；显式空串=关闭）。`bearer_token()` 是 token 的**唯一进程内取值口**，只给免费模型换算力用，不接任何下行响应（见 [免费模型的 key 替换](#免费模型的-key-替换)）。连接池 / 预热 / 重试边界见 [AuthManager 连接复用](#authmanager-连接复用) |
-| `_auth_store.py` | 本机凭证落盘 `{appdata}/auth.enc.json`（0600）+ `device_key`；密钥存 OS 钥匙串，钥匙串不可用则降级明文并记 warning、`credentialEncrypted: false` 如实上报。`load_token()` 读到明文且钥匙串此时可用会**就地重新加密**（用户装上 keyring 重启后凭证真的转密文，而不只是黄条消失）；`credentialEncrypted` 报的是**盘上真实形态**，没碰过盘时才退回“钥匙串可用性”做预测 |
+| `desktop/_auth_manager.py` | `AuthManager` — 云端账号服务的**转发层** + 登录态持有者；不持供应商密钥、不做授权判定（发码与鉴权全在云端）。两段式注册的 `tempToken` 扣在进程内不下发给页面，改回 `registrationRequired: true`；把云端 `Retry-After` 响应头抄进 body 供倒计时用；云端 `GET /sessions` 回**裸数组**，`_call` 装 `items` 信封、`list_devices` 统一成 `{"devices": [...]}`。`resolve_endpoint()` 定地址（显式参数 > `PSI_AUTH_ENDPOINT` > 内置默认；显式空串=关闭）。`bearer_token()` 是 token 的**唯一进程内取值口**，只给免费模型换算力用，不接任何下行响应（见 [免费模型的 key 替换](#免费模型的-key-替换)）。连接池 / 预热 / 重试边界见 [AuthManager 连接复用](#authmanager-连接复用) |
+| `desktop/_auth_store.py` | 本机凭证落盘 `{appdata}/auth.enc.json`（0600）+ `device_key`；密钥存 OS 钥匙串，钥匙串不可用则降级明文并记 warning、`credentialEncrypted: false` 如实上报。`load_token()` 读到明文且钥匙串此时可用会**就地重新加密**（用户装上 keyring 重启后凭证真的转密文，而不只是黄条消失）；`credentialEncrypted` 报的是**盘上真实形态**，没碰过盘时才退回“钥匙串可用性”做预测 |
 | `_state.py` | `GatewayState` — `{appdata}/state/latest.json` + 时间戳快照；缺则双读 cwd `state/latest.json` |
-| `_ui_prefs.py` | `UIPrefs` — SPA 的一次性 UI 标记（问卷是否已填），落 `{appdata}/ui-prefs.json`，读写经 `GET/POST /ui/prefs/survey`。**刻意不放 `localStorage`**：安装包不传 `--listen`，Gateway 每次启动 `_random_port()`，而 `localStorage` 按 origin（含端口）分桶 → 上次写的标记下次读不到，弹窗每次重启都再弹一遍。也不放 `_state.py`（那是 5 个固定 key 的 manager 快照 + 每启动一份时间戳副本，UI 偏好两头都不属于）；不像 `_auth_store` 加密（存布尔不存凭证）。按**机器**存不按登录用户：认证是旁挂且可整套关掉的，绑 `user_id` 会让纯本地模式无处落脚 |
-| `_spa_shell.py` | SPA 外壳注入 — `DEFAULT_APP_NAME`、`inject_app_name()`、`read_spa_index_template()`；`GET /spa/index.html` 替换 `__GATEWAY_APP_NAME__` |
+| `desktop/_ui_prefs.py` | `UIPrefs` — SPA 的一次性 UI 标记（问卷是否已填），落 `{appdata}/ui-prefs.json`，读写经 `GET/POST /ui/prefs/survey`。**刻意不放 `localStorage`**：安装包不传 `--listen`，Gateway 每次启动 `_random_port()`，而 `localStorage` 按 origin（含端口）分桶 → 上次写的标记下次读不到，弹窗每次重启都再弹一遍。也不放 `_state.py`（那是 5 个固定 key 的 manager 快照 + 每启动一份时间戳副本，UI 偏好两头都不属于）；不像 `_auth_store` 加密（存布尔不存凭证）。按**机器**存不按登录用户：认证是旁挂且可整套关掉的，绑 `user_id` 会让纯本地模式无处落脚 |
+| `desktop/_spa_shell.py` | SPA 外壳注入 — `DEFAULT_APP_NAME`、`inject_app_name()`、`read_spa_index_template()`；`GET /spa/index.html` 替换 `__GATEWAY_APP_NAME__` |
 | `server.py` | aiohttp Application + REST handlers。装配分三个函数：`create_core_app()` 骨架（内核 manager + 两条线都要的路由，**不认识**飞书/托盘/盘符/登录）、`register_desktop_routes()` ToC、`register_feishu_routes()` ToB。旧的单个 `create_app()` 收 17 个参数并**无条件**建 `FeishuManager` 与 `WorkspaceManager` —— 桌面端容器里建飞书管理器、飞书容器里建 Windows 盘符枚举器 |
-| `_workspace_manager.py` | 目录浏览 + 快捷路径列表 + cwd 查询 |
-| `spa/` | Vue 3 SPA v1（对话气泡），构建输出 `spa/dist/`；路径 `/spa/` |
-| `spa-v2/` | React SPA v2（任务工作台 + 宝箱），构建输出 `spa-v2/dist/`；**默认** `GET /` → `/spa-v2/`（无 dist 时回退 v1） |
-| `_tray.py` | 系统托盘图标（pystray + Pillow），由 `--tray` 参数开启，`--icon` 参数指定图标文件，左键打开浏览器或恢复 webview 窗口，右键菜单控制；`request_attention()` 脉冲高亮图标 |
-| `_webview.py` | 原生 webview 窗口（pywebview），`--webview` 参数开启。窗口关闭信号通过 `threading.Event` 传递给主 loop；`request_attention()` 在 Windows 上 FlashWindowEx |
-| `_attention.py` | `AttentionHub`：SPA `POST /ui/attention` → 绑定的 tray/webview 注意力提示（best-effort）。`schedule_notify()` 用 daemon thread 异步触发，**禁止**在 aiohttp handler 里同步等 tray（pystray 可能卡死事件循环） |
+| `desktop/_workspace_manager.py` | 目录浏览 + 快捷路径列表 + cwd 查询 |
+| `desktop/spa/` | Vue 3 SPA v1（对话气泡），构建输出 `spa/dist/`；路径 `/spa/` |
+| `desktop/spa-v2/` | React SPA v2（任务工作台 + 宝箱），构建输出 `spa-v2/dist/`；**默认** `GET /` → `/spa-v2/`（无 dist 时回退 v1） |
+| `desktop/_tray.py` | 系统托盘图标（pystray + Pillow），由 `--tray` 参数开启，`--icon` 参数指定图标文件，左键打开浏览器或恢复 webview 窗口，右键菜单控制；`request_attention()` 脉冲高亮图标 |
+| `desktop/_webview.py` | 原生 webview 窗口（pywebview），`--webview` 参数开启。窗口关闭信号通过 `threading.Event` 传递给主 loop；`request_attention()` 在 Windows 上 FlashWindowEx |
+| `desktop/_attention.py` | `AttentionHub`：SPA `POST /ui/attention` → 绑定的 tray/webview 注意力提示（best-effort）。`schedule_notify()` 用 daemon thread 异步触发，**禁止**在 aiohttp handler 里同步等 tray（pystray 可能卡死事件循环） |
 | `_openapi.py` | `GET /openapi.json` schema 装配 — `build_openapi_spec(desktop=, feishu=)` 把下面三份片段按产品线拼起来；`OPENAPI_SPEC` 是「全都要」的那份（path key 集合与拆分前一致）。**按 path key 分份、不按当前谁在调用**：路由注册分开后各线只贴自己那份。`render_openapi(desktop=, feishu=)` 由 handler 按 `app["openapi_desktop"]` / `app["openapi_feishu"]` 两面旗子传参（旗子由各 `register_*_routes` 立），所以 spec 报的就是本进程真注册了的那批 path |
 | `_openapi_core.py` | 两条线都注册的 18 个 path（`/ais` `/routers` `/sessions*` `/titles*` `/summaries*` `/defaults` `/oauth/*`）+ 公共 schema 与 `responses.Error`。`/oauth/*` 归公共是因为 `OAuthRelay` 只认识 `state → code` 信箱，既不认识飞书也不认识桌面端 |
-| `_openapi_desktop.py` | ToC 专属 6 个 path（`/ui/attention` `/ui/prefs/survey` `/workspace/*`）；背后 `AttentionHub` / `UIPrefs` / `WorkspaceManager` 都认识桌面概念。无专属 schema |
-| `_openapi_feishu.py` | ToB 专属 2 个 path（`/feishu/route` `/feishu/routes`）+ 三个 `FeishuRoute*` schema |
+| `desktop/_openapi.py` | ToC 专属 6 个 path（`/ui/attention` `/ui/prefs/survey` `/workspace/*`）；背后 `AttentionHub` / `UIPrefs` / `WorkspaceManager` 都认识桌面概念。无专属 schema |
+| `feishu/_openapi.py` | ToB 专属 2 个 path（`/feishu/route` `/feishu/routes`）+ 三个 `FeishuRoute*` schema |
 
 ## Gateway 启动流程
 
@@ -266,7 +272,7 @@ AI 运行时 crash 时，`_run_ai` 的 except 块从 `_entries` 中移除该 ent
 
 ### 免费模型的 key 替换
 
-实现在 `_free_model.py`。C 端默认免费模型走云端转发（`https://account.genuineknowledge.cn/llm/v1`），供应商 key 只在云端的 litellm 容器里，客户端凭**登录态**换算力。但 token 全程由 Gateway 持有并加密落盘，前端拿不到也不该拿（`authFlow.ts` 更要求登录组件源码不出现 token 字面量，理由是 XSS）。
+实现在 `desktop/_free_model.py`。C 端默认免费模型走云端转发（`https://account.genuineknowledge.cn/llm/v1`），供应商 key 只在云端的 litellm 容器里，客户端凭**登录态**换算力。但 token 全程由 Gateway 持有并加密落盘，前端拿不到也不该拿（`authFlow.ts` 更要求登录组件源码不出现 token 字面量，理由是 XSS）。
 
 所以 SPA 填哨兵值 `haitun-default`，Gateway 在 `_spawn` 里换成真 token：
 
@@ -286,7 +292,7 @@ AI 运行时 crash 时，`_run_ai` 的 except 块从 `_entries` 中移除该 ent
 - **原地重建，不是删了重加**：同一个 `AiInfo` 原样放回，模型列表 / Session 的 `backend_id` / 快照全都不动，用户看不到模型消失又出现。变的只有 `Ai` 手里那份 key
 - **接线**（`server.py:_refresh_free_models`）：`_auth_verify` / `_auth_complete` 在 `status == 200` 时调；`_auth_logout` **无条件**调 —— `logout()` 即使云端不可达也会走 `logout_local()`，本机已经登出了
 
-哨兵值 `haitun-default` 是**跨边界契约**，共三处：`_free_model.py`、`spa-v2/src/services/bootstrapAi.ts`、`spa/src/bootstrapAi.js`。任改一处就静默失效（带着哨兵去请求，云端回 401）。
+哨兵值 `haitun-default` 是**跨边界契约**，共三处：`desktop/_free_model.py`、`desktop/spa-v2/src/services/bootstrapAi.ts`、`desktop/spa/src/bootstrapAi.js`。任改一处就静默失效（带着哨兵去请求，云端回 401）。
 
 ## RouterManager
 
@@ -691,7 +697,7 @@ Session 标题由服务端 `/titles` 端点维护，不在浏览器 localStorage
 
 **启动加载流程**：
 ```
-GET /ais + GET /sessions → 恢复上次 AI/Session → 无 AI 时由 SPA 自行 POST /ais（打开即用，见 spa/AGENTS.md）
+GET /ais + GET /sessions → 恢复上次 AI/Session → 无 AI 时由 SPA 自行 POST /ais（打开即用，见 desktop/spa/AGENTS.md）
 → 仍无 AI 则弹窗 Hub「大模型」→ 恢复 titles / sidebar / theme / active IDs
 ```
 Chat SSE 在长空闲时写 `: keepalive` 注释，**不得**对上游 `agen.__anext__()` 使用 `fail_after`（会拆掉 ChatManager，导致前端「正在同步」挂死）。打开即用默认模型 / 域名由 SPA 维护，Gateway 不内置默认 AI。

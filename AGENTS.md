@@ -128,22 +128,34 @@ src/
     │   ├── _chat_manager.py        # SSE 流式对话管理
     │   ├── _history_manager.py     # JSONL 历史读取
     │   └── _todo_manager.py        # 会话 todo 列表读取
-    └── gateway/
+    └── gateway/                     # 骨架层：两条产品线的共同装配 + 公共端点
         ├── AGENTS.md                # Gateway 层设计文档
         ├── __init__.py              # Gateway dataclass + run()
-        ├── _free_model.py          # 免费模型哨兵 key → 登录 token（同源校验）
-        ├── _feishu_manager.py      # FeishuManager — 飞书 open_id → Session 路由
+        ├── server.py                # aiohttp REST handlers + create_core_app / register_*_routes
+        ├── _defaults.py             # ToC 品牌字面量 + GET /defaults 的解析入口
         ├── _oauth_manager.py       # OAuthRelay — OAuth 回调中继（免手抄授权码）
         ├── _state.py               # GatewayState — 状态持久化 (state/latest.json)
-        ├── server.py               # aiohttp REST handlers
-        ├── _workspace_manager.py   # 目录浏览
-        ├── _openapi.py             # OpenAPI schema 生成
-        ├── _attention.py           # AttentionHub — tray/webview 注意力提示
-        ├── _tray.py                # 系统托盘图标 (pystray)
-        ├── _webview.py            # 原生 webview 窗口 (pywebview)
-        ├── spa/                    # Vue 3 SPA v1（Vite + SFC）
-        └── spa-v2/                 # React SPA v2（任务工作台；默认 GET /）
+        ├── _openapi.py             # OpenAPI 装配（按产品线开关拼三份片段）
+        ├── _openapi_core.py        # 公共 path 片段
+        ├── desktop/                 # **ToC 专属层**
+        │   ├── _free_model.py      # 免费模型哨兵 key → 登录 token（同源校验）
+        │   ├── _auth_manager.py    # AuthManager — 云端账号服务转发 + 登录态
+        │   ├── _auth_store.py      # 本机凭证加密落盘
+        │   ├── _workspace_manager.py  # 目录浏览（认识 Windows 盘符）
+        │   ├── _attention.py       # AttentionHub — tray/webview 注意力提示
+        │   ├── _tray.py            # 系统托盘图标 (pystray)
+        │   ├── _webview.py        # 原生 webview 窗口 (pywebview)
+        │   ├── _ui_prefs.py        # SPA 一次性 UI 标记
+        │   ├── _spa_shell.py       # SPA 外壳注入（app_name）
+        │   ├── _openapi.py         # ToC path 片段（/ui/* /workspace/*）
+        │   ├── spa/                # Vue 3 SPA v1（Vite + SFC）
+        │   └── spa-v2/             # React SPA v2（任务工作台；默认 GET /）
+        └── feishu/                  # **ToB 专属层**
+            ├── _feishu_manager.py  # FeishuManager — 飞书 open_id → Session 路由
+            └── _openapi.py         # ToB path 片段（/feishu/*）
 ```
+
+gateway 内部同样是**单向**的：骨架层不 import `desktop/` 与 `feishu/`（`server.py` 例外地只为静态资源根取一次 `desktop` 包路径），两条产品线由 `register_desktop_routes()` / `register_feishu_routes()` 往骨架产出的 app 上贴。归属判据是「这段代码认识哪些概念」，不是「当前谁在调用」。
 
 `runtime/` 与 `gateway/` 的依赖方向**单一**：gateway 组装 runtime 的 manager 并接到 REST + Web UI 上，runtime 反过来对 gateway 一无所知。这条边由 `git grep -n "from psi_agent.gateway" -- src/psi_agent/runtime/` 必须无输出来守。
 
@@ -353,7 +365,7 @@ async def handler(request):
   - `tests/integration/conftest.py:112` — pytest async generator fixture 的返回类型局限（`yield` 导致函数被推断为 AsyncGenerator，与标注的 MockAIServer 冲突）
   - `src/psi_agent/gateway/server.py:257` — `anyio.to_thread.run_sync(file_field.file.read)` 返回类型 Any，ty 无法推断
   - `src/psi_agent/gateway/__init__.py:152,167,169`（3 处）— `anyio.to_thread.run_sync(webbrowser.open, ...)` / `anyio.to_thread.run_sync(tray.wait_stop, ...)` / `anyio.to_thread.run_sync(wv.wait_closed, ...)` 同上
-  - `src/psi_agent/gateway/_webview.py:40`（1 处）— `events.closing` 无法解析，因 webview 由 `__import__("webview")` 动态导入
+  - `src/psi_agent/gateway/desktop/_webview.py:40`（1 处）— `events.closing` 无法解析，因 webview 由 `__import__("webview")` 动态导入
   - `src/psi_agent/channel/cli/client.py:16` — `anyio.to_thread.run_sync(sys.stdin.read)` 同上
 - **例外**：`examples/` 下的示例 workspace（如 `a-serper-mcp-workspace/tools/_mcp.py`）含若干 `# ty: ignore`（动态 MCP 工具的运行时签名构造），属示例代码，不计入上述核心约定。
 
@@ -370,9 +382,9 @@ async def handler(request):
 ## 注释约定
 
 - **语种与风格跟随所在文件**，不跟随个人习惯：改一个文件前先看它现有的注释/docstring 是英文还是中文，然后与之保持一致。**单个 `.py` 文件内必须统一**
-- 仓库整体是混合的（`src/` 与 `tests/` 均约 1:6 中英），但这不是「随便写」的许可——它是逐文件收敛的结果。典型：`gateway/_feishu_manager.py`、`runtime/_scheduler_manager.py` 与其对应测试通篇中文；`session/schedule_registry.py`、`session/agent.py`、`gateway/server.py`、`runtime/_session_manager.py` 通篇英文
+- 仓库整体是混合的（`src/` 与 `tests/` 均约 1:6 中英），但这不是「随便写」的许可——它是逐文件收敛的结果。典型：`gateway/feishu/_feishu_manager.py`、`runtime/_scheduler_manager.py` 与其对应测试通篇中文；`session/schedule_registry.py`、`session/agent.py`、`gateway/server.py`、`runtime/_session_manager.py` 通篇英文
 - **`刻意为之:` 是例外**，可嵌在英文注释里作反直觉行为的标记词（如 `# prompt = LLM turn on task_content; tool = direct ToolRegistry call (刻意为之).`）。它是全仓统一的检索词，配合「改动后自检清单」第 1 条使用，不算破坏语种一致性
-- 新建文件按**同层同类邻居**定语种（如 `runtime/_scheduler_manager.py` 对标 `gateway/_feishu_manager.py`），别按仓库全局比例猜
+- 新建文件按**同层同类邻居**定语种（如 `runtime/_scheduler_manager.py` 对标 `gateway/feishu/_feishu_manager.py`），别按仓库全局比例猜
 - 中文注释里避免全角 `，`、`（`、`）`、`：` 与 `×`——ruff 的 RUF001/002/003 报 ambiguous unicode，一律改半角 `,` `(` `)` `:` 和 `x`；`。`、`——`、`「」`、`→` 不在规则里，可用（本条以 `ruff check --isolated --select RUF001,RUF002,RUF003` 实测为准）
 
 ## 开发命令
@@ -392,12 +404,12 @@ uv build                         # 构建
 
 本仓常被同时 checkout 成多棵工作树并行施工（前端树 / workspace 树 / 参谋树）。约定如下：
 
-- **一棵树只改一个区**：前端树只碰 `src/psi_agent/gateway/spa-v2/`（及必要的 Gateway 壳 / spa v1）；workspace 树主要碰 `examples/haitun-workspace/`，以及必要的 Session / Gateway 服务端。越区改动优先换树，而不是在本树顺手改
+- **一棵树只改一个区**：前端树只碰 `src/psi_agent/gateway/desktop/spa-v2/`（及必要的 Gateway 壳 / spa v1）；workspace 树主要碰 `examples/haitun-workspace/`，以及必要的 Session / Gateway 服务端。越区改动优先换树，而不是在本树顺手改
 - **同 remote ≠ 同磁盘**：别人把分支合进 `main`，不会自动出现在你的工作树里；要用 `git fetch` 后显式合并
 - **接 `main` 时停在自己的 `feat/…` 上**：`git fetch origin` → 先 commit 或 stash 保护 WIP → `git merge origin/main`。冲突以各层 `AGENTS.md` 为准（保留三区 / AppData / ContextVar 约定后再叠自己的功能）
 - **禁止**擅自 `git reset --hard origin/main`——它会丢掉本树的本地提交，除非用户明确要求
-- **阅读顺序**：根 `AGENTS.md` → `session/AGENTS.md` → `gateway/AGENTS.md` → `examples/haitun-workspace/AGENTS.md` 或 `spa-v2/AGENTS.md`
-- **各区验收命令看本层文档**：Python 侧见上面「开发命令」；前端侧见 `spa-v2/AGENTS.md`「本地开发」（`npm run build` 后经 Gateway 硬刷验收，该目录没有 `npm test`）
+- **阅读顺序**：根 `AGENTS.md` → `session/AGENTS.md` → `gateway/AGENTS.md` → `examples/haitun-workspace/AGENTS.md` 或 `gateway/desktop/spa-v2/AGENTS.md`
+- **各区验收命令看本层文档**：Python 侧见上面「开发命令」；前端侧见 `gateway/desktop/spa-v2/AGENTS.md`「本地开发」（`npm run build` 后经 Gateway 硬刷验收，该目录没有 `npm test`）
 
 ## 改动后自检清单（Definition of Done）
 
@@ -417,7 +429,7 @@ C 端注册登录的云端服务**不在本仓库**，在服务器 `/srv/psi-clo
 
 - 两侧只通过 HTTP 契约耦合。契约的权威定义是云端的 `/openapi.json`（自动生成，不会与实现脱同步）。
 - 云端的目录结构、模块契约与硬规则记在 `/srv/psi-cloud/AGENTS.md`，**本文不重复**。一句话概括：`core/` 是框架且不认识任何业务，`modules/` 下每个目录一块业务自报清单，认证是 `modules/auth`。
-- 本机侧只有 `gateway/_auth_manager.py` 与 `_auth_store.py` 两个文件与它对接，**不持任何供应商密钥**。改动云端接口要同步上面那份设计文档。
+- 本机侧只有 `gateway/desktop/_auth_manager.py` 与 `_auth_store.py` 两个文件与它对接，**不持任何供应商密钥**。改动云端接口要同步上面那份设计文档。
 
 ## 未来扩展方向
 

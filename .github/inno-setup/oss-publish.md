@@ -95,7 +95,7 @@ HAITUN_UPDATE_INTERVAL_HOURS=24
 
 安装向导第一页是协议页：两个链接分别打开《Haitun Agent 软件许可及服务协议》与《Haitun Agent 隐私保护政策》，**一个勾选框同时覆盖两份**，不勾则「下一步」禁用。这个形态由许可协议导言本身规定（「您在本软件安装过程中勾选同意本协议，即视为您同时同意隐私保护政策」），不是 UI 选择。
 
-两份协议的 HTML 是 `docs/` 下 md 源的生成物，由 `scripts/gen_legal_html.py` 产出到 `src/psi_agent/gateway/spa-v2/public/`，安装器与产品内共用同一份。**改了 md 必须重新生成**，否则 CI 的 `--check` 步骤会失败。
+两份协议的 HTML 是 `docs/` 下 md 源的生成物，由 `scripts/gen_legal_html.py` 产出到 `src/psi_agent/gateway/desktop/spa-v2/public/`，安装器与产品内共用同一份。**改了 md 必须重新生成**，否则 CI 的 `--check` 步骤会失败。
 
 **不记录同意状态。** 无注册表、无标记文件 —— 团队决定每次安装都勾。自动更新走完整向导（`haitun.c` 拉起 setup 未带 `/SILENT`），因此升级也会经过协议页。
 

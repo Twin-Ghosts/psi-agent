@@ -13,7 +13,7 @@ import anyio
 import pytest
 from aiohttp import ClientSession, ClientTimeout, FormData, web
 
-from psi_agent.gateway._attention import AttentionHub
+from psi_agent.gateway.desktop._attention import AttentionHub
 from psi_agent.gateway.server import create_core_app, register_desktop_routes, register_feishu_routes
 from psi_agent.runtime._ai_manager import AIManager
 from psi_agent.runtime._router_manager import RouterManager

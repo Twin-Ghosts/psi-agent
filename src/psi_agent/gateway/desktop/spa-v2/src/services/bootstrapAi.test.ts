@@ -28,7 +28,7 @@ const ai = (partial: Partial<AiInfo> & Pick<AiInfo, 'id' | 'api_key'>): AiInfo =
 
 describe('DEFAULT_REMOTE_AI', () => {
   /**
-   * These three values are a contract with `gateway/_free_model.py`. The Gateway
+   * These three values are a contract with `gateway/desktop/_free_model.py`. The Gateway
    * only swaps the placeholder for a login token when the key matches AND the
    * base_url is same-origin with the account service. Drift on either side means
    * the free model ships a placeholder and the cloud answers 401 — a failure the

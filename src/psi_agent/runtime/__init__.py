@@ -7,7 +7,7 @@
 src/psi_agent/runtime/`` 必须无输出, 这是这个包存在的意义所在。
 
 反过来的依赖是允许且预期的: ``gateway`` 组装这些 manager 并把它们接到 REST + Web UI
-上, ``gateway/_feishu_manager.py`` 复用 ``SessionManager`` 给每个飞书用户 spawn 独立
+上, ``gateway/feishu/_feishu_manager.py`` 复用 ``SessionManager`` 给每个飞书用户 spawn 独立
 Session。方向单一 —— gateway → runtime, 永不回头。
 
 命名: 与 ``session/runtime_context.py`` 只是字面相近, 两者在 Python 命名空间里互不

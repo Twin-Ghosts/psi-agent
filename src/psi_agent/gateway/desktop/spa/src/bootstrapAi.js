@@ -7,7 +7,7 @@ import { api } from './api.js'
  * process.
  *
  * `base_url` must stay same-origin with the account service and `api_key` must
- * match `PLACEHOLDER_API_KEY` in `gateway/_free_model.py` — the Gateway only
+ * match `PLACEHOLDER_API_KEY` in `gateway/desktop/_free_model.py` — the Gateway only
  * substitutes when both hold. Keep this in sync with `spa-v2`'s copy.
  */
 export const DEFAULT_REMOTE_AI = {

@@ -19,7 +19,7 @@ import anyio
 import pytest
 from anyio.abc import TaskGroup
 
-from psi_agent.gateway._free_model import (
+from psi_agent.gateway.desktop._free_model import (
     PLACEHOLDER_API_KEY,
     is_cloud_free_model,
     make_key_resolver,

@@ -13,8 +13,8 @@ from loguru import logger
 from PIL import Image, ImageDraw
 
 if TYPE_CHECKING:
-    from psi_agent.gateway._tray import GatewayTray
-    from psi_agent.gateway._webview import GatewayWebView
+    from psi_agent.gateway.desktop._tray import GatewayTray
+    from psi_agent.gateway.desktop._webview import GatewayWebView
 
 
 def _make_highlight_image(image: Any) -> Any:

@@ -65,12 +65,12 @@ source = "vcs"
 
 [tool.hatch.build.targets.sdist]
 artifacts = [
-    "src/psi_agent/gateway/spa/dist/**/*",
-    "src/psi_agent/gateway/spa-v2/dist/**/*",
+    "src/psi_agent/gateway/desktop/spa/dist/**/*",
+    "src/psi_agent/gateway/desktop/spa-v2/dist/**/*",
 ]
 exclude = [
-    "src/psi_agent/gateway/spa/node_modules/**",
-    "src/psi_agent/gateway/spa-v2/node_modules/**",
+    "src/psi_agent/gateway/desktop/spa/node_modules/**",
+    "src/psi_agent/gateway/desktop/spa-v2/node_modules/**",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -78,12 +78,12 @@ packages = ["src/psi_agent"]
 exclude = [
     "src/psi_agent/**/AGENTS.md",
     "src/psi_agent/**/.gitignore",
-    "src/psi_agent/gateway/spa",
-    "src/psi_agent/gateway/spa-v2",
+    "src/psi_agent/gateway/desktop/spa",
+    "src/psi_agent/gateway/desktop/spa-v2",
 ]
 artifacts = [
-    "src/psi_agent/gateway/spa/dist/**/*",
-    "src/psi_agent/gateway/spa-v2/dist/**/*",
+    "src/psi_agent/gateway/desktop/spa/dist/**/*",
+    "src/psi_agent/gateway/desktop/spa-v2/dist/**/*",
 ]
 
 [tool.ruff]

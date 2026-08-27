@@ -6,7 +6,7 @@ import { createAi, listAis, type AiInfo } from './api'
  * login token when spawning the AI process — the SPA never holds a token.
  *
  * `PLACEHOLDER_API_KEY` below is a cross-boundary contract with
- * `gateway/_free_model.py`. Change one side only and the free model silently
+ * `gateway/desktop/_free_model.py`. Change one side only and the free model silently
  * ships the placeholder to the cloud, which answers 401.
  *
  * Do NOT POST this on boot when the pool is empty and there are no Sessions —

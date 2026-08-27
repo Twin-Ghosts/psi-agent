@@ -728,7 +728,7 @@ export default function HubLoginPanel({
         {busy ? <Loader2 size={15} className="hub-spin" /> : null} 重试
       </button>
       {/* 硬门禁下断网也不放行: 默认模型的 key 由云端按登录态下发, 放进去只会在
-          第一次对话时报一个与产品无关的上游错误(见 gateway/_free_model.py)。 */}
+          第一次对话时报一个与产品无关的上游错误(见 gateway/desktop/_free_model.py)。 */}
       {mandatory ? null : (
         <div className="hub-login-center">
           <button type="button" className="hub-btn ghost" style={{ border: 0, background: 'none' }} onClick={onClose}>

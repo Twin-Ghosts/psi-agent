@@ -11,20 +11,21 @@ import anyio
 from aiohttp import web
 from loguru import logger
 
-from psi_agent.gateway._attention import AttentionHub
-from psi_agent.gateway._auth_manager import AuthManager
+from psi_agent.gateway import desktop as desktop_pkg
 from psi_agent.gateway._defaults import (
     resolve_appdata_root,
     resolve_default_agent,
     resolve_default_workspace,
 )
-from psi_agent.gateway._feishu_manager import FeishuManager
-from psi_agent.gateway._free_model import is_cloud_free_model
 from psi_agent.gateway._oauth_manager import OAuthRelay
 from psi_agent.gateway._openapi import render_openapi
-from psi_agent.gateway._spa_shell import DEFAULT_APP_NAME, inject_app_name, read_spa_index_template
-from psi_agent.gateway._ui_prefs import UIPrefs
-from psi_agent.gateway._workspace_manager import WorkspaceManager
+from psi_agent.gateway.desktop._attention import AttentionHub
+from psi_agent.gateway.desktop._auth_manager import AuthManager
+from psi_agent.gateway.desktop._free_model import is_cloud_free_model
+from psi_agent.gateway.desktop._spa_shell import DEFAULT_APP_NAME, inject_app_name, read_spa_index_template
+from psi_agent.gateway.desktop._ui_prefs import UIPrefs
+from psi_agent.gateway.desktop._workspace_manager import WorkspaceManager
+from psi_agent.gateway.feishu._feishu_manager import FeishuManager
 from psi_agent.runtime._ai_manager import AIManager
 from psi_agent.runtime._chat_manager import ChatManager
 from psi_agent.runtime._history_manager import HistoryManager
@@ -106,8 +107,13 @@ async def _handle_spa_index(request: web.Request) -> web.Response:
 
 
 def _gateway_spa_root() -> anyio.Path:
-    """Package dir that owns ``spa/`` and ``spa-v2/`` (tests may monkeypatch)."""
-    return anyio.Path(__file__).parent
+    """Package dir that owns ``spa/`` and ``spa-v2/`` (tests may monkeypatch).
+
+    A5: 两棵树随 ToC 其余部分搬进 ``gateway/desktop/``, 所以这里从 **desktop 包**
+    的 ``__file__`` 推, 不再是 ``gateway/`` 自己的 —— 否则拼出的路径不存在, SPA 静态
+    资源静默 404 (``await spa_dist.exists()`` 为假时连 static 都不注册, 不报错)。
+    """
+    return anyio.Path(desktop_pkg.__file__).parent
 
 
 async def _handle_spa_v2_index(request: web.Request) -> web.Response:

@@ -14,7 +14,7 @@ gateway/  ──→  runtime/  ──→  session/ ai/ router/ protocol/ channel
   + 飞书 + 认证）      + 生命周期）
 ```
 
-**方向单一，永不回头。** gateway 组装这些 manager 并把它们接到 REST + Web UI 上（`gateway/server.py`、`gateway/__init__.py`），`gateway/_feishu_manager.py` 复用 `SessionManager` 给每个飞书用户按需 spawn 独立 Session。runtime 反过来对 gateway 一无所知。
+**方向单一，永不回头。** gateway 组装这些 manager 并把它们接到 REST + Web UI 上（`gateway/server.py`、`gateway/__init__.py`），`gateway/feishu/_feishu_manager.py` 复用 `SessionManager` 给每个飞书用户按需 spawn 独立 Session。runtime 反过来对 gateway 一无所知。
 
 这条边由一条可执行的闸门守着，改动本包后必须为空：
 

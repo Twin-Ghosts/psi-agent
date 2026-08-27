@@ -8,8 +8,8 @@ from typing import Any
 
 from loguru import logger
 
-from psi_agent.gateway._attention import _flash_hwnd
-from psi_agent.gateway._spa_shell import DEFAULT_APP_NAME
+from psi_agent.gateway.desktop._attention import _flash_hwnd
+from psi_agent.gateway.desktop._spa_shell import DEFAULT_APP_NAME
 
 
 class GatewayWebView:

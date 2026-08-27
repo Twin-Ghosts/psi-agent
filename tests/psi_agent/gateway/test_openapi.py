@@ -4,8 +4,8 @@ from typing import Any, cast
 
 from psi_agent.gateway._openapi import OPENAPI_SPEC, build_openapi_spec
 from psi_agent.gateway._openapi_core import CORE_PATHS, CORE_RESPONSES, CORE_SCHEMAS
-from psi_agent.gateway._openapi_desktop import DESKTOP_PATHS
-from psi_agent.gateway._openapi_feishu import FEISHU_PATHS, FEISHU_SCHEMAS
+from psi_agent.gateway.desktop._openapi import DESKTOP_PATHS
+from psi_agent.gateway.feishu._openapi import FEISHU_PATHS, FEISHU_SCHEMAS
 
 
 def test_openapi_router_contract_uses_current_fields_only() -> None:
