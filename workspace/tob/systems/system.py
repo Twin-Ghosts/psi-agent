@@ -69,11 +69,39 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import anyio
 
 try:
+    from psi_agent.session.runtime_context import get_agent as _runtime_agent
     from psi_agent.session.runtime_context import get_workspace as _runtime_workspace
 except ImportError:  # pragma: no cover — standalone import without editable install
 
     def _runtime_workspace() -> str:
         return ""
+
+    def _runtime_agent() -> str:
+        return ""
+
+
+def _package_fallback() -> str:
+    """This package root, derived from ``__file__`` (``systems/`` parent).
+
+    Last resort only. It follows the file, so it goes wrong the moment the
+    package is re-laid-out — which is why every caller below prefers the root
+    the kernel hands down (``agent_raw``) or binds per turn (``get_agent()``).
+    """
+    return str(Path(__file__).resolve().parents[1])
+
+
+def _resolve_agent(agent_raw: str = "") -> anyio.Path:
+    """Agent package root: explicit *agent_raw* → ``get_agent()`` → ``__file__``.
+
+    Same priority chain as ``tools/_runtime_paths.agent_dir`` — the kernel is
+    authoritative when it says something, the per-turn ContextVar covers the
+    rest, and ``__file__`` only answers when nothing else did.
+    """
+    for candidate in (agent_raw, _runtime_agent()):
+        text = (candidate or "").strip()
+        if text:
+            return anyio.Path(text)
+    return anyio.Path(_package_fallback())
 
 
 from prompt_sections import (
@@ -1409,8 +1437,9 @@ this workspace, generated workflows, instruction files, or committed `.env` file
         )
 
 
-def _resolve_workspace(workspace_raw: str = "") -> anyio.Path:
-    raw = workspace_raw or _runtime_workspace() or str(anyio.Path(__file__).parent.parent)
+def _resolve_workspace(workspace_raw: str = "", agent_raw: str = "") -> anyio.Path:
+    """User workspace root; falls back to the agent package (single-root compat)."""
+    raw = workspace_raw or _runtime_workspace() or str(_resolve_agent(agent_raw))
     return anyio.Path(os.path.realpath(os.path.abspath(raw)))
 
 
@@ -1442,6 +1471,7 @@ async def system_before_turn(
     user_message: dict[str, Any] | None,
     *,
     workspace_raw: str = "",
+    agent_raw: str = "",
 ) -> dict[str, Any]:
     """Return namespaced background advice for an eligible learning turn."""
     if not isinstance(user_message, dict):
@@ -1458,7 +1488,7 @@ async def system_before_turn(
     if not supervisor_module.is_learning_question(content):
         return {}
     try:
-        manager = _get_supervisor_manager(_resolve_workspace(workspace_raw))
+        manager = _get_supervisor_manager(_resolve_workspace(workspace_raw, agent_raw))
         before_turn = getattr(manager, "before_turn", None)
         advice = await before_turn(user_message) if callable(before_turn) else await manager.supervise(user_message)
     except Exception as exc:
@@ -1471,18 +1501,21 @@ async def system_prompt_builder(
     user_message: dict[str, Any] | None = None,
     *,
     workspace_raw: str = "",
+    agent_raw: str = "",
 ) -> str:
     """Module-level entry point used by the psi-agent session loader.
 
     The loader looks up an async ``system_prompt_builder`` attribute in this
-    module and calls it with no arguments.
+    module and calls it with the turn's user message.
 
-    **Agent vs user workspace (三区)**: this file lives in the agent package, so
-    ``__file__`` resolves the capability root. The user open-folder for file IO
-    comes from Session ``get_workspace()`` (bound inside ``runtime_scope`` during
-    the turn). Falling back to the agent root preserves single-root compat.
+    **Agent vs user workspace (三区)**: the capability root comes from
+    *agent_raw* (the kernel passes the package root it loaded this module from)
+    or ``get_agent()``, and only falls back to ``__file__`` when neither is set
+    — see ``_resolve_agent``. The user open-folder for file IO comes from
+    Session ``get_workspace()`` (bound inside ``runtime_scope`` during the
+    turn). Falling back to the agent root preserves single-root compat.
     """
-    agent_dir = anyio.Path(__file__).parent.parent
+    agent_dir = _resolve_agent(agent_raw)
     user_workspace = agent_dir
     raw = (workspace_raw or _runtime_workspace() or "").strip()
     if raw:
@@ -1537,7 +1570,7 @@ async def system_prompt_builder(
     return prompt + "\n" + injected
 
 
-async def turn_context_builder() -> str:
+async def turn_context_builder(*, agent_raw: str = "") -> str:
     """Render the volatile block for the turn about to run.
 
     ``system_prompt_builder`` runs once per Session, so every "now" it renders
@@ -1554,7 +1587,7 @@ async def turn_context_builder() -> str:
     on the turn's own user message, so the prompt and every earlier turn stay
     byte-identical.
     """
-    agent_dir = anyio.Path(__file__).parent.parent
+    agent_dir = _resolve_agent(agent_raw)
     user_workspace = agent_dir
     raw = (_runtime_workspace() or "").strip()
     if raw:
@@ -1563,9 +1596,13 @@ async def turn_context_builder() -> str:
     return await system.build_turn_context()
 
 
-async def system_prompt_rebuild_checker(_user_message: dict[str, Any] | None = None) -> bool:
+async def system_prompt_rebuild_checker(
+    _user_message: dict[str, Any] | None = None,
+    *,
+    agent_raw: str = "",
+) -> bool:
     """Activate Memory and rebuild for the current topic-specific profile."""
-    agent_dir = anyio.Path(__file__).parent.parent
+    agent_dir = _resolve_agent(agent_raw)
     await _activate_fusion_memory(agent_dir)
     return True
 
@@ -1575,10 +1612,11 @@ async def system_after_turn(
     assistant_message: dict[str, Any],
     *,
     workspace_raw: str = "",
+    agent_raw: str = "",
 ) -> None:
     """Persist profile signals and warm the background supervisor."""
     profile_module = importlib.import_module("_user_profile")
-    workspace = _resolve_workspace(workspace_raw)
+    workspace = _resolve_workspace(workspace_raw, agent_raw)
     identity = {
         name: value
         for name in ("profile_id", "user_id", "session_id")
