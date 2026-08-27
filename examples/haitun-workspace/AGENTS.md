@@ -385,8 +385,10 @@ invoked by the current framework — do not "clean them up" as dead code:
 
 - `systems/system.py`: `System.compact_history()`, `System.after_turn()`, and the
   `_run_self_evolution_review` / self-evolution helpers. (The **module-level**
-  `compact_history()` is a separate, self-contained implementation and *is* invoked on a
-  compaction signal; the identically-named `System` method is not reached from it.)
+  `compact_history()` is a separate implementation — now re-exported from
+  `psi_agent.session._compaction` — and *is* invoked on a compaction signal; the
+  identically-named `System` method is not reached from it, and its four-layer heartbeat
+  guards are only called from within that un-wired method.)
 - `systems/curator.py`, `systems/background_review.py`, `systems/threat_patterns.py`,
   `systems/prompt_constants.py` — standalone modules from the hermes-style design, kept for
   when matching hooks are wired into the framework. They are not imported by `system.py`.

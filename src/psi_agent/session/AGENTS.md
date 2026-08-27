@@ -451,7 +451,8 @@ Session 支持将对话历史持久化到 AppData `histories/{session_id}.jsonl`
 1. `AiClient.stream()` 解析 `psi_compaction` → `AiDelta.compaction_needed=True`，并把
    `prompt_tokens` / `threshold` 一并透出（经 `AiClient._as_int`，缺失或非法为 0）
 2. Agent loop 在 `finish_reason="stop"` 后调用 `_maybe_compact(prompt_tokens, threshold)`
-3. 从 `{agent}/systems/system.py` 提取 `compact_history()` 函数
+3. 从 `{agent}/systems/system.py` 提取 `compact_history()` 函数（`getattr` 按名字查找，见下
+   「默认实现的归属」）
 4. **冷却门槛**：`_compaction_cooldown_elapsed()` 不过则直接返回（见下）
 5. 构造 `complete_fn`（使用现有 `AiClient` 做流式调用并收集全部 content 的闭包）
 6. `summary = await compact_history(conversation.messages, complete_fn)`
@@ -474,6 +475,20 @@ async def compact_history(
 ```
 
 未定义时 → 记录 warning，跳过压缩，history 持续增长。
+
+### 默认实现的归属（`session/_compaction.py`）
+
+这 90 行原本抄在每个 workspace 的 `systems/system.py` 里，12 个 example 中有 **11 份逐字节
+相同**——字节相同说明没有任何 workspace 需要它不同，那它就是引擎行为放错了层，修一次要改
+十一遍。现已收进 `session/_compaction.py`，那 11 个 workspace 改为 re-export。
+
+- **搬迁只是去重，行为一字未改。** 它**没有**给谁「补上」抗注入防护：真实防线是本层的
+  `_summary_looks_hijacked()`，对所有 workspace 一直生效，与函数住哪儿无关；而函数自带的
+  `TRANSCRIPT_IS_DATA` 标记 + 指令后置，搬迁前 12/12 全都有。
+- **必须 re-export，不能只在内部 import。** hook 查找是 `getattr(module, "compact_history")`，
+  名字得能在 workspace 模块上解析到。
+- **覆盖方式**：workspace 直接自己定义 `compact_history`（后定义的绑定生效）。
+  `haitun-supervisor-workspace` 就是这样保留了自己那份 71 行的变体，未纳入本次去重。
 多次 compaction → 每次插入独立的 `compacted` 消息；`messages_for_ai()` 仅取最后一条合并到 system prompt。
 这一步安全的前提是默认实现**链式累积**（新摘要在上一份之上更新，故包含而非丢弃更早
 上下文）；若自定义的 `compact_history` 忽略传入的 `compacted` 行，则每压一次就少一层
@@ -489,9 +504,9 @@ async def compact_history(
 
 两侧一起改才闸得住：
 
-- **提示词侧**（各 workspace `system.py`）：原文用 `<transcript>` 围栏包裹、声明为待总结的
-  数据、「请总结」在围栏**之后**复述，与劫持指令争同一个尾部位置；原文里的 `</transcript>`
-  转义掉，防止逃逸。
+- **提示词侧**（默认实现在 `session/_compaction.py`；workspace 自定义时自负其责）：原文用
+  `<transcript>` 围栏包裹、声明为待总结的数据、「请总结」在围栏**之后**复述，与劫持指令争同一个
+  尾部位置；原文里的 `</transcript>` 转义掉，防止逃逸。
 - **落盘侧**（本层）：`_summary_looks_hijacked(summary, source_chars)` 判为劫持则重试一次，
   仍失败则**不写入**——宁可这回合不压缩（下回合会重试），也不能把整段对话换成模型的一句
   回话。
