@@ -735,3 +735,142 @@ async def test_post_leaves_source_empty_for_local(monkeypatch):
 
     assert len(files) == 1
     assert files[0].source == ""
+
+
+class _StallingResp(_RecordingResp):
+    """Fake response that pauses ``stall`` seconds before its final lines.
+
+    Reproduces the observed upstream shape: content arrives, the model then goes
+    quiet well past the buffer interval, and only afterwards does ``[DONE]`` come.
+    """
+
+    def __init__(self, head: list[bytes], stall: float, tail: list[bytes]) -> None:
+        super().__init__([])
+        self.content: AsyncIterator[bytes] = self._stalling(head, stall, tail)
+
+    @staticmethod
+    async def _stalling(head: list[bytes], stall: float, tail: list[bytes]) -> AsyncIterator[bytes]:
+        for line in head:
+            yield line
+        await anyio.sleep(stall)
+        for line in tail:
+            yield line
+
+
+@pytest.mark.anyio
+async def test_post_drains_tail_while_upstream_is_silent(monkeypatch):
+    """A tail buffered before a long upstream pause reaches the user during the pause.
+
+    Regression: the interval window is lazy (checked only on the next delta), so a
+    quiet upstream left the last chars invisible until ``[DONE]`` — the reply looked
+    cut off mid-sentence. Asserting on *arrival time*, not just final content: the
+    old code produced the same text, only too late.
+    """
+    resp = _StallingResp(
+        [b'data: {"choices":[{"index":0,"delta":{"content":"tail text"}}]}\n\n'],
+        stall=1.0,
+        tail=[b"data: [DONE]\n\n"],
+    )
+    # interval high enough that only the idle drain can emit this tail.
+    core = ChannelCore(session_socket="/tmp/x.sock", interval=10.0, idle_drain=0.2)
+    monkeypatch.setattr(core, "_session", _RecordingPostSession(resp), raising=False)
+    monkeypatch.setattr(core, "_endpoint", "http://localhost/chat/completions", raising=False)
+
+    start = anyio.current_time()
+    seen: list[tuple[float, str]] = []
+    async for chunk in core.post([TextChunk("hi")]):
+        if isinstance(chunk, TextChunk):
+            seen.append((anyio.current_time() - start, chunk.text))
+
+    assert [text for _, text in seen] == ["tail text"]
+    # Arrived during the 1s silence, not at [DONE].
+    assert seen[0][0] < 0.9
+
+
+@pytest.mark.anyio
+async def test_post_idle_drain_does_not_split_active_stream(monkeypatch):
+    """Deltas arriving steadily still coalesce — the drain only fires on real silence."""
+    resp = _RecordingResp(
+        [
+            b'data: {"choices":[{"index":0,"delta":{"content":"a"}}]}\n\n',
+            b'data: {"choices":[{"index":0,"delta":{"content":"b"}}]}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+    )
+    core = ChannelCore(session_socket="/tmp/x.sock", interval=10.0, idle_drain=5.0)
+    monkeypatch.setattr(core, "_session", _RecordingPostSession(resp), raising=False)
+    monkeypatch.setattr(core, "_endpoint", "http://localhost/chat/completions", raising=False)
+
+    texts = [c.text async for c in core.post([TextChunk("hi")]) if isinstance(c, TextChunk)]
+
+    assert texts == ["ab"]
+
+
+@pytest.mark.anyio
+async def test_post_idle_drain_disabled_keeps_legacy_path(monkeypatch):
+    """``idle_drain<=0`` skips the pump task entirely — unchanged behaviour."""
+    resp = _RecordingResp(
+        [
+            b'data: {"choices":[{"index":0,"delta":{"content":"x"}}]}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+    )
+    core = ChannelCore(session_socket="/tmp/x.sock", interval=10.0, idle_drain=0.0)
+    monkeypatch.setattr(core, "_session", _RecordingPostSession(resp), raising=False)
+    monkeypatch.setattr(core, "_endpoint", "http://localhost/chat/completions", raising=False)
+
+    texts = [c.text async for c in core.post([TextChunk("hi")]) if isinstance(c, TextChunk)]
+
+    assert texts == ["x"]
+
+
+@pytest.mark.anyio
+async def test_post_surfaces_bare_channel_error_through_pump(monkeypatch):
+    """Parser errors must stay bare ChannelError, not become an ExceptionGroup.
+
+    The parser now runs in a task group, which wraps whatever it raises; callers and
+    the rest of this file catch ``ChannelError`` directly, so a group would slip past
+    every ``except ChannelError`` in the codebase.
+    """
+    resp = _RecordingResp(
+        [
+            b'data: {"choices":[{"delta":{"content":"[Upstream Error]: boom"},"finish_reason":"error"}]}\n\n',
+        ]
+    )
+    # interval>0 is required to take the pump path at all (see _iter_deltas).
+    core = ChannelCore(session_socket="/tmp/x.sock", interval=10.0, idle_drain=5.0)
+    monkeypatch.setattr(core, "_session", _RecordingPostSession(resp), raising=False)
+    monkeypatch.setattr(core, "_endpoint", "http://localhost/chat/completions", raising=False)
+
+    with pytest.raises(ChannelError, match="Upstream Error"):
+        async for _ in core.post([TextChunk("hi")]):
+            pass
+
+
+@pytest.mark.anyio
+async def test_post_early_break_releases_response_with_pump(monkeypatch):
+    """Early break must still unwind cleanly now that a task group is in the path.
+
+    Yielding out of a generator that owns a task group is the fragile case: if the
+    break left the pump running, ``aclose()`` would raise instead of releasing.
+    """
+    resp = _StallingResp(
+        [
+            b'data: {"choices":[{"index":0,"delta":{"content":"first"}}]}\n\n',
+            b'data: {"choices":[{"index":0,"delta":{"content":"second"}}]}\n\n',
+        ],
+        stall=30.0,
+        tail=[b"data: [DONE]\n\n"],
+    )
+    # interval>0 is required to take the pump path at all (see _iter_deltas); a tiny
+    # value still emits per delta, so the loop below gets something to break on.
+    core = ChannelCore(session_socket="/tmp/x.sock", interval=0.01, idle_drain=5.0)
+    monkeypatch.setattr(core, "_session", _RecordingPostSession(resp), raising=False)
+    monkeypatch.setattr(core, "_endpoint", "http://localhost/chat/completions", raising=False)
+
+    async with aclosing(core.post([TextChunk("hi")])) as gen:
+        async for chunk in gen:
+            if isinstance(chunk, TextChunk):
+                break
+
+    assert resp.released

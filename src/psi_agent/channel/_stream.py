@@ -116,6 +116,14 @@ class StreamBuffer:
     ``flush``), not exactly at the window edge. This avoids an extra anyio task and
     its cancellation surface; ``flush()`` always drains the tail at stream end. One
     ``StreamBuffer`` is created per ``post()`` call, so state never crosses requests.
+
+    **Idle drain.** Because the window is lazy, a buffered tail waits for the *next*
+    delta to be emitted — so when the upstream model goes quiet mid-reply (observed:
+    deepseek pausing 50-70s before ``[DONE]``), the last ~100 chars sit invisible in
+    the buffer until the stream ends, and the user sees a reply cut off mid-sentence.
+    ``drain_if_idle`` lets the caller flush that tail on an idle tick without waiting
+    for a delta that may never come. It is the caller's job to detect idleness (see
+    ``ChannelCore.post``); this class still does no I/O and owns no timer.
     """
 
     def __init__(self, interval: float) -> None:
@@ -161,6 +169,23 @@ class StreamBuffer:
             self._timer_target = time.monotonic() + self._interval
         if self._kind is not None and time.monotonic() >= self._timer_target:
             logger.debug(f"timer expired → yield {self._label()} ({len(self._buf)} chars)")
+            out: list[tuple[str, str]] = [(self._kind, self._buf)]
+            self._buf = ""
+            self._timer_target = None
+            return out
+        return []
+
+    def drain_if_idle(self) -> list[tuple[str, str]]:
+        """Emit the buffered tail when the upstream has gone quiet mid-stream.
+
+        Same output shape as ``append``, but triggered by the *absence* of a delta
+        instead of the arrival of one, so a tail buffered right before a long
+        upstream pause reaches the user then rather than at ``[DONE]``. Resets the
+        window so the next ``append`` starts a fresh one; a no-op when nothing is
+        buffered, which keeps repeated idle ticks from emitting empty blocks.
+        """
+        if self._buf and self._kind is not None:
+            logger.debug(f"idle drain → {self._label()} ({len(self._buf)} chars)")
             out: list[tuple[str, str]] = [(self._kind, self._buf)]
             self._buf = ""
             self._timer_target = None

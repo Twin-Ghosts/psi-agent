@@ -51,6 +51,43 @@ def test_buffer_flush_empty_returns_empty():
     assert b.flush() == []
 
 
+def test_buffer_drain_if_idle_emits_tail_before_stream_end():
+    """The tail buffered before an upstream pause must not wait for [DONE]."""
+    b = StreamBuffer(10.0)
+    b.switch("text")
+    assert b.append("tail") == []
+    assert b.drain_if_idle() == [("text", "tail")]
+    # Already drained → stream end has nothing left to flush.
+    assert b.flush() == []
+
+
+def test_buffer_drain_if_idle_empty_is_noop():
+    """Repeated idle ticks with nothing buffered must not emit empty blocks."""
+    b = StreamBuffer(10.0)
+    b.switch("text")
+    assert b.drain_if_idle() == []
+    assert b.drain_if_idle() == []
+
+
+def test_buffer_drain_if_idle_resets_window():
+    """After an idle drain the next append starts a fresh window, not an expired one."""
+    b = StreamBuffer(10.0)
+    b.switch("text")
+    b.append("a")
+    assert b.drain_if_idle() == [("text", "a")]
+    # Window restarted → this keeps buffering instead of emitting immediately.
+    assert b.append("b") == []
+    assert b.flush() == [("text", "b")]
+
+
+def test_buffer_drain_if_idle_keeps_reasoning_kind():
+    """An idle drain must carry the reasoning provenance, not degrade to text."""
+    b = StreamBuffer(10.0)
+    b.switch("reasoning:thinking")
+    b.append("half a thought")
+    assert b.drain_if_idle() == [("reasoning:thinking", "half a thought")]
+
+
 async def _alines(*items: bytes) -> AsyncIterator[bytes]:
     for it in items:
         yield it
