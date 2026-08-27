@@ -34,17 +34,21 @@ Delivery is the caller's job, done from inside the resumed turn by calling the n
 tools. Chunks yielded here go nowhere on their own — nothing is streaming them — so a
 resumed turn that wants to speak must send a message as a tool call, exactly as a
 scheduled task does.
+
+Because nobody is streaming it, a resumed turn is also **not a chat bubble**: its rows
+carry ``trigger.silent`` provenance, like every other out-of-band turn (see ``kind``
+defaults below).
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import aclosing, contextmanager
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from psi_agent.session.history_display import with_kind
+from psi_agent.session.history_display import KIND_TRIGGER_SILENT, with_kind
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from psi_agent.session.agent import SessionAgent
@@ -87,7 +91,7 @@ async def resume_session_turn(
     session_id: str,
     content: str,
     *,
-    kind: str = "chat",
+    kind: str = KIND_TRIGGER_SILENT,
 ) -> bool:
     """Run one ordinary turn on *session_id* carrying *content*; ``True`` if it ran.
 
@@ -99,6 +103,13 @@ async def resume_session_turn(
     stream would execute nothing at all. Chunks are drained rather than returned —
     nothing is streaming them anywhere, so the turn must deliver its own output via
     tools (see the module docstring).
+
+    ``kind`` defaults to ``trigger.silent`` (刻意为之): a resume is an out-of-band turn,
+    exactly like a trigger or a silent schedule, so neither its injected ``<event>``
+    block nor its reply may surface as a chat bubble in Gateway ``/history``. ``chat``
+    would leak the raw instruction block into the transcript as if the user had typed
+    it, and would double the reply the turn already delivered through a tool. Callers
+    wanting the reply in the Web Console pass ``trigger.display`` deliberately.
     """
     agent = get(session_id)
     if agent is None:
@@ -108,14 +119,13 @@ async def resume_session_turn(
     message = with_kind({"role": "user", "content": content}, kind)
     logger.info(f"Resuming a turn on session {session_id!r} ({len(content)} chars, kind={kind!r})")
     # Take the same lock a Channel turn takes: a resume is an ordinary turn and must
-    # not interleave with one that is already writing this conversation.
-    async with agent._lock:
-        chunks = agent.run(message)
-        try:
-            async for _chunk in chunks:
-                pass
-        finally:
-            await chunks.aclose()
+    # not interleave with one that is already writing this conversation. ``aclosing``
+    # rather than a bare ``finally: aclose()``: the agent loop's own cleanup (rollback /
+    # commit) must run before this frame unwinds — the ordering every other
+    # ``agent.run`` call site uses.
+    async with agent._lock, aclosing(agent.run(message, response_kind=kind)) as chunks:
+        async for _chunk in chunks:
+            pass
     logger.info(f"Resumed turn on session {session_id!r} finished")
     return True
 

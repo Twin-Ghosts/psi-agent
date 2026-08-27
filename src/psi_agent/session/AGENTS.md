@@ -21,7 +21,7 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 | | 约定 |
 |--|------|
 | **唯一写入方** | 仅 `SessionAgent.run`（对话整轮）和 `SessionAgent.handle_event`（事件匹配与触发器执行）经 `runtime_scope`。禁止 Gateway / Channel / AI / 测试外业务代码自行 `set_*` |
-| **`get_session_id()`** | 仅 **workspace 工具**需要「当前会话 id」时（如 `todo`、fusion memory）。框架内部用 `Conversation.session_id` / 显式参数 |
+| **`get_session_id()`** | 仅 **workspace 工具**需要「当前会话 id」时（如 `todo`、fusion memory、飞书授权续跑）。框架内部用 `Conversation.session_id` / 显式参数。工具起的后台任务里也读得到（`asyncio.create_task` 建任务那刻复制 ContextVar），这是「脱离本轮后还能找回原 session」的依据——见下方「续跑一个回合」 |
 | **`get_workspace()` / `get_agent()`** | 仅 **workspace 工具**在解析相对路径、找 agent 包根时（`write`/`bash`/`read` 等）。**框架核心**（`SessionAgent` / registries / Gateway / Channel）一律用构造时的 `workspace_path` / `agent_path` 或 REST 入参，**禁止**回读 ContextVar |
 | **Tool AI socket bridge** | `current_tool_ai_socket()` 仅在 `SessionAgent` 实际 await workspace tool 的区间返回当前 AI socket，并用 token 复位；它供 `run_flow` 创建受限的临时 Step Session，不进入 tool schema，也不能传播 API key/provider 配置。 |
 | **禁止扩进 ContextVar 的** | AppData / 记忆区根、API key、provider、Gateway listen、任意「方便全局拿一下」的配置——这些走显式字段 / DI / CLI |
@@ -374,7 +374,9 @@ provider 只认 `reasoning_content`（any-llm 的 `REASONING_FIELD_NAMES` 首项
 - **注册与「正在服务」同生命周期**（`register` 是上下文管理器）：过期句柄会续跑一个没人听的对话
 - **续跑照样拿 `agent._lock`**：续跑不是特权。真用户的轮次在跑就等它，跳锁会让两轮交错写同一份 conversation
 - **投递是调用方的事**：这里 yield 的 chunk 没人在流式接收（不是任何请求打开的轮次），所以续跑那一轮要说话必须调 `feishu_message_send` 之类的工具——与 `fire: prompt` 的 schedule 同理（见上节）
+- **`kind` 缺省 `trigger.silent`（刻意为之，勿"改成 `chat` 让它显示出来"）**：续跑是**带外回合**，与 trigger / silent schedule 同类，所以注入的 `<event>` 块和它的回答都不进 Gateway `/history` 的聊天气泡。给 `chat` 会有两处后果——那段给模型的指令正文会像用户亲手打的一样出现在记录里，而回合已经用工具把话说过一遍了，气泡是第二遍。要让回答进 Web Console 就显式传 `trigger.display`（`response_kind` 与 user 行的 `kind` 同值，与 `_fire_prompt` 一致）
 - 起不了回合时（无在服务的 live agent）返回 `False`，调用方必须退回它力所能及的方式（通常一条通知），否则活会被静默丢掉
+- **续跑那一轮跑在调用方的 task 里**：飞书授权的情形是跑在 watcher 的 `asyncio.Task` 内，所以那一轮再次发起授权时会走到 `_feishu_auth_watch.forget_and_wait`，即「取消自己所在的 task」。当前这是安全的——`forget_and_wait` 把 `CancelledError` 一并 suppress 掉（实测取消在它自己的 `await task` 处交付并被吞掉，回合照常跑完）。**改动那处 suppress 时要连带想到这条自指路径**
 
 ## Event / Trigger 协议（触发器）
 

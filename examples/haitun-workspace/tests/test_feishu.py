@@ -1916,6 +1916,43 @@ async def test_granted_auth_dms_when_resuming_raises(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
+async def test_resumed_turn_can_request_auth_again_without_killing_itself(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """钉住一条自指路径: 续跑那一轮跑在 watcher 自己的 task 里, 而它可以再发起授权。
+
+    续跑的回合完全可能再要一次授权 (上次的 scope 不够, 或换个能力集), 那条路会先
+    ``forget_and_wait`` 同一个 user_key —— 而这个 user_key 的 task 正是**在跑它自己的**那个,
+    于是等于「自己取消自己」。今天这是安全的, 但**不是设计出来的**: 取消在 ``forget_and_wait``
+    自己的 ``await task`` 处交付, 被那里的 ``suppress(CancelledError)`` 吞掉 (已实测), 回合照常
+    跑完。本用例把这个结论钉住 —— 谁要收窄那处 suppress, 先在这里红一次。
+    """
+    _granted_pending(tmp_path, monkeypatch)
+    monkeypatch.setattr(_impl, "send_message_impl", _record_dm(dms := []))
+    progress: list[str] = []
+
+    async def _resume_that_reauthorizes(session_id: str, content: str, **kwargs: Any) -> bool:
+        progress.append("turn-start")
+        # 续跑的回合再次发起授权走到的正是这一步。
+        await _watch.forget_and_wait(_impl._norm_user_key("ou_a"))
+        progress.append("turn-finished")
+        return True
+
+    monkeypatch.setattr(_auth.live_agent, "resume_session_turn", _resume_that_reauthorizes)
+    monkeypatch.setattr(_auth, "get_session_id", lambda: "feishu-ou_a")
+
+    await _impl.auth_collect_impl("ou_a")
+    state = _watch.status("ou_a")
+    assert state is not None and state.task is not None
+    with anyio.fail_after(2):
+        await asyncio.shield(state.task)
+
+    # 关键断言: 回合是**跑完**的, 不是被自己掐断在中间。
+    assert progress == ["turn-start", "turn-finished"]
+    assert dms == []
+
+
+@pytest.mark.asyncio
 async def test_failed_auth_does_not_resume_a_turn(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     """超时/失败没有「接着做」可言: 起一轮只会让模型对着一个没成的授权行动。"""
     _pending_gateway(tmp_path, monkeypatch)

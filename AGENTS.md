@@ -94,6 +94,7 @@ src/
     │   ├── system_prompt.py        # SystemPrompt — 系统 prompt 生命周期
     │   ├── schedule_registry.py    # ScheduleRegistry — 定时任务集
     │   ├── ai_client.py            # AiClient — AI 侧协议适配（HTTP/SSE → AiDelta）
+    │   ├── live_agent.py           # 按 session id 登记在服务中的 SessionAgent；脱离轮次的活据此续跑一个回合
     │   ├── protocol.py             # Session 专属类型（含 `AgentRunResult`）+ 重导出 `psi_agent.protocol` 共享定义
     ├── router/
     │   ├── AGENTS.md               # Router 层设计与不变量
