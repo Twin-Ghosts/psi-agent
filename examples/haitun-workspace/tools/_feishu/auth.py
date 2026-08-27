@@ -419,7 +419,8 @@ async def auth_card_impl(
             "授权卡已发给用户. **这一轮到此为止, 不要再等待、也不要另发链接** —— 用户点卡片上的"
             "「点此授权」时飞书会把点击回调给你, 那一轮调 "
             f"{_AUTH_CARD_HANDLER}(user_key={key!r}) 把等待交给后台 (那一轮也立刻收尾), "
-            "授权码自动回流后后台会换好 token 并私聊告诉用户可以继续.\n"
+            "授权码自动回流后后台会换好 token, 然后**自动起一轮把原来那件事做完**并回话 "
+            "(不是只发一条「授权成功」回执).\n"
             f"{_AUTH_CARD_RETRY_NOTE}"
         ),
         "next_step": f"等卡片回调, 届时调 {_AUTH_CARD_HANDLER} (不阻塞)",
@@ -601,9 +602,10 @@ async def auth_check_impl(user_key: str = "") -> dict[str, Any]:
                 "background": True,
                 "message": (
                     "后台正在等这位用户的授权码 (本轮不必也不该再查, 免得两边抢同一个码). "
-                    "**收尾本轮**: 码一到后台会自动换 token 并私聊告知用户."
+                    "**收尾本轮且不要播报等待**: 码一到后台会自动换 token, "
+                    "然后自动起一轮把原来那件事做完并回话."
                 ),
-                "next_step": "结束本轮; 后台会自己完成授权并回告用户",
+                "next_step": "结束本轮且不播报等待; 后台会完成授权并自动接着做完原来那件事",
             }
         if watched.status == _auth_watch.STATUS_GRANTED:
             # 后台已经换好 token 并清掉了 pending 文件; 不报这一条的话下面会误判成

@@ -94,7 +94,12 @@ src/
     │   ├── system_prompt.py        # SystemPrompt — 系统 prompt 生命周期
     │   ├── schedule_registry.py    # ScheduleRegistry — 定时任务集
     │   ├── ai_client.py            # AiClient — AI 侧协议适配（HTTP/SSE → AiDelta）
+    │   ├── trigger_registry.py     # TriggerRegistry — 事件触发器集（与 schedule 平行）
     │   ├── live_agent.py           # 按 session id 登记在服务中的 SessionAgent；脱离轮次的活据此续跑一个回合
+    │   ├── runtime_context.py      # 本轮 session id / workspace / agent 路径（ContextVar；工具侧只读）
+    │   ├── history_display.py      # 消息 `kind` provenance + `/history` 展示白名单 + AI 请求投影
+    │   ├── event_protocol.py       # 事件薄信封校验（`source`/`event`/`payload`；无业务 catalog）
+    │   ├── file_serving.py         # 会话文件下载的路径归约（限定在根内）
     │   ├── protocol.py             # Session 专属类型（含 `AgentRunResult`）+ 重导出 `psi_agent.protocol` 共享定义
     ├── router/
     │   ├── AGENTS.md               # Router 层设计与不变量

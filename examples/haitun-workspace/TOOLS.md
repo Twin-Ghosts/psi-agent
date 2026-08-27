@@ -160,7 +160,9 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
   `feishu_auth_collect`、`action.value.user_key` 是该用户。**那一轮**调
   `feishu_auth_collect(user_key=...)`：它把「等授权码」交给一个脱离本轮的后台任务，
   **本轮同样立刻收尾**。收到点击时用户才刚要在浏览器上点「同意」，在这一轮原地等就又把
-  会话占住了；码回流后后台自己换好 token 并私聊告诉用户可以继续；
+  会话占住了；码回流后后台自己换好 token，然后**自动起一轮把原来那件事做完**并回话
+  （不是只发一条「授权成功」回执）。所以**这一轮别播报等待状态**——审批只要几秒，
+  「我在后台等你授权」那句话往往比续跑那一轮的回话更晚到，用户就看到两条自相矛盾的回复；
 - 想主动确认进度，再调一次 `feishu_auth_collect` 即可（它返回 `status`：`watching` /
   `granted` / `failed` / `timeout`，且不会起第二个收码任务）；
 - **卡片是一次性的**：用户点了按钮但没在授权页点「同意」时，这张卡已作废（原卡被改写成
@@ -172,7 +174,8 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
 
 - `tier=link_auto`：**不要向用户索要任何 code**，也**任何一轮都别在工具里干等**。
   发完链接就收尾，然后二选一：调 `feishu_auth_collect(user_key=...)` 让码自己回来（推荐，
-  用户不必再回话；后台收到后私聊告知他可以继续），或者请用户点完「同意授权」后回你一句
+  用户不必再回话；后台收到后自动起一轮接着做完原来那件事并回话，同样别播报等待），
+  或者请用户点完「同意授权」后回你一句
   （他会看到「授权成功」页），那一轮调 `feishu_auth_check(user_key=...)` 查一眼。返回
   `pending=True` 只是还没点完，不是失败——授权码在取件箱里留存约 10 分钟，晚一轮取毫无损失；
 - `tier=link_manual`：才需要**明确告诉用户**看浏览器地址栏，地址形如
