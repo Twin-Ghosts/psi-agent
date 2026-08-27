@@ -55,6 +55,9 @@ async def feishu_sheet_read(token: str, range: str, max_chars: int = 20000, user
       absent, not empty — treating them as blank reports people as not having filled
       anything when their row was never read. Re-read narrower, or switch to
       ``feishu_sheet_read_grid``, before saying anything about who filled what.
+    - **Raising ``max_chars`` is not the fix.** It is capped internally at the
+      per-result limit, so a bigger number changes nothing about what comes back.
+      Narrow the range or page with ``feishu_sheet_read_grid`` instead.
 
     Cells that are mentions (``@somebody``) or styled rich text are flattened to
     their visible text, so a name column reads as ``"张三"`` rather than raw JSON.
@@ -65,8 +68,12 @@ async def feishu_sheet_read(token: str, range: str, max_chars: int = 20000, user
             ``GET /open-apis/wiki/v2/spaces/get_node`` and use its ``obj_token``.
         range: Range to read, e.g. ``"SHEET_ID!A1:H30"`` or just ``"SHEET_ID"``
             for the sheet's used range.
-        max_chars: Stop after roughly this many characters of cell text (0 = no
-            limit). Guards against pulling a huge board into the conversation.
+        max_chars: Stop after roughly this many characters of cell text. Capped
+            internally at the per-result limit, and ``0`` means "that cap" rather
+            than "unlimited" — **raising this above the cap does nothing**, since a
+            result over the limit is cut on the wire regardless. The effective value
+            is echoed as ``max_chars_effective`` when a read is truncated. To get
+            more data, narrow the range or page with ``feishu_sheet_read_grid``.
         user_key: The sender's open_id (from ``<feishu_context>``). Reads try the bot's
             tenant token first and only fall back to this user's identity when the bot
             is denied — pass it whenever the sheet may be user-owned.

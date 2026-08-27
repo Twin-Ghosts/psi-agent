@@ -701,19 +701,26 @@ async def test_sheet_read_flattens_mentions_and_rich_text(monkeypatch: pytest.Mo
 @pytest.mark.asyncio
 async def test_sheet_read_truncates_on_max_chars(monkeypatch: pytest.MonkeyPatch) -> None:
     grid = [["x" * 40], ["y" * 40], ["z" * 40]]
-    cap = _CapturedInvoke({"valueRange": {"range": "S1", "values": grid}})
+    cap = _CapturedInvoke({"valueRange": {"range": "S1!A1:A3", "values": grid}})
     monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.read_sheet_range_impl("sht1", "S1", max_chars=60)
+    result = await _impl.read_sheet_range_impl("sht1", "S1!A1:A3", max_chars=60)
     assert result["truncated"] is True
     assert result["row_count"] == 1
 
 
 @pytest.mark.asyncio
-async def test_sheet_read_no_limit_keeps_all_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_sheet_read_small_grid_keeps_all_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``max_chars=0`` means "the per-result cap", not "unlimited".
+
+    A grid this small is under that cap either way, so every row survives — but the
+    assertion is about the rows, not about the limit being off. Anything over the cap
+    is truncated even at ``max_chars=0``, since a bigger payload is cut on the wire
+    regardless (and cutting there destroys the JSON).
+    """
     grid = [["x" * 40], ["y" * 40]]
-    cap = _CapturedInvoke({"valueRange": {"range": "S1", "values": grid}})
+    cap = _CapturedInvoke({"valueRange": {"range": "S1!A1:A2", "values": grid}})
     monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.read_sheet_range_impl("sht1", "S1", max_chars=0)
+    result = await _impl.read_sheet_range_impl("sht1", "S1!A1:A2", max_chars=0)
     assert result["truncated"] is False
     assert result["row_count"] == 2
 

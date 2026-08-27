@@ -16,13 +16,17 @@ own row numbers.
 
 Args:
     token: The spreadsheet_token (from the sheet URL).
-    range: Optional worksheet pin — ``<sheetId>`` (whole first rows of that
-        sheet) or ``<sheetId>!A1:B30`` (block pinned to that range's sheet).
-        Empty = the spreadsheet's first worksheet.
-        ⚠️ 事实问答只传 ``<sheetId>``,不要钉死行范围——范围钉死时 has_more
-        只能报告该范围内的情况,范围外的行永远读不到(已实测事故:钉死 A1:S20
-        导致第 31 行的人漏读)。
-    max_rows: Rows per block (default 50). The block is ``A{start_row}:{max}``.
+    range: Optional worksheet pin, plus optional **column** narrowing —
+        ``<sheetId>`` reads the full ``A:ZZ`` width; ``<sheetId>!B1:O80`` reads
+        only columns B..O. **Row numbers in this argument are ignored** — paging
+        is driven by ``start_row`` / ``max_rows``, so pinning columns can never
+        hide rows outside the range (the old 钉死 A1:S20 → 第 31 行漏读 事故 is
+        structurally impossible now). Empty = the first worksheet, full width.
+        ⚠️ 只读需要的列:一个 20 列的看板整宽拉回来动辄几十万字符,会撞上
+        每条结果的字符上限,逼工具少给你几行(has_more 会如实报告,但要多跑
+        几轮)。已知人名列和目标日期列时,narrow 到那两列最省。
+    max_rows: Rows per block (default 50). The block spans the pinned columns
+        from ``start_row`` to ``start_row + max_rows - 1``.
     start_row: First row of the block (1-based, default 1). Use the previous
         result's ``next_start_row`` to continue.
     user_key: The sender's open_id (from ``<feishu_context>``).
@@ -55,15 +59,19 @@ async def feishu_sheet_read_grid(
 
     1. ``feishu_sheet_find_columns`` (or read just the name column) to get the person's
        **row number** and the target **column letter**;
-    2. read that one cell / row with this tool or a pinned range.
+    2. read just those columns with ``range="<sheetId>!B1:B80"`` (name column) or
+       ``"<sheetId>!O1:O80"`` (one date column) — the column letters in ``range`` are
+       honored, so a narrow read really is narrow.
 
-    Pulling the whole board first is what makes a read come back truncated; locating
-    first keeps every read small.
+    Pulling the whole board's width is what forces this tool to hand back fewer rows per
+    block; narrowing the columns keeps every read small and the paging short.
 
     **Keep reading until ``has_more`` is false.** Answering from one partial block is the
     single most common correctness bug here: unread rows look like empty cells, so people
     get reported as not having filled anything when their row was simply never fetched.
-    Row numbers are 1-based and line up with the sheet's own rows.
+    Row numbers are 1-based and line up with the sheet's own rows. A block may come back
+    with fewer rows than ``max_rows`` when the text is wide — that is reported honestly via
+    ``has_more`` / ``next_start_row``, so just keep paging; it is never a silent cut.
 
     To decide whether person X wrote on date D: the result carries ``filled_cols`` — a
     per-row list of column letters whose cells are non-empty, computed in code. Check

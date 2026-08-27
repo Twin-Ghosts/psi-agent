@@ -18,6 +18,8 @@ import _feishu_impl as _core
 from lark_channel.core.enum import AccessTokenType, HttpMethod
 from lark_channel.core.model import BaseRequest
 
+from psi_agent.session.history_display import MAX_TOOL_RESULT_CHARS
+
 
 def _build_sheet_meta_request(spreadsheet_token: str) -> BaseRequest:
     return _core._raw_get(
@@ -110,15 +112,21 @@ async def read_sheet_range_impl(token: str, range_: str, max_chars: int = 20000,
     raw_rows = value_range.get("values") or []
     rows: list[list[str]] = []
     truncated = False
-    budget = max_chars
+    # 调用方的预算再大也越不过会话层 20000 字符硬切,而那一刀落在 JSON 中间会把
+    # 整个结果切成非法 JSON(连 truncated 警告本身都读不到)。实测调用方看到截断后
+    # 反手把 max_chars 提到 80000,结果照旧被切到 20053 —— 「调大预算」反而稳定
+    # 制造坏 JSON。所以这里向下收敛,让本函数的 truncated+warning 一定能被看见。
+    # max_chars=0(不限)同样受此上限约束:上限之外没有「不限」可言。
+    effective_max_chars = min(max_chars, _GRID_TEXT_BUDGET) if max_chars > 0 else _GRID_TEXT_BUDGET
+    budget = effective_max_chars
     for raw_row in raw_rows if isinstance(raw_rows, list) else []:
         cells = [_flatten_sheet_cell(c) for c in (raw_row if isinstance(raw_row, list) else [])]
-        if max_chars > 0:
-            spent = sum(len(c) for c in cells)
-            if spent > budget:
-                truncated = True
-                break
-            budget -= spent
+        spent = sum(len(c) for c in cells)
+        # 首行永远给:一行就超预算时也得让调用方看见内容而不是空网格 + 一句警告。
+        if rows and spent > budget:
+            truncated = True
+            break
+        budget -= spent
         rows.append(cells)
     outcome: dict[str, Any] = {
         "ok": True,
@@ -135,12 +143,16 @@ async def read_sheet_range_impl(token: str, range_: str, max_chars: int = 20000,
         # answers anyway reports people as having filled nothing when their row was never
         # fetched. Say what is missing and what to do instead, in the payload itself.
         outcome["rows_dropped_after_row"] = len(rows)
+        # 报生效预算而不是入参:入参可能被上限收敛掉,照着入参说「Truncated at 80000
+        # chars」会让调用方以为再调大就能读全,而那条路是不存在的。
+        outcome["max_chars_effective"] = effective_max_chars
         outcome["warning"] = (
-            f"Truncated at {max_chars} chars: only the first {len(rows)} row(s) of this range are "
+            f"Truncated at {effective_max_chars} chars: only the first {len(rows)} row(s) of this range are "
             "present and the rest were dropped, NOT read as empty. Do not draw conclusions about "
-            "who filled what from this result. Either narrow the range (locate the person's row "
-            "first, then read that row/cell) or page the sheet with feishu_sheet_read_grid, which "
-            "reports has_more / next_start_row instead of dropping rows."
+            "who filled what from this result. Raising max_chars will NOT help — this is the hard "
+            "per-result cap. Either narrow the range (locate the person's row first, then read that "
+            "row/cell) or page the sheet with feishu_sheet_read_grid, which reports has_more / "
+            "next_start_row instead of dropping rows."
         )
     return outcome
 
@@ -384,6 +396,34 @@ def _data_width(rows: list[list[str]]) -> int:
     return width
 
 
+# 留给 JSON 骨架的余量:一格文本在结果里不止它本身 —— 引号/逗号约 4 字符,
+# 加上 _label_grid 补的行号列和 filled_cols(每行一份列字母清单)。按 0.7 折算,
+# 保证「本工具自报的 has_more」先生效,而不是让会话层的硬切先把 JSON 切烂。
+_GRID_TEXT_BUDGET = int(MAX_TOOL_RESULT_CHARS * 0.7)
+
+
+def _fit_rows_to_budget(rows: list[list[str]], budget: int = _GRID_TEXT_BUDGET) -> tuple[list[list[str]], bool]:
+    """Drop whole trailing rows until the block's cell text fits ``budget``.
+
+    Returns the kept rows and whether anything was dropped. Cuts only at row
+    boundaries: a half-row would be indistinguishable from a row whose later
+    columns are empty, which is exactly the misread this module exists to stop.
+
+    Always keeps at least one row, even when that row alone busts the budget —
+    otherwise ``next_start_row`` would equal ``start_row`` and a caller paging
+    until ``has_more`` is false would spin on the same block forever.
+    """
+    kept: list[list[str]] = []
+    spent = 0
+    for row in rows:
+        cost = sum(len(cell) for cell in row)
+        if kept and spent + cost > budget:
+            return kept, True
+        kept.append(row)
+        spent += cost
+    return kept, len(kept) < len(rows)
+
+
 def _start_row_from_range(range_str: str) -> int:
     """Parse the first row number out of a valueRange range like ``46a582!R2:R41``."""
     try:
@@ -391,6 +431,28 @@ def _start_row_from_range(range_str: str) -> int:
         return int("".join(c for c in cell if c.isdigit()))
     except Exception:
         return 1
+
+
+def _col_span_from_range(range_str: str) -> tuple[str, str]:
+    """Extract the column letters a caller pinned in ``range_``, e.g. ``S!B1:O80`` → ``("B", "O")``.
+
+    Returns ``("", "")`` when the range names no worksheet-relative columns (a bare
+    ``<sheetId>``, or an unparseable range) — the caller then falls back to the full
+    ``A:ZZ`` span. Only the letters are taken: row numbers come from ``start_row`` /
+    ``max_rows`` so paging stays under the caller's control.
+    """
+    if "!" not in range_str:
+        return "", ""
+    cells = range_str.split("!", 1)[1]
+    start, _, end = cells.partition(":")
+    first = "".join(c for c in start if c.isalpha()).upper()
+    last = "".join(c for c in end if c.isalpha()).upper() or first
+    if not first:
+        return "", ""
+    # 反着写的区间(O1:B80)按小→大归一,否则飞书报 wrong range 而调用方只看到一句报错。
+    if _col_index(last) < _col_index(first):
+        first, last = last, first
+    return first, last
 
 
 def _label_grid(outcome: dict[str, Any]) -> dict[str, Any]:
@@ -450,8 +512,16 @@ async def read_sheet_grid_impl(
     Never truncates silently: ``has_more`` / ``next_start_row`` tell the caller
     exactly where the read stopped, and the caller must continue from
     ``next_start_row`` until ``has_more`` is false. ``range_`` may pin one
-    worksheet (``<sheetId>`` or ``<sheetId>!A1:B30``); empty means the first
-    worksheet. Row numbers are 1-based and align with the sheet's own rows.
+    worksheet (``<sheetId>``) and optionally the **columns** to fetch
+    (``<sheetId>!B1:O80`` reads only B..O) — row numbers in ``range_`` are
+    ignored, since paging is driven by ``start_row`` / ``max_rows``. Empty means
+    the first worksheet, full ``A:ZZ`` width. Row numbers are 1-based and align
+    with the sheet's own rows.
+
+    The block is additionally capped at ``MAX_TOOL_RESULT_CHARS`` worth of cell
+    text, cutting **at a row boundary** and folding the cut into
+    ``has_more`` / ``next_start_row``, so a caller that keeps paging still sees
+    every row.
     """
     if not token.strip():
         return _core._error("token (spreadsheet_token) is required.")
@@ -469,17 +539,28 @@ async def read_sheet_grid_impl(
             sheet_id, _ = await _first_sheet_id(token, user_key)
     except RuntimeError as e:
         return _core._error(str(e))
-    block_range = f"{sheet_id}!A{start_row}:ZZ{start_row + max_rows - 1}"
+    # 列范围曾被整段丢掉(只取 sheetId,区间恒为 A:ZZ):调用方「改用窄范围读人名列」
+    # 是哑操作,读回来的还是整表全宽。实测一次 B1:B80 请求拉回 322338 字符,把
+    # 会话层 20000 上限撑爆——正是本工具存在的意义被反过来抵消。
+    first_col, last_col = _col_span_from_range(range_.strip() if range_ else "")
+    first_col = first_col or "A"
+    last_col = last_col or "ZZ"
+    block_range = f"{sheet_id}!{first_col}{start_row}:{last_col}{start_row + max_rows - 1}"
     res = await _core._invoke(_build_sheet_values_request(token, block_range), user_key=user_key)
     if not res.get("ok"):
         return res
     value_range = res.get("data", {}).get("valueRange", {}) if isinstance(res.get("data"), dict) else {}
     raw_rows = value_range.get("values") or []
     rows = [[_flatten_sheet_cell(c) for c in (raw_row if isinstance(raw_row, list) else [])] for raw_row in raw_rows]
-    has_more = len(rows) >= max_rows
-    # 没有 truncated 字段:本工具无字符预算、行数据完整,截断只发生在
-    # feishu_sheet_read。曾经把 truncated 直接映射成 has_more,单行读取
+    # 行边界字符预算:会话层 truncate_tool_result 会在 20000 字符处硬切,切口落在
+    # JSON 中间 → 整个结果不再是合法 JSON,has_more/next_start_row 一起烂掉,
+    # 「读到 has_more 为 false」的契约当场失效(实测四次 read_grid 返回全部
+    # json.loads 失败)。所以宁可自己按整行少给几行,让分页元数据始终可信。
+    rows, budget_cut = _fit_rows_to_budget(rows)
+    # 没有 truncated 字段:行数据完整(要么整行给要么不给),字符预算的后果全部
+    # 折进 has_more/next_start_row。曾经把 truncated 直接映射成 has_more,单行读取
     # (max_rows=1)恒报 truncated=true,被当成「截断警告不适用」而整体无视。
+    has_more = budget_cut or len(rows) >= max_rows
     return {
         "ok": True,
         "sheet": sheet_id,
