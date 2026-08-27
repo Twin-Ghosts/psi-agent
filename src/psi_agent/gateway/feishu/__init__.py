@@ -5,5 +5,7 @@ chat_id / 群聊 vs 私聊 / 跨容器会话), 所以住在产品层而不是骨
 不再无条件建它 (原 `create_app()` 的 ``app["fm"]`` 那行是无条件的)。
 
 骨架侧的装配入口是 ``gateway.server.register_feishu_routes()``。骨架**不** import
-本包。ToB 前端 (`feishu-web/`) 按方案 3.6 归本包, 本轮 A5 不含它 —— 那是 A6。
+本包。ToB 前端 (`feishu-web/`) 按方案 3.6 归本包, A6 已落地 —— 但**只是脚手架**:
+能构建 / 能起 dev server / 能连本机 gateway, 页面是占位, 零业务。后端侧对应的只有
+``register_feishu_routes()`` 里那一个 ``add_static``, 没有任何新业务路由。
 """

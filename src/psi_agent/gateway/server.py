@@ -5,6 +5,7 @@ from base64 import b64encode
 from collections.abc import AsyncGenerator
 from contextlib import aclosing, suppress
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -12,6 +13,7 @@ from aiohttp import web
 from loguru import logger
 
 from psi_agent.gateway import desktop as desktop_pkg
+from psi_agent.gateway import feishu as feishu_pkg
 from psi_agent.gateway._defaults import (
     resolve_appdata_root,
     resolve_default_agent,
@@ -385,6 +387,17 @@ def register_feishu_routes(
     app["openapi_feishu"] = True
     app.router.add_post("/feishu/route", _feishu_route)
     app.router.add_get("/feishu/routes", _list_feishu_routes)
+
+    # ToB 前端的静态挂载点 —— 写法参照上面 ToC 两个 ``add_static``, 但存在性判断用同步的
+    # ``pathlib``: 本函数是 ``def`` 而非 ``async def``, 改成协程要动 4 个调用点, 而这里
+    # 要的只是「启动时目录在不在」。前缀与 ``feishu-web/vite.config.ts`` 的 ``base``
+    # 是同一个字面量, 改一边忘另一边会静默 404 (``dist/`` 不存在时连 static 都不注册)。
+    feishu_web_dist = Path(feishu_pkg.__file__).parent / "feishu-web" / "dist"
+    if feishu_web_dist.is_dir():
+        logger.info(f"Feishu web enabled, serving {feishu_web_dist}")
+        app.router.add_static("/feishu-web/", str(feishu_web_dist), show_index=False)
+    else:
+        logger.info(f"Feishu web dist absent ({feishu_web_dist}), static mount skipped")
     return app
 
 

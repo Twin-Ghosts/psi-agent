@@ -30,6 +30,7 @@ Gateway 进程
 │   ├── spa/             — Vue 3 SPA v1 前端项目 (Vite + SFC)
 │   └── spa-v2/          — React SPA v2（默认）
 ├── feishu/            — **ToB 专属层**（`FeishuManager` + `/feishu/*`）
+│   └── feishu-web/      — ToB 前端（Vite + React 19）；**当前只是脚手架，零业务**
 └── _openapi*.py       — OpenAPI schema：公共片段在骨架，两份产品片段在各自子包，装配留骨架
 ```
 
@@ -54,6 +55,7 @@ Gateway 进程
 | `desktop/_workspace_manager.py` | 目录浏览 + 快捷路径列表 + cwd 查询 |
 | `desktop/spa/` | Vue 3 SPA v1（对话气泡），构建输出 `spa/dist/`；路径 `/spa/` |
 | `desktop/spa-v2/` | React SPA v2（任务工作台 + 宝箱），构建输出 `spa-v2/dist/`；**默认** `GET /` → `/spa-v2/`（无 dist 时回退 v1） |
+| `feishu/feishu-web/` | ToB 前端（Vite + React 19），构建输出 `feishu-web/dist/`；路径 `/feishu-web/`。**A6 只落脚手架**：能构建 / 能起 dev server / 能连本机 gateway（页面里一次 `fetch('/defaults')` 就是连通性判据），页面是占位、零业务。登录、会话列表、对话收发由后续开发。`vite.config.ts` 的 `base` 与后端 `add_static` 前缀是同一字面量，改一边忘另一边会静默 404。详见 `feishu-web/AGENTS.md` |
 | `desktop/_tray.py` | 系统托盘图标（pystray + Pillow），由 `--tray` 参数开启，`--icon` 参数指定图标文件，左键打开浏览器或恢复 webview 窗口，右键菜单控制；`request_attention()` 脉冲高亮图标 |
 | `desktop/_webview.py` | 原生 webview 窗口（pywebview），`--webview` 参数开启。窗口关闭信号通过 `threading.Event` 传递给主 loop；`request_attention()` 在 Windows 上 FlashWindowEx |
 | `desktop/_attention.py` | `AttentionHub`：SPA `POST /ui/attention` → 绑定的 tray/webview 注意力提示（best-effort）。`schedule_notify()` 用 daemon thread 异步触发，**禁止**在 aiohttp handler 里同步等 tray（pystray 可能卡死事件循环） |
