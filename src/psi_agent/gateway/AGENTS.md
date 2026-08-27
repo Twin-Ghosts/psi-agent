@@ -39,7 +39,7 @@ Gateway 进程
 | `_router_manager.py` | `RouterManager` — Router 实例注册表、类型化 AI/Router 依赖解析和生命周期管理 |
 | `_session_manager.py` | `SessionManager` — Session 实例注册表 + 生命周期 + SessionInfo（含 `agent`、`active_schedules` / `deactive_schedules`） |
 | `_scheduler_manager.py` | `SchedulerManager` — 每个 workspace 恰好一个**全量激活**（`active_schedules=("*",)`）的调度 Session，按需 spawn，对 SPA / state 隐藏 |
-| `_defaults.py` | `resolve_default_agent` / `resolve_default_workspace`；再导出 ``psi_agent._appdata`` 路径助手 — CLI / `GET /defaults` 用 |
+| `_defaults.py` | **只持 ToC 品牌字面量**（`haitun交付` / `examples/haitun-workspace`）+ 两个薄包装 `resolve_default_agent` / `resolve_default_workspace` — CLI / `GET /defaults` 用；机制在包外 ``psi_agent._workspace_paths``（见下方[工作区路径的机制与字面量分家](#工作区路径的机制与字面量分家)）。再导出 ``psi_agent._appdata`` 路径助手与 ``ensure_workspace_dir``（老调用方不破） |
 | `_feishu_manager.py` | `FeishuManager` — 飞书会话 → Session 路由表（私聊按 `open_id`、群聊按 `chat_id`；复用 SessionManager 按需 spawn）+ FeishuRoute |
 | `_oauth_manager.py` | `OAuthRelay` — OAuth 回调中继（`state → code` 一次性信箱，带 TTL；供 `GET /oauth/callback` + `GET /oauth/code`），让授权码免用户手工复制 |
 | `_auth_manager.py` | `AuthManager` — 云端账号服务的**转发层** + 登录态持有者；不持供应商密钥、不做授权判定（发码与鉴权全在云端）。两段式注册的 `tempToken` 扣在进程内不下发给页面，改回 `registrationRequired: true`；把云端 `Retry-After` 响应头抄进 body 供倒计时用；云端 `GET /sessions` 回**裸数组**，`_call` 装 `items` 信封、`list_devices` 统一成 `{"devices": [...]}`。`resolve_endpoint()` 定地址（显式参数 > `PSI_AUTH_ENDPOINT` > 内置默认；显式空串=关闭）。`bearer_token()` 是 token 的**唯一进程内取值口**，只给免费模型换算力用，不接任何下行响应（见 [免费模型的 key 替换](#免费模型的-key-替换)）。连接池 / 预热 / 重试边界见 [AuthManager 连接复用](#authmanager-连接复用) |
@@ -107,7 +107,7 @@ Gateway state → `{appdata}/state/`（双读旧 cwd `state/`）          ← �
 schedules → `{workspace}/schedules/`（归 workspace，非 agent 包 / 非 AppData）
 ```
 
-路径助手：``psi_agent._appdata``（Session / Gateway / haitun 共用；**刻意**放在 gateway 包外以免循环导入）。``gateway._defaults`` 再导出同名助手。Gateway 启动把解析后的根写入 ``PSI_APPDATA``，**同进程**工具与 ``GET /defaults.appdata`` 一致。**注意这个「同进程」是硬限制**：``os.environ`` 只对本进程及其之后 fork 的子进程有效，而飞书 channel 通常是**兄弟进程**（各自 `psi-agent gateway` / `psi-agent channel feishu`），继承不到这个 env。因此需要共享 AppData 的兄弟进程必须**要么**由启动脚本给**每一个**进程都传 `--appdata`/设 `PSI_APPDATA`，**要么**像 channel 那样经 ``GET /defaults`` 现问（见 `channel/AGENTS.md`「AppData 根向 Gateway 现问」）——`GET /defaults` 由此不只服务「建 Session 的调用方」，也是**跨进程 AppData 根的唯一权威**。**禁止**把 AppData 根塞进 Session ContextVar。
+路径助手：``psi_agent._appdata``（Session / Gateway / haitun 共用；**刻意**放在 gateway 包外以免循环导入）。``gateway._defaults`` 再导出同名助手（`_todo_manager` 已直接从 ``_appdata`` 取，再导出只为包外工具 `examples/haitun-workspace/tools/_todo_store.py:23` 留着）。Gateway 启动把解析后的根写入 ``PSI_APPDATA``，**同进程**工具与 ``GET /defaults.appdata`` 一致。**注意这个「同进程」是硬限制**：``os.environ`` 只对本进程及其之后 fork 的子进程有效，而飞书 channel 通常是**兄弟进程**（各自 `psi-agent gateway` / `psi-agent channel feishu`），继承不到这个 env。因此需要共享 AppData 的兄弟进程必须**要么**由启动脚本给**每一个**进程都传 `--appdata`/设 `PSI_APPDATA`，**要么**像 channel 那样经 ``GET /defaults`` 现问（见 `channel/AGENTS.md`「AppData 根向 Gateway 现问」）——`GET /defaults` 由此不只服务「建 Session 的调用方」，也是**跨进程 AppData 根的唯一权威**。**禁止**把 AppData 根塞进 Session ContextVar。
 
 | 已合 | 内容 |
 |------|------|
@@ -130,6 +130,21 @@ schedules → `{workspace}/schedules/`（归 workspace，非 agent 包 / 非 App
 | `--auth-endpoint` | 云端账号服务地址。**空 ≠ 关闭**：空则取内置默认（正式账号服务），装了包即能登录。要关掉整套认证（不创建 `AuthManager`、不注册 `/auth/*`、不读写本机凭证）须显式 `PSI_AUTH_ENDPOINT=""`。前缀另由 `PSI_AUTH_PREFIX` 覆盖（默认 `/auth`） |
 
 `POST /sessions` 可显式带 `agent` / `workspace`；省略时用上述默认。`SessionInfo` 与 `state/latest.json` 持久化含 `agent`。
+
+### 工作区路径的机制与字面量分家
+
+`_defaults.py` 曾经既定义机制又写死品牌名，于是 `SessionManager`（只想 mkdir）不得不 `from psi_agent.gateway._defaults import ensure_workspace_dir` —— 一个**创建 Session 的 manager 反向依赖了产品线包**。现在拆成两层：
+
+| 层 | 位置 | 内容 |
+|----|------|------|
+| 机制 | ``psi_agent/_workspace_paths.py``（**gateway 包外**） | `resolve_user_workspace(explicit, *, default_name)` / `ensure_workspace_dir(path)` / `resolve_agent_package(explicit, *, repo_candidate="")`。桌面路径运算、mkdir、`tools/`+`skills/` 探测 |
+| 字面量 | `gateway/_defaults.py` | `DEFAULT_USER_WORKSPACE_NAME = "haitun交付"`、`DEFAULT_AGENT_REPO_CANDIDATE = "examples/haitun-workspace"`，以及两个薄包装 `resolve_default_workspace` / `resolve_default_agent` |
+
+判据是**这段代码认识谁**：`_workspace_paths` 不认识托盘、webview、Windows 盘符、桌面登录，也**不认识任何品牌名** —— 缺省文件夹名由调用方作为关键字参数传入，该模块自己没有缺省值。代价是多两个关键字参数；换来的是 workspace 改名只碰 `gateway/`。
+
+**坑：monkeypatch 的目标跟着机制走，不跟着包装走。** 打 `platformdirs.user_desktop_dir` 必须打 ``psi_agent._workspace_paths.platformdirs.user_desktop_dir``；照旧打 `gateway._defaults.platformdirs` 会 `AttributeError`（那个模块已不 import platformdirs）。`tests/psi_agent/test_workspace_paths.py` 另有一条断言：中立模块正文（去掉模块 docstring）里不许出现 `haitun` / `交付` / `examples/`，防止品牌缺省值日后又漏回中立层。
+
+对外兼容：`_defaults.py` 继续再导出 `ensure_workspace_dir`，`resolve_default_*` 签名与返回值不变，`GET /defaults`、CLI、包外工具的调用点一行都没改。
 
 **谁对接这套接口（调用方 = 谁 POST /sessions 或等价 spawn）**
 
@@ -315,7 +330,7 @@ AI → Router（按持久化顺序）→ Session；依赖缺失的 Router 记录
 **`_persist` 回调**：同 AIManager，默认 no-op，Gateway.run() 注入。
 
 **create(ai_id, *, id="", workspace="") 流程**：
-1. 解析 `workspace`（缺省用 Gateway `_default_workspace`）→ ``ensure_workspace_dir`` mkdir（**刻意为之**：`GET /defaults` 只宣布路径，目录到此才创建）
+1. 解析 `workspace`（缺省用 Gateway `_default_workspace`）→ ``psi_agent._workspace_paths.ensure_workspace_dir`` mkdir（**刻意为之**：`GET /defaults` 只宣布路径，目录到此才创建。取自 gateway 包外，本 manager 不反向依赖产品线包）
 2. 获取 lock，断言不重复
 3. `aimanager.get_socket(ai_id)` 查 AI socket（AI 不存在时计算路径返回，不抛异常——支持启动恢复时 AI 尚未就绪）
 4. `_socket_path(prefix, "channels", session_id)` 生成 channel socket

@@ -34,7 +34,7 @@ AI 后端无状态，不保存任何信息。多个 Session 可以共享同一�
 JSONL 格式零依赖，逐行追加读写简单。现路径为 AppData ``{appdata}/histories/{session_id}.jsonl``（legacy ``{workspace}/histories/`` 双读），`session_id` 可由 CLI 传入以 resume。`SessionAgent.run()` 每次调用通过 ``async with self._conversation`` 进入上下文管理器——``Conversation`` 的 ``add / commit / rollback`` 实现回合级原子性。仅在回合成功完成（stop / tool_calls 全部执行 / unexpected finish / max rounds）时落盘；异常时 ``__aexit__`` 自动 ``rollback()`` 恢复内存到快照，磁盘不落地任何新消息。细节见 `session/AGENTS.md` / `gateway/AGENTS.md`。
 
 **为什么拆 agent / workspace / AppData 三区？**
-能力包（tools / system）与用户打开目录、进程记忆区解耦：同一 agent 可挂多个 workspace；定时任务 `schedules/` 跟着 **workspace** 走（同一 agent 挂不同 workspace 应有各自的提醒，见坑 17）；todos / history / Gateway `state/` 进 AppData（`platformdirs` / `--appdata` / `PSI_APPDATA`），避免写进用户项目树。路径助手在 ``psi_agent._appdata``（跨 Session/Gateway，避免循环导入）；**禁止**把 AppData 根塞进 Session ContextVar。分层细节见各层 `AGENTS.md`。
+能力包（tools / system）与用户打开目录、进程记忆区解耦：同一 agent 可挂多个 workspace；定时任务 `schedules/` 跟着 **workspace** 走（同一 agent 挂不同 workspace 应有各自的提醒，见坑 17）；todos / history / Gateway `state/` 进 AppData（`platformdirs` / `--appdata` / `PSI_APPDATA`），避免写进用户项目树。路径助手在 ``psi_agent._appdata``（跨 Session/Gateway，避免循环导入）；**禁止**把 AppData 根塞进 Session ContextVar。agent / workspace 两区的路径**机制**同样放在 gateway 包外的 ``psi_agent._workspace_paths``（桌面路径运算、mkdir、`tools/`+`skills/` 探测），品牌缺省名由 `gateway/_defaults.py` 作为参数传入——建 Session 的 manager 因此不反向依赖产品线包（见 `gateway/AGENTS.md`「工作区路径的机制与字面量分家」）。分层细节见各层 `AGENTS.md`。
 
 **为什么 socket 文件不自动 unlink？**
 支持热换 Server。每个 `session.post()` 新建 TCP/Unix 连接，由 `UnixConnector` 按路径重新 connect。只要新的服务进程绑定到同一 socket 路径，客户端无需重启即可继续通信。auto-unlink 会破坏这个能力——socket 文件需要保留，由新进程手动接管。
@@ -73,6 +73,7 @@ src/
     ├── _yaml.py               # 共享 YAML header 解析（scheduler + workspace system.py）
     ├── _sockets.py             # 共享 socket 工具（prefix-based transport 解析）
     ├── _appdata.py             # AppData 路径助手（todos/history/state；Session↔Gateway 共享）
+    ├── _workspace_paths.py     # 工作区/能力包路径机制（桌面路径、mkdir、tools+skills 探测）；不认识品牌名，缺省名由调用方传入
     ├── protocol.py             # 跨组件 SSE 协议归属（线格式类型 + finish_reason 常量 + 辅助帧/终止帧规则）
     ├── _feishu_routing.py      # 飞书群聊/私聊判定与路由键（Gateway↔Channel 共享）
     ├── _send_markers.py        # [SEND:] 解码：正则 + 空路径过滤（Channel↔Session 共享）

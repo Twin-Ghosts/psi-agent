@@ -20,7 +20,7 @@ from typing import Any
 import anyio
 from loguru import logger
 
-from psi_agent.gateway._defaults import (
+from psi_agent._appdata import (
     appdata_todo_segments_path,
     resolve_appdata_root,
     resolve_todo_read_path,

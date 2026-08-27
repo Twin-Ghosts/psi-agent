@@ -31,8 +31,9 @@ async def test_resolve_default_workspace_soft_desktop_announces_without_mkdir(
 ) -> None:
     desktop = tmp_path / "Desktop"
     await anyio.Path(desktop).mkdir()
+    # Desktop path math moved to the neutral module; brand name stays in _defaults.
     monkeypatch.setattr(
-        "psi_agent.gateway._defaults.platformdirs.user_desktop_dir",
+        "psi_agent._workspace_paths.platformdirs.user_desktop_dir",
         lambda: str(desktop),
     )
     expected = desktop / DEFAULT_USER_WORKSPACE_NAME

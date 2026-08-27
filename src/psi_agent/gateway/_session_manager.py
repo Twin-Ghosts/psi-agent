@@ -8,8 +8,8 @@ from typing import Any
 import anyio
 from loguru import logger
 
+from psi_agent._workspace_paths import ensure_workspace_dir
 from psi_agent.gateway._ai_manager import AIManager
-from psi_agent.gateway._defaults import ensure_workspace_dir
 from psi_agent.gateway._manager import (
     _ensure_socket_dir,
     _new_uuid,
