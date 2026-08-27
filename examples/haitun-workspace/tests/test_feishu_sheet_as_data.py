@@ -17,14 +17,23 @@ calls return success either way, so a caller who generalized from one to the oth
 silently loses a row of someone's data. Each convention is pinned by its own test, with
 the pitfall text asserted, so a later "cleanup" that unifies them fails loudly here.
 
-The four read/write endpoints keep their tools (``feishu_sheet_read`` / ``_write`` /
-``_append`` / ``_format``): a range written as a bare ``"<sheet_id>!A1"`` — no end cell —
-is answered with ``code: 0`` and an empty ``updatedRange``, having written nothing. Their
-rules name the tool but are deliberately **not** ``hard``: the generic tool has warned
-rather than refused across ``/open-apis/sheets/`` since before this skill existed, and
-tightening that would strand valid hand-built calls. What this file does pin is their
-*methods*, because writing values is a ``PUT`` while appending is a ``POST`` and the table
-is the only place that difference is written down.
+The four read/write endpoints keep their tools (``feishu_sheet_read`` / ``_read_grid`` /
+``_write`` / ``_append`` / ``_format``): a range written as a bare ``"<sheet_id>!A1"`` — no
+end cell — is answered with ``code: 0`` and an empty ``updatedRange``, having written
+nothing.
+
+The three **write** rules name their tool but are deliberately **not** ``hard``: the
+generic tool has warned rather than refused across ``/open-apis/sheets/`` since before this
+skill existed, and tightening that would strand valid hand-built calls. What this file
+pins for them is their *methods*, because writing values is a ``PUT`` while appending is a
+``POST`` and the table is the only place that difference is written down.
+
+The **read** rule is the one exception and is ``hard`` on purpose: hand-built cell reads
+come back as raw ``mention`` / ``text_run`` objects with no row-number or column-letter
+labels, and aligning those by eye is what produced the miscalls this skill exists to stop.
+Refusing it removes the one path that looks like it works and doesn't. Advisory and hard
+are pinned by separate tests, since collapsing them into one parametrized list is how a
+deliberate tightening showed up as two failures in a list named "kept tools".
 """
 
 from __future__ import annotations
@@ -384,26 +393,35 @@ def test_replace_requires_a_replacement(monkeypatch: pytest.MonkeyPatch) -> None
 
 # ----------------------------------------------------------- the writes stay refused
 
-#: Endpoint → the tool that must be named instead, for every ``hard: true`` rule.
-KEPT_TOOLS = [
-    ("GET", "/open-apis/sheets/v2/spreadsheets/:spreadsheet_token/values/:range", "feishu_sheet_read"),
+#: Write endpoints whose rule names a tool but stays *advice* (``hard`` unset).
+ADVISORY_TOOLS = [
     ("PUT", "/open-apis/sheets/v2/spreadsheets/:spreadsheet_token/values", "feishu_sheet_write"),
     ("POST", "/open-apis/sheets/v2/spreadsheets/:spreadsheet_token/values_append", "feishu_sheet_append"),
     ("PUT", "/open-apis/sheets/v2/spreadsheets/:spreadsheet_token/style", "feishu_sheet_format"),
 ]
 
+#: The one sheets endpoint the generic tool refuses outright, and the readers it points at.
+HARD_READ_ENDPOINT = ("GET", "/open-apis/sheets/v2/spreadsheets/:spreadsheet_token/values/:range")
+HARD_READ_TOOLS = ("feishu_sheet_read", "feishu_sheet_read_grid")
 
-@pytest.mark.parametrize(("method", "uri", "tool"), KEPT_TOOLS)
-def test_cell_io_endpoint_names_its_tool_without_blocking(
+#: Every rule that names a tool, advisory or hard — for checks that apply to both.
+KEPT_TOOLS = [*ADVISORY_TOOLS, (*HARD_READ_ENDPOINT, " / ".join(HARD_READ_TOOLS))]
+
+
+@pytest.mark.parametrize(("method", "uri", "tool"), ADVISORY_TOOLS)
+def test_write_endpoint_names_its_tool_without_blocking(
     monkeypatch: pytest.MonkeyPatch, method: str, uri: str, tool: str
 ) -> None:
-    """These four point at a tool but stay *advice* — deliberately not ``hard``.
+    """The three write endpoints point at a tool but stay *advice* — deliberately not ``hard``.
 
     The generic tool has warned rather than refused on ``/open-apis/sheets/`` since before
     this skill existed (``_PREFER_DEDICATED``), and for a reason that still holds: the
     guard is a prefix over the whole domain, so a hard refusal here would strand
     hand-built calls that are perfectly valid. The rule's job is to name the tool and say
     why; the range check itself lives in the tool.
+
+    The read endpoint is the exception, and it is hard on purpose — see
+    ``test_reading_values_by_hand_is_refused_outright``.
     """
     cap, out = _generic(
         monkeypatch,
@@ -418,20 +436,67 @@ def test_cell_io_endpoint_names_its_tool_without_blocking(
     assert _rule(method, uri).prefer_tool == tool
 
 
+def test_reading_values_by_hand_is_refused_outright(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reading cells through ``feishu_api`` is the one sheets call that is hard-refused.
+
+    Unlike the writes, hand-building this one is not merely clumsy — what comes back is
+    raw ``mention`` / ``text_run`` objects with no row-number or column-letter labels, and
+    aligning those by eye is what produced the miscalls this skill exists to stop (a
+    person reported as not having written when their row was simply misaligned). The
+    dedicated readers flatten the cells and embed the labels, so refusing here removes the
+    one path that looks like it works and doesn't.
+
+    Both readers must be named: ``feishu_sheet_read`` for an already-located narrow range,
+    ``feishu_sheet_read_grid`` for anything that needs paging. Naming only one would push
+    every caller onto that one, which is how a whole-board read ends up going through the
+    truncating reader.
+    """
+    method, uri = HARD_READ_ENDPOINT
+    _cap, out = _generic(
+        monkeypatch,
+        method=method,
+        uri=uri,
+        paths_json=json.dumps({"spreadsheet_token": SPREADSHEET, "range": f"{SHEET_ID}!A1:B2"}),
+        body_json="{}",
+        query_json="{}",
+    )
+
+    assert out.get("ok") is False, "a refusal that still sends the request refuses nothing"
+    assert out.get("code") == "use_dedicated_tool", out
+    for tool in HARD_READ_TOOLS:
+        assert tool in str(out.get("tool", "")), f"the refusal must name {tool}"
+
+
 @pytest.mark.parametrize(("method", "uri", "tool"), KEPT_TOOLS)
 def test_kept_tool_rule_says_why(method: str, uri: str, tool: str) -> None:
     """Advice without a reason reads as arbitrary, and gets ignored."""
     rule = _rule(method, uri)
     assert rule.prefer_tool == tool
-    assert rule.prefer_hard is False, "see test_cell_io_endpoint_names_its_tool_without_blocking"
     assert rule.why.strip(), f"{method} {uri}: named a tool without saying why"
 
 
+@pytest.mark.parametrize(("method", "uri", "_tool"), ADVISORY_TOOLS)
+def test_write_rules_stay_advisory(method: str, uri: str, _tool: str) -> None:
+    """Pinned separately from the payload check: ``hard`` is a one-word change with a big blast radius."""
+    assert _rule(method, uri).prefer_hard is False, "see test_write_endpoint_names_its_tool_without_blocking"
+
+
+def test_read_rule_stays_hard() -> None:
+    assert _rule(*HARD_READ_ENDPOINT).prefer_hard is True, "see test_reading_values_by_hand_is_refused_outright"
+
+
 def test_kept_tools_still_exist() -> None:
-    """A hard rule pointing at a deleted tool would be a dead end with no way forward."""
-    source = (TOOLS_DIR / "feishu_sheet.py").read_text(encoding="utf-8")
+    """A rule pointing at a deleted tool would be a dead end with no way forward."""
+    # 每个工具一个同名文件,读表分页器不在 feishu_sheet.py 里 —— 只扫那一个文件会把
+    # feishu_sheet_read_grid 判成「不存在」,而它恰恰是硬拒规则指向的两个出路之一。
     for _, _, tool in KEPT_TOOLS:
-        assert f"async def {tool}(" in source, f"{tool} is named by a hard rule but no longer exists"
+        for name in tool.split("/"):
+            name = name.strip()
+            candidates = [TOOLS_DIR / "feishu_sheet.py", TOOLS_DIR / f"{name}.py"]
+            found = any(
+                path.exists() and f"async def {name}(" in path.read_text(encoding="utf-8") for path in candidates
+            )
+            assert found, f"{name} is named by a rule but no longer exists"
 
 
 def test_writing_values_is_a_put_not_a_post() -> None:
@@ -450,12 +515,12 @@ def test_writing_values_is_a_put_not_a_post() -> None:
 # --------------------------------------------------- refusals stay in their own lane
 
 
-def test_structure_endpoints_are_not_swallowed_by_the_hard_write_rules(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``PUT .../values`` is hard-refused; the tabled structure endpoints must stay reachable.
+def test_structure_endpoints_are_not_swallowed_by_the_hard_read_rule(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``GET .../values/:range`` is hard-refused; the tabled structure endpoints must stay reachable.
 
     They live under the same ``/spreadsheets/:token`` prefix, so a rule matched on path
     alone would make merging cells or inserting rows impossible — refused with "use
-    feishu_sheet_write", which names a tool that cannot do either.
+    feishu_sheet_read", which names a tool that cannot do either.
     """
     for label in ("merge", "insert_rows", "delete_rows", "add_sheet", "find"):
         cap, out = _call(monkeypatch, label)
