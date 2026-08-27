@@ -412,8 +412,19 @@ extra_body.setdefault("thinking", {"type": "disabled" if thinking_disabled else 
 | V12 | 不传时兜默认值 | 单测 `test_handler_requests_thinking_mode_by_default` ✅ |
 | V13 | 调用方给的值优先（含 `"none"`） | 单测 `test_handler_keeps_caller_supplied_reasoning_effort` ✅ |
 | V14 | 真实端点上思维链回来 | **端到端实测**：一次性容器挂载改后 `server.py`，跑真 handler 打真端点，`0/9 → 24/33` ✅ |
+| V15 | `"none"` 真能关掉，不只是参数发出去 | **生产容器内三臂实测**（2026-08-27，同 prompt/模型/key，`reasoning_effort` 为唯一变量）✅ |
 
 V14 是关键 —— 单测只能证明参数发出去了，证明不了泄漏被修好。
+
+V15 补的是 V13 的盲区：单测断言的是「请求体里那个键还在」，证明不了这个值真被上游当回事。三臂在生产容器里打真端点：
+
+| `reasoning_effort` | 带思维链的 chunk | 说明 |
+|---|---|---|
+| 不传（旧行为） | **0/60** | 就是这个 bug：思维通道全哑 |
+| `"medium"`（新默认） | **42/62** | 修复生效 |
+| `"none"`（调用方显式关） | **0/21** | 覆盖真的穿透到上游 |
+
+第三臂说明 `setdefault` 保住的是端到端的调用方意图，不止是 dict 里的一个键 —— 转发层没有偷偷替上游做决定。
 
 ### 连带发现（各自立项，本次不做）
 
