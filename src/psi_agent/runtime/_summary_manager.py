@@ -7,8 +7,8 @@ from aiohttp import ClientSession, ClientTimeout
 from loguru import logger
 
 from psi_agent._sockets import resolve_connector_and_endpoint
-from psi_agent.gateway._manager import _noop
 from psi_agent.protocol import SSE_DONE, parse_sse_data
+from psi_agent.runtime._manager import _noop
 
 
 class SummaryManager:

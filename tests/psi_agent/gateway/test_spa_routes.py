@@ -8,10 +8,10 @@ import pytest
 from aiohttp import ClientSession, ClientTimeout, web
 
 from psi_agent.gateway import server as gateway_server
-from psi_agent.gateway._ai_manager import AIManager
-from psi_agent.gateway._session_manager import SessionManager
-from psi_agent.gateway._title_manager import TitleManager
 from psi_agent.gateway.server import create_app
+from psi_agent.runtime._ai_manager import AIManager
+from psi_agent.runtime._session_manager import SessionManager
+from psi_agent.runtime._title_manager import TitleManager
 
 
 async def _start_app_on_free_port(app: web.Application) -> tuple[str, web.AppRunner]:

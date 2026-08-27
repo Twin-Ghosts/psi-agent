@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 import anyio
 from loguru import logger
 
-from psi_agent.gateway._session_manager import SessionManager
+from psi_agent.runtime._session_manager import SessionManager
 from psi_agent.session.schedule_registry import ACTIVATE_ALL
 
 

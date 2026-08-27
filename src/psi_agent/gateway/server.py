@@ -11,10 +11,8 @@ import anyio
 from aiohttp import web
 from loguru import logger
 
-from psi_agent.gateway._ai_manager import AIManager
 from psi_agent.gateway._attention import AttentionHub
 from psi_agent.gateway._auth_manager import AuthManager
-from psi_agent.gateway._chat_manager import ChatManager
 from psi_agent.gateway._defaults import (
     resolve_appdata_root,
     resolve_default_agent,
@@ -22,18 +20,20 @@ from psi_agent.gateway._defaults import (
 )
 from psi_agent.gateway._feishu_manager import FeishuManager
 from psi_agent.gateway._free_model import is_cloud_free_model
-from psi_agent.gateway._history_manager import HistoryManager
 from psi_agent.gateway._oauth_manager import OAuthRelay
 from psi_agent.gateway._openapi import render_openapi
-from psi_agent.gateway._router_manager import RouterDependencyError, RouterManager, RouterUpstreamInfo
-from psi_agent.gateway._scheduler_manager import SchedulerManager
-from psi_agent.gateway._session_manager import SessionInfo, SessionManager
 from psi_agent.gateway._spa_shell import DEFAULT_APP_NAME, inject_app_name, read_spa_index_template
-from psi_agent.gateway._summary_manager import SummaryManager
-from psi_agent.gateway._title_manager import TitleManager
-from psi_agent.gateway._todo_manager import TodoManager
 from psi_agent.gateway._ui_prefs import UIPrefs
 from psi_agent.gateway._workspace_manager import WorkspaceManager
+from psi_agent.runtime._ai_manager import AIManager
+from psi_agent.runtime._chat_manager import ChatManager
+from psi_agent.runtime._history_manager import HistoryManager
+from psi_agent.runtime._router_manager import RouterDependencyError, RouterManager, RouterUpstreamInfo
+from psi_agent.runtime._scheduler_manager import SchedulerManager
+from psi_agent.runtime._session_manager import SessionInfo, SessionManager
+from psi_agent.runtime._summary_manager import SummaryManager
+from psi_agent.runtime._title_manager import TitleManager
+from psi_agent.runtime._todo_manager import TodoManager
 
 # Browser fetch often dies during multi-minute tool silence; SSE comments keep it open.
 _SSE_KEEPALIVE_SEC = 15.0

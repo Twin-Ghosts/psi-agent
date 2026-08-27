@@ -1,4 +1,4 @@
-"""Shared helpers for gateway managers."""
+"""Shared helpers for runtime instance managers."""
 
 from __future__ import annotations
 

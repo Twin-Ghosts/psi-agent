@@ -8,9 +8,9 @@ from typing import Any
 import anyio
 from loguru import logger
 
-from psi_agent.gateway._ai_manager import AIManager
-from psi_agent.gateway._manager import _ensure_socket_dir, _new_uuid, _noop, _remove_socket, _socket_path, _wait_socket
 from psi_agent.router import Router, RouterBackendType, RouterUpstream
+from psi_agent.runtime._ai_manager import AIManager
+from psi_agent.runtime._manager import _ensure_socket_dir, _new_uuid, _noop, _remove_socket, _socket_path, _wait_socket
 
 
 async def _run_router_service(

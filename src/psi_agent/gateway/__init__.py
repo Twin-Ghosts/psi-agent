@@ -13,21 +13,21 @@ from loguru import logger
 
 from psi_agent._logging import setup_logging
 from psi_agent._sockets import create_site
-from psi_agent.gateway._ai_manager import AIManager
 from psi_agent.gateway._attention import AttentionHub
 from psi_agent.gateway._auth_manager import AuthManager, resolve_endpoint
 from psi_agent.gateway._defaults import resolve_appdata_root, resolve_default_agent, resolve_default_workspace
 from psi_agent.gateway._free_model import make_key_resolver
-from psi_agent.gateway._router_manager import RouterManager, RouterUpstreamInfo
-from psi_agent.gateway._scheduler_manager import SchedulerManager
-from psi_agent.gateway._session_manager import SessionManager
 from psi_agent.gateway._spa_shell import DEFAULT_APP_NAME
 from psi_agent.gateway._state import GatewayState
-from psi_agent.gateway._summary_manager import SummaryManager
-from psi_agent.gateway._title_manager import TitleManager
 from psi_agent.gateway._tray import GatewayTray
 from psi_agent.gateway._webview import GatewayWebView
 from psi_agent.gateway.server import create_app
+from psi_agent.runtime._ai_manager import AIManager
+from psi_agent.runtime._router_manager import RouterManager, RouterUpstreamInfo
+from psi_agent.runtime._scheduler_manager import SchedulerManager
+from psi_agent.runtime._session_manager import SessionManager
+from psi_agent.runtime._summary_manager import SummaryManager
+from psi_agent.runtime._title_manager import TitleManager
 
 
 def _random_port() -> int:

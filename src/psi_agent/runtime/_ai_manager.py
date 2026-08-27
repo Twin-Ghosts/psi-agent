@@ -8,7 +8,7 @@ import anyio
 from loguru import logger
 
 from psi_agent.ai import Ai
-from psi_agent.gateway._manager import (
+from psi_agent.runtime._manager import (
     _ensure_socket_dir,
     _new_uuid,
     _noop,

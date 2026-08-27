@@ -9,8 +9,8 @@ import anyio
 from loguru import logger
 
 from psi_agent._workspace_paths import ensure_workspace_dir
-from psi_agent.gateway._ai_manager import AIManager
-from psi_agent.gateway._manager import (
+from psi_agent.runtime._ai_manager import AIManager
+from psi_agent.runtime._manager import (
     _ensure_socket_dir,
     _new_uuid,
     _noop,
@@ -18,7 +18,7 @@ from psi_agent.gateway._manager import (
     _socket_path,
     _wait_socket,
 )
-from psi_agent.gateway._router_manager import RouterManager
+from psi_agent.runtime._router_manager import RouterManager
 from psi_agent.session import Session
 from psi_agent.session.schedule_registry import ACTIVATE_ALL
 

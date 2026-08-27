@@ -13,12 +13,12 @@ import anyio
 import pytest
 from aiohttp import ClientSession, ClientTimeout, FormData, web
 
-from psi_agent.gateway._ai_manager import AIManager
 from psi_agent.gateway._attention import AttentionHub
-from psi_agent.gateway._router_manager import RouterManager
-from psi_agent.gateway._session_manager import SessionManager
-from psi_agent.gateway._title_manager import TitleManager
 from psi_agent.gateway.server import create_app
+from psi_agent.runtime._ai_manager import AIManager
+from psi_agent.runtime._router_manager import RouterManager
+from psi_agent.runtime._session_manager import SessionManager
+from psi_agent.runtime._title_manager import TitleManager
 from tests.integration.conftest import MockAIServer
 
 
@@ -93,9 +93,9 @@ async def test_gateway_rest_crud(tmp_path: str, monkeypatch: pytest.MonkeyPatch)
     async def serve(**_kwargs: object) -> None:
         await anyio.sleep_forever()
 
-    monkeypatch.setattr("psi_agent.gateway._router_manager._wait_socket", ready)
-    monkeypatch.setattr("psi_agent.gateway._router_manager._remove_socket", ready)
-    monkeypatch.setattr("psi_agent.gateway._router_manager._run_router_service", serve)
+    monkeypatch.setattr("psi_agent.runtime._router_manager._wait_socket", ready)
+    monkeypatch.setattr("psi_agent.runtime._router_manager._remove_socket", ready)
+    monkeypatch.setattr("psi_agent.runtime._router_manager._run_router_service", serve)
     tg = anyio.create_task_group()
     await tg.__aenter__()
 

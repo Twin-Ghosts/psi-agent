@@ -30,7 +30,7 @@ from loguru import logger
 
 from psi_agent import _private_space
 from psi_agent._feishu_routing import route_key
-from psi_agent.gateway._session_manager import SessionManager
+from psi_agent.runtime._session_manager import SessionManager
 
 _SOCKET_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 

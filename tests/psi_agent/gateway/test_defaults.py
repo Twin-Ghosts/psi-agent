@@ -14,7 +14,7 @@ from psi_agent.gateway._defaults import (
     resolve_default_workspace,
     resolve_history_read_path,
 )
-from psi_agent.gateway._session_manager import SessionInfo
+from psi_agent.runtime._session_manager import SessionInfo
 
 
 @pytest.mark.anyio

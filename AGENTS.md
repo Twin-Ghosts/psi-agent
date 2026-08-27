@@ -116,22 +116,26 @@ src/
     │   ├── cli/                    # 单次消息 CLI thin client
     │   ├── telegram/               # Telegram bot channel
     │   ├── feishu/                 # Feishu bot channel
+    ├── runtime/                    # 实例注册表与生命周期（只认识内核，不认识任何接入形态）
+    │   ├── __init__.py             # 包说明 + 「不依赖 gateway」这条闸门的由来
+    │   ├── _manager.py             # 共享类型 + helpers
+    │   ├── _ai_manager.py          # AIManager
+    │   ├── _session_manager.py     # SessionManager
+    │   ├── _scheduler_manager.py   # SchedulerManager — 每 workspace 一个全量激活的调度 Session（触发其 schedules/）
+    │   ├── _router_manager.py      # RouterManager — 内部语义路由服务注册表
+    │   ├── _title_manager.py       # 会话标题 CRUD + AI 生成
+    │   ├── _summary_manager.py     # 任务摘要 CRUD + AI 生成
+    │   ├── _chat_manager.py        # SSE 流式对话管理
+    │   ├── _history_manager.py     # JSONL 历史读取
+    │   └── _todo_manager.py        # 会话 todo 列表读取
     └── gateway/
         ├── AGENTS.md                # Gateway 层设计文档
         ├── __init__.py              # Gateway dataclass + run()
-        ├── _manager.py             # 共享类型 + helpers
-        ├── _ai_manager.py         # AIManager
         ├── _free_model.py          # 免费模型哨兵 key → 登录 token（同源校验）
-        ├── _session_manager.py    # SessionManager
-        ├── _scheduler_manager.py  # SchedulerManager — 每 workspace 一个全量激活的调度 Session（触发其 schedules/）
-        ├── _router_manager.py      # RouterManager — 内部语义路由服务注册表
         ├── _feishu_manager.py      # FeishuManager — 飞书 open_id → Session 路由
         ├── _oauth_manager.py       # OAuthRelay — OAuth 回调中继（免手抄授权码）
-        ├── _title_manager.py       # 会话标题 CRUD + AI 生成
         ├── _state.py               # GatewayState — 状态持久化 (state/latest.json)
         ├── server.py               # aiohttp REST handlers
-        ├── _chat_manager.py        # SSE 流式对话管理
-        ├── _history_manager.py     # JSONL 历史读取
         ├── _workspace_manager.py   # 目录浏览
         ├── _openapi.py             # OpenAPI schema 生成
         ├── _attention.py           # AttentionHub — tray/webview 注意力提示
@@ -140,6 +144,8 @@ src/
         ├── spa/                    # Vue 3 SPA v1（Vite + SFC）
         └── spa-v2/                 # React SPA v2（任务工作台；默认 GET /）
 ```
+
+`runtime/` 与 `gateway/` 的依赖方向**单一**：gateway 组装 runtime 的 manager 并接到 REST + Web UI 上，runtime 反过来对 gateway 一无所知。这条边由 `git grep -n "from psi_agent.gateway" -- src/psi_agent/runtime/` 必须无输出来守。
 
 项目使用 **src-layout**（`src/psi_agent/`），由 `uv sync` 安装为 editable package。
 
@@ -150,7 +156,8 @@ src/
 - **Session 层**: `src/psi_agent/session/AGENTS.md` — workspace 启动、agent loop、tool 加载调用、schedule 机制、history 持久化、context compaction
 - **Router 层**: `src/psi_agent/router/AGENTS.md` — 单目标分流、广播聚合、Fallback、组合与 SSE/隐私/取消不变量
 - **Channel 层**: `src/psi_agent/channel/AGENTS.md` — ChannelCore 公共部件、REPL/CLI/Telegram/Feishu 约定
-- **Gateway 层**: `src/psi_agent/gateway/AGENTS.md` — 生命周期管理、REST API、Web Console SPA、CI 打包
+- **Runtime 层**: `src/psi_agent/runtime/AGENTS.md` — AI / Session / Router 实例注册表与生命周期、标题/摘要/历史/todo 投影
+- **Gateway 层**: `src/psi_agent/gateway/AGENTS.md` — REST API、Web Console SPA、飞书路由、认证、CI 打包
 
 ## 核心通信协议
 
@@ -363,9 +370,9 @@ async def handler(request):
 ## 注释约定
 
 - **语种与风格跟随所在文件**，不跟随个人习惯：改一个文件前先看它现有的注释/docstring 是英文还是中文，然后与之保持一致。**单个 `.py` 文件内必须统一**
-- 仓库整体是混合的（`src/` 与 `tests/` 均约 1:6 中英），但这不是「随便写」的许可——它是逐文件收敛的结果。典型：`gateway/_feishu_manager.py`、`gateway/_scheduler_manager.py` 与其对应测试通篇中文；`session/schedule_registry.py`、`session/agent.py`、`gateway/server.py`、`gateway/_session_manager.py` 通篇英文
+- 仓库整体是混合的（`src/` 与 `tests/` 均约 1:6 中英），但这不是「随便写」的许可——它是逐文件收敛的结果。典型：`gateway/_feishu_manager.py`、`runtime/_scheduler_manager.py` 与其对应测试通篇中文；`session/schedule_registry.py`、`session/agent.py`、`gateway/server.py`、`runtime/_session_manager.py` 通篇英文
 - **`刻意为之:` 是例外**，可嵌在英文注释里作反直觉行为的标记词（如 `# prompt = LLM turn on task_content; tool = direct ToolRegistry call (刻意为之).`）。它是全仓统一的检索词，配合「改动后自检清单」第 1 条使用，不算破坏语种一致性
-- 新建文件按**同层同类邻居**定语种（如 `gateway/_scheduler_manager.py` 对标 `gateway/_feishu_manager.py`），别按仓库全局比例猜
+- 新建文件按**同层同类邻居**定语种（如 `runtime/_scheduler_manager.py` 对标 `gateway/_feishu_manager.py`），别按仓库全局比例猜
 - 中文注释里避免全角 `，`、`（`、`）`、`：` 与 `×`——ruff 的 RUF001/002/003 报 ambiguous unicode，一律改半角 `,` `(` `)` `:` 和 `x`；`。`、`——`、`「」`、`→` 不在规则里，可用（本条以 `ruff check --isolated --select RUF001,RUF002,RUF003` 实测为准）
 
 ## 开发命令

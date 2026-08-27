@@ -6,9 +6,9 @@ from typing import cast
 import anyio
 import pytest
 
-from psi_agent.gateway._ai_manager import AIManager
 from psi_agent.gateway._feishu_manager import FeishuManager, _sanitize_open_id, external_sessions
-from psi_agent.gateway._session_manager import SessionManager
+from psi_agent.runtime._ai_manager import AIManager
+from psi_agent.runtime._session_manager import SessionManager
 
 # 纯谓词用例 (is_external / _workspace_for) 都不碰 self._sm, 故意不造 SessionManager ——
 # 真造一个要连带 AIManager + task group。cast 只为让类型检查放行, 运行期仍是 None:
