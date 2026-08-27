@@ -23,9 +23,7 @@ from typing import Any
 
 import pytest
 
-WORKSPACES = sorted(
-    [*Path("examples").glob("*/systems/system.py"), *Path("workspace").glob("*/systems/system.py")]
-)
+WORKSPACES = sorted([*Path("examples").glob("*/systems/system.py"), *Path("workspace").glob("*/systems/system.py")])
 
 _SIBLING_MODULES = ("prompt_sections", "prompt_texts", "tool_docs")
 

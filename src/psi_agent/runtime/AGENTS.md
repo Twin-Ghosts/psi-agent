@@ -22,7 +22,7 @@ gateway/  ──→  runtime/  ──→  session/ ai/ router/ protocol/ channel
 git grep -n "from psi_agent.gateway" -- src/psi_agent/runtime/   # 必须无输出
 ```
 
-包外共享助手（`psi_agent._appdata` 路径运算、`psi_agent._workspace_paths` 工作区路径机制、`psi_agent._sockets` 传输解析）**刻意**放在 gateway 与 runtime 两个包之外，正是为了让本包不必为了拿一个路径去 import 产品线包。ToC 品牌字面量（`haitun交付` / `examples/haitun-workspace`）留在 `gateway/_defaults.py`，由调用方**作为参数传入**——所以建 Session 的 `SessionManager` 不反向依赖产品线。
+包外共享助手（`psi_agent._appdata` 路径运算、`psi_agent._workspace_paths` 工作区路径机制、`psi_agent._sockets` 传输解析）**刻意**放在 gateway 与 runtime 两个包之外，正是为了让本包不必为了拿一个路径去 import 产品线包。ToC 品牌字面量（`haitun交付` / `workspace/tob`）留在 `gateway/_defaults.py`，由调用方**作为参数传入**——所以建 Session 的 `SessionManager` 不反向依赖产品线。
 
 ## 命名
 

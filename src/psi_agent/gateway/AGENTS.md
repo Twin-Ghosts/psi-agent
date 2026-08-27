@@ -42,7 +42,7 @@ Gateway 进程
 | 文件 | 职责 |
 |------|------|
 | `__init__.py` | `Gateway` dataclass + `run()` 入口 |
-| `_defaults.py` | **只持 ToC 品牌字面量**（`haitun交付` / `examples/haitun-workspace`）+ 两个薄包装 `resolve_default_agent` / `resolve_default_workspace` — CLI / `GET /defaults` 用；机制在包外 ``psi_agent._workspace_paths``（见下方[工作区路径的机制与字面量分家](#工作区路径的机制与字面量分家)）。再导出 ``psi_agent._appdata`` 路径助手与 ``ensure_workspace_dir``（老调用方不破） |
+| `_defaults.py` | **只持 ToC 品牌字面量**（`haitun交付` / `workspace/tob`）+ 两个薄包装 `resolve_default_agent` / `resolve_default_workspace` — CLI / `GET /defaults` 用；机制在包外 ``psi_agent._workspace_paths``（见下方[工作区路径的机制与字面量分家](#工作区路径的机制与字面量分家)）。再导出 ``psi_agent._appdata`` 路径助手与 ``ensure_workspace_dir``（老调用方不破） |
 | `feishu/_feishu_manager.py` | `FeishuManager` — 飞书会话 → Session 路由表（私聊按 `open_id`、群聊按 `chat_id`；复用 SessionManager 按需 spawn）+ FeishuRoute |
 | `_oauth_manager.py` | `OAuthRelay` — OAuth 回调中继（`state → code` 一次性信箱，带 TTL；供 `GET /oauth/callback` + `GET /oauth/code`），让授权码免用户手工复制 |
 | `desktop/_auth_manager.py` | `AuthManager` — 云端账号服务的**转发层** + 登录态持有者；不持供应商密钥、不做授权判定（发码与鉴权全在云端）。两段式注册的 `tempToken` 扣在进程内不下发给页面，改回 `registrationRequired: true`；把云端 `Retry-After` 响应头抄进 body 供倒计时用；云端 `GET /sessions` 回**裸数组**，`_call` 装 `items` 信封、`list_devices` 统一成 `{"devices": [...]}`。`resolve_endpoint()` 定地址（显式参数 > `PSI_AUTH_ENDPOINT` > 内置默认；显式空串=关闭）。`bearer_token()` 是 token 的**唯一进程内取值口**，只给免费模型换算力用，不接任何下行响应（见 [免费模型的 key 替换](#免费模型的-key-替换)）。连接池 / 预热 / 重试边界见 [AuthManager 连接复用](#authmanager-连接复用) |
@@ -111,7 +111,7 @@ Gateway state → `{appdata}/state/`（双读旧 cwd `state/`）          ← �
 schedules → `{workspace}/schedules/`（归 workspace，非 agent 包 / 非 AppData）
 ```
 
-路径助手：``psi_agent._appdata``（Session / Gateway / haitun 共用；**刻意**放在 gateway 包外以免循环导入）。``gateway._defaults`` 再导出同名助手（`_todo_manager` 已直接从 ``_appdata`` 取，再导出只为包外工具 `examples/haitun-workspace/tools/_todo_store.py:23` 留着）。Gateway 启动把解析后的根写入 ``PSI_APPDATA``，**同进程**工具与 ``GET /defaults.appdata`` 一致。**注意这个「同进程」是硬限制**：``os.environ`` 只对本进程及其之后 fork 的子进程有效，而飞书 channel 通常是**兄弟进程**（各自 `psi-agent gateway` / `psi-agent channel feishu`），继承不到这个 env。因此需要共享 AppData 的兄弟进程必须**要么**由启动脚本给**每一个**进程都传 `--appdata`/设 `PSI_APPDATA`，**要么**像 channel 那样经 ``GET /defaults`` 现问（见 `channel/AGENTS.md`「AppData 根向 Gateway 现问」）——`GET /defaults` 由此不只服务「建 Session 的调用方」，也是**跨进程 AppData 根的唯一权威**。**禁止**把 AppData 根塞进 Session ContextVar。
+路径助手：``psi_agent._appdata``（Session / Gateway / haitun 共用；**刻意**放在 gateway 包外以免循环导入）。``gateway._defaults`` 再导出同名助手（`_todo_manager` 已直接从 ``_appdata`` 取，再导出只为包外工具 `workspace/tob/tools/_todo_store.py:23` 留着）。Gateway 启动把解析后的根写入 ``PSI_APPDATA``，**同进程**工具与 ``GET /defaults.appdata`` 一致。**注意这个「同进程」是硬限制**：``os.environ`` 只对本进程及其之后 fork 的子进程有效，而飞书 channel 通常是**兄弟进程**（各自 `psi-agent gateway` / `psi-agent channel feishu`），继承不到这个 env。因此需要共享 AppData 的兄弟进程必须**要么**由启动脚本给**每一个**进程都传 `--appdata`/设 `PSI_APPDATA`，**要么**像 channel 那样经 ``GET /defaults`` 现问（见 `channel/AGENTS.md`「AppData 根向 Gateway 现问」）——`GET /defaults` 由此不只服务「建 Session 的调用方」，也是**跨进程 AppData 根的唯一权威**。**禁止**把 AppData 根塞进 Session ContextVar。
 
 | 已合 | 内容 |
 |------|------|
@@ -142,7 +142,7 @@ schedules → `{workspace}/schedules/`（归 workspace，非 agent 包 / 非 App
 | 层 | 位置 | 内容 |
 |----|------|------|
 | 机制 | ``psi_agent/_workspace_paths.py``（**gateway 包外**） | `resolve_user_workspace(explicit, *, default_name)` / `ensure_workspace_dir(path)` / `resolve_agent_package(explicit, *, repo_candidate="")`。桌面路径运算、mkdir、`tools/`+`skills/` 探测 |
-| 字面量 | `gateway/_defaults.py` | `DEFAULT_USER_WORKSPACE_NAME = "haitun交付"`、`DEFAULT_AGENT_REPO_CANDIDATE = "examples/haitun-workspace"`，以及两个薄包装 `resolve_default_workspace` / `resolve_default_agent` |
+| 字面量 | `gateway/_defaults.py` | `DEFAULT_USER_WORKSPACE_NAME = "haitun交付"`、`DEFAULT_AGENT_REPO_CANDIDATE = "workspace/tob"`，以及两个薄包装 `resolve_default_workspace` / `resolve_default_agent` |
 
 判据是**这段代码认识谁**：`_workspace_paths` 不认识托盘、webview、Windows 盘符、桌面登录，也**不认识任何品牌名** —— 缺省文件夹名由调用方作为关键字参数传入，该模块自己没有缺省值。代价是多两个关键字参数；换来的是 workspace 改名只碰 `gateway/`。
 
