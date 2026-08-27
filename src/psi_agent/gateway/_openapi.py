@@ -43,5 +43,12 @@ def build_openapi_spec(*, desktop: bool = True, feishu: bool = True) -> dict[str
 OPENAPI_SPEC = build_openapi_spec()
 
 
-def render_openapi() -> str:
-    return json.dumps(OPENAPI_SPEC)
+def render_openapi(*, desktop: bool = True, feishu: bool = True) -> str:
+    """渲染 spec。两个开关都为真时直接用预建的 ``OPENAPI_SPEC``, 省一次装配。
+
+    ``GET /openapi.json`` 把本进程真的注册了的产品线传进来 (见 ``server._handle_openapi``),
+    这样飞书容器的 spec 里不再有 ``/workspace/*``, 桌面端的里不再有 ``/feishu/*``。
+    """
+    if desktop and feishu:
+        return json.dumps(OPENAPI_SPEC)
+    return json.dumps(build_openapi_spec(desktop=desktop, feishu=feishu))

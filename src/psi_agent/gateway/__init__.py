@@ -21,7 +21,7 @@ from psi_agent.gateway._spa_shell import DEFAULT_APP_NAME
 from psi_agent.gateway._state import GatewayState
 from psi_agent.gateway._tray import GatewayTray
 from psi_agent.gateway._webview import GatewayWebView
-from psi_agent.gateway.server import create_app
+from psi_agent.gateway.server import create_core_app, register_desktop_routes, register_feishu_routes
 from psi_agent.runtime._ai_manager import AIManager
 from psi_agent.runtime._router_manager import RouterManager, RouterUpstreamInfo
 from psi_agent.runtime._scheduler_manager import SchedulerManager
@@ -235,23 +235,34 @@ class Gateway:
 
             attention = AttentionHub()
             schedm = SchedulerManager(_sm=sm, _ai_id=self.scheduler_ai_id or self.feishu_ai_id)
-            app = await create_app(
+            # 骨架 + 两条产品线各自往上贴。**这一个进程仍然两条线都贴**: `psi-agent
+            # gateway` 是唯一的入口, 生产上飞书容器起的也是它 (同容器里另起一个
+            # `psi-agent channel feishu` 连过来), 所以这里少贴哪一面都是行为回归。
+            # 拆分的收益落在装配函数上 —— 谁认识什么现在写在函数签名里, 只想起一条线
+            # 的进程 (ToB 容器、测试) 只贴自己那面即可。
+            app = await create_core_app(
                 aim,
                 sm,
                 tm,
                 rm=rm,
-                favicon_path=self.icon,
-                app_name=self.app_name,
-                attention=attention,
-                feishu_ai_id=self.feishu_ai_id,
-                feishu_workspace_root=self.feishu_workspace_root,
                 default_agent=agent_default,
                 default_workspace=workspace_default,
                 appdata=appdata_root,
                 scheduler_ai_id=self.scheduler_ai_id,
                 schedm=schedm,
                 sum_m=sum_m,
+            )
+            await register_desktop_routes(
+                app,
+                favicon_path=self.icon,
+                app_name=self.app_name,
+                attention=attention,
                 authm=authm,
+            )
+            register_feishu_routes(
+                app,
+                feishu_ai_id=self.feishu_ai_id,
+                feishu_workspace_root=self.feishu_workspace_root,
             )
 
             # Restored sessions need a scheduler Session for their workspace too

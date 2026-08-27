@@ -88,7 +88,12 @@ async def _handle_spa_v2(request: web.Request) -> web.HTTPFound:
 
 
 async def _handle_openapi(request: web.Request) -> web.Response:
-    return web.Response(text=render_openapi(), content_type="application/json")
+    """只报本进程真的注册了的那批 path —— 旗子由各 ``register_*_routes`` 立。"""
+    body = render_openapi(
+        desktop=bool(request.app.get("openapi_desktop")),
+        feishu=bool(request.app.get("openapi_feishu")),
+    )
+    return web.Response(text=body, content_type="application/json")
 
 
 async def _handle_spa_index(request: web.Request) -> web.Response:
@@ -197,24 +202,36 @@ def _session_data(info: SessionInfo) -> dict[str, Any]:
     return data
 
 
-async def create_app(
+async def create_core_app(
     aim: AIManager,
     sm: SessionManager,
     tm: TitleManager,
     rm: RouterManager | None = None,
-    favicon_path: str | None = None,
-    app_name: str = DEFAULT_APP_NAME,
-    attention: AttentionHub | None = None,
-    feishu_ai_id: str = "",
-    feishu_workspace_root: str = "",
+    *,
     default_agent: str = "",
     default_workspace: str = "",
     appdata: str = "",
     scheduler_ai_id: str = "",
     schedm: SchedulerManager | None = None,
     sum_m: SummaryManager | None = None,
-    authm: AuthManager | None = None,
 ) -> web.Application:
+    """两条产品线共同的骨架: 内核 manager + 两边都要的路由。
+
+    这里**只认识** ``runtime`` 那批 manager 与 ``OAuthRelay``: 没有飞书、没有托盘、
+    没有 Windows 盘符、没有登录。产品专属的东西由调用方往上贴 ——
+
+    .. code-block:: python
+
+        app = await create_core_app(aim, sm, tm, rm=rm)   # ToC
+        await register_desktop_routes(app, favicon_path=..., authm=...)
+
+        app = await create_core_app(aim, sm, tm, rm=rm)   # ToB
+        register_feishu_routes(app, feishu_ai_id=..., feishu_workspace_root=...)
+
+    改成这样之前是一个函数收 17 个参数、内部判断, 结果桌面端容器里也建 ``FeishuManager``、
+    飞书容器里也建 Windows 盘符枚举器 (原 ``create_app`` 的 ``app["fm"]`` / ``app["wm"]``
+    两行都是无条件的)。
+    """
     app = web.Application(client_max_size=100 * 1024 * 1024)
     app["aim"] = aim
     app["rm"] = rm
@@ -224,22 +241,71 @@ async def create_app(
     # Owns the scheduler Sessions: one per workspace, created on demand, hidden
     # from SPA / state. Gateway.run passes its own instance (also needed by
     # startup restore); standalone tests may omit it.
-    app["schedm"] = schedm or SchedulerManager(_sm=sm, _ai_id=scheduler_ai_id or feishu_ai_id)
-    app["fm"] = FeishuManager(_sm=sm, _ai_id=feishu_ai_id, _workspace_root=feishu_workspace_root)
+    app["schedm"] = schedm or SchedulerManager(_sm=sm, _ai_id=scheduler_ai_id)
     app["oauth"] = OAuthRelay()
-    app["wm"] = WorkspaceManager()
     app["cm"] = ChatManager()
     app["hm"] = HistoryManager()
     app["todom"] = TodoManager()
-    app["favicon_path"] = favicon_path
-    app["app_name"] = app_name
-    app["attention"] = attention if attention is not None else AttentionHub()
     app["default_agent"] = default_agent
     app["default_workspace"] = default_workspace
     app["appdata"] = appdata
-    # Built from *appdata* rather than taken as a parameter: prefs are a plain
-    # file, no lifecycle to own and nothing for callers to inject or fake.
-    app["uiprefs"] = await UIPrefs.from_appdata(appdata)
+    # ``GET /openapi.json`` 只报本进程真的注册了的那些 path —— 各 register_* 把自己
+    # 那面旗子立起来 (见 ``_openapi.build_openapi_spec`` 的两个开关)。
+    app["openapi_desktop"] = False
+    app["openapi_feishu"] = False
+
+    app.router.add_get("/openapi.json", _handle_openapi)
+    app.router.add_post("/ais", _create_ai)
+    app.router.add_delete("/ais/{ai_id}", _delete_ai)
+    app.router.add_get("/ais", _list_ais)
+    app.router.add_post("/routers", _create_router)
+    app.router.add_delete("/routers/{router_id}", _delete_router)
+    app.router.add_get("/routers", _list_routers)
+    app.router.add_post("/sessions", _create_session)
+    app.router.add_delete("/sessions/{session_id}", _delete_session)
+    app.router.add_get("/sessions", _list_sessions)
+    app.router.add_get("/titles", _list_titles)
+    app.router.add_post("/titles", _set_title)
+    app.router.add_post("/titles/generate", _generate_title)
+    app.router.add_get("/summaries", _list_summaries)
+    app.router.add_post("/summaries", _set_summary)
+    app.router.add_post("/summaries/generate", _generate_summary)
+    app.router.add_get("/defaults", _get_defaults)
+    app.router.add_get("/sessions/{session_id}/history", _get_history)
+    app.router.add_get("/sessions/{session_id}/todos", _get_todos)
+    app.router.add_get("/sessions/{session_id}/todo-segments", _list_todo_segments)
+    app.router.add_get("/sessions/{session_id}/todo-segments/{segment_id}", _get_todo_segment)
+    app.router.add_post("/sessions/{session_id}/todo-segments/{segment_id}", _set_todo_segment_label)
+    app.router.add_post("/sessions/{session_id}/chat", _handle_chat)
+    # ``/oauth/*`` 归骨架: ``OAuthRelay`` 只认识 state → code 信箱, 既不认识飞书也
+    # 不认识桌面端 (与 ``_openapi_core`` 的归属一致)。
+    app.router.add_get("/oauth/callback", _oauth_callback)
+    app.router.add_get("/oauth/code", _oauth_take_code)
+    return app
+
+
+async def register_desktop_routes(
+    app: web.Application,
+    *,
+    favicon_path: str | None = None,
+    app_name: str = DEFAULT_APP_NAME,
+    attention: AttentionHub | None = None,
+    authm: AuthManager | None = None,
+) -> web.Application:
+    """ToC: SPA 静态资源 + 托盘注意力 + UI 偏好 + 本机目录浏览 + 登录。
+
+    这些背后的 ``AttentionHub`` / ``UIPrefs`` / ``WorkspaceManager`` / ``AuthManager``
+    都认识桌面概念 (托盘、Windows 盘符、本机凭证), 飞书容器里一个都用不上。
+
+    ``appdata`` 不再单独收: ``UIPrefs`` 从骨架已经记下的 ``app["appdata"]`` 建 ——
+    prefs 是个普通文件, 没有生命周期要谁来持有, 也没有值得调用方注入或伪造的东西。
+    """
+    app["wm"] = WorkspaceManager()
+    app["favicon_path"] = favicon_path
+    app["app_name"] = app_name
+    app["attention"] = attention if attention is not None else AttentionHub()
+    app["uiprefs"] = await UIPrefs.from_appdata(str(app.get("appdata") or ""))
+    app["openapi_desktop"] = True
 
     spa_root = _gateway_spa_root()
     spa_dist = spa_root / "spa" / "dist"
@@ -264,41 +330,15 @@ async def create_app(
     if favicon_path is not None:
         logger.info(f"Favicon enabled, serving {favicon_path!r} at /favicon.ico")
         app.router.add_get("/favicon.ico", _handle_favicon)
-    app.router.add_get("/openapi.json", _handle_openapi)
-    app.router.add_post("/ais", _create_ai)
-    app.router.add_delete("/ais/{ai_id}", _delete_ai)
-    app.router.add_get("/ais", _list_ais)
-    app.router.add_post("/routers", _create_router)
-    app.router.add_delete("/routers/{router_id}", _delete_router)
-    app.router.add_get("/routers", _list_routers)
-    app.router.add_post("/sessions", _create_session)
-    app.router.add_delete("/sessions/{session_id}", _delete_session)
-    app.router.add_get("/sessions", _list_sessions)
-    app.router.add_get("/titles", _list_titles)
-    app.router.add_post("/titles", _set_title)
-    app.router.add_post("/titles/generate", _generate_title)
-    app.router.add_get("/summaries", _list_summaries)
-    app.router.add_post("/summaries", _set_summary)
-    app.router.add_post("/summaries/generate", _generate_summary)
+
     app.router.add_post("/ui/attention", _request_attention)
     app.router.add_get("/ui/prefs/survey", _get_survey_pref)
     app.router.add_post("/ui/prefs/survey", _set_survey_pref)
     app.router.add_get("/workspace/cwd", _get_cwd)
-    app.router.add_get("/defaults", _get_defaults)
     app.router.add_get("/workspace/places", _list_workspace_places)
     app.router.add_get("/workspace/browse", _browse_workspace)
     app.router.add_get("/workspace/file", _read_workspace_file)
     app.router.add_post("/workspace/reveal", _reveal_workspace_path)
-    app.router.add_get("/sessions/{session_id}/history", _get_history)
-    app.router.add_get("/sessions/{session_id}/todos", _get_todos)
-    app.router.add_get("/sessions/{session_id}/todo-segments", _list_todo_segments)
-    app.router.add_get("/sessions/{session_id}/todo-segments/{segment_id}", _get_todo_segment)
-    app.router.add_post("/sessions/{session_id}/todo-segments/{segment_id}", _set_todo_segment_label)
-    app.router.add_post("/sessions/{session_id}/chat", _handle_chat)
-    app.router.add_post("/feishu/route", _feishu_route)
-    app.router.add_get("/feishu/routes", _list_feishu_routes)
-    app.router.add_get("/oauth/callback", _oauth_callback)
-    app.router.add_get("/oauth/code", _oauth_take_code)
 
     # 认证路由: 只在配了云端地址时才注册。authm 为 None 时**一条都不注册**,
     # 现有本地单用户流程零回归。
@@ -315,7 +355,30 @@ async def create_app(
         app.router.add_get("/auth/devices", _auth_devices)
         app.router.add_delete("/auth/devices/{device_id}", _auth_revoke_device)
         logger.info(f"Auth enabled, proxying to {authm.endpoint}{authm.prefix}")
+    return app
 
+
+def register_feishu_routes(
+    app: web.Application,
+    *,
+    feishu_ai_id: str = "",
+    feishu_workspace_root: str = "",
+) -> web.Application:
+    """ToB: 飞书会话 → Session 的路由表。
+
+    ``FeishuManager`` 复用骨架里的 ``SessionManager``, 但它自己认识飞书 (open_id /
+    chat_id / 跨容器会话), 所以建在这里而不是骨架里 —— 桌面端容器不再无条件建它。
+
+    **不碰 ``app["schedm"]``**: 原 ``create_app`` 里 ``scheduler_ai_id or feishu_ai_id``
+    那个回落已经在唯一的生产调用点做掉了 (``Gateway.run`` 建 ``SchedulerManager`` 时,
+    见 ``gateway/__init__.py``)。调度 Session 由骨架持有, 让产品层回头改它的私有字段
+    等于把一个已建好对象的配置权分给两处。
+    """
+    sm: SessionManager = app["sm"]
+    app["fm"] = FeishuManager(_sm=sm, _ai_id=feishu_ai_id, _workspace_root=feishu_workspace_root)
+    app["openapi_feishu"] = True
+    app.router.add_post("/feishu/route", _feishu_route)
+    app.router.add_get("/feishu/routes", _list_feishu_routes)
     return app
 
 
@@ -898,7 +961,7 @@ async def _handle_chat(request: web.Request) -> web.StreamResponse:
 
 # ---------------------------------------------------------------- 认证 (/auth/*)
 #
-# 这些路由只在云端地址非空时注册 (见 create_app)。为空时整套认证不加载, 现有本地
+# 这些路由只在云端地址非空时注册 (见 register_desktop_routes)。为空时整套认证不加载, 现有本地
 # 单用户流程零回归 —— 这是本期改动能安全落地的前提。
 #
 # Gateway 侧刻意只做**转发 + 本机凭证管理**: 不持任何供应商密钥 (安装包里放阿里云

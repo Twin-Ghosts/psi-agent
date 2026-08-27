@@ -47,7 +47,7 @@ git grep -n "from psi_agent.gateway" -- src/psi_agent/runtime/   # 必须无输�
 
 ## 测试
 
-测试仍在 `tests/psi_agent/gateway/`（`test_manager.py` / `test_session_manager.py` / `test_router_manager.py` / `test_scheduler_manager.py` / `test_history_manager.py` / `test_todo_manager.py` / `test_summary_manager.py` / `test_chat_manager.py`）与 `tests/integration/test_gateway.py`。**没有随代码搬家**：它们大量经 `create_app()` 走 REST 断言，本质是 gateway 装配后的行为，搬过来反而要把 aiohttp 装配也搬过来。跑子树注意 `-o testpaths=` 必须写在路径**之前**：
+测试仍在 `tests/psi_agent/gateway/`（`test_manager.py` / `test_session_manager.py` / `test_router_manager.py` / `test_scheduler_manager.py` / `test_history_manager.py` / `test_todo_manager.py` / `test_summary_manager.py` / `test_chat_manager.py`）与 `tests/integration/test_gateway.py`。**没有随代码搬家**：它们大量经 `create_core_app()` 走 REST 断言，本质是 gateway 装配后的行为，搬过来反而要把 aiohttp 装配也搬过来。跑子树注意 `-o testpaths=` 必须写在路径**之前**：
 
 ```bash
 .venv/Scripts/python.exe -m pytest -o testpaths= tests/psi_agent/gateway tests/integration/test_gateway.py -q --no-cov

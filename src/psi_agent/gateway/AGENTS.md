@@ -44,14 +44,14 @@ Gateway 进程
 | `_state.py` | `GatewayState` — `{appdata}/state/latest.json` + 时间戳快照；缺则双读 cwd `state/latest.json` |
 | `_ui_prefs.py` | `UIPrefs` — SPA 的一次性 UI 标记（问卷是否已填），落 `{appdata}/ui-prefs.json`，读写经 `GET/POST /ui/prefs/survey`。**刻意不放 `localStorage`**：安装包不传 `--listen`，Gateway 每次启动 `_random_port()`，而 `localStorage` 按 origin（含端口）分桶 → 上次写的标记下次读不到，弹窗每次重启都再弹一遍。也不放 `_state.py`（那是 5 个固定 key 的 manager 快照 + 每启动一份时间戳副本，UI 偏好两头都不属于）；不像 `_auth_store` 加密（存布尔不存凭证）。按**机器**存不按登录用户：认证是旁挂且可整套关掉的，绑 `user_id` 会让纯本地模式无处落脚 |
 | `_spa_shell.py` | SPA 外壳注入 — `DEFAULT_APP_NAME`、`inject_app_name()`、`read_spa_index_template()`；`GET /spa/index.html` 替换 `__GATEWAY_APP_NAME__` |
-| `server.py` | aiohttp Application + REST handlers |
+| `server.py` | aiohttp Application + REST handlers。装配分三个函数：`create_core_app()` 骨架（内核 manager + 两条线都要的路由，**不认识**飞书/托盘/盘符/登录）、`register_desktop_routes()` ToC、`register_feishu_routes()` ToB。旧的单个 `create_app()` 收 17 个参数并**无条件**建 `FeishuManager` 与 `WorkspaceManager` —— 桌面端容器里建飞书管理器、飞书容器里建 Windows 盘符枚举器 |
 | `_workspace_manager.py` | 目录浏览 + 快捷路径列表 + cwd 查询 |
 | `spa/` | Vue 3 SPA v1（对话气泡），构建输出 `spa/dist/`；路径 `/spa/` |
 | `spa-v2/` | React SPA v2（任务工作台 + 宝箱），构建输出 `spa-v2/dist/`；**默认** `GET /` → `/spa-v2/`（无 dist 时回退 v1） |
 | `_tray.py` | 系统托盘图标（pystray + Pillow），由 `--tray` 参数开启，`--icon` 参数指定图标文件，左键打开浏览器或恢复 webview 窗口，右键菜单控制；`request_attention()` 脉冲高亮图标 |
 | `_webview.py` | 原生 webview 窗口（pywebview），`--webview` 参数开启。窗口关闭信号通过 `threading.Event` 传递给主 loop；`request_attention()` 在 Windows 上 FlashWindowEx |
 | `_attention.py` | `AttentionHub`：SPA `POST /ui/attention` → 绑定的 tray/webview 注意力提示（best-effort）。`schedule_notify()` 用 daemon thread 异步触发，**禁止**在 aiohttp handler 里同步等 tray（pystray 可能卡死事件循环） |
-| `_openapi.py` | `GET /openapi.json` schema 装配 — `build_openapi_spec(desktop=, feishu=)` 把下面三份片段按产品线拼起来；`OPENAPI_SPEC` 是「全都要」的那份（path key 集合与拆分前一致）。**按 path key 分份、不按当前谁在调用**：路由注册分开后各线只贴自己那份 |
+| `_openapi.py` | `GET /openapi.json` schema 装配 — `build_openapi_spec(desktop=, feishu=)` 把下面三份片段按产品线拼起来；`OPENAPI_SPEC` 是「全都要」的那份（path key 集合与拆分前一致）。**按 path key 分份、不按当前谁在调用**：路由注册分开后各线只贴自己那份。`render_openapi(desktop=, feishu=)` 由 handler 按 `app["openapi_desktop"]` / `app["openapi_feishu"]` 两面旗子传参（旗子由各 `register_*_routes` 立），所以 spec 报的就是本进程真注册了的那批 path |
 | `_openapi_core.py` | 两条线都注册的 18 个 path（`/ais` `/routers` `/sessions*` `/titles*` `/summaries*` `/defaults` `/oauth/*`）+ 公共 schema 与 `responses.Error`。`/oauth/*` 归公共是因为 `OAuthRelay` 只认识 `state → code` 信箱，既不认识飞书也不认识桌面端 |
 | `_openapi_desktop.py` | ToC 专属 6 个 path（`/ui/attention` `/ui/prefs/survey` `/workspace/*`）；背后 `AttentionHub` / `UIPrefs` / `WorkspaceManager` 都认识桌面概念。无专属 schema |
 | `_openapi_feishu.py` | ToB 专属 2 个 path（`/feishu/route` `/feishu/routes`）+ 三个 `FeishuRoute*` schema |
@@ -69,7 +69,10 @@ Gateway 进程
    - **必须排在第 7 步之前**：交给 `Ai` 的 key 在 socket 构造时就定了，建晚了恢复出来的免费模型会带着哨兵起来，第一次对话必然 401（见 [免费模型的 key 替换](#免费模型的-key-替换)）
 7. 恢复 AI / Router / Session（Session 恢复时带 `agent`，缺省用 Gateway default）/ titles / summaries
 8. 创建 SchedulerManager（`--scheduler-ai-id`，空则回落 `--feishu-ai-id`）
-9. await create_app(..., default_agent=..., default_workspace=..., appdata=..., schedm=..., authm=...)  — 注册 REST（含 `GET /defaults`；`authm` 非 None 才注册 `/auth/*`）
+9. await create_core_app(aim, sm, tm, rm=..., default_agent=..., default_workspace=..., appdata=..., schedm=...)  — 骨架：内核 manager + 两条线都要的路由（含 `GET /defaults` `/oauth/*`）
+9b. await register_desktop_routes(app, favicon_path=..., app_name=..., attention=..., authm=...)  — ToC：SPA 静态 + `/ui/*` + `/workspace/*`（`authm` 非 None 才注册 `/auth/*`）
+9c. register_feishu_routes(app, feishu_ai_id=..., feishu_workspace_root=...)  — ToB：`FeishuManager` + `/feishu/*`
+   - **`psi-agent gateway` 这一个进程仍然两条线都贴**（生产上飞书容器起的也是它）。拆分的收益在装配函数：谁认识什么写在签名里，只想起一条线的进程只贴自己那面即可
 10. 为每个已恢复 Session 的 workspace `schedm.ensure(...)` — 按需拉起调度 Session（无 `schedules/` 则跳过）
 11. 创建 _do_persist 闭包（快照 managers → state.save，sessions 含 `agent`；`list_all()` 默认已排除调度 Session）
 12. 注入 _persist + 初始全量持久化
@@ -196,8 +199,8 @@ Gateway 启动时可通过 `--tray` 开启系统托盘，图标由 `--icon` 指�
 - 托盘启动失败（无桌面环境、图标文件无效等）不阻塞 Gateway 启动，仅记录 warning
 - `self.browser` 参数（默认 False）：设为 True 时启动时自动打开一次浏览器，托盘提供后续手动"重新打开"
 - `self.webview` 参数（默认 False）：设为 True 时替代 `--browser`，使用原生 webview 窗口展示 Web Console。与 `--browser` 互斥。必须同时指定 `--icon`（否则报错）。`--tray` 开启时关闭窗口仅隐藏到托盘（托盘左键可恢复）；否则关闭窗口即终止 Gateway
-- **Favicon 复用托盘图标**：`--icon` 设置时，`create_app(..., favicon_path=self.icon)` 注册 `GET /favicon.ico`，用 `web.FileResponse` 直接返回该图标文件（content-type 由扩展名推断）。`--icon` 未设置时不注册该路由，浏览器请求 `/favicon.ico` 得 404（无 favicon）。SPA `index.html` 含 `<link rel="icon" href="/favicon.ico">`
-- **应用名称 `app_name`**：`Gateway.app_name`（CLI `--app-name`，默认 `Haitun Agent`）经 `create_app(..., app_name=...)` 写入 `app["app_name"]`；`GET /spa/index.html` 在静态路由之前注入 `<title>`（占位符 `__GATEWAY_APP_NAME__`）。同源传给 `GatewayWebView` 窗口标题与 `GatewayTray` tooltip/菜单文案。与 Session 标题 API（`/titles`、`TitleManager`）无关。
+- **Favicon 复用托盘图标**：`--icon` 设置时，`register_desktop_routes(..., favicon_path=self.icon)` 注册 `GET /favicon.ico`，用 `web.FileResponse` 直接返回该图标文件（content-type 由扩展名推断）。`--icon` 未设置时不注册该路由，浏览器请求 `/favicon.ico` 得 404（无 favicon）。SPA `index.html` 含 `<link rel="icon" href="/favicon.ico">`
+- **应用名称 `app_name`**：`Gateway.app_name`（CLI `--app-name`，默认 `Haitun Agent`）经 `register_desktop_routes(..., app_name=...)` 写入 `app["app_name"]`；`GET /spa/index.html` 在静态路由之前注入 `<title>`（占位符 `__GATEWAY_APP_NAME__`）。同源传给 `GatewayWebView` 窗口标题与 `GatewayTray` tooltip/菜单文案。与 Session 标题 API（`/titles`、`TitleManager`）无关。
 
 ## Socket 路径约定
 
@@ -384,7 +387,7 @@ Gateway：``list_segments`` / ``get_segment`` 只读；``set_segment_label`` 允
 
 **字段**：
 - `_sm: SessionManager` — 复用其 spawn/查询能力管理 Session 生命周期
-- `_ai_id: str` — 飞书 Session 默认挂载的 AI 实例 id（`create_app(..., feishu_ai_id=...)` 注入，来自 `Gateway.feishu_ai_id`）
+- `_ai_id: str` — 飞书 Session 默认挂载的 AI 实例 id（`register_feishu_routes(..., feishu_ai_id=...)` 注入，来自 `Gateway.feishu_ai_id`）
 - `_workspace_root: str` — 各会话独立 workspace 的父目录（来自 `Gateway.feishu_workspace_root`；空则以 cwd 为父）
 - `_routes: dict[str, str]` — 路由键 → session_id 映射（内存态）
 - `_lock: anyio.Lock` — 首次路由才走，频率低，可接受串行
@@ -521,7 +524,7 @@ OAuth 回调中继（`_oauth_manager.py`）：让**授权码自己回到发起�
 | POST | `/ui/attention` | 会话在后台完成时闪烁托盘/webview（best-effort，需 `--tray` / `--webview`） |
 | GET | `/ui/prefs/survey` | 问卷弹窗是否已关闭过 → `{"done": bool}`（按机器，落 `{appdata}/ui-prefs.json`） |
 | POST | `/ui/prefs/survey` | 记录问卷弹窗已关闭；body `{"done": bool}`，缺省/非 bool 视作 `true`（唯一调用方是"关闭"动作） |
-| GET | `/openapi.json` | OpenAPI schema |
+| GET | `/openapi.json` | OpenAPI schema。只含本进程真注册了的产品线片段（`psi-agent gateway` 两条都贴，故与拆分前一致） |
 | GET | `/favicon.ico` | 托盘图标（仅当 `--icon` 设置时注册，返回该图标文件） |
 
 AI 和 Session 的 `id` 字段可选，不传自动生成 UUID。
