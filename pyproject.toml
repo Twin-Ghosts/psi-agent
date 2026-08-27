@@ -19,7 +19,18 @@ dependencies = [
     "pyyaml>=6.0.3",
     "prompt-toolkit>=3.0.52",
     "rich>=15.0.0",
-    "any-llm-sdk>=1.21.0",
+    # 上界是承重的, 且必须卡到 minor: any-llm 会在 minor 版本里改**请求语义**。
+    # 实测 1.21.0 的 providers/deepseek/deepseek.py 没有 thinking 分支, 1.26.0
+    # 有 —— 它把 reasoning_effort 缺省值当「没要思维」, 下发
+    # extra_body.thinking={"type":"disabled"}, 于是模型把自我对话写进 content
+    # (线上的 thinking 泄漏)。原先写 >=1.21.0 开区间, 这个变更就静默上了线。
+    #
+    # 所以 <2.0.0 这种 semver 上界在这里没用: 1.21→1.26 本身就是 minor。要拦住
+    # 这一类, 上界只能卡 minor, 升级时人工读 changelog。
+    #
+    # 下界同时抬到 1.26.0 对齐生产: 之前 lock 是 1.21.0 而生产镜像跑 1.26.0,
+    # 本机与线上不在同一条 minor 线上 —— 这正是该变更没被本机测试发现的原因。
+    "any-llm-sdk>=1.26.0,<1.27.0",
     "json-repair>=0.63.0,<0.64",
     "platformdirs>=4.10.1",
     "keyring>=25.0.0",
