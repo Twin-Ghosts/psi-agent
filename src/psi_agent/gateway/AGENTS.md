@@ -26,7 +26,7 @@ Gateway 进程
 ├── spa/               — Vue 3 SPA 前端项目 (Vite + SFC)
 ├── GatewayWebView     — 原生 webview 窗口 (pywebview)
 ├── GatewayTray        — 系统托盘图标 (pystray)
-└── _openapi.py       — OpenAPI schema 提供
+└── _openapi*.py      — OpenAPI schema 提供（公共 / ToC / ToB 三份 + 装配）
 ```
 
 ## 模块
@@ -51,7 +51,10 @@ Gateway 进程
 | `_tray.py` | 系统托盘图标（pystray + Pillow），由 `--tray` 参数开启，`--icon` 参数指定图标文件，左键打开浏览器或恢复 webview 窗口，右键菜单控制；`request_attention()` 脉冲高亮图标 |
 | `_webview.py` | 原生 webview 窗口（pywebview），`--webview` 参数开启。窗口关闭信号通过 `threading.Event` 传递给主 loop；`request_attention()` 在 Windows 上 FlashWindowEx |
 | `_attention.py` | `AttentionHub`：SPA `POST /ui/attention` → 绑定的 tray/webview 注意力提示（best-effort）。`schedule_notify()` 用 daemon thread 异步触发，**禁止**在 aiohttp handler 里同步等 tray（pystray 可能卡死事件循环） |
-| `_openapi.py` | `GET /openapi.json` schema 生成 |
+| `_openapi.py` | `GET /openapi.json` schema 装配 — `build_openapi_spec(desktop=, feishu=)` 把下面三份片段按产品线拼起来；`OPENAPI_SPEC` 是「全都要」的那份（path key 集合与拆分前一致）。**按 path key 分份、不按当前谁在调用**：路由注册分开后各线只贴自己那份 |
+| `_openapi_core.py` | 两条线都注册的 18 个 path（`/ais` `/routers` `/sessions*` `/titles*` `/summaries*` `/defaults` `/oauth/*`）+ 公共 schema 与 `responses.Error`。`/oauth/*` 归公共是因为 `OAuthRelay` 只认识 `state → code` 信箱，既不认识飞书也不认识桌面端 |
+| `_openapi_desktop.py` | ToC 专属 6 个 path（`/ui/attention` `/ui/prefs/survey` `/workspace/*`）；背后 `AttentionHub` / `UIPrefs` / `WorkspaceManager` 都认识桌面概念。无专属 schema |
+| `_openapi_feishu.py` | ToB 专属 2 个 path（`/feishu/route` `/feishu/routes`）+ 三个 `FeishuRoute*` schema |
 
 ## Gateway 启动流程
 
