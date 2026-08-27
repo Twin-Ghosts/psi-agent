@@ -81,28 +81,30 @@ category: developer-productivity
 
 ### 级别一：完整详细版
 
-用户："逐行解释 gateway/_manager.py"
+用户："逐行解释 runtime/_manager.py"
 
 ```
-# 文件: gateway/_manager.py
+# 文件: runtime/_manager.py
 
 ## 架构定位
 Gateway 进程的整体结构：
   Gateway 进程
-  ├─ AIManager → 管理 AI 实例生命周期
-  ├─ SessionManager → 管理 Session 实例生命周期
-  ├─ RouterManager → 管理 Router 实例生命周期
-  ├─ TitleManager → 管理会话标题
-  └─ server.py → REST API 路由注册
+  ├─ runtime/ 层 —— 实例生命周期管理
+  │   ├─ AIManager → 管理 AI 实例生命周期
+  │   ├─ SessionManager → 管理 Session 实例生命周期
+  │   ├─ RouterManager → 管理 Router 实例生命周期
+  │   └─ TitleManager / SummaryManager → 管理会话标题与摘要
+  └─ gateway/ 层 —— HTTP 骨架
+      └─ server.py → REST API 路由注册
           ↑
-   所有这些模块都依赖同一个底层工具文件：
-   gateway/_manager.py —— 共享工具函数
+   runtime/ 各 Manager 都依赖同一个底层工具文件：
+   runtime/_manager.py —— 共享工具函数
 
-_manager.py 在整个 Gateway 层中处于最底层——它不调用任何人，
-而是被所有 Manager 模块共同依赖。
+_manager.py 在 runtime/ 层中处于最底层——它不调用任何人，
+而是被各 Manager 模块共同依赖。
 
 ## 归属与角色
-属于 gateway/ 层内部工具模块（文件名以 _ 开头，表示不对外暴露）。
+属于 runtime/ 层内部工具模块（文件名以 _ 开头，表示不对外暴露）。
 不包含任何业务逻辑，只提供 6 个纯工具函数。
 
 ## 关键结构
@@ -118,21 +120,22 @@ _wait_socket()           轮询等待 socket 就绪（一直 ping 直到能连�
 ## 数据流（含跨层关系）
 _manager.py 本身没有数据流——它是一个纯工具库，不维护状态，不产生数据。
 
-但各 Manager 的 create() 方法有固定的调用顺序，展示了 Gateway 层与 AI/Session 层的握手：
+但各 Manager 的 create() 方法有固定的调用顺序，展示了 runtime 层与 AI/Session 层的握手：
   _new_uuid() → _socket_path() → _ensure_socket_dir()
   → 【启动目标进程】→ _wait_socket() → 注册到 _entries
   → 失败时 _remove_socket()
 
   _wait_socket() 这里跨越了 Gateway → AI/Session 的边界：
   Gateway 启动子进程后，需要通过 socket 等待对方就绪
-  → 这是 Gateway 层和 AI/Session 层之间唯一的「握手」环节
+  → 这是 runtime 层和 AI/Session 层之间唯一的「握手」环节
 
 ## 关联模块
-被调用于：
-  gateway/_ai_manager.py       ← 6 个函数全部用到
-  gateway/_session_manager.py  ← 6 个函数全部用到
-  gateway/_router_manager.py   ← _socket_path / _ensure_socket_dir / _remove_socket / _wait_socket
-  gateway/_title_manager.py    ← _noop 仅作默认回调
+被调用于（实测 5 个导入方）：
+  runtime/_ai_manager.py       ← 6 个函数全部用到
+  runtime/_session_manager.py  ← 6 个函数全部用到
+  runtime/_router_manager.py   ← 6 个函数全部用到
+  runtime/_title_manager.py    ← _noop 仅作默认回调
+  runtime/_summary_manager.py  ← _noop 仅作默认回调
 
 调用了：
   sys.platform            → 判断操作系统（决定 socket 还是 pipe）
@@ -140,11 +143,11 @@ _manager.py 本身没有数据流——它是一个纯工具库，不维护状�
   aiohttp                 → NamedPipeConnector / UnixConnector / ClientSession
   anyio.Path / anyio.sleep → 异步文件操作 + 等待
 
-不依赖于 Gateway 层的任何其他模块。
+不依赖于 runtime 层的任何其他模块，也不依赖 gateway 层。
 
 ## 关键代码段说明
 
-### _socket_path() 约 L18-22
+### _socket_path() 约 L29-32
 def _socket_path(prefix, kind, entity_id):
     if sys.platform == "win32":
         return rf"\\.\pipe\{prefix}\{kind}\{entity_id}"
@@ -155,18 +158,20 @@ def _socket_path(prefix, kind, entity_id):
 不同项目用不同文件路径互不干扰，没有端口冲突。
 → 如果你想改 socket 文件的存放位置（比如不想用 /tmp/），就在这里改。
 
-### _wait_socket() 约 L44-64
-async def _wait_socket(path):
+### _wait_socket() 约 L51-74
+async def _wait_socket(path, timeout_sec=_SOCKET_READY_TIMEOUT_SECONDS):
     ... 平台分支选择 connector ...
+    deadline = anyio.current_time() + timeout_sec
     session = aiohttp.ClientSession(connector=connector)
     try:
-        while True:
+        while anyio.current_time() < deadline:
             try:
                 async with session.get("http://localhost/") as _resp:
                     pass
                 return
             except Exception:
                 await anyio.sleep(0.1)
+        raise TimeoutError(...)
     finally:
         with anyio.CancelScope(shield=True):
             await session.close()
@@ -175,24 +180,29 @@ async def _wait_socket(path):
    → 对应 AGENTS.md 中 socket 传输的跨平台约定
    → 不要简化这个分支，否则 Windows 上会报 NotImplementedError
 
-② while True 循环：每 0.1 秒 ping 一次直到连上
-   → 如果你想改超时或重试间隔，就在这里加
+② deadline 循环：每 0.1 秒 ping 一次，超过 timeout_sec 就抛 TimeoutError
+   → 上限来自模块级 _SOCKET_READY_TIMEOUT_SECONDS（L17，当前 120s）
+   → 改重试间隔动 anyio.sleep(0.1)；改超时上限动 L17 或调用时传 timeout_sec
+   → 这个上限不能去掉：服务起不来时没有上限会把整个 Gateway 请求挂死
 
 ③ CancelScope(shield=True)：即使外部 cancel 信号来了，
    也要保证关闭连接、不泄露资源
    → 这是 psi-agent 全框架的统一约定
    → 不要删 shield，否则 cancel 时会泄露 aiohttp 连接
 
-### _remove_socket() 约 L31-40
+### _remove_socket() 约 L40-48
 async def _remove_socket(path):
     if sys.platform == "win32":
         return
     ...
 
 Windows 上直接 return——命名管道由 OS 自动清理，不需要手动删。
-→ 这个 return 分支不要删，原因见 AGENTS.md 第 17 条
+→ 这个 return 分支不要删。POSIX 侧要删的原因见根 AGENTS.md「关键注意事项」第 1 条
+  （socket 文件残留，进程退出不自动删）；而框架刻意不做 auto-unlink 的原因见同文档
+  「为什么 socket 文件不自动 unlink？」一节（保留文件才能热换 Server）。
+  所以清理是显式动作、只在 POSIX 做，两边都不能顺手"统一"掉。
 
-### _new_uuid() 与 _noop() 约 L9-15
+### _new_uuid() 与 _noop() 约 L20-26
 这两个最简单，但体现了一个设计习惯：
 _noop() 用作默认回调值，而不是 None。
 这样所有调用处不用写 if callback:，符合 Default over None 原则。
@@ -201,18 +211,18 @@ _noop() 用作默认回调值，而不是 None。
 
 ### 级别二：精简概览版
 
-用户："解释一下 gateway/_manager.py"
+用户："解释一下 runtime/_manager.py"
 
 ```
-归属: gateway/ 层内部工具模块（_ 开头 = 不对外暴露）
+归属: runtime/ 层内部工具模块（_ 开头 = 不对外暴露）
 职责: 提供 6 个纯工具函数：ID生成 / socket路径 / 目录创建 / 文件删除 / 就绪等待 / 空回调
 关键结构:
   _socket_path()    — 跨平台路径生成（核心架构决策：通信走 socket/pipe 不走 TCP）
-  _wait_socket()    — 轮询握手（Gateway 层和 AI/Session 层的唯一握手点）
+  _wait_socket()    — 轮询握手（runtime 层和 AI/Session 层的唯一握手点）
   _ensure_socket_dir() / _remove_socket() — 目录创建 + 残留清理
   _new_uuid() / _noop() — 工具函数
 数据流: 无自身数据流，被各 Manager 的 create/delete 流程按顺序调用
-关联: 被 _ai_manager / _session_manager / _router_manager / _title_manager 导入
+关联: 被 runtime/ 下 _ai_manager / _session_manager / _router_manager / _title_manager / _summary_manager 导入
 不建议改: _new_uuid / _noop 不需要动；_remove_socket Windows return 不要删
 
 可继续问我更具体的函数，如"解释一下 _wait_socket 怎么实现的"
@@ -223,17 +233,18 @@ _noop() 用作默认回调值，而不是 None。
 用户："解释一下 _wait_socket 这个函数怎么实现的"
 
 ```
-归属: gateway/_manager.py
+归属: runtime/_manager.py
 
-_wait_socket(path: str)  @约 L44-64
+_wait_socket(path: str, timeout_sec: float = _SOCKET_READY_TIMEOUT_SECONDS)  @约 L51-74
 职责: 轮询等待 socket/pipe 就绪
-调用者: AIManager.create()、SessionManager.create()、RouterManager.create()
+调用者: 实测 4 处 —— _ai_manager.py L113 / L202、_router_manager.py L194、_session_manager.py L172
 
-L46-49: 平台分支——Windows 走 NamedPipe，其他走 Unix socket
+L53-58: 平台分支——Windows 走 NamedPipe，其他走 Unix socket
         → 对应 AGENTS.md 中 socket 传输的跨平台约定
-L51-59: while True 循环——每 0.1 秒 ping 一次直到连上
-        → 如果你想改启动超时或重试间隔，就在这里加逻辑
-L60-63: CancelScope(shield=True) 保护 session.close()
+L60-71: deadline 循环——每 0.1 秒 ping 一次，超时抛 TimeoutError
+        → 改重试间隔在循环里；改超时上限动 L17 的 _SOCKET_READY_TIMEOUT_SECONDS
+          或在调用处传 timeout_sec，不必改本文件
+L72-74: CancelScope(shield=True) 保护 session.close()
         → psi-agent 全框架的取消安全统一约定
         → 不要删 shield，否则 cancel 时会泄露连接
 
@@ -247,11 +258,13 @@ L60-63: CancelScope(shield=True) 保护 session.close()
 用户："给 socket 等待加超时改哪里"
 
 ```
-归属: gateway/_manager.py
+归属: runtime/_manager.py
 文件: _manager.py
 函数: _wait_socket()
-行号: L44-L64
-改动点: while True 循环中增加超时计数器或最大重试次数
+行号: L51-L74
+改动点: 超时已实现——上限是模块级 _SOCKET_READY_TIMEOUT_SECONDS（L17，当前 120s），
+        由 timeout_sec 参数默认值传入，循环按 deadline 判定。
+        要改默认上限动 L17；要让某个调用方单独用别的值，传 timeout_sec 即可，不用改本文件。
 不动区域: CancelScope(shield=True) 不要动
 测试: 需通过 AIManager/SessionManager 的集成测试验证，见 tests/integration/
 ```
