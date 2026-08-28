@@ -71,6 +71,9 @@ artifacts = [
 exclude = [
     "src/psi_agent/gateway/desktop/spa/node_modules/**",
     "src/psi_agent/gateway/desktop/spa-v2/node_modules/**",
+    # 只排 node_modules, 不往 artifacts 加 feishu-web 的 dist —— 产物怎么下发不在本轮
+    # 范围。少了这行, 新目录的依赖树会跟着 sdist 一起打进去。
+    "src/psi_agent/gateway/feishu/feishu-web/node_modules/**",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -80,6 +83,9 @@ exclude = [
     "src/psi_agent/**/.gitignore",
     "src/psi_agent/gateway/desktop/spa",
     "src/psi_agent/gateway/desktop/spa-v2",
+    # 与上面两棵 ToC 前端同一处置: 源码树不进 wheel。dist 也不进 (没往下面 artifacts
+    # 加) —— 本轮不含部署, 后端那个 add_static 目录不存在时会静默跳过, 不报错。
+    "src/psi_agent/gateway/feishu/feishu-web",
 ]
 artifacts = [
     "src/psi_agent/gateway/desktop/spa/dist/**/*",

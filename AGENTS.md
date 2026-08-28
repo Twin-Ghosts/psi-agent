@@ -131,13 +131,14 @@ src/
     └── gateway/                     # 骨架层：两条产品线的共同装配 + 公共端点
         ├── AGENTS.md                # Gateway 层设计文档
         ├── __init__.py              # Gateway dataclass + run()
-        ├── server.py                # aiohttp REST handlers + create_core_app / register_*_routes
+        ├── server.py                # create_core_app + 核心 handler（/ais /routers /sessions /titles /summaries /defaults /oauth/*）
         ├── _defaults.py             # ToC 品牌字面量 + GET /defaults 的解析入口
         ├── _oauth_manager.py       # OAuthRelay — OAuth 回调中继（免手抄授权码）
         ├── _state.py               # GatewayState — 状态持久化 (state/latest.json)
         ├── _openapi.py             # OpenAPI 装配（按产品线开关拼三份片段）
         ├── _openapi_core.py        # 公共 path 片段
         ├── desktop/                 # **ToC 专属层**
+        │   ├── _routes.py          # register_desktop_routes + ToC handler（/ui/* /workspace/* /auth/*）
         │   ├── _free_model.py      # 免费模型哨兵 key → 登录 token（同源校验）
         │   ├── _auth_manager.py    # AuthManager — 云端账号服务转发 + 登录态
         │   ├── _auth_store.py      # 本机凭证加密落盘
@@ -151,11 +152,12 @@ src/
         │   ├── spa/                # Vue 3 SPA v1（Vite + SFC）
         │   └── spa-v2/             # React SPA v2（任务工作台；默认 GET /）
         └── feishu/                  # **ToB 专属层**
+            ├── _routes.py          # register_feishu_routes + /feishu/route /feishu/routes
             ├── _feishu_manager.py  # FeishuManager — 飞书 open_id → Session 路由
             └── _openapi.py         # ToB path 片段（/feishu/*）
 ```
 
-gateway 内部同样是**单向**的：骨架层不 import `desktop/` 与 `feishu/`（`server.py` 例外地只为静态资源根取一次 `desktop` 包路径），两条产品线由 `register_desktop_routes()` / `register_feishu_routes()` 往骨架产出的 app 上贴。归属判据是「这段代码认识哪些概念」，不是「当前谁在调用」。
+gateway 内部同样是**单向**的：骨架层不 import `desktop/` 与 `feishu/`，两条产品线由各自包内的 `register_desktop_routes()`（`desktop/_routes.py`）/ `register_feishu_routes()`（`feishu/_routes.py`）往骨架产出的 app 上贴。归属判据是「这段代码认识哪些概念」，不是「当前谁在调用」。A5 搬完模块后这条曾不成立——两个装配函数还留在 `server.py`，骨架为给它们备料反向 import 了 7 个产品符号；A7 把函数连同专属 handler 搬进产品包收掉。判据命令与 `_openapi.py` 那一处刻意例外（只碰 dict 数据、不碰产品行为）见 `gateway/AGENTS.md`「依赖方向」。
 
 `runtime/` 与 `gateway/` 的依赖方向**单一**：gateway 组装 runtime 的 manager 并接到 REST + Web UI 上，runtime 反过来对 gateway 一无所知。这条边由 `git grep -n "from psi_agent.gateway" -- src/psi_agent/runtime/` 必须无输出来守。
 
