@@ -16,8 +16,9 @@ Args:
         ``definition_code`` (sometimes ``process_code``) in its response is this value.
     date_from: First day of the window, ISO (``2026-08-05``). Inclusive.
     date_to: Last day of the window, inclusive. Empty = same as ``date_from``.
-    names_json: Optional JSON array restricting the answer, e.g. ``'["ou_abc"]'``.
-        Applicants come back as ids, so ids are the reliable filter. Empty = everyone.
+    names_json: Optional JSON array restricting the answer, e.g. ``'["ou_abc","张三"]'``.
+        Names and open_ids both work — applicants come back as ids and their names are
+        resolved from the contact book, then either form is matched. Empty = everyone.
     user_key: The sender's open_id (from ``<feishu_context>``).
 """
 
@@ -48,11 +49,17 @@ async def feishu_leave_query(
     - leave that never went through an approval flow (verbal, or edited straight in the HR
       console) is invisible here, so it counts as not-on-leave and the person appeals.
 
-    The result carries ``on_leave`` (per applicant: hit dates and each leave interval),
-    ``full_period_applicants`` for the people to skip dispatching entirely,
+    The result carries ``on_leave`` (per applicant: ``name``, hit dates and each leave
+    interval), ``full_period_applicants`` for the people to skip dispatching entirely,
     ``skipped_not_approved`` so a pile of pending applications is visible rather than
     looking like nobody asked for leave, and ``needs_fix`` for applications a human must
-    look at. Applicants are ids — resolve names with ``feishu_user_get`` when displaying.
+    look at.
+
+    When ``names_json`` is used, check ``unmatched_filter`` before concluding anybody was
+    at work: an entry there means that spelling matched no leave record, which is either
+    "not on leave" or "the spelling never resolved" — ``name_lookup_error`` tells them
+    apart. An empty ``on_leave`` alone cannot, and reading it as "everyone was at work"
+    books overdue todos against people who were away.
     """
     return _f.dumps_result(
         await _f.query_leave_impl(

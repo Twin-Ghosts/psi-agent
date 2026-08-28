@@ -60,6 +60,9 @@ _MAX_INSTANCES = 200
 #: 列实例的页大小上限(飞书规定 100)。
 _PAGE_SIZE = 100
 
+#: 一次批量查多少个人的姓名(飞书 users/batch 规定上限 50)。
+_NAME_BATCH = 50
+
 
 def _parse_date(text: str) -> datetime.date | None:
     """把一个日期写法归一成 ``date``;认不出来返回 None(而不是猜)。"""
@@ -209,8 +212,8 @@ def _leave_span(form: Any) -> tuple[str, str, str, str]:
 def _wanted_names(names_json: str) -> tuple[set[str], str | None]:
     """解析 names_json 过滤名单。空 = 不过滤,返回窗口内所有请假的人。
 
-    名单里可以写姓名也可以写 open_id:审批详情回的申请人是 id,姓名要另外解析,所以
-    两种都允许,匹配时任一命中即算。
+    名单里可以写姓名也可以写 open_id:审批详情回的申请人是 id,姓名要另外解析
+    (见 ``_resolve_applicant_names``),所以两种都允许,匹配时任一命中即算。
     """
     raw = names_json.strip()
     if not raw:
@@ -222,6 +225,39 @@ def _wanted_names(names_json: str) -> tuple[set[str], str | None]:
     if not isinstance(parsed, list) or any(not isinstance(item, str) for item in parsed):
         return set(), 'names_json must be a JSON array of strings, e.g. \'["ou_abc","张三"]\''
     return {item.strip() for item in parsed if item.strip()}, None
+
+
+async def _resolve_applicant_names(applicants: list[str]) -> tuple[dict[str, str], str]:
+    """把申请人 open_id 批量换成姓名。返回 (id 到姓名, 错误说明)。
+
+    审批详情里的申请人只有 open_id,而 ``names_json`` 允许按姓名过滤 —— 姓名到 id 的
+    全局搜索只吃 user_access_token,这里是 tenant 场景用不上。所以反过来做:把窗口里
+    出现过的申请人 id 解析成姓名,两种写法都拿来跟名单比。
+
+    解析失败不抛错也不静默:错误原文回给调用方,由 ``name_lookup_error`` 呈现 ——
+    按姓名过滤时解析失败等于谁都匹配不上,那种空结果跟「确实没人请假」长得一样。
+    """
+    names: dict[str, str] = {}
+    errors: list[str] = []
+    for index in range(0, len(applicants), _NAME_BATCH):
+        chunk = applicants[index : index + _NAME_BATCH]
+        res = await _core.get_users_batch_impl(",".join(chunk), user_id_type="open_id")
+        if not res.get("ok"):
+            errors.append(str(res.get("error") or res.get("message") or "查通讯录失败"))
+            continue
+        for user in res.get("users") or []:
+            if not isinstance(user, dict):
+                continue
+            open_id = str(user.get("open_id") or "")
+            name = str(user.get("name") or "").strip()
+            if open_id and name:
+                names[open_id] = name
+    return names, "; ".join(dict.fromkeys(errors))
+
+
+def _identity_keys(applicant: str, names: dict[str, str]) -> set[str]:
+    """一个申请人在名单里可能的写法:open_id 与姓名。"""
+    return {key for key in (applicant, names.get(applicant, "")) if key}
 
 
 async def _list_instance_codes(approval_code: str, start_ms: str, end_ms: str, user_key: str) -> tuple[list[str], str]:
@@ -344,11 +380,11 @@ async def query_leave_impl(
         hits = _overlap_days(start, end, start_date, end_date)
         if not hits:
             continue
-        if wanted and applicant not in wanted:
-            continue
+        # 名单过滤挪到循环后面做:按姓名过滤需要先把 id 换成姓名,而要查的 id 只有把窗口
+        # 扫完才知道 —— 在这里过滤就只能拿 id 比,姓名一律匹配不上。
         person = on_leave.setdefault(
             applicant,
-            {"applicant": applicant, "hit_dates": [], "leaves": [], "hit_days": 0, "full_period": False},
+            {"applicant": applicant, "name": "", "hit_dates": [], "leaves": [], "hit_days": 0, "full_period": False},
         )
         person["leaves"].append(
             {
@@ -364,11 +400,23 @@ async def query_leave_impl(
             if day not in person["hit_dates"]:
                 person["hit_dates"].append(day)
 
-    for person in on_leave.values():
+    # 姓名解析一律做,不只在带名单时做:结果里只有 open_id 的话,调用方要么自己再查一次,
+    # 要么把 id 当人名念给用户听。
+    names, name_error = await _resolve_applicant_names(sorted(on_leave))
+    for applicant, person in on_leave.items():
+        person["name"] = names.get(applicant, "")
         person["hit_dates"].sort()
         person["hit_days"] = len(person["hit_dates"])
         # 整周期请假 ⇒ 派发环节整块跳过(不派卡、不建任务)。
         person["full_period"] = person["hit_days"] == span
+
+    unmatched: list[str] = []
+    if wanted:
+        matched_keys = {key for applicant in on_leave for key in _identity_keys(applicant, names)}
+        unmatched = sorted(wanted - matched_keys)
+        on_leave = {
+            applicant: person for applicant, person in on_leave.items() if _identity_keys(applicant, names) & wanted
+        }
 
     people = sorted(on_leave.values(), key=lambda p: (-p["hit_days"], p["applicant"]))
     return {
@@ -380,7 +428,14 @@ async def query_leave_impl(
         "queried_names": sorted(wanted) if wanted else [],
         "on_leave": people,
         "on_leave_applicants": [p["applicant"] for p in people],
+        "on_leave_names": [p["name"] for p in people if p["name"]],
         "full_period_applicants": [p["applicant"] for p in people if p["full_period"]],
+        # 名单里没能对上任何请假记录的写法。空名单时恒为空 —— 有值时「这几个人没请假」和
+        # 「这几个人的写法没查到」两种可能都在里面,配合 name_lookup_error 才能分开。
+        "unmatched_filter": unmatched,
+        # 姓名没查着时必须说出来:按姓名过滤会因此匹配不上,而那种空结果跟「确实没人请假」
+        # 一模一样,方向恰好是加重考核。
+        "name_lookup_error": name_error,
         "instances_scanned": len(codes[:_MAX_INSTANCES]),
         "skipped_not_approved": skipped_not_approved,
         "needs_fix": needs_fix,
