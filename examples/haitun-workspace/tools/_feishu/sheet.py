@@ -581,52 +581,63 @@ async def read_sheet_grid_impl(
     }
 
 
+#: 日期表头的写法。年份可有可无,分隔符 . - / 通吃,允许尾巴带「日」。
 _DATE_PATTERNS = [
-    (r"^\d{1,2}\.\d{1,2}(?:日)?$", "%m.%d"),  # 7.24 / 8.10日
-    (r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}$", "%Y-%m-%d"),  # 2026-08-14
-    (r"^\d{1,2}[-/]\d{1,2}$", "%m-%d"),  # 8/14
-]
-_HEADER_KIND_RULES = [
-    ("mentor", "mentor"),
-    ("负责人", "names"),
-    ("姓名", "names"),
-    ("名字", "names"),
-    ("owner", "names"),
+    re.compile(r"^(?:(?P<year>\d{4})[.\-/])?(?P<month>\d{1,2})[.\-/](?P<day>\d{1,2})日?$"),
 ]
 
 
-def _classify_header(header: str) -> tuple[str, str]:
-    """Classify one header cell into (kind, normalized_date)."""
+def _header_date(header: str) -> str:
+    """Return the ISO date a header cell denotes, or "" if it is not a date.
+
+    Only dates are recognized here. Headers used to be classified further —
+    ``负责人``/``姓名``/``owner`` became ``names``, anything containing
+    ``mentor`` became ``mentor``, everything else ``other`` — off a hardcoded
+    substring table. That table decided meaning it could not know:
+
+    * a Chinese mentor column (导师 / 带教 / 师父) matched nothing and came back
+      ``other``, which reads as "there is no mentor column here" and sends the
+      model back to counting header cells — the exact mistake this lookup was
+      added to prevent;
+    * a header naming two roles (``带教负责人(mentor)``) was decided by the
+      table's write order, not by the header, so 负责人 and mentor came back
+      swapped.
+
+    Reading a header is the model's job; it has the whole sheet and the question
+    in front of it. What it cannot do by eye is column arithmetic, so that is
+    what stays in code: the column letter, and this normalization.
+
+    数字直接从分组里取,不走 ``strptime``:原先按「模式 → 格式串」配对解析,``7/24``
+    配到的格式串是 ``%m-%d``,分隔符对不上就抛 ValueError,再被兜底成 1900-01-01、
+    补年份变成「今年 1 月 1 日」—— 一个错得看不出来的日期。``2.29`` 同理(strptime
+    的默认年份 1900 不是闰年)。
+    """
     text = header.strip()
-
-    for pattern, fmt in _DATE_PATTERNS:
-        m = re.fullmatch(pattern, text)
-        if m:
-            try:
-                normalized = datetime.datetime.strptime(m.group(0).rstrip("日"), fmt)
-            except ValueError:
-                normalized = datetime.datetime(1900, 1, 1)
-            # 无年份的日期列(如 8.14)按当前年份归一,不给 1900 这种误导值。
-            if normalized.year == 1900:
-                normalized = normalized.replace(year=datetime.datetime.now().year)
-            return "date", normalized.strftime("%Y-%m-%d")
-    low = text.lower()
-    for marker, kind in _HEADER_KIND_RULES:
-        if marker in low:
-            return kind, ""
-    return "other", ""
+    for pattern in _DATE_PATTERNS:
+        m = pattern.fullmatch(text)
+        if not m:
+            continue
+        # 无年份的日期列(如 8.14)按当前年份归一,不给 1900 这种误导值。
+        year = int(m.group("year") or datetime.datetime.now().year)
+        try:
+            return datetime.date(year, int(m.group("month")), int(m.group("day"))).isoformat()
+        except ValueError:
+            # 13.32 这种「像日期但不是日期」的表头:当普通表头处理,不编一个日期出来。
+            return ""
+    return ""
 
 
 async def find_sheet_columns_impl(
     token: str, header_row: int = 1, range_: str = "", user_key: str = ""
 ) -> dict[str, Any]:
-    """Read the header row and classify every column's semantics in code.
+    """Read the header row and return each non-empty header with its column letter.
 
-    Date columns (7.24 / 8.10日 / 2026-08-14 …) are recognized by pattern and
-    normalized to ISO dates; name columns (负责人/姓名/名字) and the mentor
-    column are recognized by markers. The agent should use this to locate
-    columns instead of counting header cells by eye — the counted-column
-    mistakes (案例 3 的行列横跳) come from exactly that.
+    Headers come back verbatim — reading what a column means is left to the
+    caller (see ``_header_date`` for why). Two things are computed here because
+    they are arithmetic, not judgement: the column letter (26-base, offset by
+    where the returned range actually starts, so a ``!B1`` range does not report
+    its first cell as A) and, for cycle columns like 7.24 / 8.10日 /
+    2026-08-14, the normalized ISO ``date`` (``kind: "date"``).
     """
     if not token.strip():
         return _core._error("token (spreadsheet_token) is required.")
@@ -663,13 +674,14 @@ async def find_sheet_columns_impl(
         text = _flatten_sheet_cell(cell)
         if not text:
             continue
-        kind, normalized = _classify_header(text)
+        normalized = _header_date(text)
         columns.append(
             {
                 "col": _col_letter(start_col + offset),
                 "header": text,
-                "kind": kind,
-                **({"date": normalized} if kind == "date" else {}),
+                # kind 只在日期列出现:那是归一算出来的结论。其他列不带 kind —— 与其
+                # 给个 "other" 让人当成「查过了,没别的意思」,不如什么都不说。
+                **({"kind": "date", "date": normalized} if normalized else {}),
             }
         )
     return {

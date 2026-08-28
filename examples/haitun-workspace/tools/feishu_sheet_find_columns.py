@@ -1,14 +1,21 @@
-"""Locate a sheet's header row and classify every column's semantics in code.
+"""Read a sheet's header row and return every column's letter and header text.
 
 Counting header cells by eye is a proven failure mode (columns misidentified,
-person rows read as empty). This tool reads the header row and classifies each
-non-empty header deterministically:
+person rows read as empty), and the arithmetic is easy to get wrong: column
+letters are 26-base (column 27 is AA) and a range that starts at B must not
+report its first cell as A. That is what this tool does for you.
 
-- ``kind: "date"`` — cycle columns like 7.24 / 8.10日 / 2026-08-14, with the
-  normalized ISO date (``date`` field);
-- ``kind: "names"`` — the person/owner column (负责人/姓名/名字/owner);
-- ``kind: "mentor"`` — the mentor column;
-- ``kind: "other"`` — anything else (kept in the list, not dropped).
+Each non-empty header comes back as ``{"col": "C", "header": "导师"}`` — the
+header text **verbatim**, in sheet order. Reading what a column means is your
+job, not the tool's: you have the question and the whole header row. The one
+exception is dates, which need normalizing rather than interpreting — cycle
+columns like 7.24 / 8.10日 / 2026-08-14 also carry ``kind: "date"`` and an ISO
+``date``. No other ``kind`` is returned; a column without one simply was not a
+date, which says nothing about its meaning.
+
+Two headers can name different roles while sharing words (``负责人`` vs
+``带教负责人``): compare the full header text, and if two columns are equally
+plausible, read a few data rows from each before deciding rather than guessing.
 
 Use it before any fact question: resolve the column letters, then read the
 needed columns/rows with ``feishu_sheet_read_grid`` (or ``feishu_sheet_read``
@@ -35,6 +42,6 @@ async def feishu_sheet_find_columns(
     range: str = "",
     user_key: str = "",
 ) -> str:
-    """Classify the header row's columns: date/names/mentor/other with letters."""
+    """List the header row's columns: column letter + verbatim header (dates normalized)."""
     outcome = await _f.find_sheet_columns_impl(token=token, header_row=header_row, range_=range, user_key=user_key)
     return json.dumps(outcome, ensure_ascii=False)
