@@ -16,9 +16,10 @@ Args:
         ``definition_code`` (sometimes ``process_code``) in its response is this value.
     date_from: First day of the window, ISO (``2026-08-05``). Inclusive.
     date_to: Last day of the window, inclusive. Empty = same as ``date_from``.
-    names_json: Optional JSON array restricting the answer, e.g. ``'["ou_abc","张三"]'``.
-        Names and open_ids both work — applicants come back as ids and their names are
-        resolved from the contact book, then either form is matched. Empty = everyone.
+    names_json: Optional JSON array restricting the answer, e.g. ``'["张三","dg429f6d"]'``.
+        Names and applicant ids both work — applicants come back as ids (this tenant returns
+        an 8-char ``user_id``) and their names are resolved from the contact book, then
+        either form is matched. Empty = everyone.
     user_key: The sender's open_id (from ``<feishu_context>``).
 """
 

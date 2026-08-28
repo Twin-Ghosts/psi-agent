@@ -62,9 +62,14 @@ def _instance(applicant: str, start: str, end: str, *, status: Any = "APPROVED")
 def fake_feishu(monkeypatch: pytest.MonkeyPatch):
     """Serve a fixed instance list plus per-code details, without touching the network.
 
-    ``names`` is the contact book: applicant id -> display name. It is stubbed for every
-    test because the tool resolves applicant names unconditionally, so leaving it out would
-    let the tests reach the network. Pass ``names_result`` to make the lookup itself fail.
+    ``names`` is the contact book: applicant **user_id** -> display name. It is stubbed for
+    every test because the tool resolves applicant names unconditionally, so leaving it out
+    would let the tests reach the network. Pass ``names_result`` to make the lookup fail.
+
+    The stub rejects a lookup that asks for the wrong ``user_id_type``, the way Feishu does
+    (99992351 "not a valid open_id"). That matters: an echo-anything stub passes whichever
+    id type the code sends, which is exactly how the ``open_id`` version of this lookup got
+    green tests while resolving nothing at all against the live tenant.
     """
 
     def install(
@@ -78,14 +83,21 @@ def fake_feishu(monkeypatch: pytest.MonkeyPatch):
         async def fake_detail(instance_code: str, *_a: Any, **_kw: Any) -> dict[str, Any]:
             return details[instance_code]
 
-        async def fake_batch(user_ids: str, **_kw: Any) -> dict[str, Any]:
+        async def fake_batch(user_ids: str, user_id_type: str = "open_id", **_kw: Any) -> dict[str, Any]:
             if names_result is not None:
                 return names_result
             book = names or {}
             asked = [uid.strip() for uid in user_ids.split(",") if uid.strip()]
+            if user_id_type != "user_id":
+                return {
+                    "ok": False,
+                    "error": f"Feishu API error 99992351: not a valid {{open_id}}. Invalid ids: {asked}",
+                }
             return {
                 "ok": True,
-                "users": [{"open_id": uid, "name": book[uid]} for uid in asked if uid in book],
+                "users": [
+                    {"user_id": uid, "open_id": f"ou_for_{uid}", "name": book[uid]} for uid in asked if uid in book
+                ],
             }
 
         monkeypatch.setattr(_impl, "_invoke", fake_invoke)
@@ -301,25 +313,53 @@ class TestWindowAndShape:
     def test_names_filter_accepts_display_names(self, fake_feishu: Any) -> None:
         """A filter written as Chinese names must work — the parameter is called ``names``.
 
-        The regression this pins: applicants come back as open_ids and the filter used to be
-        a bare set-membership test against them, so a list of names matched nobody and the
-        empty result was indistinguishable from "nobody was on leave". Live, that judged
-        three people on approved leave as having skipped their TODO.
+        The regression this pins: the filter used to be a bare set-membership test against
+        the applicant ids, so a list of names matched nobody and the empty result was
+        indistinguishable from "nobody was on leave". Live, that judged three people on
+        approved leave as having skipped their TODO.
+
+        The applicant ids here are the shape the live tenant really returns (8-char
+        ``user_id``, from ``data.user_id`` in the instance detail) — not open_ids.
         """
         fake_feishu(
             {
-                "i1": _instance("ou_a", "2026-08-03", "2026-09-01"),
-                "i2": _instance("ou_b", "2026-08-11", "2026-08-28"),
-                "i3": _instance("ou_c", "2026-08-20", "2026-08-20"),
+                "i1": _instance("dg429f6d", "2026-08-03", "2026-09-01"),
+                "i2": _instance("9be7b262", "2026-08-11", "2026-08-28"),
+                "i3": _instance("g7e36a55", "2026-08-20", "2026-08-20"),
             },
-            names={"ou_a": "潘逸轩", "ou_b": "董修奇", "ou_c": "马晨柯"},
+            names={"dg429f6d": "潘逸轩", "9be7b262": "董修奇", "g7e36a55": "马晨柯"},
         )
         result = _query(date_from="2026-08-26", date_to="2026-08-26", names_json='["潘逸轩","董修奇"]')
-        assert result["on_leave_applicants"] == ["ou_a", "ou_b"]
-        assert result["on_leave_names"] == ["潘逸轩", "董修奇"]
+        assert result["on_leave_applicants"] == ["9be7b262", "dg429f6d"]
+        assert result["on_leave_names"] == ["董修奇", "潘逸轩"]
         # Both cover the single-day window end to end, so dispatch skips them entirely.
-        assert result["full_period_applicants"] == ["ou_a", "ou_b"]
+        assert result["full_period_applicants"] == ["9be7b262", "dg429f6d"]
         assert result["unmatched_filter"] == []
+
+    def test_names_are_looked_up_by_user_id_not_open_id(self, fake_feishu: Any) -> None:
+        """The applicant is a ``user_id``; asking the contact book for an open_id resolves nothing.
+
+        Probed against the live tenant: ``users/batch`` with ``user_id_type=open_id`` and an
+        applicant like ``dg429f6d`` returns error 99992351 "not a valid {open_id}", so every
+        name stays unresolved and a name filter matches nobody — the harsher-assessment
+        direction, and it looks exactly like a working feature.
+        """
+        asked: list[str] = []
+        fake_feishu({"i1": _instance("dg429f6d", "2026-08-19", "2026-08-19")}, names={"dg429f6d": "潘逸轩"})
+        inner = _impl.get_users_batch_impl
+
+        async def spy(user_ids: str, user_id_type: str = "open_id", **kw: Any) -> dict[str, Any]:
+            asked.append(user_id_type)
+            return await inner(user_ids, user_id_type=user_id_type, **kw)
+
+        _impl.get_users_batch_impl = spy
+        try:
+            result = _query(date_from="2026-08-19", date_to="2026-08-26", names_json='["潘逸轩"]')
+        finally:
+            _impl.get_users_batch_impl = inner
+        assert asked == ["user_id"], "the applicant id is a user_id, so the lookup must say so"
+        assert result["on_leave_applicants"] == ["dg429f6d"]
+        assert result["name_lookup_error"] == ""
 
     def test_names_and_ids_can_be_mixed(self, fake_feishu: Any) -> None:
         fake_feishu(

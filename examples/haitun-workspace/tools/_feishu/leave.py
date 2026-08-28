@@ -212,8 +212,9 @@ def _leave_span(form: Any) -> tuple[str, str, str, str]:
 def _wanted_names(names_json: str) -> tuple[set[str], str | None]:
     """解析 names_json 过滤名单。空 = 不过滤,返回窗口内所有请假的人。
 
-    名单里可以写姓名也可以写 open_id:审批详情回的申请人是 id,姓名要另外解析
-    (见 ``_resolve_applicant_names``),所以两种都允许,匹配时任一命中即算。
+    名单里可以写姓名也可以写申请人 id(本租户是 8 位 user_id,如 ``dg429f6d``):审批详情
+    回的申请人是 id,姓名要另外解析(见 ``_resolve_applicant_names``),所以两种都允许,
+    匹配时任一命中即算。
     """
     raw = names_json.strip()
     if not raw:
@@ -228,35 +229,43 @@ def _wanted_names(names_json: str) -> tuple[set[str], str | None]:
 
 
 async def _resolve_applicant_names(applicants: list[str]) -> tuple[dict[str, str], str]:
-    """把申请人 open_id 批量换成姓名。返回 (id 到姓名, 错误说明)。
+    """把申请人 id 批量换成姓名。返回 (申请人 id 到姓名, 错误说明)。
 
-    审批详情里的申请人只有 open_id,而 ``names_json`` 允许按姓名过滤 —— 姓名到 id 的
-    全局搜索只吃 user_access_token,这里是 tenant 场景用不上。所以反过来做:把窗口里
-    出现过的申请人 id 解析成姓名,两种写法都拿来跟名单比。
+    ``names_json`` 允许按姓名过滤,而姓名到 id 的全局搜索只吃 user_access_token,
+    tenant 场景用不上。所以反过来做:把窗口里出现过的申请人 id 解析成姓名,两种写法都
+    拿来跟名单比。
 
-    解析失败不抛错也不静默:错误原文回给调用方,由 ``name_lookup_error`` 呈现 ——
-    按姓名过滤时解析失败等于谁都匹配不上,那种空结果跟「确实没人请假」长得一样。
+    **查的是 user_id 不是 open_id**:审批详情的申请人取自 ``data.user_id``(见
+    ``get_approval_instance_impl``),本租户实测是 ``dg429f6d`` 这种 8 位 id。拿它当
+    open_id 去查,飞书回 99992351「不是合法 open_id」,于是姓名一个都解析不出来 ——
+    按姓名过滤会因此全部落空,而那种空结果跟「确实没人请假」长得一样。
+
+    解析失败不抛错也不静默:错误原文回给调用方,由 ``name_lookup_error`` 呈现。
     """
     names: dict[str, str] = {}
     errors: list[str] = []
     for index in range(0, len(applicants), _NAME_BATCH):
         chunk = applicants[index : index + _NAME_BATCH]
-        res = await _core.get_users_batch_impl(",".join(chunk), user_id_type="open_id")
+        res = await _core.get_users_batch_impl(",".join(chunk), user_id_type="user_id")
         if not res.get("ok"):
             errors.append(str(res.get("error") or res.get("message") or "查通讯录失败"))
             continue
         for user in res.get("users") or []:
             if not isinstance(user, dict):
                 continue
-            open_id = str(user.get("open_id") or "")
             name = str(user.get("name") or "").strip()
-            if open_id and name:
-                names[open_id] = name
+            if not name:
+                continue
+            # 按 user_id 查就按 user_id 归键(申请人就是这个),open_id 一并收下:名单里
+            # 万一写的是 open_id 也能命中。
+            for key in (user.get("user_id"), user.get("open_id")):
+                if isinstance(key, str) and key.strip():
+                    names[key.strip()] = name
     return names, "; ".join(dict.fromkeys(errors))
 
 
 def _identity_keys(applicant: str, names: dict[str, str]) -> set[str]:
-    """一个申请人在名单里可能的写法:open_id 与姓名。"""
+    """一个申请人在名单里可能的写法:申请人 id 与姓名。"""
     return {key for key in (applicant, names.get(applicant, "")) if key}
 
 
@@ -400,7 +409,7 @@ async def query_leave_impl(
             if day not in person["hit_dates"]:
                 person["hit_dates"].append(day)
 
-    # 姓名解析一律做,不只在带名单时做:结果里只有 open_id 的话,调用方要么自己再查一次,
+    # 姓名解析一律做,不只在带名单时做:结果里只有申请人 id 的话,调用方要么自己再查一次,
     # 要么把 id 当人名念给用户听。
     names, name_error = await _resolve_applicant_names(sorted(on_leave))
     for applicant, person in on_leave.items():

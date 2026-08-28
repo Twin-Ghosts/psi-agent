@@ -58,7 +58,8 @@ feishu_leave_query(approval_code=<请假模板 code>, date_from=<最早空白日
 
 ## 只查几个人时:必须看 `unmatched_filter`
 
-`names_json` 姓名和 open_id 都收(工具内部把申请人 id 解析成姓名,两种写法任一命中即算),
+`names_json` 姓名和申请人 id 都收(工具内部把申请人 id 解析成姓名,两种写法任一命中即算;
+申请人 id 是 `user_id`,本租户形如 `dg429f6d`,不是 `ou_` 开头的 open_id),
 但**空结果有两种病因,分不开就会误判**:
 
 - 名单里没对上任何请假记录的写法进 `unmatched_filter`;
