@@ -7,8 +7,9 @@ import anyio
 import pytest
 from aiohttp import ClientSession, ClientTimeout, web
 
-from psi_agent.gateway import server as gateway_server
-from psi_agent.gateway.server import create_core_app, register_desktop_routes
+from psi_agent.gateway.desktop import _routes as desktop_routes
+from psi_agent.gateway.desktop._routes import register_desktop_routes
+from psi_agent.gateway.server import create_core_app
 from psi_agent.runtime._ai_manager import AIManager
 from psi_agent.runtime._session_manager import SessionManager
 from psi_agent.runtime._title_manager import TitleManager
@@ -40,7 +41,8 @@ async def test_spa_directory_routes_redirect_not_403(
     await (spa_dist / "index.html").write_text(index, encoding="utf-8")
     await (spa_v2_dist / "index.html").write_text(index, encoding="utf-8")
 
-    monkeypatch.setattr(gateway_server, "_gateway_spa_root", lambda: spa_root)
+    # A7: ``_gateway_spa_root`` 随 register_desktop_routes 搬进 desktop/_routes.py。
+    monkeypatch.setattr(desktop_routes, "_gateway_spa_root", lambda: spa_root)
 
     tg = anyio.create_task_group()
     await tg.__aenter__()

@@ -9,8 +9,9 @@ import pytest
 from aiohttp import ClientSession, ClientTimeout, web
 
 from psi_agent._appdata import appdata_ui_prefs_path
+from psi_agent.gateway.desktop._routes import register_desktop_routes
 from psi_agent.gateway.desktop._ui_prefs import UIPrefs
-from psi_agent.gateway.server import create_core_app, register_desktop_routes
+from psi_agent.gateway.server import create_core_app
 from psi_agent.runtime._ai_manager import AIManager
 from psi_agent.runtime._session_manager import SessionManager
 from psi_agent.runtime._title_manager import TitleManager
