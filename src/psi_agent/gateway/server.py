@@ -16,7 +16,6 @@ from psi_agent.gateway._defaults import (
     resolve_default_agent,
     resolve_default_workspace,
 )
-from psi_agent.gateway._oauth_manager import OAuthRelay
 from psi_agent.gateway._openapi import render_openapi
 from psi_agent.runtime._ai_manager import AIManager
 from psi_agent.runtime._chat_manager import ChatManager
@@ -137,8 +136,9 @@ async def create_core_app(
 ) -> web.Application:
     """两条产品线共同的骨架: 内核 manager + 两边都要的路由。
 
-    这里**只认识** ``runtime`` 那批 manager 与 ``OAuthRelay``: 没有飞书、没有托盘、
-    没有 Windows 盘符、没有登录。产品专属的东西由调用方往上贴 ——
+    这里**只认识** ``runtime`` 那批 manager: 没有飞书、没有托盘、没有 Windows 盘符、
+    没有登录, 也没有 OAuth 中继 (它随 ``/oauth/*`` 一起归 ``feishu/``, 理由见
+    ``feishu/_oauth_manager.py`` 模块头)。产品专属的东西由调用方往上贴 ——
 
     .. code-block:: python
 
@@ -169,7 +169,6 @@ async def create_core_app(
     # from SPA / state. Gateway.run passes its own instance (also needed by
     # startup restore); standalone tests may omit it.
     app["schedm"] = schedm or SchedulerManager(_sm=sm, _ai_id=scheduler_ai_id)
-    app["oauth"] = OAuthRelay()
     app["cm"] = ChatManager()
     app["hm"] = HistoryManager()
     app["todom"] = TodoManager()
@@ -204,10 +203,6 @@ async def create_core_app(
     app.router.add_get("/sessions/{session_id}/todo-segments/{segment_id}", _get_todo_segment)
     app.router.add_post("/sessions/{session_id}/todo-segments/{segment_id}", _set_todo_segment_label)
     app.router.add_post("/sessions/{session_id}/chat", _handle_chat)
-    # ``/oauth/*`` 归骨架: ``OAuthRelay`` 只认识 state → code 信箱, 既不认识飞书也
-    # 不认识桌面端 (与 ``_openapi_core`` 的归属一致)。
-    app.router.add_get("/oauth/callback", _oauth_callback)
-    app.router.add_get("/oauth/code", _oauth_take_code)
     return app
 
 
@@ -356,56 +351,6 @@ async def _delete_session(request: web.Request) -> web.Response:
 async def _list_sessions(request: web.Request) -> web.Response:
     sm: SessionManager = request.app["sm"]
     return _json([_session_data(info) for info in await sm.list_all()])
-
-
-_OAUTH_DONE_HTML = (
-    "<!doctype html><meta charset=utf-8><title>授权完成</title>"
-    "<body style='font:16px/1.7 system-ui;padding:3rem;text-align:center'>"
-    "<h2>{title}</h2><p style='color:#666'>{note}</p></body>"
-)
-
-
-def _oauth_html(title: str, note: str, status: int = 200) -> web.Response:
-    return web.Response(
-        text=_OAUTH_DONE_HTML.format(title=title, note=note),
-        content_type="text/html",
-        charset="utf-8",
-        status=status,
-    )
-
-
-async def _oauth_callback(request: web.Request) -> web.Response:
-    """OAuth 重定向落地点: 收下 ``?code=&state=`` 交给中继, 给用户一个成功页。
-
-    发起方(workspace 工具)随后用同一个 ``state`` 去 ``/oauth/code`` 取回 —— 用户
-    因此**不需要**再从地址栏手工复制 code。
-    """
-    relay: OAuthRelay = request.app["oauth"]
-    state = request.query.get("state", "")
-    code = request.query.get("code", "")
-    error = request.query.get("error", "") or request.query.get("error_description", "")
-    if not state:
-        return _oauth_html("授权链接不完整", "回调缺少 state 参数, 请回到对话里重新发起授权。", status=400)
-    if not code and not error:
-        error = "callback carried neither code nor error"
-    await relay.deliver(state, code=code, error=error)
-    if error:
-        return _oauth_html("授权未完成", "可以回到对话里重新发起授权。", status=400)
-    return _oauth_html("授权成功 ✅", "可以关掉这个页面, 回到对话继续 —— 不用复制任何东西。")
-
-
-async def _oauth_take_code(request: web.Request) -> web.Response:
-    """发起方取件: ``?state=`` 命中则返回 ``{code}`` 并作废, 未到达返回 404。"""
-    relay: OAuthRelay = request.app["oauth"]
-    state = request.query.get("state", "")
-    if not state:
-        return _error("state query parameter is required", status=400)
-    pending = await relay.take(state)
-    if pending is None:
-        return _error("no callback received for this state yet", status=404)
-    if pending.error:
-        return _json({"state": state, "error": pending.error}, status=200)
-    return _json({"state": state, "code": pending.code}, status=200)
 
 
 async def _list_titles(request: web.Request) -> web.Response:

@@ -1,10 +1,11 @@
 """公共 OpenAPI 片段 —— 两条产品线都注册的端点。
 
 按 path key 从原 ``_openapi.py`` 原样切出, 未改动任何 schema。
-产品专属片段见 ``_openapi_desktop.py`` (ToC) / ``_openapi_feishu.py`` (ToB)。
+产品专属片段见 ``desktop/_openapi.py`` (ToC) / ``feishu/_openapi.py`` (ToB)。
 
-``/oauth/*`` 归公共: ``OAuthRelay`` 只认识 ``state -> code`` 一次性信箱, 不认识飞书、
-不认识桌面端 —— 判据是「这段代码认识哪些概念」, 不是「当前谁在调用」。
+``/oauth/*`` 曾经归这里, 理由是「``OAuthRelay`` 只认识 ``state -> code`` 信箱」。
+后来(实测)取件方全在 ToB 一侧, 已随 ``OAuthRelay`` 一起挪到 ``feishu/_openapi.py``
+—— 判据不只看这段代码认识什么概念, 还要看它到底有没有第二个消费者。
 """
 
 from __future__ import annotations
@@ -238,35 +239,6 @@ CORE_PATHS: dict[str, Any] = {
             },
             "responses": {
                 "200": {"description": "SSE stream of Chunk objects"},
-                "400": {"$ref": "#/components/responses/Error"},
-                "404": {"$ref": "#/components/responses/Error"},
-            },
-        },
-    },
-    "/oauth/callback": {
-        "get": {
-            "summary": "OAuth redirect landing point (relays the code, no manual copy)",
-            "operationId": "oauthCallback",
-            "parameters": [
-                {"name": "state", "in": "query", "required": True, "schema": {"type": "string"}},
-                {"name": "code", "in": "query", "schema": {"type": "string"}},
-                {"name": "error", "in": "query", "schema": {"type": "string"}},
-            ],
-            "responses": {
-                "200": {"description": "HTML success page; the code is held for the initiator"},
-                "400": {"description": "HTML failure page (missing state, or provider error)"},
-            },
-        },
-    },
-    "/oauth/code": {
-        "get": {
-            "summary": "Take the relayed authorization code once, by state",
-            "operationId": "oauthTakeCode",
-            "parameters": [
-                {"name": "state", "in": "query", "required": True, "schema": {"type": "string"}},
-            ],
-            "responses": {
-                "200": {"description": "{state, code} — or {state, error}; consumed on read"},
                 "400": {"$ref": "#/components/responses/Error"},
                 "404": {"$ref": "#/components/responses/Error"},
             },

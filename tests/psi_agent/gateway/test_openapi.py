@@ -58,10 +58,10 @@ def test_three_fragments_partition_the_full_spec() -> None:
 def test_fragments_own_only_their_own_prefixes() -> None:
     """归属按 path 前缀可判: 产品前缀不许出现在公共片段里, 反之亦然。"""
     assert all(k.startswith(("/ui/", "/workspace/")) for k in DESKTOP_PATHS)
-    assert all(k.startswith("/feishu/") for k in FEISHU_PATHS)
-    assert not any(k.startswith(("/ui/", "/workspace/", "/feishu/")) for k in CORE_PATHS)
-    # /oauth/* 归公共: OAuthRelay 只认识 state → code 信箱, 两条线都能用。
-    assert {"/oauth/callback", "/oauth/code"} <= set(CORE_PATHS)
+    assert all(k.startswith(("/feishu/", "/oauth/")) for k in FEISHU_PATHS)
+    assert not any(k.startswith(("/ui/", "/workspace/", "/feishu/", "/oauth/")) for k in CORE_PATHS)
+    # /oauth/* 归 ToB: 取件方全在 workspace/tob/tools 一侧, ToC 的登录不走 OAuth 跳转。
+    assert {"/oauth/callback", "/oauth/code"} <= set(FEISHU_PATHS)
 
 
 def test_product_lines_get_only_their_own_endpoints() -> None:

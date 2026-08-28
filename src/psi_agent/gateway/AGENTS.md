@@ -20,7 +20,6 @@ Gateway 进程
 ├── ChatManager        — SSE 流式对话管理
 ├── HistoryManager     — JSONL 历史读取（AppData `histories/` + legacy 双读）
 ├── TodoManager        — 会话 todo 列表只读（AppData `todos/` + legacy workspace 双读）
-├── OAuthRelay         — OAuth 回调中继（state → code 一次性信箱，免用户手工复制授权码）
 ├── GatewayState       — 状态持久化到 AppData `state/latest.json`（legacy cwd 双读）
 ├── aiohttp REST Server  — OpenAPI CRUD + Web UI chat
 ├── desktop/           — **ToC 专属层**（托盘、webview、登录、盘符、SPA 静态资源）
@@ -30,13 +29,16 @@ Gateway 进程
 │   ├── AttentionHub / UIPrefs / WorkspaceManager / AuthManager + AuthStore
 │   ├── spa/             — Vue 3 SPA v1 前端项目 (Vite + SFC)
 │   └── spa-v2/          — React SPA v2（默认）
-├── feishu/            — **ToB 专属层**（`FeishuManager` + `/feishu/*`）
-│   ├── _routes.py       — `register_feishu_routes()` + `/feishu/route` `/feishu/routes`
+├── feishu/            — **ToB 专属层**（`FeishuManager` + `/feishu/*`，`OAuthRelay` + `/oauth/*`）
+│   ├── _routes.py       — `register_feishu_routes()` + `/feishu/route` `/feishu/routes` `/oauth/callback` `/oauth/code`
+│   ├── OAuthRelay       — OAuth 回调中继（state → code 一次性信箱，免用户手工复制授权码）
 │   └── feishu-web/      — ToB 前端（Vite + React 19）；**当前只是脚手架，零业务**
 └── _openapi*.py       — OpenAPI schema：公共片段在骨架，两份产品片段在各自子包，装配留骨架
 ```
 
-**目录分三层**（A5 落位，A7 收口）：骨架层（本目录顶层）只有 `server.py` 骨架 + `_defaults` / `_oauth_manager` / `_state` / `_openapi*` 装配；`desktop/` 与 `feishu/` 各自持产品专属模块**以及各自的路由装配函数**（`desktop/_routes.py` / `feishu/_routes.py`）。判据是「这段代码认识哪些概念」而不是「当前谁在调用」——`WorkspaceManager` 认识 Windows 盘符、`_tray` 认识 pystray，飞书容器里一个都用不上。
+**目录分三层**（A5 落位，A7 收口）：骨架层（本目录顶层）只有 `server.py` 骨架 + `_defaults` / `_state` / `_openapi*` 装配（**6 个 `.py`**）；`desktop/` 与 `feishu/` 各自持产品专属模块**以及各自的路由装配函数**（`desktop/_routes.py` / `feishu/_routes.py`）。判据是「这段代码认识哪些概念」而不是「当前谁在调用」——`WorkspaceManager` 认识 Windows 盘符、`_tray` 认识 pystray，飞书容器里一个都用不上。
+
+**判据还有第二条：先问存在性。** `_oauth_manager` 是个反例——它 69 行里零飞书字样，按「认识哪些概念」该留骨架，但〔实测〕取件方全在 `workspace/tob/tools/` 一侧（`_oauth_receiver` / `_oauth_setup` / `feishu_auth` / `_feishu/auth`），ToC 那两处只是注释、零调用（ToC 登录走手机号 + 验证码，不经过 OAuth 跳转）。两条判据冲突时按存在性走：**当前只有一个消费者就跟着那个消费者放**，等第二条线真要用再往上提。
 
 ### 依赖方向
 
@@ -45,7 +47,7 @@ Gateway 进程
 ```bash
 git grep -nE "^\s*(from|import)\s+.*gateway\.(desktop|feishu)" -- \
     src/psi_agent/gateway/server.py src/psi_agent/gateway/_defaults.py \
-    src/psi_agent/gateway/_oauth_manager.py src/psi_agent/gateway/_state.py \
+    src/psi_agent/gateway/_state.py \
     src/psi_agent/gateway/_openapi_core.py            # 必须无输出
 ```
 
@@ -62,13 +64,13 @@ A5 把模块文件搬进两个子包后，这条曾**不成立**：两个 `regis
 | `__init__.py` | `Gateway` dataclass + `run()` 入口 |
 | `_defaults.py` | **只持 ToC 品牌字面量**（`haitun交付` / `workspace/tob`）+ 两个薄包装 `resolve_default_agent` / `resolve_default_workspace` — CLI / `GET /defaults` 用；机制在包外 ``psi_agent._workspace_paths``（见下方[工作区路径的机制与字面量分家](#工作区路径的机制与字面量分家)）。再导出 ``psi_agent._appdata`` 路径助手与 ``ensure_workspace_dir``（老调用方不破） |
 | `feishu/_feishu_manager.py` | `FeishuManager` — 飞书会话 → Session 路由表（私聊按 `open_id`、群聊按 `chat_id`；复用 SessionManager 按需 spawn）+ FeishuRoute |
-| `_oauth_manager.py` | `OAuthRelay` — OAuth 回调中继（`state → code` 一次性信箱，带 TTL；供 `GET /oauth/callback` + `GET /oauth/code`），让授权码免用户手工复制 |
+| `feishu/_oauth_manager.py` | `OAuthRelay` — OAuth 回调中继（`state → code` 一次性信箱，带 TTL；供 `GET /oauth/callback` + `GET /oauth/code`），让授权码免用户手工复制。**住 `feishu/` 是按存在性判据**：取件方〔实测〕全在 `workspace/tob/tools/` 一侧，ToC 登录走手机号 + 验证码不经过 OAuth 跳转（模块头有实测清单） |
 | `desktop/_auth_manager.py` | `AuthManager` — 云端账号服务的**转发层** + 登录态持有者；不持供应商密钥、不做授权判定（发码与鉴权全在云端）。两段式注册的 `tempToken` 扣在进程内不下发给页面，改回 `registrationRequired: true`；把云端 `Retry-After` 响应头抄进 body 供倒计时用；云端 `GET /sessions` 回**裸数组**，`_call` 装 `items` 信封、`list_devices` 统一成 `{"devices": [...]}`。`resolve_endpoint()` 定地址（显式参数 > `PSI_AUTH_ENDPOINT` > 内置默认；显式空串=关闭）。`bearer_token()` 是 token 的**唯一进程内取值口**，只给免费模型换算力用，不接任何下行响应（见 [免费模型的 key 替换](#免费模型的-key-替换)）。连接池 / 预热 / 重试边界见 [AuthManager 连接复用](#authmanager-连接复用) |
 | `desktop/_auth_store.py` | 本机凭证落盘 `{appdata}/auth.enc.json`（0600）+ `device_key`；密钥存 OS 钥匙串，钥匙串不可用则降级明文并记 warning、`credentialEncrypted: false` 如实上报。`load_token()` 读到明文且钥匙串此时可用会**就地重新加密**（用户装上 keyring 重启后凭证真的转密文，而不只是黄条消失）；`credentialEncrypted` 报的是**盘上真实形态**，没碰过盘时才退回“钥匙串可用性”做预测 |
 | `_state.py` | `GatewayState` — `{appdata}/state/latest.json` + 时间戳快照；缺则双读 cwd `state/latest.json` |
 | `desktop/_ui_prefs.py` | `UIPrefs` — SPA 的一次性 UI 标记（问卷是否已填），落 `{appdata}/ui-prefs.json`，读写经 `GET/POST /ui/prefs/survey`。**刻意不放 `localStorage`**：安装包不传 `--listen`，Gateway 每次启动 `_random_port()`，而 `localStorage` 按 origin（含端口）分桶 → 上次写的标记下次读不到，弹窗每次重启都再弹一遍。也不放 `_state.py`（那是 5 个固定 key 的 manager 快照 + 每启动一份时间戳副本，UI 偏好两头都不属于）；不像 `_auth_store` 加密（存布尔不存凭证）。按**机器**存不按登录用户：认证是旁挂且可整套关掉的，绑 `user_id` 会让纯本地模式无处落脚 |
 | `desktop/_spa_shell.py` | SPA 外壳注入 — `DEFAULT_APP_NAME`、`inject_app_name()`、`read_spa_index_template()`；`GET /spa/index.html` 替换 `__GATEWAY_APP_NAME__` |
-| `server.py` | aiohttp Application + **骨架**装配 `create_core_app()`（内核 manager + 两条线都要的路由，**不认识**飞书/托盘/盘符/登录）与核心 handler（`/ais` `/routers` `/sessions*` `/titles*` `/summaries*` `/defaults` `/oauth/*` `/openapi.json`，与 `_openapi_core.py` 的 path 集合同源）。旧的单个 `create_app()` 收 17 个参数并**无条件**建 `FeishuManager` 与 `WorkspaceManager` —— 桌面端容器里建飞书管理器、飞书容器里建 Windows 盘符枚举器 |
+| `server.py` | aiohttp Application + **骨架**装配 `create_core_app()`（内核 manager + 两条线都要的路由，**不认识**飞书/托盘/盘符/登录）与核心 handler（`/ais` `/routers` `/sessions*` `/titles*` `/summaries*` `/defaults` `/openapi.json`，与 `_openapi_core.py` 的 path 集合同源）。旧的单个 `create_app()` 收 17 个参数并**无条件**建 `FeishuManager` 与 `WorkspaceManager` —— 桌面端容器里建飞书管理器、飞书容器里建 Windows 盘符枚举器 |
 | `desktop/_routes.py` | **ToC 装配** `register_desktop_routes()` + ToC 专属 handler（SPA 外壳与静态、`/ui/*`、`/workspace/*`、`/auth/*` 与 `_refresh_free_models`）。A7 从 `server.py` 搬来：装配函数留在骨架里时，骨架必须反向 import 6 个本包符号 + 飞书 1 个，「骨架不认识产品线」只剩纪律没有结构 |
 | `feishu/_routes.py` | **ToB 装配** `register_feishu_routes()` + `/feishu/route` `/feishu/routes` 两个 handler。A7 同上从 `server.py` 搬来 |
 | `desktop/_workspace_manager.py` | 目录浏览 + 快捷路径列表 + cwd 查询 |
@@ -79,9 +81,9 @@ A5 把模块文件搬进两个子包后，这条曾**不成立**：两个 `regis
 | `desktop/_webview.py` | 原生 webview 窗口（pywebview），`--webview` 参数开启。窗口关闭信号通过 `threading.Event` 传递给主 loop；`request_attention()` 在 Windows 上 FlashWindowEx |
 | `desktop/_attention.py` | `AttentionHub`：SPA `POST /ui/attention` → 绑定的 tray/webview 注意力提示（best-effort）。`schedule_notify()` 用 daemon thread 异步触发，**禁止**在 aiohttp handler 里同步等 tray（pystray 可能卡死事件循环） |
 | `_openapi.py` | `GET /openapi.json` schema 装配 — `build_openapi_spec(desktop=, feishu=)` 把下面三份片段按产品线拼起来；`OPENAPI_SPEC` 是「全都要」的那份（path key 集合与拆分前一致）。**按 path key 分份、不按当前谁在调用**：路由注册分开后各线只贴自己那份。`render_openapi(desktop=, feishu=)` 由 handler 按 `app["openapi_desktop"]` / `app["openapi_feishu"]` 两面旗子传参（旗子由各 `register_*_routes` 立），所以 spec 报的就是本进程真注册了的那批 path |
-| `_openapi_core.py` | 两条线都注册的 18 个 path（`/ais` `/routers` `/sessions*` `/titles*` `/summaries*` `/defaults` `/oauth/*`）+ 公共 schema 与 `responses.Error`。`/oauth/*` 归公共是因为 `OAuthRelay` 只认识 `state → code` 信箱，既不认识飞书也不认识桌面端 |
+| `_openapi_core.py` | 两条线都注册的 16 个 path（`/ais` `/routers` `/sessions*` `/titles*` `/summaries*` `/defaults`）+ 公共 schema 与 `responses.Error`。`/oauth/*` 曾在这里，已随 `OAuthRelay` 挪去 `feishu/_openapi.py` |
 | `desktop/_openapi.py` | ToC 专属 6 个 path（`/ui/attention` `/ui/prefs/survey` `/workspace/*`）；背后 `AttentionHub` / `UIPrefs` / `WorkspaceManager` 都认识桌面概念。无专属 schema |
-| `feishu/_openapi.py` | ToB 专属 2 个 path（`/feishu/route` `/feishu/routes`）+ 三个 `FeishuRoute*` schema |
+| `feishu/_openapi.py` | ToB 专属 4 个 path（`/feishu/route` `/feishu/routes` `/oauth/callback` `/oauth/code`）+ 三个 `FeishuRoute*` schema |
 
 ## Gateway 启动流程
 
@@ -96,7 +98,7 @@ A5 把模块文件搬进两个子包后，这条曾**不成立**：两个 `regis
    - **必须排在第 7 步之前**：交给 `Ai` 的 key 在 socket 构造时就定了，建晚了恢复出来的免费模型会带着哨兵起来，第一次对话必然 401（见 [免费模型的 key 替换](#免费模型的-key-替换)）
 7. 恢复 AI / Router / Session（Session 恢复时带 `agent`，缺省用 Gateway default）/ titles / summaries
 8. 创建 SchedulerManager（`--scheduler-ai-id`，空则回落 `--feishu-ai-id`）
-9. await create_core_app(aim, sm, tm, rm=..., default_agent=..., default_workspace=..., appdata=..., schedm=...)  — 骨架（`server.py`）：内核 manager + 两条线都要的路由（含 `GET /defaults` `/oauth/*`）
+9. await create_core_app(aim, sm, tm, rm=..., default_agent=..., default_workspace=..., appdata=..., schedm=...)  — 骨架（`server.py`）：内核 manager + 两条线都要的路由（含 `GET /defaults`）
 9b. await register_desktop_routes(app, favicon_path=..., app_name=..., attention=..., authm=...)  — ToC（`desktop/_routes.py`）：SPA 静态 + `/ui/*` + `/workspace/*`（`authm` 非 None 才注册 `/auth/*`）
 9c. register_feishu_routes(app, feishu_ai_id=..., feishu_workspace_root=...)  — ToB（`feishu/_routes.py`）：`FeishuManager` + `/feishu/*`
    - **`psi-agent gateway` 这一个进程仍然两条线都贴**（生产上飞书容器起的也是它）。拆分的收益在装配函数：谁认识什么写在签名里，只想起一条线的进程只贴自己那面即可
@@ -440,9 +442,11 @@ Gateway：``list_segments`` / ``get_segment`` 只读；``set_segment_label`` 允
 
 ## OAuthRelay
 
-OAuth 回调中继（`_oauth_manager.py`）：让**授权码自己回到发起方**，免用户从地址栏手工复制 code。
+OAuth 回调中继（`feishu/_oauth_manager.py`，路由与 handler 在 `feishu/_routes.py`）：让**授权码自己回到发起方**，免用户从地址栏手工复制 code。
 
 **为什么在 Gateway**：授权码流程里第三方只把 `code` 拼在 `redirect_uri` 上跳一次浏览器；若没人监听那个地址，用户只能自己抄 code。Gateway 本就是 HTTP 服务且用户浏览器可达（配 `PSI_OAUTH_CALLBACK_BASE` 后连手机端也可达），是回调的天然落点——这也是飞书多用户部署唯一可行的一条通道（浏览器与 agent 不同机）。
+
+**为什么在 `feishu/` 而不是骨架层**：〔实测〕取件方全在 ToB 一侧（`workspace/tob/tools/` 下 `_oauth_receiver` / `_oauth_setup` / `feishu_auth` / `_feishu/auth`），`desktop/_auth_manager.py` 那两处只是注释、零调用——ToC 登录走手机号 + 验证码，不经过 OAuth 跳转。这段代码本身零飞书字样，所以按「认识哪些概念」会判它留骨架；两条判据冲突时按**先问存在性**走。生产进程照样有这两条路由（唯一入口 `__init__.py` 两条线都贴），所以搬家不改变任何运行时行为。
 
 **刻意不做的事**：Gateway 不碰 token 交换——不知道 app_secret、不知道 PKCE verifier、不知道是哪个飞书用户。那些都留在发起方（workspace 工具），中继只搬运一次性 code，故本模块**零持久化、无跨用户鉴权**（`state` 是发起方生成的高熵随机串，本身即取件码）。
 

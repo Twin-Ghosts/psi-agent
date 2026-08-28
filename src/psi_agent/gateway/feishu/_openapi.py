@@ -1,6 +1,9 @@
-"""ToB (飞书) 专属 OpenAPI 片段 —— 飞书会话到 Session 的路由表。
+"""ToB (飞书) 专属 OpenAPI 片段 —— 飞书会话到 Session 的路由表, 以及 OAuth 回调中继。
 
 ``/feishu/*`` 与三个 ``FeishuRoute*`` schema 只有飞书这条线用得到; ToC 不注册。
+
+``/oauth/*`` 两条从 ``_openapi_core`` 挪来: 取件方(实测)全在 ``workspace/tob/tools/``,
+ToC 的登录走手机号 + 验证码不经过 OAuth 跳转 —— 详见 ``_oauth_manager`` 模块头。
 """
 
 from __future__ import annotations
@@ -43,6 +46,35 @@ FEISHU_PATHS: dict[str, Any] = {
                         }
                     },
                 },
+            },
+        },
+    },
+    "/oauth/callback": {
+        "get": {
+            "summary": "OAuth redirect landing point (relays the code, no manual copy)",
+            "operationId": "oauthCallback",
+            "parameters": [
+                {"name": "state", "in": "query", "required": True, "schema": {"type": "string"}},
+                {"name": "code", "in": "query", "schema": {"type": "string"}},
+                {"name": "error", "in": "query", "schema": {"type": "string"}},
+            ],
+            "responses": {
+                "200": {"description": "HTML success page; the code is held for the initiator"},
+                "400": {"description": "HTML failure page (missing state, or provider error)"},
+            },
+        },
+    },
+    "/oauth/code": {
+        "get": {
+            "summary": "Take the relayed authorization code once, by state",
+            "operationId": "oauthTakeCode",
+            "parameters": [
+                {"name": "state", "in": "query", "required": True, "schema": {"type": "string"}},
+            ],
+            "responses": {
+                "200": {"description": "{state, code} — or {state, error}; consumed on read"},
+                "400": {"$ref": "#/components/responses/Error"},
+                "404": {"$ref": "#/components/responses/Error"},
             },
         },
     },
