@@ -34,23 +34,24 @@ user profile, and bootstrap files all live at the workspace root:
 | `HEARTBEAT.md` | Dynamic context. Picked up on the next turn after its **content** changes (`system_prompt_rebuild_checker()` compares a digest), not re-rendered on every turn. |
 | `AGENTS.md` | This file; also loaded as a bootstrap context file. |
 
-## 包内 / 包外 (ToC 独有)
+## 出厂内容与用户数据的边界 (ToC 独有, 尚未落地)
 
-**判据是「谁有写权」。** 安装器写的东西放包内, 用户与 agent 自己写的东西放包外。ToB 没有
-安装器, 结构上不存在这个问题 —— 这一节只对 ToC 的安装形态成立。
+**判据候选是「谁有写权」。** 安装器写的算出厂内容, 用户与 agent 自己写的算用户数据。
+ToB 没有安装器, 结构上不存在这个问题 —— 这一节只对 ToC 的安装形态成立。
 
-| 区 | 内容 | 谁写 |
+| 类 | 内容 | 谁写 |
 |---|---|---|
-| 包内 | `systems/` `tools/` `skills/` `triggers/` `channel_events/` `bin/` `config/` `docs/` `flows/`, 以及 `AGENTS.md` / `IDENTITY.md` / `TOOLS.md` / `BOOTSTRAP.md` / `HEARTBEAT.md` 这些提示词模板 | 安装器 (每次安装覆盖为本版内容) |
-| 包外 | `SOUL.md` `USER.md` `schedules/` | agent 自己改写 / 用户积累 / `schedule_manage` 写 |
+| 出厂内容 | `systems/` `tools/` `skills/` `triggers/` `channel_events/` `bin/` `config/` `docs/` `flows/`, 以及 `AGENTS.md` / `IDENTITY.md` / `TOOLS.md` / `BOOTSTRAP.md` / `HEARTBEAT.md` 这些提示词模板 | 安装器 (每次安装覆盖为本版内容) |
+| 用户数据 | `SOUL.md` `USER.md` `schedules/` | agent 自己改写 / 用户积累 / `schedule_manage` 写 |
 
-`.github/inno-setup/haitun.iss` 的 `[Files]` 段按这张表分成两组 `Source`: 包内区一条通配
-(`Excludes` 掉包外那三项), 包外区三条单列。**本轮只做分类落位, 两组的 `Flags` 一致
-(`ignoreversion`), 全新安装的落点与内容与分包前逐字节相同。**
+**当前状态: `.iss` 里这两类仍混在同一条通配 `Source` 里, 结构上分不出来。**
+按上表把 `[Files]` 拆成两组 `Source` 的改法试过一次又撤回了 —— 它牵动升级时的保数据语义,
+归属讨论后单独开 PR, 不属于架构重排。讨论项见
+`docs/superpowers/specs/2026-08-28-gateway-workspace-refactor-report.md` 第九章。
 
-**已知未修 (不要当成已解决)**: `{app}\app` 会被 `[Code]` 段的 `SwapComponent('app')`
-整目录换掉, 所以升级时包外那三项的存活情况本轮既不改善也不恶化。给它们加保护属于
-「打包部署」, 是后续单独一步。
+**为什么不能只拆 `Source` 就算完**: `{app}\app` 会被 `[Code]` 段的 `SwapComponent('app')`
+整目录换掉, 所以光把三项单列出来、`Flags` 不变的话, 升级时用户数据的存活情况一点没变 ——
+真正要定的是保护策略, 不是清单。
 
 **这里还有一处结构性的不一致, 本轮未改**〔实测〕: 提示词读 `SOUL.md` / `USER.md` 用的是
 **agent 包根** (`System.__init__` 把 `self._agent_dir` 传给 `_load_soul_md` /
