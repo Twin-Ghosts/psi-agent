@@ -73,6 +73,12 @@ EXPECTED: dict[str, tuple[str, ...]] = {
     ),
     "tb2-specific-workspace": ("system_prompt_builder", "compact_history"),
     "tob": HOOKS,
+    # ``toc`` is ``tob`` minus the Feishu-coupled capabilities, so its
+    # ``systems/`` is byte-identical apart from three prompt-text edits — all 6
+    # hooks must resolve there too. A drift to fewer hooks means the extraction
+    # broke a sibling import (``prompt_sections`` / ``curator`` / …), which is
+    # exactly the silent failure this table exists to catch.
+    "toc": HOOKS,
 }
 
 # Sibling helpers the workspaces import by bare name. Several ship their own
@@ -120,7 +126,7 @@ async def _resolved_hooks(system_py: Path) -> tuple[str, ...]:
 
 def test_every_workspace_is_covered() -> None:
     """The glob must not quietly stop matching — B2 lost 10 tests that way."""
-    assert len(WORKSPACES) == 12
+    assert len(WORKSPACES) == 13
     assert {p.parent.parent.name for p in WORKSPACES} == set(EXPECTED)
 
 

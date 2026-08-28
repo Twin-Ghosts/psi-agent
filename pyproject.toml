@@ -95,7 +95,12 @@ artifacts = [
 [tool.ruff]
 target-version = "py314"
 line-length = 120
-extend-exclude = ["workspace/tob/skills/workflow/fusion_flow/generated"]
+extend-exclude = [
+    "workspace/tob/skills/workflow/fusion_flow/generated",
+    # ``toc`` ships the same ANTLR-generated parser as ``tob`` (byte-identical);
+    # generated code is not hand-maintained, so it is excluded on both paths.
+    "workspace/toc/skills/workflow/fusion_flow/generated",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP", "ASYNC", "SIM", "C4", "B", "RUF", "N", "T20", "PLC"]
@@ -112,10 +117,16 @@ addopts = ["--strict-markers", "-ra", "--cov"]
 markers = ["schedule: schedule-based tests (> 30s)"]
 
 [tool.ty.environment]
+# Only ``tob`` is on the type-check path: ``toc``'s copy of the workflow skill is
+# byte-identical, so adding it would make ty resolve the same bare module names
+# (``fusion_flow`` …) from two roots and report duplicate-definition noise.
 extra-paths = ["workspace/tob/skills/workflow"]
 
 [tool.ty.src]
-exclude = ["workspace/tob/skills/workflow/fusion_flow/generated"]
+exclude = [
+    "workspace/tob/skills/workflow/fusion_flow/generated",
+    "workspace/toc/skills/workflow/fusion_flow/generated",
+]
 
 [tool.coverage.run]
 source = ["src/psi_agent"]
