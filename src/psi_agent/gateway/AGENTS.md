@@ -62,7 +62,7 @@ A5 把模块文件搬进两个子包后，这条曾**不成立**：两个 `regis
 | 文件 | 职责 |
 |------|------|
 | `__init__.py` | `Gateway` dataclass + `run()` 入口 |
-| `_defaults.py` | **只持 ToC 品牌字面量**（`haitun交付` / `agents/feishu`）+ 两个薄包装 `resolve_default_agent` / `resolve_default_workspace` — CLI / `GET /defaults` 用；机制在包外 ``psi_agent._workspace_paths``（见下方[工作区路径的机制与字面量分家](#工作区路径的机制与字面量分家)）。再导出 ``psi_agent._appdata`` 路径助手与 ``ensure_workspace_dir``（老调用方不破） |
+| `_defaults.py` | **只持 ToC 品牌字面量**（`haitun交付` / `agents/feishu` / 短名搜索目录 `agents`）+ 两个薄包装 `resolve_default_agent` / `resolve_default_workspace` — CLI / `GET /defaults` 用；机制在包外 ``psi_agent._workspace_paths``（见下方[工作区路径的机制与字面量分家](#工作区路径的机制与字面量分家)）。再导出 ``psi_agent._appdata`` 路径助手与 ``ensure_workspace_dir``（老调用方不破） |
 | `feishu/_feishu_manager.py` | `FeishuManager` — 飞书会话 → Session 路由表（私聊按 `open_id`、群聊按 `chat_id`；复用 SessionManager 按需 spawn）+ FeishuRoute |
 | `feishu/_oauth_manager.py` | `OAuthRelay` — OAuth 回调中继（`state → code` 一次性信箱，带 TTL；供 `GET /oauth/callback` + `GET /oauth/code`），让授权码免用户手工复制。**住 `feishu/` 是按存在性判据**：取件方〔实测〕全在 `agents/feishu/tools/` 一侧，ToC 登录走手机号 + 验证码不经过 OAuth 跳转（模块头有实测清单） |
 | `desktop/_auth_manager.py` | `AuthManager` — 云端账号服务的**转发层** + 登录态持有者；不持供应商密钥、不做授权判定（发码与鉴权全在云端）。两段式注册的 `tempToken` 扣在进程内不下发给页面，改回 `registrationRequired: true`；把云端 `Retry-After` 响应头抄进 body 供倒计时用；云端 `GET /sessions` 回**裸数组**，`_call` 装 `items` 信封、`list_devices` 统一成 `{"devices": [...]}`。`resolve_endpoint()` 定地址（显式参数 > `PSI_AUTH_ENDPOINT` > 内置默认；显式空串=关闭）。`bearer_token()` 是 token 的**唯一进程内取值口**，只给免费模型换算力用，不接任何下行响应（见 [免费模型的 key 替换](#免费模型的-key-替换)）。连接池 / 预热 / 重试边界见 [AuthManager 连接复用](#authmanager-连接复用) |
@@ -152,7 +152,7 @@ schedules → `{workspace}/schedules/`（归 workspace，非 agent 包 / 非 App
 
 | CLI | 含义 |
 |-----|------|
-| `--default-agent` | 新建 Session 的 Agent 包目录；空则软默认：① `cwd/agents/feishu`（仓库开发）；② cwd 自身含 `tools/`+`skills/`（Inno 安装布局 `{app}` 即能力包）；仍空则 Session `agent=""`（与 workspace 同根兼容）。Windows 安装包 `haitun.exe` **显式**传 `--default-agent {app}` |
+| `--default-agent` | 新建 Session 的 Agent 包目录。**非空**：先试值本身是目录，再试 `agents/<值>`（短名，如 `desktop`），都不是则**报错退出**并列出可选包名（详见下方[两形解析](#工作区路径的机制与字面量分家)）。**空**则软默认：① `cwd/agents/feishu`（仓库开发）；② cwd 自身含 `tools/`+`skills/`（Inno 安装布局 `{app}` 即能力包）；仍空则 Session `agent=""`（与 workspace 同根兼容）。Windows 安装包 `haitun.exe` **显式**传 `--default-agent {app}`（绝对路径，走第一档不变） |
 | `--default-workspace` | 新建 Session / `GET /defaults` 的用户工作区；空 → 软默认 `{Desktop}/haitun交付`（**只宣布路径**；目录在 `SessionManager.create` / 开始对话时才 mkdir。`platformdirs.user_desktop_dir`）。安装包 `haitun.exe` **显式**传该路径（运行时解析桌面，不写死用户名） |
 | `--appdata` | AppData 记忆区根；空 → `PSI_APPDATA` → `platformdirs`（**禁止**手写死 `%AppData%`） |
 | `--scheduler-ai-id` | 调度 Session 挂载的 AI 实例；空 → 回落 `--feishu-ai-id`；两者都空则有 `schedules/` 的 workspace 只记 warning 不启动调度 |
@@ -166,8 +166,12 @@ schedules → `{workspace}/schedules/`（归 workspace，非 agent 包 / 非 App
 
 | 层 | 位置 | 内容 |
 |----|------|------|
-| 机制 | ``psi_agent/_workspace_paths.py``（**gateway 包外**） | `resolve_user_workspace(explicit, *, default_name)` / `ensure_workspace_dir(path)` / `resolve_agent_package(explicit, *, repo_candidate="")`。桌面路径运算、mkdir、`tools/`+`skills/` 探测 |
-| 字面量 | `gateway/_defaults.py` | `DEFAULT_USER_WORKSPACE_NAME = "haitun交付"`、`DEFAULT_AGENT_REPO_CANDIDATE = "agents/feishu"`，以及两个薄包装 `resolve_default_workspace` / `resolve_default_agent` |
+| 机制 | ``psi_agent/_workspace_paths.py``（**gateway 包外**） | `resolve_user_workspace(explicit, *, default_name)` / `ensure_workspace_dir(path)` / `resolve_agent_package(explicit, *, repo_candidate="", short_name_root="", label=...)`。桌面路径运算、mkdir、`tools/`+`skills/` 探测、短名查找 |
+| 字面量 | `gateway/_defaults.py` | `DEFAULT_USER_WORKSPACE_NAME = "haitun交付"`、`DEFAULT_AGENT_REPO_CANDIDATE = "agents/feishu"`、`DEFAULT_AGENT_SHORT_NAME_ROOT`（从上一个**推导**，不写第二份 `agents`），以及两个薄包装 `resolve_default_workspace` / `resolve_default_agent` |
+
+**`--default-agent` 的解析：非空值两形，解析不到就报错。** 先试值本身是目录（`/abs/path`、`agents/feishu` 两种老写法照旧），再试 `agents/<值>`（故 `--default-agent desktop` 选中 `agents/desktop`），都不是则 `FileNotFoundError` 退出并列出 `agents/` 下真实可选包名。顺序不能反：反了会让老写法在 `agents/` 下有同名目录时悄悄换地方。**空值仍是合法第三态**（回落 Session 自己的 workspace），走软默认链不报错。
+
+原先第一档非空就 `.resolve()` 不查存在性，`--default-agent desktop` 静默指向 `{cwd}/desktop`；启动期根本不碰这个路径，日志干净、端口正常监听，错要等建 Session 才暴露成「这个 Session 没有 tools/skills」，排查方向完全跑偏。故每一档都**无条件 INFO 打印**解析结果与命中哪一档（根 `AGENTS.md` 坑 22 那半条教训：凡「两处必须一致」的路径，各方都应在启动时无条件打印自己的解析结果）。
 
 判据是**这段代码认识谁**：`_workspace_paths` 不认识托盘、webview、Windows 盘符、桌面登录，也**不认识任何品牌名** —— 缺省文件夹名由调用方作为关键字参数传入，该模块自己没有缺省值。代价是多两个关键字参数；换来的是 workspace 改名只碰 `gateway/`。
 
@@ -864,6 +868,7 @@ psi-agent gateway --gateway {desktop,feishu} [{desktop,feishu} ...] [--listen ht
 - **为什么不按环境给默认值**（比如云上默认 `feishu`）：内核里**没有「产品线」这个概念**。要让内核默认 `feishu`，内核就得先知道自己跑在云上——那等于把产品线概念从参数名里赶出去，又从环境判断偷偷放回来。哪一面该挂是**部署脚本**的事，各调用方显式写：装机版 `--gateway desktop`（`.github/inno-setup/haitun.c`），云端 `launch-gateway.sh` `--gateway feishu`
 - **实现用 `tyro.MISSING` 而非省略默认值**〔实测〕：该字段前面的字段都带默认值，真省掉会撞 dataclass 的「非默认字段不能跟在默认字段后」而 `TypeError`。`tyro.MISSING` 在 tyro 眼里是必填，对 dataclass 而言又是个普通默认值，不必为一个约束重排字段顺序（字段顺序就是 `--help` 的显示顺序）。**副作用**：`dataclasses.fields()` 上该字段的 `default` 是 `tyro.MISSING`（`tyro._singleton.PropagatingMissingType`）而 **不是** `dataclasses.MISSING`，只查后者会误判成「有默认值」
 - **不传时的实际表现**〔实测，tyro 1.0.15 / Python 3.14.7〕：退出码 **2**，打一个 `Required options` 框，`Missing from <prog> gateway:` 后跟 `--gateway [{desktop,feishu} [{desktop,feishu} ...]]` 与该字段 docstring——缺什么、可选值是什么都在里面。**因此该字段的 docstring 刻意写短**：tyro 把它整段渲进这个报错框，写长了会把「你少给了一个参数」淹在几十行说明里；设计理由留在字段上方的注释里
+- **CLI 可见的文本一律英文**（本仓约定）：字段 docstring、报错文案、启动 INFO 都会显示给命令行用户，统一英文；**代码注释、本文件与其他 `AGENTS.md` 保持中文**，别顺手翻译。判据是把 `--help` 抓出来跑 CJK 正则命中 0——抓的时候要设宽 `COLUMNS`（如 400），否则输出被终端宽度截断、漏掉后面的字段。设计理由与实测记录搬到字段上方的 `#` 注释里（不进 `--help`），是搬位置不是删
 - **列表而非枚举**：「有哪些 gateway」将来会变，而 `both` 这种词只在恰好两个时成立，加第三个就得改枚举。上一版是个三选一枚举（`{both,desktop,feishu}`），改掉的正是这个
 - **两个边界 tyro 都不管，代码自己拦**〔实测〕：`--gateway` 后不跟值得到 `[]` 且**退出码 0**——必填拦不到这一种（tyro 认为参数「给过了」），所以 `resolve_gateways()` 那条空列表拦截仍是唯一防线，别以为必填替掉了它；它抛 `ValueError` 退出，**不**自己补一个取值（该挂哪面只有部署方知道，内核猜出来的那面一样是静默的）；`--gateway feishu feishu` 重复值照收不报错 → 去重保序（意图无歧义，但注册两次会叠同名路由）。校验点与 `--browser` / `--webview` 互斥那条并列，都在建 socket / 恢复 state 之前失败
 - **逗号形式不支持**〔实测〕：`--gateway desktop,feishu` 报错，只认空格分隔
