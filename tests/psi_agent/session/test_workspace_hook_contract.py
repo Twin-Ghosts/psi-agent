@@ -29,7 +29,7 @@ import pytest
 
 from psi_agent.session.system_prompt import SystemPrompt
 
-WORKSPACES = sorted([*Path("examples").glob("*/systems/system.py"), *Path("workspace").glob("*/systems/system.py")])
+WORKSPACES = sorted([*Path("examples").glob("*/systems/system.py"), *Path("agents").glob("*/systems/system.py")])
 
 # The kernel's lookup order in ``_load_module``.
 HOOKS = (
@@ -72,13 +72,13 @@ EXPECTED: dict[str, tuple[str, ...]] = {
         "turn_context_builder",
     ),
     "tb2-specific-workspace": ("system_prompt_builder", "compact_history"),
-    "tob": HOOKS,
-    # ``toc`` is ``tob`` minus the Feishu-coupled capabilities, so its
+    "feishu": HOOKS,
+    # ``desktop`` is ``feishu`` minus the Feishu-coupled capabilities, so its
     # ``systems/`` is byte-identical apart from three prompt-text edits — all 6
     # hooks must resolve there too. A drift to fewer hooks means the extraction
     # broke a sibling import (``prompt_sections`` / ``curator`` / …), which is
     # exactly the silent failure this table exists to catch.
-    "toc": HOOKS,
+    "desktop": HOOKS,
 }
 
 # Sibling helpers the workspaces import by bare name. Several ship their own
