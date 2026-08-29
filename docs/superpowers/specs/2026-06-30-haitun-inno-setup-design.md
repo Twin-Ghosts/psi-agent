@@ -8,10 +8,10 @@
 
 | 文件 | 操作 | 说明 |
 |------|------|------|
-| `haitun.ico` → `workspace/tob/haitun.ico` | 移动 | 图标文件，用于 tray icon、installer icon、shortcut icon |
-| `workspace/tob/haitun agent.vbs` | 新建 | VBS 启动器，负责 launch `psi-agent gateway --tray --icon haitun.ico` |
-| `workspace/tob/haitun.iss` | 新建 | Inno Setup 安装脚本 |
-| `workspace/tob/.gitignore` | 修改 | 移除 `haitun agent.vbs`、`haitun.ico` 行（现已提交） |
+| `haitun.ico` → `agents/feishu/haitun.ico` | 移动 | 图标文件，用于 tray icon、installer icon、shortcut icon |
+| `agents/feishu/haitun agent.vbs` | 新建 | VBS 启动器，负责 launch `psi-agent gateway --tray --icon haitun.ico` |
+| `agents/feishu/haitun.iss` | 新建 | Inno Setup 安装脚本 |
+| `agents/feishu/.gitignore` | 修改 | 移除 `haitun agent.vbs`、`haitun.ico` 行（现已提交） |
 | `.github/workflows/pyinstaller.yml` | 修改 | 新增 `haitun-inno-setup` job，在 PyInstaller 之后运行 |
 
 ## haitun agent.vbs

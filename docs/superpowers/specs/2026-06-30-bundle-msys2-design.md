@@ -11,10 +11,10 @@ MSYS2 是 Windows 上的类 Unix 环境，提供 `bash`、`coreutils`、`git`、
 | 文件 | 操作 | 说明 |
 |------|------|------|
 | `.github/workflows/pyinstaller.yml` | 修改 | 在 `haitun-inno-setup` job 内新增：装 MSYS2 → 复制进工作区 → 瘦身 |
-| `workspace/tob/haitun agent.vbs` | 修改 | 启动前把 `msys64\usr\bin` 与 `msys64\ucrt64\bin` 加到 PATH 最前，并设 `CHERE_INVOKING=1` |
-| `workspace/tob/.gitignore` | 修改 | 新增 `msys64/`（CI 生成，不提交） |
-| `workspace/tob/haitun.iss` | **不改** | 现有递归 glob 自动打包 `msys64` |
-| `workspace/tob/tools/bash.py` | **不改** | 复用现有 `which` 查找逻辑（见下方说明） |
+| `agents/feishu/haitun agent.vbs` | 修改 | 启动前把 `msys64\usr\bin` 与 `msys64\ucrt64\bin` 加到 PATH 最前，并设 `CHERE_INVOKING=1` |
+| `agents/feishu/.gitignore` | 修改 | 新增 `msys64/`（CI 生成，不提交） |
+| `agents/feishu/haitun.iss` | **不改** | 现有递归 glob 自动打包 `msys64` |
+| `agents/feishu/tools/bash.py` | **不改** | 复用现有 `which` 查找逻辑（见下方说明） |
 | `README.md` / `AGENTS.md` | 修改 | 文档同步 |
 
 ## ① CI：获取 MSYS2 并瘦身（在 `haitun-inno-setup` job 内）
@@ -81,7 +81,7 @@ objShell.Environment("Process")("CHERE_INVOKING") = "1"
 
 ## ⑤ 文档与 .gitignore
 
-- `workspace/tob/.gitignore` 新增 `msys64/`。
+- `agents/feishu/.gitignore` 新增 `msys64/`。
 - README（安装包现在自带 MSYS2、bash 开箱即用）、根 `AGENTS.md` 或 workspace `AGENTS.md` 的 tools 说明、本设计文档同步。
 
 ## ⑥ 测试
