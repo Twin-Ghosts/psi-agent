@@ -102,7 +102,7 @@ A5 把模块文件搬进两个子包后，这条曾**不成立**：两个 `regis
 9b. await register_desktop_routes(app, favicon_path=..., app_name=..., attention=..., authm=...)  — ToC（`desktop/_routes.py`）：SPA 静态 + `/ui/*` + `/workspace/*`（`authm` 非 None 才注册 `/auth/*`）。**仅当 `--gateway` 含 `desktop`**
 9c. register_feishu_routes(app, feishu_ai_id=..., feishu_workspace_root=...)  — ToB（`feishu/_routes.py`）：`FeishuManager` + `/feishu/*` + `/feishu-web/`。**仅当 `--gateway` 含 `feishu`**；只挂 ToB 时另注册 `GET /` → 302 `/feishu-web/index.html`
 9d. register_oauth_routes(app) — `/oauth/callback` + `/oauth/code`。**与挂了哪些 gateway 正交，每种组合都贴**：含 `feishu` 时由 9c 内部调用，只挂 ToC 时由 `Gateway.run` 自己调，恰好一处调到
-   - **默认全集 `desktop feishu` = 两面都贴，与加参数前逐条相同**（生产上飞书容器起的也是 `psi-agent gateway`，云端 `launch-gateway.sh` 不带此参数）。默认值一动就是静默的生产回归：少挂一面不报错，只是某个前端 404
+   - **`--gateway` 必填，没有默认值**：挂哪些面是部署方的决定，内核不替它猜。少挂一面不报错，只是某个前端 404，排查方向完全跑偏——必填把这个静默失败提前成启动期的显式失败（不传即非 0 退出）。各调用方都得显式写：装机版 `--gateway desktop`（`.github/inno-setup/haitun.c`），云端 `launch-gateway.sh` `--gateway feishu`
    - `--gateway` 只决定挂哪些 HTTP 面；agent 包选哪个是**独立的一维**，走 `--default-agent`（见 [路径默认值](#路径默认值)），不另造一套。两维可自由组合，见 [gateway 与 agent 是两个独立维度](#gateway-与-agent-是两个独立维度)
 10. 为每个已恢复 Session 的 workspace `schedm.ensure(...)` — 按需拉起调度 Session（无 `schedules/` 则跳过）
 11. 创建 _do_persist 闭包（快照 managers → state.save，sessions 含 `agent`；`list_all()` 默认已排除调度 Session）
@@ -559,7 +559,7 @@ OAuth 回调中继（`feishu/_oauth_manager.py`，路由与 handler 在 `feishu/
 | POST | `/ui/attention` | 会话在后台完成时闪烁托盘/webview（best-effort，需 `--tray` / `--webview`） |
 | GET | `/ui/prefs/survey` | 问卷弹窗是否已关闭过 → `{"done": bool}`（按机器，落 `{appdata}/ui-prefs.json`） |
 | POST | `/ui/prefs/survey` | 记录问卷弹窗已关闭；body `{"done": bool}`，缺省/非 bool 视作 `true`（唯一调用方是"关闭"动作） |
-| GET | `/openapi.json` | OpenAPI schema。只含本进程真注册了的那些面的片段（默认 `--gateway desktop feishu` 两面都贴，故与拆分前一致；单挂一面时另一面的 path 不再出现，`/oauth/*` 每种组合都在） |
+| GET | `/openapi.json` | OpenAPI schema。只含本进程真注册了的那些面的片段（`--gateway desktop feishu` 两面都贴时与拆分前一致；单挂一面时另一面的 path 不再出现，`/oauth/*` 每种组合都在） |
 | GET | `/favicon.ico` | 托盘图标（仅当 `--icon` 设置时注册，返回该图标文件） |
 
 AI 和 Session 的 `id` 字段可选，不传自动生成 UUID。
@@ -841,7 +841,7 @@ AI 创建对话框支持从 provider 的 `/models` API 实时拉取可用模型�
 ## CLI 集成
 
 ```
-psi-agent gateway [--listen http://127.0.0.1:PORT] [--socket-path psi] [--gateway desktop feishu] [--icon PATH] [--app-name NAME] [--browser/--no-browser] [--webview/--no-webview] [--tray/--no-tray] [--feishu-ai-id ID] [--feishu-workspace-root DIR] [--default-agent DIR] [--default-workspace DIR] [--appdata DIR] [--auth-endpoint URL] [--verbose]
+psi-agent gateway --gateway {desktop,feishu} [{desktop,feishu} ...] [--listen http://127.0.0.1:PORT] [--socket-path psi] [--icon PATH] [--app-name NAME] [--browser/--no-browser] [--webview/--no-webview] [--tray/--no-tray] [--feishu-ai-id ID] [--feishu-workspace-root DIR] [--default-agent DIR] [--default-workspace DIR] [--appdata DIR] [--auth-endpoint URL] [--verbose]
 ```
 
 默认 listen 为空，会自动绑定 127.0.0.1 随机高端口。`--browser` 开启自动打开浏览器。
@@ -854,17 +854,20 @@ psi-agent gateway [--listen http://127.0.0.1:PORT] [--socket-path psi] [--gatewa
 
 | 取值 | 挂载的面 | `GET /` |
 | --- | --- | --- |
-| `desktop feishu`（默认） | ToC（`/spa/` `/spa-v2/` `/ui/*` `/workspace/*` `/auth/*`）+ ToB（`/feishu/*` `/feishu-web/`） | ToC 降级链：spa-v2 → spa |
+| `desktop feishu` | ToC（`/spa/` `/spa-v2/` `/ui/*` `/workspace/*` `/auth/*`）+ ToB（`/feishu/*` `/feishu-web/`） | ToC 降级链：spa-v2 → spa |
 | `desktop` | 只 ToC。`/feishu/*` `/feishu-web/` 不注册（404） | 同上 |
 | `feishu` | 只 ToB。`/spa*` `/ui/*` `/workspace/*` `/auth/*` 不注册（404） | 302 → `/feishu-web/index.html` |
 
 开发时只写一个值单挂一面，省掉另一面的前端与 manager。值得记的几点：
 
-- **默认必须是全集 `desktop feishu`**：云端 `launch-gateway.sh` 不带这个参数，默认值一改就等于改了生产行为，而且是静默的（少挂一面不报错，只是某个前端 404）。判据在 `tests/psi_agent/gateway/test_gateway_selection.py`
+- **必填，且不要加回默认值**：挂哪些面是**部署方的决定**，内核不替它猜。曾经默认全集 `desktop feishu`，那是个「看起来安全实则最危险」的默认——少挂一面不报错，只是某个前端 404，出问题时排查方向完全跑偏。必填把这个静默失败变成启动期的显式失败。判据在 `tests/psi_agent/gateway/test_gateway_selection.py`
+- **为什么不按环境给默认值**（比如云上默认 `feishu`）：内核里**没有「产品线」这个概念**。要让内核默认 `feishu`，内核就得先知道自己跑在云上——那等于把产品线概念从参数名里赶出去，又从环境判断偷偷放回来。哪一面该挂是**部署脚本**的事，各调用方显式写：装机版 `--gateway desktop`（`.github/inno-setup/haitun.c`），云端 `launch-gateway.sh` `--gateway feishu`
+- **实现用 `tyro.MISSING` 而非省略默认值**〔实测〕：该字段前面的字段都带默认值，真省掉会撞 dataclass 的「非默认字段不能跟在默认字段后」而 `TypeError`。`tyro.MISSING` 在 tyro 眼里是必填，对 dataclass 而言又是个普通默认值，不必为一个约束重排字段顺序（字段顺序就是 `--help` 的显示顺序）。**副作用**：`dataclasses.fields()` 上该字段的 `default` 是 `tyro.MISSING`（`tyro._singleton.PropagatingMissingType`）而 **不是** `dataclasses.MISSING`，只查后者会误判成「有默认值」
+- **不传时的实际表现**〔实测，tyro 1.0.15 / Python 3.14.7〕：退出码 **2**，打一个 `Required options` 框，`Missing from <prog> gateway:` 后跟 `--gateway [{desktop,feishu} [{desktop,feishu} ...]]` 与该字段 docstring——缺什么、可选值是什么都在里面。**因此该字段的 docstring 刻意写短**：tyro 把它整段渲进这个报错框，写长了会把「你少给了一个参数」淹在几十行说明里；设计理由留在字段上方的注释里
 - **列表而非枚举**：「有哪些 gateway」将来会变，而 `both` 这种词只在恰好两个时成立，加第三个就得改枚举。上一版是个三选一枚举（`{both,desktop,feishu}`），改掉的正是这个
-- **两个边界 tyro 都不管，代码自己拦**〔实测〕：`--gateway` 后不跟值得到 `[]`（起了服务但一个前端都没有）→ `resolve_gateways()` 抛 `ValueError` 退出，**不**悄悄回落到默认值；`--gateway feishu feishu` 重复值照收不报错 → 去重保序（意图无歧义，但注册两次会叠同名路由）。校验点与 `--browser` / `--webview` 互斥那条并列，都在建 socket / 恢复 state 之前失败
+- **两个边界 tyro 都不管，代码自己拦**〔实测〕：`--gateway` 后不跟值得到 `[]` 且**退出码 0**——必填拦不到这一种（tyro 认为参数「给过了」），所以 `resolve_gateways()` 那条空列表拦截仍是唯一防线，别以为必填替掉了它；它抛 `ValueError` 退出，**不**自己补一个取值（该挂哪面只有部署方知道，内核猜出来的那面一样是静默的）；`--gateway feishu feishu` 重复值照收不报错 → 去重保序（意图无歧义，但注册两次会叠同名路由）。校验点与 `--browser` / `--webview` 互斥那条并列，都在建 socket / 恢复 state 之前失败
 - **逗号形式不支持**〔实测〕：`--gateway desktop,feishu` 报错，只认空格分隔
-- **`GET /` 指向 `index.html` 而非目录**〔实测〕：`add_static(..., show_index=False)` 对 `/feishu-web/` 这个裸目录回 **403**（ToC 侧靠在 `add_static` 之前另注册三条 `→ index.html` 的 handler 绕过）。跳目录会让 ToB 单挂时的首页变成 403；直接跳文件即可，不给飞书侧补那三条——补了会改动默认组合的路由集合，而那一条要求逐条不变
+- **`GET /` 指向 `index.html` 而非目录**〔实测〕：`add_static(..., show_index=False)` 对 `/feishu-web/` 这个裸目录回 **403**（ToC 侧靠在 `add_static` 之前另注册三条 `→ index.html` 的 handler 绕过）。跳目录会让 ToB 单挂时的首页变成 403；直接跳文件即可，不给飞书侧补那三条——补了会改动两面全挂时的路由集合，而那一条要求逐条不变
 
 骨架 REST（`/ais` `/sessions` …）与 `/oauth/*` 在**每种组合下都在**：前者是各面共用的内核面，后者的回调地址登记在第三方应用后台，不随本进程挂了哪些 gateway 而变（见装配步骤 9d）。
 

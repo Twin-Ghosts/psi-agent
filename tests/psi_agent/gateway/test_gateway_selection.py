@@ -2,8 +2,9 @@
 
 判据对着的是两类静默故障:
 
-1. **默认值一动就是生产回归** —— 云上 ``launch-gateway.sh`` 不带这个参数, 默认少挂一面
-   不会报错, 只是某个前端 404。故默认组合的路由集合与「两面无条件贴」逐条比对。
+1. **少挂一面是静默的** —— 少挂一面不报错, 只是某个前端 404, 排查方向完全跑偏。所以该参数
+   **必填**: 把这个静默失败提前成启动期的显式失败 (不给就非 0 退出, 而不是替调用方猜一个
+   默认值)。故既查「没有默认值」, 又查不传时 CLI 真的退出。
 2. **``/oauth/*`` 漏挂** —— 回调地址登记在第三方应用后台, 不随本进程挂了哪些 gateway 而变;
    少这两条的表现是用户点完授权拿 404, 而不是某个功能没开。故每种组合都验。
 
@@ -13,10 +14,12 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import fields
 
 import anyio
 import pytest
+import tyro
 from aiohttp import web
 
 from psi_agent.gateway import ALL_GATEWAYS, Gateway, _redirect_to_feishu_web, resolve_gateways
@@ -58,19 +61,55 @@ def _paths(app: web.Application) -> set[str]:
     return {getattr(res, "canonical", "") for res in app.router.resources()}
 
 
-def test_the_default_is_every_gateway() -> None:
-    """默认值 = 全集 = 加参数前的行为。
+def test_the_gateway_field_has_no_default() -> None:
+    """``--gateway`` **没有默认值** —— 挂哪些面是部署方的决定, 内核不替它猜。
 
-    **默认值一动就是生产行为改变** (launch-gateway.sh 不带此参数)。这里只查字段默认值,
-    路由那半由 ``test_dropping_one_gateway_drops_only_that_side`` 逐条比对。
+    守的是「有人图省事又加回一个默认值」: 那会把「少挂一面」退回成静默 404。这里只查字段,
+    用户可见的那半由 ``test_omitting_gateway_exits_nonzero`` 走真 CLI 验。
+
+    实测: 用 ``tyro.MISSING`` 表达必填 (字段前面全是带默认值的字段, 真省掉默认值会撞
+    dataclass 的字段顺序限制)。于是 ``default`` 是 ``tyro.MISSING`` 而 **不是**
+    ``dataclasses.MISSING`` —— 只查后者会误判成「有默认值」, 两个都得查。
     """
-    default_factory = next(f.default_factory for f in fields(Gateway) if f.name == "gateway")
-    assert default_factory() == list(ALL_GATEWAYS) == ["desktop", "feishu"]
+    f = next(f for f in fields(Gateway) if f.name == "gateway")
+    assert f.default is tyro.MISSING
+    assert f.default is not dataclasses.MISSING
+    assert f.default_factory is dataclasses.MISSING
+    # 取值域全集还在 (resolve_gateways 的报错文案在用), 只是不再是默认值。
+    assert list(ALL_GATEWAYS) == ["desktop", "feishu"]
+
+
+def test_omitting_gateway_exits_nonzero() -> None:
+    """不传 ``--gateway`` 时 CLI 退出, 且报错说清缺什么、可选值是什么。
+
+    走 tyro 入口而不是直接构造 dataclass: 直接构造只会拿到 ``gateway=tyro.MISSING`` 这个
+    哨兵 (dataclass 眼里它是个正常默认值, 不报错), 验不到用户实际看到的行为 —— 必填这件事
+    整个由 tyro 落实, 绕开它就等于什么都没验。
+
+    实测退出码 **2** (tyro 走 argparse 的 usage-error 路径), 只断言非 0: 判据是「起不来」,
+    具体码值属 tyro 实现细节。
+    """
+    with pytest.raises(SystemExit) as exc:
+        tyro.cli(Gateway, args=[])
+    assert exc.value.code != 0
+
+
+def test_gateway_accepts_values_when_given() -> None:
+    """必填只改「不传时的行为」: 传了之后照原样收下, 三种组合都不受影响。
+
+    ``--gateway`` 后不跟值仍是 ``[]`` 且**不报错** (实测: tyro 认为参数给过了), 所以
+    ``resolve_gateways`` 里那条空列表拦截仍然是唯一防线, 没被必填替掉。
+    """
+    assert tyro.cli(Gateway, args=["--gateway", "desktop"]).gateway == ["desktop"]
+    assert tyro.cli(Gateway, args=["--gateway", "feishu"]).gateway == ["feishu"]
+    both = tyro.cli(Gateway, args=["--gateway", "desktop", "feishu"])
+    assert both.gateway == ["desktop", "feishu"]
+    assert tyro.cli(Gateway, args=["--gateway"]).gateway == []
 
 
 @pytest.mark.anyio
-async def test_default_combination_mounts_both_sides() -> None:
-    """两面全挂时各自的路由一条不少。"""
+async def test_both_gateways_together_mount_both_sides() -> None:
+    """``--gateway desktop feishu`` 两面全挂时各自的路由一条不少。"""
     # 只列与 ``dist/`` 无关的那些 —— 静态挂载点见
     # test_dropping_one_gateway_drops_only_that_side 的说明 (构建过前端的机器才有)。
     paths = _paths(await _assemble("desktop", "feishu"))
@@ -152,8 +191,9 @@ async def test_desktop_only_keeps_the_toc_root_fallback() -> None:
 def test_an_empty_selection_is_rejected() -> None:
     """``--gateway`` 后不跟值时 tyro 给 ``[]``, 那是起了服务但一个前端都没有。
 
-    实测 tyro 照收不报错, 所以拦在这里。报错而不是回落到全集: 用户显式写了 ``--gateway``
-    却被悄悄补成默认值, 比拿到一个错误更难发现。
+    实测 tyro 照收不报错 (它认为参数「给过了」, 退出码 0), 所以必填拦不到这一种, 仍得拦在
+    这里。报错而不是自己补一个取值: 该挂哪面只有部署方知道, 内核替它猜出来的那面一样是静默
+    的 —— 用户显式写了 ``--gateway`` 却被悄悄补齐, 比拿到一个错误更难发现。
     """
     with pytest.raises(ValueError, match="at least one"):
         resolve_gateways([])

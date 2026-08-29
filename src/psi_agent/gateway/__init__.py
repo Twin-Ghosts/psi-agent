@@ -6,10 +6,11 @@ import os
 import socket
 import webbrowser
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 import anyio
+import tyro
 from aiohttp import web
 from loguru import logger
 
@@ -47,7 +48,11 @@ GatewayName = Literal["desktop", "feishu"]
 """``--gateway`` 的取值域。加第三个 gateway 只动这里与 ``ALL_GATEWAYS``。"""
 
 ALL_GATEWAYS: tuple[GatewayName, ...] = ("desktop", "feishu")
-"""``--gateway`` 的全集, 也是它的默认值 (顺序即注册顺序: ToC 先贴, ``GET /`` 归它)。"""
+"""``--gateway`` 的取值域全集 (顺序即注册顺序: ToC 先贴, ``GET /`` 归它)。
+
+**不是默认值** —— 该参数必填, 见 ``Gateway.gateway``。这里只用于 ``resolve_gateways``
+的报错文案列举可选值。
+"""
 
 
 def resolve_gateways(selected: Sequence[str]) -> tuple[str, ...]:
@@ -103,26 +108,41 @@ class Gateway:
     ``PermissionError(13, ...)`` / ``[WinError 5] 拒绝访问``。
     """
 
-    gateway: list[GatewayName] = field(default_factory=lambda: list(ALL_GATEWAYS))
-    """挂哪些 gateway 的 HTTP 面。**可组合的列表, 空格分隔**; 默认全挂 = 现有行为, 一条路由都不少。
+    # 本字段的 docstring 是**用户可见的帮助文本**, 刻意写短: tyro 把它整段渲进「缺必填参数」
+    # 的报错框里 (实测), 写长了会把「你少给了一个参数」这一句话淹在几十行说明里。设计理由与
+    # 实测记录都放这条注释里, 不进 docstring。
+    #
+    # **为什么必填、没有默认值**: 挂哪些面是**部署方的决定**, 内核不替它猜。原先默认全集
+    # ``("desktop", "feishu")`` 看着安全实则最危险 —— 少挂一面不报错, 只是某个前端 404,
+    # 出问题时排查方向完全跑偏。必填把这个静默失败提前成启动期的显式失败。
+    #
+    # **为什么不按环境给默认值** (比如云上默认 feishu): 内核里没有「产品线」这个概念 (定过),
+    # 要让内核默认 feishu, 内核就得先知道自己跑在云上 —— 那等于把产品线概念从参数名里赶
+    # 出去、又从环境判断偷偷放回来。哪一面该挂是部署脚本的事, 见 ``AGENTS.md``。
+    #
+    # **为什么用 ``tyro.MISSING`` 而非省略默认值**: 本字段前面的字段都带默认值, 真省掉会撞
+    # dataclass 的「非默认字段不能跟在默认字段后」而 ``TypeError``。``tyro.MISSING`` 在
+    # tyro 眼里是必填, 对 dataclass 而言又是个普通默认值, 于是不必重排字段顺序 (字段顺序
+    # 就是 ``--help`` 里的显示顺序, 为一个约束去重排会牵动无关的可读性)。
+    #
+    # 实测 (tyro 1.0.15 / Python 3.14.7):
+    #
+    # - ``--help``: 该项列在 ``options`` 段, 行尾标 ``(required)``; 值域直接印在参数名后
+    #   (``--gateway [{desktop,feishu} [{desktop,feishu} ...]]``)。
+    # - 不传: 退出码 **2**, 打一个 ``Required options`` 框, ``Missing from <prog> gateway:``
+    #   后跟该参数与值域 —— 缺什么、可选值是什么都在里面。
+    # - ``dataclasses.fields(Gateway)`` 上此字段的 ``default`` 是 ``tyro.MISSING``
+    #   (``tyro._singleton.PropagatingMissingType``), **不是** ``dataclasses.MISSING``;
+    #   ``default_factory`` 才是 ``dataclasses.MISSING``。判「有没有默认值」得认前者。
+    # - 必填**不覆盖**空列表那条: ``--gateway`` 后不跟任何值仍给 ``[]`` 且退出码 0 —— tyro
+    #   认为参数「给过了」。那一步的拦截仍归 ``resolve_gateways``, 别以为必填替掉了它。
+    gateway: list[GatewayName] = tyro.MISSING
+    """挂哪些 gateway 的 HTTP 面 (必填, 可组合, 空格分隔)。
 
-    - ``desktop`` ToC 那面: ``/spa/`` ``/spa-v2/`` ``/ui/*`` ``/workspace/*`` ``/auth/*``。
-    - ``feishu``  ToB 那面: ``/feishu/*`` ``/feishu-web/``。单独挂它时 ``GET /`` 302 到
-      ``/feishu-web/index.html`` (dist 缺失时那条静态挂载本身没注册, 跟过去拿 404 ——
-      没有 ToC 外壳可降级)。
-
-    ``--gateway desktop feishu`` (默认) 两面全挂, 生产入口用的就是这个: 飞书容器起的也是
-    ``psi-agent gateway``。只写一个就只挂那一面, 另一面的路由不注册 (404), 开发时省掉另一面
-    的前端与 manager。**逗号形式不支持** (``--gateway desktop,feishu`` 会报错); 一个值都不给
-    会退出 —— 起了服务却没有任何前端是个没有用处的状态, 见 ``resolve_gateways``。
-
-    列表而非枚举: 「有哪些 gateway」将来会变, 而 ``both`` 这种词只在恰好两个时成立, 加第三个
-    就得改枚举。骨架 REST (``/ais`` ``/sessions`` …) 与 ``/oauth/*`` 每种组合下都在 —— 前者是
-    各面共用的内核面, 后者的回调地址登记在第三方应用后台, 不随本进程挂了哪面而变。
-
-    **gateway 与 agent 是两个独立维度。** 本参数只决定挂哪些 HTTP 面, agent 包选哪个由
-    ``--default-agent`` 决定 (空则软默认, 见该字段), 两者可自由组合: ToC 的 gateway 配 ToB 的
-    agent 包是合法的, 不予阻止。
+    ``desktop`` = ToC 那面 (``/spa/`` ``/spa-v2/`` ``/ui/*`` ``/workspace/*`` ``/auth/*``);
+    ``feishu`` = ToB 那面 (``/feishu/*`` ``/feishu-web/``, 单挂时 ``GET /`` 302 到
+    ``/feishu-web/index.html``)。两个都写则两面全挂; 只写一个, 另一面的路由不注册 (404)。
+    逗号形式不支持。与 ``--default-agent`` 是两个独立维度, 可自由组合。
     """
 
     icon: str | None = None
@@ -187,7 +207,7 @@ class Gateway:
     auth_endpoint: str = ""
     """云端认证服务地址。**留空即取内置默认值** (账号服务的正式地址)。
 
-    空 ≠ 关闭: 装了包的用户直接 ``psi-agent gateway`` 就该能登录, 要求他先知道并
+    空 ≠ 关闭: 装了包的用户起 Gateway 就该能登录, 要求他先知道并
     手填一个域名, 等于把部署细节转嫁给使用者。要**关掉**认证 (纯本地单用户, 不注册
     ``/auth/*``、不读写本机凭证) 请显式设 ``PSI_AUTH_ENDPOINT=""``。
 
@@ -314,10 +334,12 @@ class Gateway:
 
             attention = AttentionHub()
             schedm = SchedulerManager(_sm=sm, _ai_id=self.scheduler_ai_id or self.feishu_ai_id)
-            # 骨架 + 按 --gateway 贴各 gateway 的 HTTP 面。**默认两面都贴**: 生产上飞书
-            # 容器起的也是 `psi-agent gateway` (同容器里另起一个 `psi-agent channel
-            # feishu` 连过来), 默认值一动就是静默的行为回归。开发时只写一个值单挂一面,
-            # 省掉另一面的前端与 manager。
+            # 骨架 + 按 --gateway 贴各 gateway 的 HTTP 面。**贴哪些完全由调用方给定** ——
+            # 该参数必填, 没有「不传时挂什么」这回事: 少挂一面的表现是某个前端 404 而非
+            # 报错, 所以宁可在启动期就要求说清楚。生产上飞书容器起的也是 `psi-agent
+            # gateway` (同容器里另起一个 `psi-agent channel feishu` 连过来), 它得显式写
+            # `--gateway feishu`; 装机版显式写 `--gateway desktop`。开发时只写一个值单挂
+            # 一面, 省掉另一面的前端与 manager。
             want_desktop = "desktop" in gateways
             want_feishu = "feishu" in gateways
             logger.info(f"Gateways: {' '.join(gateways)} (desktop={want_desktop}, feishu={want_feishu})")

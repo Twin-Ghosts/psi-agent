@@ -103,9 +103,11 @@ Servers (ai, session) run forever; channel components exit when done — CLI exi
 Start the Gateway and manage everything in your browser:
 
 ```bash
-uv run psi-agent gateway                         # Random port on 127.0.0.1 (default)
-uv run psi-agent gateway --listen http://127.0.0.1:8080   # Specify a listen address
+uv run psi-agent gateway --gateway desktop       # Random port on 127.0.0.1
+uv run psi-agent gateway --gateway desktop --listen http://127.0.0.1:8080   # Specify a listen address
 ```
+
+`--gateway` is **required**: it selects which HTTP surfaces to mount. `desktop` is the Web Console described here (the ToC surface); `feishu` is the Feishu/Lark surface (ToB); pass both to mount both. Having no default is deliberate — mounting one surface too few does not raise an error, it just 404s some frontend, so the choice must be stated at startup.
 
 Open the printed address to see a Material Design 3 Web Console. From the UI you can:
 
