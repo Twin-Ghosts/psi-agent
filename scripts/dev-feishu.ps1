@@ -10,7 +10,7 @@
 $ErrorActionPreference = 'Stop'
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
-$Agent = Join-Path $RepoRoot 'workspace\tob'
+$Agent = Join-Path $RepoRoot 'agents\feishu'
 $Listen = if ($env:GATEWAY_LISTEN) { $env:GATEWAY_LISTEN } else { 'http://127.0.0.1:8765' }
 $AiId = 'feishu-default'
 # Company proxy allowlist: deepseek-v4-flash | deepseek-v4-pro only.

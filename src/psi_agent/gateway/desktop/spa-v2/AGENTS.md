@@ -7,7 +7,7 @@
 
 ## 开发 session 交接
 
-本文件是 SPA v2 相关开发在多个 session 之间交接的**第一文档**（与根 `AGENTS.md`、`workspace/tob/AGENTS.md` 一并阅读）。新 session 开工先读本文件；行为 / 协议 / UI 约定变更时先写回本文件再交接。聊天记录不替代文档。
+本文件是 SPA v2 相关开发在多个 session 之间交接的**第一文档**（与根 `AGENTS.md`、`agents/feishu/AGENTS.md` 一并阅读）。新 session 开工先读本文件；行为 / 协议 / UI 约定变更时先写回本文件再交接。聊天记录不替代文档。
 
 **并行开发**：改本目录时建议单独一棵 `git worktree` + 独立功能分支；勿与 workspace/后端施工共挂同一分支。约定见仓库根 `WORKTREE.md` 与 `AGENTS.md`（「本地并行开发」）。
 

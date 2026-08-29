@@ -13,7 +13,7 @@
 为什么住在 ``feishu/`` 而不是骨架层
 ----------------------------------
 这 69 行里确实零飞书字样 —— 但**判据不能只看代码认识什么, 还要看存在性**: 取件方
-(实测)全在 ToB 一侧 (``workspace/tob/tools/`` 下 ``_oauth_receiver`` / ``_oauth_setup`` /
+(实测)全在 ToB 一侧 (``agents/feishu/tools/`` 下 ``_oauth_receiver`` / ``_oauth_setup`` /
 ``feishu_auth`` / ``_feishu/auth``), ToC 那两处 (``desktop/_auth_manager.py:7`` 与 ``:16``)
 只是注释、零调用 —— ToC 的登录走手机号 + 验证码, 不经过 OAuth 跳转。
 

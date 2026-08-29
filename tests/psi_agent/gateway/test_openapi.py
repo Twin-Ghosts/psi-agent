@@ -61,7 +61,7 @@ def test_fragments_own_only_their_own_prefixes() -> None:
     assert all(k.startswith(("/ui/", "/workspace/")) for k in DESKTOP_PATHS)
     assert all(k.startswith("/feishu/") for k in FEISHU_PATHS)
     assert not any(k.startswith(("/ui/", "/workspace/", "/feishu/", "/oauth/")) for k in CORE_PATHS)
-    # /oauth/* 代码归 ToB (取件方全在 workspace/tob/tools 一侧, ToC 登录不走 OAuth 跳转),
+    # /oauth/* 代码归 ToB (取件方全在 agents/feishu/tools 一侧, ToC 登录不走 OAuth 跳转),
     # 但**自成一份片段**: 路由侧每种 --product-line 都注册, 挂在 feishu 开关上会错报。
     assert set(OAUTH_PATHS) == {"/oauth/callback", "/oauth/code"}
     assert not set(OAUTH_PATHS) & set(FEISHU_PATHS)

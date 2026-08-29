@@ -61,20 +61,20 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 #ifdef COMPONENT_MSYS
-Source: "..\..\workspace\tob\msys64\*"; DestDir: "{app}\msys64"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\..\agents\feishu\msys64\*"; DestDir: "{app}\msys64"; Flags: ignoreversion recursesubdirs createallsubdirs
 #else
-; .env 由 CI 打包前从 GitHub Secret SERPER_API_KEY 注入到 workspace\tob\.env，随 workspace 一并安装到 {app}\app。
+; .env 由 CI 打包前从 GitHub Secret SERPER_API_KEY 注入到 agents\feishu\.env，随 workspace 一并安装到 {app}\app。
 ;
 ; 出厂内容与用户数据 (SOUL.md / USER.md / schedules) 目前仍在这一条通配里, 结构上分不出来。
 ; 分包内 / 包外的改法已在 B3 试过又撤回 —— 它牵动升级时的保数据语义, 归属讨论后单独开 PR,
 ; 不在本轮架构重排范围内。讨论项见
 ; docs/superpowers/specs/2026-08-28-gateway-workspace-refactor-report.md 第九章。
-Source: "..\..\workspace\tob\*"; DestDir: "{app}\app"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "msys64"
+Source: "..\..\agents\feishu\*"; DestDir: "{app}\app"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "msys64"
 Source: "haitun.ico"; DestDir: "{app}\app"
 Source: "haitun.exe"; DestDir: "{app}\app"
 #ifdef COMPONENT_APP
 #else
-Source: "..\..\workspace\tob\msys64\*"; DestDir: "{app}\msys64"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\..\agents\feishu\msys64\*"; DestDir: "{app}\msys64"; Flags: ignoreversion recursesubdirs createallsubdirs
 #endif
 #endif
 Source: "rollback.cmd"; DestDir: "{app}"
