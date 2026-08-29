@@ -1,44 +1,205 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { generateTitle, revealWorkspacePath } from "./api";
+import { ArtifactDrawer } from "./components/artifact-drawer";
+import { ChatView } from "./components/chat-view";
+import { DeliveryPreviewModal } from "./components/delivery-preview-modal";
+import { NewDeliveriesPanel } from "./components/new-deliveries-panel";
+import { TaskFocusDetails } from "./components/task-focus-details";
+import { TasksView } from "./components/tasks-view";
+import { useChatTurn } from "./hooks/useChatTurn";
+import { useSessionHistory, useSessions } from "./hooks/useSessions";
+import { useTasks } from "./hooks/useTasks";
+import { mapHistory } from "./services/historyMap";
+import "./styles.css";
 
-/** 后端连通性的三种状态 —— 页面上唯一的动态内容。 */
-type Probe =
-  | { kind: 'pending' }
-  | { kind: 'ok'; status: number }
-  | { kind: 'failed'; detail: string }
+type View = "tasks" | "chat";
 
 /**
- * ToB 前端脚手架的占位页面。
+ * 应用装配层。
  *
- * 这里**故意只有一次 ``fetch('/defaults')``**: 它是方案 3.7 第三项能力
- * (「能连本地服务端」) 的判据 —— dev 期间经 vite proxy 打到本机 gateway 拿 200。
- * 登录、会话列表、对话收发等业务由其他同事后续开发, 本轮不碰。
+ * 有意保持薄: 状态在 hooks/ 里 (会话 / 流式一轮 / 任务派生), 渲染在 components/ 里,
+ * 这里只做「哪个视图 + 谁连谁」。PR 版是 829 行的单文件, 登录、会话列表、历史加载、
+ * 流式收发、任务过滤全在一个组件里互相串状态, 所以整体重做而不是搬。
+ *
+ * 还没有登录 —— 飞书免登与身份隔离归任务 5fef7。当前按单用户跑, 就是本机 gateway 的行为。
  */
 export function App() {
-  const [probe, setProbe] = useState<Probe>({ kind: 'pending' })
+  const [view, setView] = useState<View>("tasks");
+  const [input, setInput] = useState("");
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [selectedSegment, setSelectedSegment] = useState("live");
+  const [artifactTaskId, setArtifactTaskId] = useState("");
+  const [previewFile, setPreviewFile] = useState("");
+  const [showNewDeliveries, setShowNewDeliveries] = useState(false);
 
+  const sessions = useSessions();
+  const tasks = useTasks(sessions.sessions, sessions.titles);
+  const history = useSessionHistory(sessions.currentId);
+  const turn = useChatTurn();
+
+  // 历史到了就铺进消息列表 (附件路径一起接管)。流式增量之后只改 turn.messages。
   useEffect(() => {
-    const abort = new AbortController()
-    fetch('/defaults', { signal: abort.signal })
-      .then((res) => setProbe({ kind: 'ok', status: res.status }))
-      .catch((err: unknown) => {
-        if (abort.signal.aborted) return
-        setProbe({ kind: 'failed', detail: err instanceof Error ? err.message : String(err) })
-      })
-    return () => abort.abort()
-  }, [])
+    const { messages, filePaths } = mapHistory(history.raw);
+    turn.setMessages(messages);
+    turn.setFilePaths((prev) => ({ ...prev, ...filePaths }));
+  }, [history.raw, turn.setMessages, turn.setFilePaths]);
+
+  const currentTask = useMemo(
+    () => tasks.tasks.find((t) => t.id === sessions.currentId),
+    [tasks.tasks, sessions.currentId],
+  );
+  const artifactTask = useMemo(
+    () => tasks.tasks.find((t) => t.id === artifactTaskId),
+    [tasks.tasks, artifactTaskId],
+  );
+  const newDeliveryTasks = useMemo(
+    () => tasks.tasks.filter((t) => t.newDeliverables.length > 0),
+    [tasks.tasks],
+  );
+
+  const openChat = useCallback(
+    (id: string) => {
+      sessions.setCurrentId(id);
+      setSelectedSegment("live");
+      setView("chat");
+    },
+    [sessions],
+  );
+
+  const handleNewTask = useCallback(async () => {
+    const id = await sessions.create();
+    if (id) openChat(id);
+  }, [sessions, openChat]);
+
+  const handleSend = useCallback(async () => {
+    const sessionId = sessions.currentId;
+    if (!sessionId) return;
+    const text = input;
+    const files = pendingFiles;
+    setInput("");
+    setPendingFiles([]);
+    await turn.send(sessionId, text, files);
+
+    // 首轮结束后补标题, 否则列表里一直是「未命名任务」。
+    if (!sessions.titles[sessionId]) {
+      const assistant = turn.messages.at(-1)?.text || "";
+      try {
+        const { title } = await generateTitle(sessionId, text, assistant);
+        sessions.setTitles((prev) => ({ ...prev, [sessionId]: title }));
+      } catch {
+        // 标题生成失败不影响对话本身。
+      }
+    }
+    void tasks.refresh();
+  }, [sessions, input, pendingFiles, turn, tasks]);
+
+  const handleOpenFile = useCallback((name: string) => setPreviewFile(name), []);
+  const handleReveal = useCallback((path: string) => {
+    void revealWorkspacePath(path).catch(() => undefined);
+  }, []);
+
+  const listError = sessions.error || history.error;
 
   return (
-    <main style={{ fontFamily: 'system-ui, sans-serif', padding: '2rem', lineHeight: 1.6 }}>
-      <h1 style={{ fontSize: '1.25rem' }}>psi-agent 飞书前端脚手架</h1>
-      <p>
-        本页是占位。脚手架只验证三件事: 能构建、能起 dev server、能连本地服务端。
-      </p>
-      <p>
-        后端连通性 (<code>GET /defaults</code>):{' '}
-        {probe.kind === 'pending' && <span>探测中…</span>}
-        {probe.kind === 'ok' && <strong>HTTP {probe.status}</strong>}
-        {probe.kind === 'failed' && <span>连不上 —— {probe.detail}</span>}
-      </p>
-    </main>
-  )
+    <div className="ht-app">
+      {view === "tasks" ? (
+        <main className="ht-desktop">
+          {listError ? <div className="ht-error" role="alert">{listError}</div> : null}
+          <TasksView
+            tasks={tasks.tasks}
+            filtered={tasks.filtered}
+            counts={tasks.counts}
+            selected={currentTask}
+            filter={tasks.filter}
+            search={tasks.search}
+            onFilter={tasks.setFilter}
+            onSearch={tasks.setSearch}
+            onSelect={sessions.setCurrentId}
+            onDelete={(id) => void sessions.remove(id)}
+            onOpenChat={openChat}
+            onOpenNewDeliverables={() => setShowNewDeliveries(true)}
+            newDeliveryCount={newDeliveryTasks.length}
+            onNewTask={() => void handleNewTask()}
+          />
+        </main>
+      ) : (
+        <main className="ht-focus">
+          <header className="ht-focus-top">
+            <button type="button" className="ht-btn" onClick={() => setView("tasks")}>
+              返回任务
+            </button>
+            <h2>{sessions.titles[sessions.currentId] || "未命名任务"}</h2>
+          </header>
+          <div className="ht-focus-split">
+            <ChatView
+              messages={turn.messages}
+              userName=""
+              input={input}
+              sending={turn.sending}
+              error={turn.error || history.error}
+              pendingFiles={pendingFiles}
+              emptyHint={history.loading ? "正在加载历史…" : undefined}
+              onInput={setInput}
+              onSend={() => void handleSend()}
+              onStop={turn.stop}
+              onAddFiles={(files) => setPendingFiles((prev) => [...prev, ...files])}
+              onRemoveFile={(i) => setPendingFiles((prev) => prev.filter((_, idx) => idx !== i))}
+              onFeedback={(index, kind) =>
+                turn.setMessages((prev) =>
+                  prev.map((m, i) =>
+                    i === index ? { ...m, feedback: m.feedback === kind ? undefined : kind } : m,
+                  ),
+                )
+              }
+              onRegenerate={(index) => {
+                const user = turn.messages[index - 1];
+                if (user?.role === "user") void turn.send(sessions.currentId, user.text);
+              }}
+              onOpenFile={handleOpenFile}
+              onRevealFile={handleReveal}
+              filePathOf={turn.filePathOf}
+            />
+            <TaskFocusDetails
+              task={currentTask || null}
+              todoSegments={tasks.segments[sessions.currentId] || []}
+              selectedSegmentId={selectedSegment}
+              onSelectTodoSegment={setSelectedSegment}
+              onOpenArtifact={(task, fileName) => {
+                setArtifactTaskId(task.id);
+                if (fileName) setPreviewFile("");
+              }}
+            />
+          </div>
+        </main>
+      )}
+
+      {showNewDeliveries && (
+        <NewDeliveriesPanel
+          tasks={newDeliveryTasks}
+          onOpen={(taskId) => {
+            setShowNewDeliveries(false);
+            setArtifactTaskId(taskId);
+          }}
+          onClose={() => setShowNewDeliveries(false)}
+        />
+      )}
+
+      {artifactTask && (
+        <ArtifactDrawer
+          taskTitle={artifactTask.title}
+          files={artifactTask.files}
+          filePathOf={turn.filePathOf}
+          onClose={() => setArtifactTaskId("")}
+        />
+      )}
+
+      {previewFile && (
+        <DeliveryPreviewModal
+          name={previewFile}
+          path={turn.filePathOf(previewFile)}
+          onClose={() => setPreviewFile("")}
+        />
+      )}
+    </div>
+  );
 }

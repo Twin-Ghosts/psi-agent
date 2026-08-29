@@ -15,9 +15,11 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true,
-    "baseUrl": ".",
+    // TS 7 删掉了 ``baseUrl``, 且 paths 的目标必须是相对路径。原来那对 baseUrl + "src/*"
+    // 在 TS 7 下直接让 tsc 拒绝加载配置 (报 TS5102/TS5090), 一个源文件都检不到 ——
+    // 而 spa-v2 的 build 是裸 ``vite build`` 不跑 tsc, 所以一直没暴露。
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["./src/*"]
     }
   },
   "include": ["src"]
