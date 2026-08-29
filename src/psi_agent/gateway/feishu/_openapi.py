@@ -6,8 +6,8 @@
 ToC 的登录走手机号 + 验证码不经过 OAuth 跳转 —— 详见 ``_oauth_manager`` 模块头。
 
 **但它们自成 ``OAUTH_PATHS``, 不在 ``FEISHU_PATHS`` 里**: 路由侧
-``register_oauth_routes()`` 每种 ``--product-line`` 组合都贴 (回调地址登记在第三方应用
-后台, 不随本进程挂了哪条线而变), 所以 spec 也必须每种组合都报 —— 挂在 feishu 开关上
+``register_oauth_routes()`` 每种 ``--gateway`` 组合都贴 (回调地址登记在第三方应用
+后台, 不随本进程挂了哪面而变), 所以 spec 也必须每种组合都报 —— 挂在 feishu 开关上
 就会出现「路由在、spec 里没有」的错报。三份片段变四份, 并集与拆分前一致。
 """
 

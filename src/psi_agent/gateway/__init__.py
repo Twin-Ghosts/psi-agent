@@ -5,7 +5,8 @@ from __future__ import annotations
 import os
 import socket
 import webbrowser
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from typing import Literal
 
 import anyio
@@ -42,8 +43,31 @@ def _random_port() -> int:
         s.close()
 
 
+GatewayName = Literal["desktop", "feishu"]
+"""``--gateway`` 的取值域。加第三个 gateway 只动这里与 ``ALL_GATEWAYS``。"""
+
+ALL_GATEWAYS: tuple[GatewayName, ...] = ("desktop", "feishu")
+"""``--gateway`` 的全集, 也是它的默认值 (顺序即注册顺序: ToC 先贴, ``GET /`` 归它)。"""
+
+
+def resolve_gateways(selected: Sequence[str]) -> tuple[str, ...]:
+    """规整 ``--gateway`` 的取值: 去重保序, 空列表报错。
+
+    两种输入 tyro 都照收不报错, 得在这里自己拦 (实测):
+
+    - ``--gateway`` 后不跟任何值 → ``[]``。那是起了服务但一个前端都没有的状态, 明确拒绝
+      而不是静默起个空壳: 用户看不出区别, 只会在访问时拿 404 并以为服务挂了。骨架 REST
+      (``/ais`` ``/sessions`` …) 想单独跑不该借这个参数, 那是另一件事。
+    - ``--gateway feishu feishu`` → 重复值。去重而不是报错: 意图没有歧义 (要飞书那面),
+      报错只是给脚本拼参数的人添麻烦。注册函数被调两次才是真问题 —— 同名路由叠一层。
+    """
+    if not selected:
+        raise ValueError(f"--gateway needs at least one of {{{','.join(ALL_GATEWAYS)}}}; got an empty list")
+    return tuple(dict.fromkeys(selected))
+
+
 async def _redirect_to_feishu_web(request: web.Request) -> web.Response:
-    """``--product-line feishu`` 下的 ``GET /``: 302 到 ``/feishu-web/``。
+    """只挂 ``--gateway feishu`` 时的 ``GET /``: 302 到 ``/feishu-web/``。
 
     只在不挂 ToC 时注册。ToC 的 ``GET /`` 有 spa-v2 → spa 的降级链 (``desktop/_routes.py``),
     两条线都挂时根路径仍归它, 行为不变。
@@ -57,7 +81,7 @@ async def _redirect_to_feishu_web(request: web.Request) -> web.Response:
     ``/feishu-web/`` 这个裸目录回 **403** 而非 index (ToC 侧靠 ``add_static`` 之前另注册
     三条 ``→ index.html`` 的 handler 绕过, 见 ``desktop/_routes.py`` 那句注释)。跳到目录
     会让 ToB 单挂时的首页变成 403; 直接跳文件即可, 无需给飞书侧补那三条 —— 补了会改动
-    ``both`` 默认组合的路由集合, 而那一条要求逐条不变。
+    默认 (两面全挂) 组合的路由集合, 而那一条要求逐条不变。
     """
     return web.Response(status=302, headers={"Location": "/feishu-web/index.html"})
 
@@ -79,22 +103,26 @@ class Gateway:
     ``PermissionError(13, ...)`` / ``[WinError 5] 拒绝访问``。
     """
 
-    product_line: Literal["both", "desktop", "feishu"] = "both"
-    """挂哪条(哪几条)产品线的前端与路由。**默认 both = 现有行为, 一条都不少。**
+    gateway: list[GatewayName] = field(default_factory=lambda: list(ALL_GATEWAYS))
+    """挂哪些 gateway 的 HTTP 面。**可组合的列表, 空格分隔**; 默认全挂 = 现有行为, 一条路由都不少。
 
-    - ``both``    ToC (``/spa/`` ``/spa-v2/`` ``/ui/*`` ``/workspace/*`` ``/auth/*``) +
-      ToB (``/feishu/*`` ``/feishu-web/``)。生产入口用这个: 飞书容器起的也是它。
-    - ``desktop`` 只挂 ToC。``/feishu/*`` 与 ``/feishu-web/`` 不注册 (404)。
-    - ``feishu``  只挂 ToB。``/spa*`` ``/ui/*`` ``/workspace/*`` ``/auth/*`` 不注册,
-      ``GET /`` 302 到 ``/feishu-web/index.html`` (dist 缺失时那条静态挂载本身没注册,
-      跟过去拿 404 —— 无 ToC 外壳可降级)。
+    - ``desktop`` ToC 那面: ``/spa/`` ``/spa-v2/`` ``/ui/*`` ``/workspace/*`` ``/auth/*``。
+    - ``feishu``  ToB 那面: ``/feishu/*`` ``/feishu-web/``。单独挂它时 ``GET /`` 302 到
+      ``/feishu-web/index.html`` (dist 缺失时那条静态挂载本身没注册, 跟过去拿 404 ——
+      没有 ToC 外壳可降级)。
 
-    枚举而非两个布尔: 布尔组合允许「都关」, 那是个起了服务但没有任何前端的无意义状态。
-    骨架 REST (``/ais`` ``/sessions`` …) 与 ``/oauth/*`` 每种取值下都在 —— 前者是两条线
-    共用的内核面, 后者的回调地址登记在第三方应用后台, 不随本进程挂了哪条线而变。
+    ``--gateway desktop feishu`` (默认) 两面全挂, 生产入口用的就是这个: 飞书容器起的也是
+    ``psi-agent gateway``。只写一个就只挂那一面, 另一面的路由不注册 (404), 开发时省掉另一面
+    的前端与 manager。**逗号形式不支持** (``--gateway desktop,feishu`` 会报错); 一个值都不给
+    会退出 —— 起了服务却没有任何前端是个没有用处的状态, 见 ``resolve_gateways``。
 
-    ``--default-agent`` 是**独立的一维**: 本参数只决定挂哪套 HTTP 面, agent 包选哪个由它
-    决定 (空则软默认, 见该字段)。开发时挂飞书前端配 ToC agent 是合法组合, 不予阻止。
+    列表而非枚举: 「有哪些 gateway」将来会变, 而 ``both`` 这种词只在恰好两个时成立, 加第三个
+    就得改枚举。骨架 REST (``/ais`` ``/sessions`` …) 与 ``/oauth/*`` 每种组合下都在 —— 前者是
+    各面共用的内核面, 后者的回调地址登记在第三方应用后台, 不随本进程挂了哪面而变。
+
+    **gateway 与 agent 是两个独立维度。** 本参数只决定挂哪些 HTTP 面, agent 包选哪个由
+    ``--default-agent`` 决定 (空则软默认, 见该字段), 两者可自由组合: ToC 的 gateway 配 ToB 的
+    agent 包是合法的, 不予阻止。
     """
 
     icon: str | None = None
@@ -176,6 +204,9 @@ class Gateway:
 
         if self.browser and self.webview:
             raise ValueError("--browser and --webview are mutually exclusive")
+
+        # 与上面的互斥校验同处: 都在建 socket / 恢复 state 之前失败, 不留半启动的进程。
+        gateways = resolve_gateways(self.gateway)
 
         addr = self.listen or f"http://127.0.0.1:{_random_port()}"
         logger.info(f"Starting Gateway service on {addr} (socket_path={self.socket_path})")
@@ -283,13 +314,13 @@ class Gateway:
 
             attention = AttentionHub()
             schedm = SchedulerManager(_sm=sm, _ai_id=self.scheduler_ai_id or self.feishu_ai_id)
-            # 骨架 + 按 --product-line 贴产品线。**默认 both 仍是两条都贴**: 生产上飞书
+            # 骨架 + 按 --gateway 贴各 gateway 的 HTTP 面。**默认两面都贴**: 生产上飞书
             # 容器起的也是 `psi-agent gateway` (同容器里另起一个 `psi-agent channel
-            # feishu` 连过来), 默认值一动就是静默的行为回归。开发时用 desktop / feishu
-            # 单挂一条, 省掉另一条线的前端与 manager。
-            want_desktop = self.product_line in ("both", "desktop")
-            want_feishu = self.product_line in ("both", "feishu")
-            logger.info(f"Product line: {self.product_line} (desktop={want_desktop}, feishu={want_feishu})")
+            # feishu` 连过来), 默认值一动就是静默的行为回归。开发时只写一个值单挂一面,
+            # 省掉另一面的前端与 manager。
+            want_desktop = "desktop" in gateways
+            want_feishu = "feishu" in gateways
+            logger.info(f"Gateways: {' '.join(gateways)} (desktop={want_desktop}, feishu={want_feishu})")
             app = await create_core_app(
                 aim,
                 sm,

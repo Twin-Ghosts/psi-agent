@@ -10,7 +10,7 @@ these resolvers.
 **This module owns only the brand literals.** The mechanism (desktop path math,
 mkdir, ``tools/`` + ``skills/`` probing) lives in ``psi_agent._workspace_paths``,
 outside this package, so Session-spawning managers can reach it without
-importing a product-line package. Splitting it this way keeps the ToC names
+importing a product package. Splitting it this way keeps the ToC names
 (``haitun交付``, ``workspace/tob``) in exactly one place — renaming
 the workspace touches only ``gateway/``.
 

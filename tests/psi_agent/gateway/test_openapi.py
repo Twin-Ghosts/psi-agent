@@ -47,7 +47,7 @@ def test_four_fragments_partition_the_full_spec() -> None:
     """四份片段的 path key 并集 == 完整 spec, 且互不重叠。
 
     刻意**不做**字节比对 —— 一份 spec 拆成四份之后不可能字节相同。
-    ``OAUTH_PATHS`` 是第四份: 与产品线正交, 每种组合都报。
+    ``OAUTH_PATHS`` 是第四份: 与挂了哪些 gateway 正交, 每种组合都报。
     """
     union = set(CORE_PATHS) | set(DESKTOP_PATHS) | set(FEISHU_PATHS) | set(OAUTH_PATHS)
     assert union == set(OPENAPI_SPEC["paths"])
@@ -62,15 +62,15 @@ def test_fragments_own_only_their_own_prefixes() -> None:
     assert all(k.startswith("/feishu/") for k in FEISHU_PATHS)
     assert not any(k.startswith(("/ui/", "/workspace/", "/feishu/", "/oauth/")) for k in CORE_PATHS)
     # /oauth/* 代码归 ToB (取件方全在 workspace/tob/tools 一侧, ToC 登录不走 OAuth 跳转),
-    # 但**自成一份片段**: 路由侧每种 --product-line 都注册, 挂在 feishu 开关上会错报。
+    # 但**自成一份片段**: 路由侧每种 --gateway 组合都注册, 挂在 feishu 开关上会错报。
     assert set(OAUTH_PATHS) == {"/oauth/callback", "/oauth/code"}
     assert not set(OAUTH_PATHS) & set(FEISHU_PATHS)
 
 
-def test_oauth_is_reported_under_every_product_line_combination() -> None:
-    """``/oauth/*`` 与产品线正交 —— 三种组合的 spec 里都必须有这两条。
+def test_oauth_is_reported_under_every_gateway_combination() -> None:
+    """``/oauth/*`` 与挂了哪些 gateway 正交 —— 三种组合的 spec 里都必须有这两条。
 
-    判据对着的是真实故障: 回调地址登记在第三方应用后台, 不随本进程挂了哪条线而变,
+    判据对着的是真实故障: 回调地址登记在第三方应用后台, 不随本进程挂了哪些 gateway 而变,
     少报一次就是「路由在、spec 里没有」或反过来「用户点完授权拿 404」。
     """
     for kwargs in (
@@ -84,7 +84,7 @@ def test_oauth_is_reported_under_every_product_line_combination() -> None:
     assert not set(OAUTH_PATHS) & set(build_openapi_spec(oauth=False)["paths"])
 
 
-def test_product_lines_get_only_their_own_endpoints() -> None:
+def test_each_gateway_gets_only_its_own_endpoints() -> None:
     tob = build_openapi_spec(desktop=False, feishu=True)
     toc = build_openapi_spec(desktop=True, feishu=False)
 
