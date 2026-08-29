@@ -423,5 +423,5 @@ invoked by the current framework — do not "clean them up" as dead code:
 ## Smoke test
 
 ```bash
-uv run python workspace/tob/systems/system.py   # prints the assembled prompt
+uv run python agents/feishu/systems/system.py   # prints the assembled prompt
 ```

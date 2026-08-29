@@ -99,7 +99,7 @@ uv run psi-agent ai openai-completions \
   --base-url <base-url>
 
 uv run psi-agent session \
-  --workspace ./workspace/tob \
+  --workspace ./agents/feishu \
   --channel-socket ./channel.sock \
   --ai-socket ./ai.sock
 

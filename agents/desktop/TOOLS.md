@@ -35,7 +35,7 @@ Add whatever helps you do your job. This is your cheat sheet.
 
 ## 这份文件与 ToB 版的差别
 
-`workspace/toc` 是桌面版(ToC)的能力包, 由 `workspace/tob` 抽取而来, **不含**飞书那套
+`agents/desktop` 是桌面版(ToC)的能力包, 由 `agents/feishu` 抽取而来, **不含**飞书那套
 工具。ToB 版的 `TOOLS.md` 在这行以下还有约 580 行飞书用法(群聊上下文、权限总原则、
 授权引导、知识库写入 …), 它们逐条点名 `feishu_*` 工具 —— 这些工具在本能力包里不存在,
 所以那些段落**不能**照抄过来: 提示词里点名一个不存在的工具, 模型会去调它然后拿到
