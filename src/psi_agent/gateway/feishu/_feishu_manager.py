@@ -94,26 +94,36 @@ class FeishuManager:
     _routes: dict[str, str] = field(default_factory=dict)
     _lock: anyio.Lock = field(default_factory=anyio.Lock)
 
-    def _session_id(self, key: str) -> str:
+    def session_id_for(self, key: str) -> str:
         """派生确定性 session_id, 加 ``feishu-`` 前缀与 SPA 手建 session 命名空间隔离。
 
         群聊键 ``chat:<chat_id>`` → ``feishu-chat-<chat_id>``; 私聊 → ``feishu-<open_id>``。
         私聊侧把 ``-`` 转义成 ``_``, 否则某人 open_id 恰为 ``chat-oc_x`` 时会与群 ``oc_x`` 撞成
         同一个 session (陌生人共享上下文的隐私事故)。飞书真实 open_id 不含 ``-``, 这只是防御层。
+
+        **公开**是因为网页应用侧要按同一份逻辑建 session/workspace: 重实现一次就会漏掉上面
+        那条转义。派生只能有一份, 故对外只暴露本方法, 不暴露拼接细节。
         """
         if key.startswith("chat:"):
             return f"feishu-chat-{_sanitize_open_id(key.removeprefix('chat:'))}"
         return f"feishu-{_sanitize_open_id(key).replace('-', '_')}"
 
-    def _workspace_for(self, key: str) -> str:
+    def _session_id(self, key: str) -> str:
+        """内部别名 —— 既有 5 处调用点不动, 实现见 ``session_id_for``。"""
+        return self.session_id_for(key)
+
+    def workspace_for(self, key: str) -> str:
         """每个路由键得到独立子目录 (root 空则以 cwd 为父)。
 
         群聊 → ``<root>/chat-<chat_id>``, 私聊 → ``<root>/<open_id>`` (``-`` 同样转义,
-        与 ``_session_id`` 一致, 免得两个键指到同一个 workspace 目录)。
+        与 ``session_id_for`` 一致, 免得两个键指到同一个 workspace 目录)。
 
         ``PSI_PRIVATE_OPEN_IDS`` 白名单里的人 → ``<root>/.private/<open_id>``, 工具层
         据此拒绝其他 session 访问 (见 ``psi_agent._private_space``)。群聊不进私密区 ——
         群是多人共用上下文, 放私密区等于把私密资料摊给全群。
+
+        网页应用侧「一个人的多个会话共享一个 workspace」正是靠调本方法实现: 同一个
+        ``open_id`` 无论开几个 session, 都落这一个目录。
         """
         root = self._workspace_root or os.getcwd()
         if key.startswith("chat:"):
@@ -121,6 +131,10 @@ class FeishuManager:
         if _private_space.is_private_user(key):
             return _private_space.private_dir(root, _sanitize_open_id(key))
         return os.path.join(root, _sanitize_open_id(key).replace("-", "_"))
+
+    def _workspace_for(self, key: str) -> str:
+        """内部别名 —— 既有调用点不动, 实现见 ``workspace_for``。"""
+        return self.workspace_for(key)
 
     def is_external(self, open_id: str, *, chat_id: str = "", chat_type: str = "") -> bool:
         """该会话是否由**别的容器**里的 Session 托管 (``PSI_FEISHU_EXTERNAL_SESSIONS`` 命中)。
