@@ -5,7 +5,7 @@ from typing import Any, cast
 from psi_agent.gateway._openapi import OPENAPI_SPEC, build_openapi_spec
 from psi_agent.gateway._openapi_core import CORE_PATHS, CORE_RESPONSES, CORE_SCHEMAS
 from psi_agent.gateway.desktop._openapi import DESKTOP_PATHS
-from psi_agent.gateway.feishu._openapi import FEISHU_PATHS, FEISHU_SCHEMAS
+from psi_agent.gateway.feishu._openapi import FEISHU_PATHS, FEISHU_SCHEMAS, OAUTH_PATHS
 
 
 def test_openapi_router_contract_uses_current_fields_only() -> None:
@@ -43,14 +43,15 @@ def test_openapi_router_contract_uses_current_fields_only() -> None:
     assert "409" in paths["/routers/{router_id}"]["delete"]["responses"]
 
 
-def test_three_fragments_partition_the_full_spec() -> None:
-    """三份片段的 path key 并集 == 完整 spec, 且互不重叠。
+def test_four_fragments_partition_the_full_spec() -> None:
+    """四份片段的 path key 并集 == 完整 spec, 且互不重叠。
 
-    刻意**不做**字节比对 —— 一份 spec 拆成三份之后不可能字节相同。
+    刻意**不做**字节比对 —— 一份 spec 拆成四份之后不可能字节相同。
+    ``OAUTH_PATHS`` 是第四份: 与产品线正交, 每种组合都报。
     """
-    union = set(CORE_PATHS) | set(DESKTOP_PATHS) | set(FEISHU_PATHS)
+    union = set(CORE_PATHS) | set(DESKTOP_PATHS) | set(FEISHU_PATHS) | set(OAUTH_PATHS)
     assert union == set(OPENAPI_SPEC["paths"])
-    assert len(CORE_PATHS) + len(DESKTOP_PATHS) + len(FEISHU_PATHS) == len(union)
+    assert len(CORE_PATHS) + len(DESKTOP_PATHS) + len(FEISHU_PATHS) + len(OAUTH_PATHS) == len(union)
     assert set(CORE_SCHEMAS) | set(FEISHU_SCHEMAS) == set(OPENAPI_SPEC["components"]["schemas"])
     assert set(CORE_RESPONSES) == set(OPENAPI_SPEC["components"]["responses"])
 
@@ -58,10 +59,29 @@ def test_three_fragments_partition_the_full_spec() -> None:
 def test_fragments_own_only_their_own_prefixes() -> None:
     """归属按 path 前缀可判: 产品前缀不许出现在公共片段里, 反之亦然。"""
     assert all(k.startswith(("/ui/", "/workspace/")) for k in DESKTOP_PATHS)
-    assert all(k.startswith(("/feishu/", "/oauth/")) for k in FEISHU_PATHS)
+    assert all(k.startswith("/feishu/") for k in FEISHU_PATHS)
     assert not any(k.startswith(("/ui/", "/workspace/", "/feishu/", "/oauth/")) for k in CORE_PATHS)
-    # /oauth/* 归 ToB: 取件方全在 workspace/tob/tools 一侧, ToC 的登录不走 OAuth 跳转。
-    assert {"/oauth/callback", "/oauth/code"} <= set(FEISHU_PATHS)
+    # /oauth/* 代码归 ToB (取件方全在 workspace/tob/tools 一侧, ToC 登录不走 OAuth 跳转),
+    # 但**自成一份片段**: 路由侧每种 --product-line 都注册, 挂在 feishu 开关上会错报。
+    assert set(OAUTH_PATHS) == {"/oauth/callback", "/oauth/code"}
+    assert not set(OAUTH_PATHS) & set(FEISHU_PATHS)
+
+
+def test_oauth_is_reported_under_every_product_line_combination() -> None:
+    """``/oauth/*`` 与产品线正交 —— 三种组合的 spec 里都必须有这两条。
+
+    判据对着的是真实故障: 回调地址登记在第三方应用后台, 不随本进程挂了哪条线而变,
+    少报一次就是「路由在、spec 里没有」或反过来「用户点完授权拿 404」。
+    """
+    for kwargs in (
+        {},
+        {"desktop": False, "feishu": True},
+        {"desktop": True, "feishu": False},
+    ):
+        spec = build_openapi_spec(**kwargs)  # type: ignore[arg-type]
+        assert set(OAUTH_PATHS) <= set(spec["paths"]), kwargs
+    # 关掉它才没有 —— 骨架单独建的 app 没贴过那两条路由, spec 里也不该报。
+    assert not set(OAUTH_PATHS) & set(build_openapi_spec(oauth=False)["paths"])
 
 
 def test_product_lines_get_only_their_own_endpoints() -> None:
