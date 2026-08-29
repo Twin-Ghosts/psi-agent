@@ -61,6 +61,8 @@ async def test_feishu_web_sessions_are_isolated_per_identity(tmp_path: str) -> N
                 assert resp.status == 401
             async with http.post(f"{base_url}/feishu/sessions", json={"backend_id": "ai1"}) as resp:
                 assert resp.status == 401
+            async with http.get(f"{base_url}/feishu/summaries") as resp:
+                assert resp.status == 401
 
             ck_a = {SID_COOKIE: sid_a}
             ck_b = {SID_COOKIE: sid_b}
@@ -68,9 +70,7 @@ async def test_feishu_web_sessions_are_isolated_per_identity(tmp_path: str) -> N
             # A 连开 3 个会话 → 3 个不同 id, 同一个 workspace。
             workspaces: set[str] = set()
             for _ in range(3):
-                async with http.post(
-                    f"{base_url}/feishu/sessions", json={"backend_id": "ai1"}, cookies=ck_a
-                ) as resp:
+                async with http.post(f"{base_url}/feishu/sessions", json={"backend_id": "ai1"}, cookies=ck_a) as resp:
                     assert resp.status == 201
                     data = await resp.json()
                     created.append(data["id"])
@@ -80,9 +80,7 @@ async def test_feishu_web_sessions_are_isolated_per_identity(tmp_path: str) -> N
             assert len(workspaces) == 1  # 决定一: 共享 workspace
 
             # 机器人那条私聊 session (IM 侧建的) 走 /feishu/route。
-            async with http.post(
-                f"{base_url}/feishu/route", json={"open_id": "ou_alice", "ai_id": "ai1"}
-            ) as resp:
+            async with http.post(f"{base_url}/feishu/route", json={"open_id": "ou_alice", "ai_id": "ai1"}) as resp:
                 assert resp.status == 201
                 bot_sid = (await resp.json())["session_id"]
             created.append(bot_sid)
@@ -97,9 +95,7 @@ async def test_feishu_web_sessions_are_isolated_per_identity(tmp_path: str) -> N
             created.append(group_sid)
 
             # B 也建一个自己的。
-            async with http.post(
-                f"{base_url}/feishu/sessions", json={"backend_id": "ai1"}, cookies=ck_b
-            ) as resp:
+            async with http.post(f"{base_url}/feishu/sessions", json={"backend_id": "ai1"}, cookies=ck_b) as resp:
                 assert resp.status == 201
                 b_sid = (await resp.json())["id"]
             created.append(b_sid)
@@ -119,35 +115,32 @@ async def test_feishu_web_sessions_are_isolated_per_identity(tmp_path: str) -> N
                 assert {r["id"] for r in await resp.json()} == {b_sid}
 
             # 直取别人的 history → 403, 不是内容。
-            async with http.get(
-                f"{base_url}/feishu/sessions/{b_sid}/history", cookies=ck_a
-            ) as resp:
+            async with http.get(f"{base_url}/feishu/sessions/{b_sid}/history", cookies=ck_a) as resp:
                 assert resp.status == 403
             # 群聊的也不行。
-            async with http.get(
-                f"{base_url}/feishu/sessions/{group_sid}/history", cookies=ck_a
-            ) as resp:
+            async with http.get(f"{base_url}/feishu/sessions/{group_sid}/history", cookies=ck_a) as resp:
                 assert resp.status == 403
             # 自己的可以。
-            async with http.get(
-                f"{base_url}/feishu/sessions/{created[0]}/history", cookies=ck_a
-            ) as resp:
+            async with http.get(f"{base_url}/feishu/sessions/{created[0]}/history", cookies=ck_a) as resp:
                 assert resp.status == 200
             # 不存在的 → 404。
-            async with http.get(
-                f"{base_url}/feishu/sessions/no-such-session/history", cookies=ck_a
-            ) as resp:
+            async with http.get(f"{base_url}/feishu/sessions/no-such-session/history", cookies=ck_a) as resp:
                 assert resp.status == 404
 
             # titles/summaries 也按身份过滤。
-            async with http.post(
-                f"{base_url}/titles", json={"id": b_sid, "title": "B 的秘密"}
-            ) as resp:
+            async with http.post(f"{base_url}/titles", json={"id": b_sid, "title": "B 的秘密"}) as resp:
                 assert resp.status == 200
             async with http.get(f"{base_url}/feishu/titles", cookies=ck_a) as resp:
                 assert b_sid not in await resp.json()
             async with http.get(f"{base_url}/feishu/titles", cookies=ck_b) as resp:
                 assert (await resp.json())[b_sid] == "B 的秘密"
+
+            async with http.post(f"{base_url}/summaries", json={"id": b_sid, "summary": "B 的秘密摘要"}) as resp:
+                assert resp.status == 200
+            async with http.get(f"{base_url}/feishu/summaries", cookies=ck_a) as resp:
+                assert b_sid not in await resp.json()
+            async with http.get(f"{base_url}/feishu/summaries", cookies=ck_b) as resp:
+                assert (await resp.json())[b_sid] == "B 的秘密摘要"
     finally:
         await runner.cleanup()
         for sid in created:
