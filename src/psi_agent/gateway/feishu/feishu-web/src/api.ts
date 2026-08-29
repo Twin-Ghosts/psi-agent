@@ -185,6 +185,10 @@ export async function listSummaries(): Promise<Record<string, string>> {
   return requestJson<Record<string, string>>("/feishu/summaries");
 }
 
+export async function setTitle(id: string, title: string): Promise<void> {
+  await requestJson<unknown>("/titles", jsonPost({ id, title }));
+}
+
 // ---- todo (任务进度的数据源) -------------------------------------------
 
 export async function getSessionTodos(sessionId: string): Promise<SessionTodosResponse> {
