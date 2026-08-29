@@ -651,6 +651,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
      * Workspace soft-default is Desktop/haitun交付; pass it too so install
      * and CLI stay aligned. Paths are resolved at runtime (g_dir + SHGetFolderPath),
      * never hardcoded machine paths.
+     *
+     * Same story for --gateway, now passed explicitly: it is required (no
+     * default), because which HTTP surfaces to mount is the deployer's call
+     * and mounting one too few fails silently (some frontend 404s, nothing
+     * logs). The installer build ships only the ToC surface, so it passes
+     * "desktop" alone — NOT the full set. Adding "feishu" here would mount
+     * ToB routes no installed user can reach.
      */
     {
         WCHAR cmd[CMD_BUF];
@@ -688,7 +695,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
         /* Quote paths: install dir may contain spaces ("HaiTun Agent"). */
         lstrcpyW(cmd, L"\"");
         lstrcatW(cmd, g_dir);
-        lstrcatW(cmd, L"\\psi-agent.exe\" gateway --tray --browser --icon haitun.ico --verbose");
+        lstrcatW(cmd, L"\\psi-agent.exe\" gateway --gateway desktop"
+                      L" --tray --browser --icon haitun.ico --verbose");
         lstrcatW(cmd, L" --default-agent \"");
         lstrcatW(cmd, g_dir);
         lstrcatW(cmd, L"\"");

@@ -37,8 +37,12 @@ if (-not $env:PSI_OAUTH_CALLBACK_BASE) {
 Set-Location $RepoRoot
 
 Write-Host "Starting Gateway on $Listen (agent=$Agent, feishu-ai-id=$AiId, oauth=$($env:PSI_OAUTH_CALLBACK_BASE))..."
+# --gateway is required (no default): which HTTP surfaces to mount is the caller's
+# call, and mounting one too few fails silently (some frontend just 404s). This
+# script serves SPA + Feishu + OAuth from one Gateway, so it needs BOTH surfaces.
 $gwArgs = @(
     'run', 'psi-agent', 'gateway',
+    '--gateway', 'desktop', 'feishu',
     '--listen', $Listen,
     '--browser',
     '--feishu-ai-id', $AiId,

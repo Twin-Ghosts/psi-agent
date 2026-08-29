@@ -103,9 +103,11 @@ Servers（ai、session）持续运行，channel 组件按需退出（CLI 发完�
 启动 Gateway 后，在浏览器里可视化管理一切：
 
 ```bash
-uv run psi-agent gateway                         # 默认 127.0.0.1 随机端口
-uv run psi-agent gateway --listen http://127.0.0.1:8080   # 指定端口
+uv run psi-agent gateway --gateway desktop       # 127.0.0.1 随机端口
+uv run psi-agent gateway --gateway desktop --listen http://127.0.0.1:8080   # 指定端口
 ```
+
+`--gateway` **必填**，指定挂哪些 HTTP 面：`desktop` 是这里说的 Web Console（ToC 那面），`feishu` 是飞书那面（ToB），两个都写则两面全挂。没有默认值是故意的——少挂一面不会报错，只是某个前端 404，所以要求启动时说清楚。
 
 打开浏览器访问印出的地址，就会看到一个 Material Design 3 的 Web Console。界面里可以：
 

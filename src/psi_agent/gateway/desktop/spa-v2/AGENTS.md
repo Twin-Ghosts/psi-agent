@@ -156,7 +156,7 @@ History 在剥 `[SEND:]` 前抽出路径放进消息的 `sends`；纯 SEND、无
 ```bash
 # 终端 1 — Gateway（端口以日志为准，若不是 8765 则设 GATEWAY_ORIGIN）
 # 勿传 --appdata / PSI_APPDATA：与安装包一致，软默认 platformdirs（%LocalAppData%\Haitun）
-uv run psi-agent gateway --listen tcp:127.0.0.1:8765
+uv run psi-agent gateway --gateway desktop --listen tcp:127.0.0.1:8765
 
 # 终端 2
 cd src/psi_agent/gateway/spa-v2

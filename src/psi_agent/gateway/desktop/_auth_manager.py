@@ -48,9 +48,13 @@ _DEFAULT_PREFIX = "/auth"
 
 # 云端认证服务地址的默认值。
 #
-# 写成默认值而不是必填参数: 装了包的用户直接 ``psi-agent gateway`` 就该能登录,
-# 让他先知道并手填一个域名, 等于把部署细节转嫁给使用者。以 ``PSI_AUTH_ENDPOINT``
-# 或 ``--auth-endpoint`` 覆盖 (自建云端时用)。
+# 写成默认值而不是必填参数: 装了包的用户起 Gateway 就该能登录, 让他先知道并手填一个
+# 域名, 等于把部署细节转嫁给使用者。以 ``PSI_AUTH_ENDPOINT`` 或 ``--auth-endpoint``
+# 覆盖 (自建云端时用)。
+#
+# 与 ``--gateway`` 必填不冲突: 那个的取值只有部署方知道 (挂错面是静默的 404), 这个有一个
+# 对绝大多数用户都正确的取值。判据是「内核能不能替调用方给出正确答案」, 不是「参数该不该
+# 显式」。
 _DEFAULT_ENDPOINT = "https://account.genuineknowledge.cn"
 
 
