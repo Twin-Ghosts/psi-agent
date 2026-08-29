@@ -14,16 +14,21 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 from aiohttp import web
 from loguru import logger
 
 from psi_agent.gateway.feishu._auth import AuthError, FeishuAuth, Identity, dev_open_id
 from psi_agent.gateway.feishu._feishu_manager import FeishuManager
+from psi_agent.gateway.feishu._identity import owns_session, visible_sessions
 from psi_agent.gateway.feishu._oauth_manager import OAuthRelay
-from psi_agent.gateway.server import _error, _json, _read_json
+from psi_agent.gateway.server import _error, _json, _read_json, _session_data
+from psi_agent.runtime._history_manager import HistoryManager
 from psi_agent.runtime._scheduler_manager import SchedulerManager
-from psi_agent.runtime._session_manager import SessionManager
+from psi_agent.runtime._session_manager import SessionInfo, SessionManager
+from psi_agent.runtime._summary_manager import SummaryManager
+from psi_agent.runtime._title_manager import TitleManager
 
 
 async def _feishu_route(request: web.Request) -> web.Response:
@@ -183,6 +188,138 @@ async def _feishu_app_id(request: web.Request) -> web.Response:
     return _json({"app_id": auth.app_id})
 
 
+def _require_identity(request: web.Request) -> Identity:
+    """取当前身份, 未登录抛 ``PermissionError`` (由各 handler 映射成 401)。
+
+    **默认拒绝**是本组路由与骨架 ``/sessions`` 的关键差别: 骨架那条无身份即返回全量,
+    于是漏传身份的后果是「泄漏」; 这里漏传的后果是 401。
+    """
+    identity = current_identity(request)
+    if identity is None:
+        raise PermissionError("not logged in")
+    return identity
+
+
+def _web_session_data(info: SessionInfo, *, from_im: bool) -> dict[str, Any]:
+    """骨架的 ``_session_data`` 再加一个 ``from_im`` —— 前端据此打「来自飞书对话」角标。
+
+    角标本身是产品决定二: IM 里那条 session 在网页里正常显示、可续聊, 但用户要能看出
+    它与 IM 共通 (在里面发言 IM 侧也看得到)。
+    """
+    data = _session_data(info)
+    data["from_im"] = from_im
+    return data
+
+
+async def _web_list_sessions(request: web.Request) -> web.Response:
+    """``GET /feishu/sessions`` —— 只回当前身份可见的私聊会话。
+
+    与骨架 ``GET /sessions`` 的关系: 骨架那条**语义一行不改**(ToC 的 spa-v2 在用), 本条
+    是飞书链上单独包的一层。过滤在**服务端**做 —— PR 755 在浏览器里 filter, 那只是显示
+    过滤, 谁都能直接打裸路由拿全量。
+    """
+    try:
+        identity = _require_identity(request)
+    except PermissionError as e:
+        return _error(str(e), status=401)
+    fm: FeishuManager = request.app["fm"]
+    sm: SessionManager = request.app["sm"]
+    bot_sid = fm.session_id_for(identity.open_id)
+    rows = visible_sessions(identity.open_id, await sm.list_all(), fm)
+    return _json([_web_session_data(r, from_im=r.id == bot_sid) for r in rows])
+
+
+async def _web_create_session(request: web.Request) -> web.Response:
+    """``POST /feishu/sessions`` —— 开一个**全新**会话: 新 uuid + 新 jsonl。
+
+    两条产品决定都落在这里:
+
+    * **不传 ``id``** 给 ``SessionManager.create`` → 它走 ``id or _new_uuid()`` 发新 uuid,
+      于是历史落到一个**新的** ``{appdata}/histories/<uuid>.jsonl``。这正是「飞书机器人
+      开不了新会话、上下文一直往同一个文件里长」的解法。
+    * **workspace 由 ``fm.workspace_for(open_id)`` 派生** → 同一个人的多个会话落**同一个**
+      目录 (决定一)。不这么做的话每开一个会话就多一个空目录、交付物散落。派生绝不在此
+      处重拼: 私聊侧 ``-`` 转义漏掉会让 open_id 为 ``chat-oc_x`` 的人与群 ``oc_x`` 撞进
+      同一个目录。
+    """
+    try:
+        identity = _require_identity(request)
+    except PermissionError as e:
+        return _error(str(e), status=401)
+    fm: FeishuManager = request.app["fm"]
+    sm: SessionManager = request.app["sm"]
+    schedm: SchedulerManager = request.app["schedm"]
+    body = await _read_json(request) or {}
+    backend_id = str(body.get("backend_id") or body.get("ai_id") or "")
+    try:
+        info = await sm.create(
+            backend_type="ai",
+            backend_id=backend_id,
+            workspace=fm.workspace_for(identity.open_id),
+            agent=str(body.get("agent") or ""),
+        )
+        await schedm.ensure(info.workspace, ai_id=info.backend_id, agent=info.agent)
+    except (TypeError, ValueError, KeyError) as e:
+        return _error(str(e), status=400)
+    except LookupError as e:
+        return _error(str(e), status=404)
+    return _json(_web_session_data(info, from_im=False), status=201)
+
+
+async def _web_get_history(request: web.Request) -> web.Response:
+    """``GET /feishu/sessions/{id}/history`` —— 只给自己的会话。
+
+    别人的/群聊的 → 403 而非内容; 不存在的 → 404。先查存在性再判归属: 反过来会让
+    「不存在」与「不属于你」都返回 403, 前端分不出「会话被删了」和「越权」。
+    """
+    try:
+        identity = _require_identity(request)
+    except PermissionError as e:
+        return _error(str(e), status=401)
+    fm: FeishuManager = request.app["fm"]
+    sm: SessionManager = request.app["sm"]
+    hm: HistoryManager = request.app["hm"]
+    session_id = request.match_info["session_id"]
+    try:
+        workspace = sm.get_workspace(session_id)
+    except LookupError:
+        return _error(f"Session '{session_id}' not found", status=404)
+    if not owns_session(identity.open_id, session_id, workspace, fm):
+        return _error("forbidden", status=403)
+    messages = await hm.get(workspace, session_id, appdata=str(request.app.get("appdata") or ""))
+    return _json(messages)
+
+
+async def _web_owned_ids(request: web.Request) -> set[str]:
+    """当前身份可见的 session id 集合 —— titles/summaries 过滤共用。"""
+    identity = _require_identity(request)
+    fm: FeishuManager = request.app["fm"]
+    sm: SessionManager = request.app["sm"]
+    return {s.id for s in visible_sessions(identity.open_id, await sm.list_all(), fm)}
+
+
+async def _web_list_titles(request: web.Request) -> web.Response:
+    """``GET /feishu/titles`` —— 标题表里只留自己会话的键。
+
+    不过滤的话标题本身就是泄漏: 它是首句 prompt 派生的, 等于把别人问了什么摊出来。
+    """
+    try:
+        owned = await _web_owned_ids(request)
+    except PermissionError as e:
+        return _error(str(e), status=401)
+    tm: TitleManager = request.app["tm"]
+    return _json({k: v for k, v in tm.get_all().items() if k in owned})
+
+
+async def _web_list_summaries(request: web.Request) -> web.Response:
+    try:
+        owned = await _web_owned_ids(request)
+    except PermissionError as e:
+        return _error(str(e), status=401)
+    sum_m: SummaryManager = request.app["sum_m"]
+    return _json({k: v for k, v in sum_m.get_all().items() if k in owned})
+
+
 def register_auth_routes(app: web.Application) -> web.Application:
     """把登录四条路由贴到 *app*。
 
@@ -277,6 +414,13 @@ def register_feishu_routes(
     register_auth_routes(app)
     app.router.add_post("/feishu/route", _feishu_route)
     app.router.add_get("/feishu/routes", _list_feishu_routes)
+    # 按身份过滤的会话一族。**骨架 ``/sessions`` 一族不动** —— ToC 的 spa-v2 用的是那批,
+    # 改它的语义会波及一条不相干的产品线。这里是飞书链上单独的一层, 默认拒绝(401)。
+    app.router.add_get("/feishu/sessions", _web_list_sessions)
+    app.router.add_post("/feishu/sessions", _web_create_session)
+    app.router.add_get("/feishu/sessions/{session_id}/history", _web_get_history)
+    app.router.add_get("/feishu/titles", _web_list_titles)
+    app.router.add_get("/feishu/summaries", _web_list_summaries)
     # ``/oauth/*`` 跟着 ``OAuthRelay`` 一起归本包: 取件方全在 ToB 一侧。ToC 进程照样有这
     # 两条 —— 唯一的生产入口 ``gateway/__init__.py`` 两条线都贴, 所以行为不变。
     app.router.add_get("/oauth/callback", _oauth_callback)
