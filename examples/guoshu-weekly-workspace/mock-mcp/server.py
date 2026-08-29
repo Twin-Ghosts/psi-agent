@@ -696,6 +696,22 @@ _GROUP_HISTORY_GROUPINGS: dict[str, tuple[str, str]] = {
     "reporter": ("h.reporter_id", "progress_count DESC, bucket"),
 }
 
+_YEAR_GOAL_SCOPES = ("by_year", "coverage", "missing", "missing_by_group", "span", "multi_year")
+
+# Milestone breakdown dimensions. Whitelisted because they reach SQL as
+# identifiers; the labels double as the caliber text.
+_MILESTONE_DIMENSIONS: dict[str, str] = {
+    "year": "年度",
+    "category": "类别",
+    "group_name": "承担组",
+    "status": "完成状态",
+    "task_status": "任务状态",
+}
+
+_MILESTONE_STATS_SCOPES = ("summary", "by_dimension", "deleted", "per_task", "mismatch")
+
+_MILESTONE_MISMATCH_KINDS = ("task_done_milestones_open", "milestones_done_task_open")
+
 
 @mcp.tool()
 def weekly_field_completeness(field: str = "") -> str:
@@ -1193,6 +1209,365 @@ def weekly_approval_turnaround(scope: str = "summary", top: int = 8) -> str:
         )
 
     return _guard("weekly_approval_turnaround", work)
+
+
+@mcp.tool()
+def weekly_year_goal_query(task: str = "", year: int = 0, limit: int = 200) -> str:
+    """List annual goals and milestone summaries for formal tasks.
+
+    ``task_year_goal`` is unique per (task, year). Only ``weekly_task_detail``
+    exposed it before, and only for a single task, so board-wide goal questions
+    had no route at all.
+
+    Args:
+        task: Task id or name; empty covers every formal task.
+        year: Four-digit year; 0 covers every year the task has goals for.
+        limit: Max rows, capped at 200.
+    """
+
+    def work() -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        where = [store.formal_task_clause()]
+        caliber = [store.FORMAL_TASK_CALIBER, "task_id + year 唯一"]
+
+        if task.strip():
+            task_id = store.resolve_task_id(task)
+            if task_id is None:
+                return {
+                    "ok": False,
+                    "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
+                }
+            params["tid"] = task_id
+            where.append("g.task_id = %(tid)s")
+        if year:
+            params["yr"] = int(year)
+            where.append("g.year = %(yr)s")
+            caliber.append(f"仅 {int(year)} 年度")
+
+        clause = " AND ".join(where)
+        totals = store.fetch(
+            "SELECT COUNT(*) AS total_rows, COUNT(DISTINCT g.task_id) AS total_tasks "
+            f"FROM task_year_goal g JOIN task t ON t.id = g.task_id WHERE {clause}",
+            params,
+            limit=1,
+        )
+        rows = store.fetch(
+            "SELECT g.task_id, t.task_name, g.year, g.current_year_goal, g.milestone_summary "
+            f"FROM task_year_goal g JOIN task t ON t.id = g.task_id WHERE {clause} "
+            "ORDER BY g.task_id, g.year",
+            params,
+            caliber="；".join(caliber),
+            limit=limit,
+        )
+        first = totals["rows"][0] if totals["rows"] else {}
+        # 313 goal rows board-wide, past the 200 cap, so counting questions need
+        # the total rather than a truncated row_count.
+        rows["total_count"] = first.get("total_rows")
+        rows["total_tasks"] = first.get("total_tasks")
+        return rows
+
+    return _guard("weekly_year_goal_query", work)
+
+
+@mcp.tool()
+def weekly_year_goal_stats(
+    scope: str = "by_year",
+    year: int = 0,
+    year_to: int = 0,
+    min_years: int = 3,
+    top: int = 8,
+) -> str:
+    """Aggregate annual-goal coverage: which years are set, and who is missing one.
+
+    Args:
+        scope: ``by_year`` (goals and tasks per year) / ``coverage`` (share of
+            formal tasks holding a goal for ``year``) / ``missing`` (tasks without
+            one) / ``missing_by_group`` (missing counts per 专项组) / ``span``
+            (average years per task, plus tasks reaching ``min_years``) /
+            ``multi_year`` (tasks holding goals in both ``year`` and ``year_to``).
+        year: Primary year. Required for every scope except ``by_year`` and ``span``.
+        year_to: Second year, for ``multi_year``.
+        min_years: Threshold for ``span``. Inclusive.
+        top: Row cap for the listing scopes.
+    """
+
+    def work() -> dict[str, Any]:
+        key = (scope or "by_year").strip().lower()
+        if key not in _YEAR_GOAL_SCOPES:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported_scope",
+                    "message": f"不支持的口径：{scope}；支持 {', '.join(_YEAR_GOAL_SCOPES)}",
+                },
+            }
+        needs_year = key in ("coverage", "missing", "missing_by_group", "multi_year")
+        if needs_year and not year:
+            return {
+                "ok": False,
+                "error": {"code": "invalid_argument", "message": f"口径 {key} 需要指定 year"},
+            }
+        bounded = max(1, min(store.MAX_ROWS, int(top)))
+        clause = store.formal_task_clause()
+        base = store.FORMAL_TASK_CALIBER
+
+        if key == "by_year":
+            return store.fetch(
+                "SELECT g.year, COUNT(*) AS goal_count, COUNT(DISTINCT g.task_id) AS task_count "
+                f"FROM task_year_goal g JOIN task t ON t.id = g.task_id WHERE {clause} "
+                "GROUP BY g.year ORDER BY g.year",
+                caliber=f"{base}；按年度统计目标条数与涉及任务数",
+                limit=bounded,
+            )
+
+        if key == "span":
+            threshold = max(1, int(min_years))
+            avg = store.scalar(
+                "SELECT ROUND(AVG(yr_cnt), 2) AS avg_years FROM (SELECT COUNT(*) AS yr_cnt "
+                f"FROM task_year_goal g JOIN task t ON t.id = g.task_id WHERE {clause} "
+                "GROUP BY g.task_id) x",
+                caliber=f"{base}；分母只含已设过目标的任务",
+            )
+            rows = store.fetch(
+                "SELECT t.id AS task_id, t.task_name, COUNT(*) AS year_count, "
+                "GROUP_CONCAT(g.year ORDER BY g.year) AS years "
+                f"FROM task_year_goal g JOIN task t ON t.id = g.task_id WHERE {clause} "
+                "GROUP BY t.id, t.task_name HAVING year_count >= %(n)s "
+                "ORDER BY year_count DESC, t.id",
+                {"n": threshold},
+                caliber=f"{base}；至少 {threshold} 个年度（含 {threshold}，边界取等）",
+                limit=bounded,
+            )
+            rows["avg_years_per_task"] = avg["value"]
+            rows["min_years"] = threshold
+            return rows
+
+        if key == "coverage":
+            # EXISTS over the whole task table, not a JOIN over goals: the tasks
+            # with no goal row are precisely the answer, and an inner join drops
+            # them (the missing_goal_as_zero trap).
+            return store.fetch(
+                "SELECT COUNT(*) AS total_tasks, "
+                "SUM(EXISTS (SELECT 1 FROM task_year_goal g "
+                "WHERE g.task_id = t.id AND g.year = %(yr)s)) AS has_goal, "
+                "SUM(NOT EXISTS (SELECT 1 FROM task_year_goal g "
+                "WHERE g.task_id = t.id AND g.year = %(yr)s)) AS missing_goal, "
+                "ROUND(SUM(EXISTS (SELECT 1 FROM task_year_goal g "
+                "WHERE g.task_id = t.id AND g.year = %(yr)s)) / COUNT(*) * 100, 1) AS coverage_pct "
+                f"FROM task t WHERE {clause}",
+                {"yr": int(year)},
+                caliber=f"{base}；分母为全部正式任务，未设目标的任务计入缺口（不能用 JOIN 丢掉）",
+                limit=1,
+            )
+
+        if key == "missing":
+            return store.fetch(
+                "SELECT t.id AS task_id, t.task_name, t.status, t.project_group "
+                f"FROM task t WHERE {clause} AND NOT EXISTS (SELECT 1 FROM task_year_goal g "
+                "WHERE g.task_id = t.id AND g.year = %(yr)s) ORDER BY t.id",
+                {"yr": int(year)},
+                caliber=f"{base}；{int(year)} 年度无目标行；status 0 未开始 / 1 进行中 / 2 已完成 / 3 已暂停",
+                limit=bounded,
+            )
+
+        if key == "missing_by_group":
+            return store.fetch(
+                "SELECT t.project_group, COUNT(*) AS missing_count "
+                f"FROM task t WHERE {clause} AND NOT EXISTS (SELECT 1 FROM task_year_goal g "
+                "WHERE g.task_id = t.id AND g.year = %(yr)s) "
+                "GROUP BY t.project_group ORDER BY missing_count DESC, t.project_group",
+                {"yr": int(year)},
+                caliber=f"{base}；按专项组统计 {int(year)} 年度目标缺口",
+                limit=bounded,
+            )
+
+        if not year_to:
+            return {
+                "ok": False,
+                "error": {"code": "invalid_argument", "message": "口径 multi_year 需要 year 与 year_to"},
+            }
+        params = {"yr1": int(year), "yr2": int(year_to)}
+        both = store.scalar(
+            "SELECT COUNT(*) AS tasks FROM (SELECT g.task_id "
+            f"FROM task_year_goal g JOIN task t ON t.id = g.task_id WHERE {clause} "
+            "AND g.year IN (%(yr1)s, %(yr2)s) "
+            "GROUP BY g.task_id HAVING COUNT(DISTINCT g.year) = 2) x",
+            params,
+            caliber=f"{base}；两个年度都设了目标",
+        )
+        rows = store.fetch(
+            "SELECT t.id AS task_id, t.task_name, "
+            "MAX(CASE WHEN g.year = %(yr1)s THEN g.current_year_goal END) AS goal_year_1, "
+            "MAX(CASE WHEN g.year = %(yr2)s THEN g.current_year_goal END) AS goal_year_2 "
+            f"FROM task_year_goal g JOIN task t ON t.id = g.task_id WHERE {clause} "
+            "AND g.year IN (%(yr1)s, %(yr2)s) GROUP BY t.id, t.task_name "
+            "HAVING goal_year_1 IS NOT NULL AND goal_year_2 IS NOT NULL ORDER BY t.id",
+            params,
+            caliber=f"{base}；{int(year)} 与 {int(year_to)} 两年对照",
+            limit=bounded,
+        )
+        rows["tasks_in_both_years"] = both["value"]
+        rows["years"] = [int(year), int(year_to)]
+        return rows
+
+    return _guard("weekly_year_goal_stats", work)
+
+
+@mcp.tool()
+def weekly_milestone_stats(
+    scope: str = "summary",
+    by: str = "category",
+    year: int = 0,
+    category: str = "",
+    min_total: int = 0,
+    kind: str = "task_done_milestones_open",
+    top: int = 8,
+) -> str:
+    """Aggregate milestone completion. weekly_milestone_query only lists rows.
+
+    ``status`` is 0 未完成 / 1 已完成 -- a two-value code, so "completed" means
+    ``status = 1`` and never a text match.
+
+    Args:
+        scope: ``summary`` (totals and finish rate) / ``by_dimension`` (grouped by
+            ``by``) / ``deleted`` (soft-delete audit, the one place deleted rows
+            are counted) / ``per_task`` (counts per task, zero-milestone tasks
+            kept) / ``mismatch`` (task status vs milestone status disagreements).
+        by: Dimension for ``by_dimension``: year / category / group_name / status
+            / task_status.
+        year: Restrict to one milestone year; 0 covers all.
+        category: Restrict to one milestone category.
+        min_total: For ``by_dimension``, drop buckets below this count. Inclusive.
+        kind: For ``mismatch``: ``task_done_milestones_open`` (task marked done
+            with milestones still open) or ``milestones_done_task_open``.
+        top: Row cap for the listing scopes.
+    """
+
+    def work() -> dict[str, Any]:
+        key = (scope or "summary").strip().lower()
+        if key not in _MILESTONE_STATS_SCOPES:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported_scope",
+                    "message": f"不支持的口径：{scope}；支持 {', '.join(_MILESTONE_STATS_SCOPES)}",
+                },
+            }
+        bounded = max(1, min(store.MAX_ROWS, int(top)))
+        clause = store.formal_task_clause()
+        status_note = "m.status 为 0/1 两值码：1 已完成、0 未完成"
+
+        # R-17: milestones must be re-checked against the formal-task caliber, and
+        # the milestone row's own soft-delete flag is separate from the task's.
+        where = [clause, "m.is_deleted = 0"]
+        params: dict[str, Any] = {}
+        caliber = [f"m.is_deleted = 0 且关联任务满足 {store.FORMAL_TASK_CALIBER}（R-17）", status_note]
+        if year:
+            params["yr"] = int(year)
+            where.append("m.year = %(yr)s")
+            caliber.append(f"仅 {int(year)} 年度里程碑")
+        if category.strip():
+            params["cat"] = category.strip()
+            where.append("m.category = %(cat)s")
+            caliber.append(f"仅类别「{category.strip()}」")
+        active = " AND ".join(where)
+
+        if key == "deleted":
+            # The only scope that counts deleted rows, and it deliberately does
+            # not apply the formal-task gate: "how many were soft-deleted" is a
+            # question about the table, and filtering by task would undercount.
+            return store.fetch(
+                "SELECT SUM(m.is_deleted = 0) AS active, SUM(m.is_deleted = 1) AS deleted, "
+                "COUNT(*) AS total_rows FROM task_milestone m",
+                caliber="全表口径（不加任务闸门）：这是关于表的问题，按任务过滤会少算",
+                limit=1,
+            )
+
+        if key == "summary":
+            return store.fetch(
+                "SELECT COUNT(*) AS total, SUM(m.status = 1) AS finished, "
+                "SUM(m.status = 0) AS unfinished, "
+                "ROUND(SUM(m.status = 1) / COUNT(*) * 100, 1) AS finish_rate_pct "
+                f"FROM task_milestone m JOIN task t ON t.id = m.task_id WHERE {active}",
+                params,
+                caliber="；".join(caliber),
+                limit=1,
+            )
+
+        if key == "by_dimension":
+            dimension = (by or "category").strip().lower()
+            if dimension not in _MILESTONE_DIMENSIONS:
+                return {
+                    "ok": False,
+                    "error": {
+                        "code": "unsupported_group_by",
+                        "message": f"不支持的维度：{by}；支持 {', '.join(sorted(_MILESTONE_DIMENSIONS))}",
+                    },
+                }
+            column = "t.status" if dimension == "task_status" else f"m.{dimension}"
+            having = ""
+            if min_total:
+                params["min_total"] = max(1, int(min_total))
+                having = "HAVING total >= %(min_total)s "
+                caliber.append(f"仅保留计数不少于 {max(1, int(min_total))} 的分组（边界取等）")
+            return store.fetch(
+                f"SELECT {column} AS bucket, COUNT(*) AS total, SUM(m.status = 1) AS finished, "
+                "ROUND(SUM(m.status = 1) / COUNT(*) * 100, 1) AS finish_rate_pct "
+                f"FROM task_milestone m JOIN task t ON t.id = m.task_id WHERE {active} "
+                f"GROUP BY bucket {having}ORDER BY total DESC, bucket",
+                params,
+                caliber="；".join(caliber) + f"；按{_MILESTONE_DIMENSIONS[dimension]}分组",
+                limit=bounded,
+            )
+
+        if key == "per_task":
+            summary = store.fetch(
+                "SELECT COUNT(DISTINCT t.id) AS tasks, COUNT(m.id) AS milestones, "
+                "ROUND(COUNT(m.id) / COUNT(DISTINCT t.id), 2) AS avg_per_task, "
+                "SUM(m.id IS NULL) AS tasks_without_milestone "
+                "FROM task t LEFT JOIN task_milestone m ON m.task_id = t.id AND m.is_deleted = 0 "
+                f"WHERE {clause}",
+                caliber=f"{store.FORMAL_TASK_CALIBER}；分母为全部正式任务（含零里程碑任务）",
+                limit=1,
+            )
+            # LEFT JOIN so the three tasks with no milestone stay visible: H5-01
+            # asks for exactly those, and an inner join answers a different question.
+            rows = store.fetch(
+                "SELECT t.id AS task_id, t.task_name, t.status AS task_status, "
+                "COUNT(m.id) AS milestones, SUM(m.status = 1) AS finished "
+                "FROM task t LEFT JOIN task_milestone m ON m.task_id = t.id AND m.is_deleted = 0 "
+                f"WHERE {clause} GROUP BY t.id, t.task_name, t.status "
+                "ORDER BY milestones DESC, t.id",
+                caliber=f"{store.FORMAL_TASK_CALIBER}；LEFT JOIN 保留零里程碑任务（R-08）；{status_note}",
+                limit=bounded,
+            )
+            rows["summary"] = summary["rows"][0] if summary["rows"] else {}
+            return rows
+
+        mismatch = (kind or "task_done_milestones_open").strip().lower()
+        if mismatch not in _MILESTONE_MISMATCH_KINDS:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported_kind",
+                    "message": f"不支持的比对：{kind}；支持 {', '.join(_MILESTONE_MISMATCH_KINDS)}",
+                },
+            }
+        if mismatch == "task_done_milestones_open":
+            extra, having, label = "t.status = 2", "SUM(m.status = 1) < COUNT(*)", "任务已完成但里程碑未全完成"
+        else:
+            extra, having, label = "t.status = 1", "SUM(m.status = 1) = COUNT(*)", "里程碑全完成但任务仍在办"
+        return store.fetch(
+            "SELECT t.id AS task_id, t.task_name, t.status AS task_status, "
+            "COUNT(*) AS milestones, SUM(m.status = 1) AS finished_milestones "
+            f"FROM task_milestone m JOIN task t ON t.id = m.task_id WHERE {active} AND {extra} "
+            f"GROUP BY t.id, t.task_name, t.status HAVING {having} ORDER BY t.id",
+            params,
+            caliber="；".join(caliber) + f"；{label}（task.status 2 已完成 / 1 进行中）",
+            limit=bounded,
+        )
+
+    return _guard("weekly_milestone_stats", work)
 
 
 @mcp.tool()

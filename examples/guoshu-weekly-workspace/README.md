@@ -21,7 +21,7 @@ export GUOSHU_WEEKLY_MCP_TOKEN=demo-token
 python tests/smoke_test.py
 ```
 
-预期 `75/75 passed`。
+预期 `98/98 passed`。
 
 ## 数据层准备
 
@@ -84,19 +84,20 @@ guoshu-weekly-workspace/
 │   ├── weekly_query.py        # 任务查询（列表 / 详情）
 │   ├── weekly_aggregate.py    # 聚合、快照时间、导入对账
 │   ├── weekly_progress.py     # 进展、里程碑、审批、附件、健康自检
-│   └── weekly_group.py        # 集团组专表（明细 / 负责人 / 历史进展 / 统计）
+│   ├── weekly_group.py        # 集团组专表（明细 / 负责人 / 历史进展 / 统计）
+│   └── weekly_goal.py         # 年度目标与里程碑（覆盖率 / 缺口 / 完成率 / 错配）
 ├── mock-mcp/                  # 仅 demo 用，不属于交付物
 │   ├── _db.py                 # MySQL 连接（只读用户，密码不进日志）
 │   ├── _store.py              # 只读查询层 + 口径规则 + 字段管控
-│   └── server.py              # 24 个语义化取数工具（Streamable HTTP MCP）
+│   └── server.py              # 27 个语义化取数工具（Streamable HTTP MCP）
 └── tests/
-    ├── smoke_test.py          # 75 条契约断言，不花模型 token
+    ├── smoke_test.py          # 98 条契约断言，不花模型 token
     └── baseline.py            # 396 题准确率基线（LLM 判定）
 ```
 
 ## 取数契约
 
-24 个语义化工具，SQL 与口径规则固化在服务端，agent 侧不产 SQL：
+27 个语义化工具，SQL 与口径规则固化在服务端，agent 侧不产 SQL：
 
 | 工具 | 用途 |
 |------|------|
@@ -124,6 +125,9 @@ guoshu-weekly-workspace/
 | `weekly_group_owner_query` | 集团组按牵头人或项目负责人查任务（多值精确匹配） |
 | `weekly_group_history` | 集团组历史进展（专表，可按年/月/季/任务/填报人分组） |
 | `weekly_group_stats` | 集团组统计（负责人构成/完成时间格式/字数/附件/期数） |
+| `weekly_year_goal_query` | 年度目标条目（按任务/年份，带里程碑摘要） |
+| `weekly_year_goal_stats` | 年度目标统计（分年/覆盖率/缺口/缺口分组/跨年跨度/连续设标） |
+| `weekly_milestone_stats` | 里程碑统计（完成率/多维分解/软删审计/每任务分布/任务与里程碑错配） |
 
 `weekly_workflow_query` 与 `weekly_submission_query` 是两张表，不可互相替代：
 动作流水**聚合不出**提交单状态。混用会答出「5 个提交单全部通过」而真值是
@@ -153,6 +157,9 @@ agent 据此给出依据、也据此判断不可答。
 | 相对时间窗锚定快照日 | `_store.AS_OF = 2026-08-15`，非 `CURDATE()`，见下节 |
 | 集团历史双闸门 | `_store.group_history_gate()`，任务侧 R-01 + 行级 `is_published = 1` |
 | 集团组多值负责人 | `FIND_IN_SET` 逐元素匹配，不用 `LIKE` 以免跨人误命中 |
+| 没设目标算 0 不算没有 | 覆盖率/缺口走 `NOT EXISTS` 全表口径，`JOIN` 会把 11 个缺口任务整行丢掉 |
+| 里程碑完成状态是两值码 | `status` 只有 1（未完成）/ 2（已完成），无「进行中」档，别按三态解读 |
+| 里程碑软删审计看全表 | `deleted` 口径故意不加任务闸门：问的是表本身，按任务过滤会少算 |
 
 ### 相对时间窗以快照日为基准
 
@@ -188,7 +195,7 @@ R-04/R-14 要的是「按权限返回」。一律遮蔽同样不满足需求—�
 | 数据权限 | 敏感字段按 token 两档分级 | 按 OA 真实身份做行级权限 |
 | 前端 | 无（经 psi-agent 既有接口） | 专建对话应用 + BFF（方案第六章） |
 | 材料生成 | 无 | 报告下载与图表（P1，第 5 期） |
-| 评测 | 44 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
+| 评测 | 98 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
 
 ### mock 数据层的两处不可外推
 

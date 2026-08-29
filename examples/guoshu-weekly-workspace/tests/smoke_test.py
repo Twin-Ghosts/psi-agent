@@ -107,12 +107,15 @@ async def run() -> int:
         "weekly_group_owner_query",
         "weekly_group_history",
         "weekly_group_stats",
+        "weekly_year_goal_query",
+        "weekly_year_goal_stats",
+        "weekly_milestone_stats",
         "weekly_freshness",
         "weekly_health",
     }
     loaded = set(registry.tools)
     check(
-        "所有 24 个工具注册，且无 helper 泄漏为工具",
+        "所有 27 个工具注册，且无 helper 泄漏为工具",
         loaded == expected_tools,
         f"缺 {sorted(expected_tools - loaded)}；多 {sorted(loaded - expected_tools)}",
     )
@@ -641,6 +644,173 @@ async def run() -> int:
         "集团统计不支持的口径明确报错",
         bad_scope.get("ok") is False and bad_scope.get("error", {}).get("code") == "unsupported_scope",
         str(bad_scope.get("error"))[:120],
+    )
+
+    # 年度目标：原先只在单任务详情里露一角，全盘覆盖率类问题无路可走。
+    goals = await _call(registry, "weekly_year_goal_query", limit=1)
+    check(
+        "年度目标全盘 313 条，计数不受 200 行截断影响（G3-02）",
+        int(goals.get("total_count") or 0) == 313,
+        f"total_count={goals.get('total_count')} total_tasks={goals.get('total_tasks')}",
+    )
+    g2026 = await _call(registry, "weekly_year_goal_query", task="隐私计算平台自主可控攻关", year=2026)
+    check(
+        "单任务单年度目标可定位，附里程碑摘要（G1-01、G4-03）",
+        g2026.get("row_count") == 1
+        and _first(g2026, "year") == 2026
+        and "3项标志性成果" in str(_first(g2026, "milestone_summary")),
+        f"rows={g2026.get('row_count')} 摘要={str(_first(g2026, 'milestone_summary'))[:40]}",
+    )
+    gby = await _call(registry, "weekly_year_goal_stats", scope="by_year")
+    gyears = {str(r.get("year")): r.get("goal_count") for r in gby.get("rows") or []}
+    check(
+        "各年度目标条数 2025=128 / 2026=117 / 2027=68（G3-01、E7-01）",
+        gyears.get("2025") == 128 and gyears.get("2026") == 117 and gyears.get("2027") == 68,
+        str(gyears),
+    )
+    cov = await _call(registry, "weekly_year_goal_stats", scope="coverage", year=2026)
+    crow = (cov.get("rows") or [{}])[0]
+    check(
+        "2026 覆盖率 分母 128 / 有 117 / 缺 11 / 91.4%（G2-02、G2-03）",
+        int(crow.get("total_tasks") or 0) == 128
+        and int(crow.get("has_goal") or 0) == 117
+        and int(crow.get("missing_goal") or 0) == 11
+        and str(crow.get("coverage_pct")) == "91.4",
+        str(crow),
+    )
+    miss = await _call(registry, "weekly_year_goal_stats", scope="missing", year=2026, top=200)
+    check(
+        "缺 2026 目标的任务列得出来（G2-01，用 JOIN 会把它们丢掉）",
+        miss.get("row_count") == 11,
+        f"rows={miss.get('row_count')}",
+    )
+    mg = await _call(registry, "weekly_year_goal_stats", scope="missing_by_group", year=2026, top=20)
+    check(
+        "缺口按专项组分布 6 组，首组 2 条（G2-04）",
+        mg.get("row_count") == 6 and int(_first(mg, "missing_count") or 0) == 2,
+        f"rows={mg.get('row_count')} 首组={_first(mg, 'missing_count')}",
+    )
+    span = await _call(registry, "weekly_year_goal_stats", scope="span", min_years=3, top=8)
+    check(
+        "平均每任务 2.45 个年度，三年及以上边界取等（G3-03、G3-04）",
+        str(span.get("avg_years_per_task")) == "2.45"
+        and span.get("row_count") == 8
+        and int(_first(span, "year_count") or 0) == 3,
+        f"avg={span.get('avg_years_per_task')} rows={span.get('row_count')}",
+    )
+    both = await _call(registry, "weekly_year_goal_stats", scope="multi_year", year=2025, year_to=2026, top=5)
+    check(
+        "连续两年都设目标的任务 117 条（G5-01、G5-02）",
+        int(both.get("tasks_in_both_years") or 0) == 117 and both.get("row_count") == 5,
+        f"both={both.get('tasks_in_both_years')} rows={both.get('row_count')}",
+    )
+    need_year = await _call(registry, "weekly_year_goal_stats", scope="coverage")
+    check(
+        "覆盖率口径缺 year 时明确报错，不静默按全年算",
+        need_year.get("ok") is False and need_year.get("error", {}).get("code") == "invalid_argument",
+        str(need_year.get("error"))[:120],
+    )
+
+    # 里程碑：原有 weekly_milestone_query 只能列行，完成率类问题只能手数。
+    ms = await _call(registry, "weekly_milestone_stats", scope="summary")
+    srow = (ms.get("rows") or [{}])[0]
+    check(
+        "里程碑总体 474 / 完成 242 / 完成率 51.1%（H2-01、H4-04）",
+        int(srow.get("total") or 0) == 474
+        and int(srow.get("finished") or 0) == 242
+        and str(srow.get("finish_rate_pct")) == "51.1",
+        str(srow),
+    )
+    check(
+        "里程碑口径同时声明 R-17 复核与 status 两值码",
+        "R-17" in str(ms.get("caliber")) and "两值码" in str(ms.get("caliber")),
+        str(ms.get("caliber"))[:140],
+    )
+    ms26 = await _call(registry, "weekly_milestone_stats", scope="summary", year=2026)
+    m26 = (ms26.get("rows") or [{}])[0]
+    check(
+        "2026 里程碑 273 / 完成 142 / 未完 131（H2-03）",
+        int(m26.get("total") or 0) == 273 and int(m26.get("unfinished") or 0) == 131,
+        str(m26),
+    )
+    by_yr = await _call(registry, "weekly_milestone_stats", scope="by_dimension", by="year")
+    ybk = {str(r.get("bucket")): r.get("total") for r in by_yr.get("rows") or []}
+    check(
+        "里程碑按年份 2025=201 / 2026=273（E7-03、H2-04）",
+        ybk.get("2025") == 201 and ybk.get("2026") == 273,
+        str(ybk),
+    )
+    by_cat = await _call(registry, "weekly_milestone_stats", scope="by_dimension", by="category", top=8)
+    check(
+        "里程碑按类别 6 类，首类国家任务 90 / 完成 53（H3-01、H3-02）",
+        by_cat.get("row_count") == 6
+        and str(_first(by_cat, "bucket")) == "国家任务"
+        and int(_first(by_cat, "total") or 0) == 90
+        and int(_first(by_cat, "finished") or 0) == 53,
+        f"rows={by_cat.get('row_count')} 首类={_first(by_cat, 'bucket')}",
+    )
+    by_grp = await _call(registry, "weekly_milestone_stats", scope="by_dimension", by="group_name", top=8)
+    check(
+        "里程碑按承担组 6 组，带完成率（H3-03）",
+        by_grp.get("row_count") == 6 and _first(by_grp, "finish_rate_pct") is not None,
+        f"rows={by_grp.get('row_count')} 首组={_first(by_grp, 'bucket')}",
+    )
+    floor20 = await _call(registry, "weekly_milestone_stats", scope="by_dimension", by="category", min_total=20, top=20)
+    lowest = min(
+        (r for r in floor20.get("rows") or []),
+        key=lambda r: float(r.get("finish_rate_pct") or 0),
+        default={},
+    )
+    check(
+        "计数不少于 20 的类别里完成率最低是平台上线 45.2%（H3-04）",
+        str(lowest.get("bucket")) == "平台上线" and str(lowest.get("finish_rate_pct")) == "45.2",
+        str(lowest),
+    )
+    deleted = await _call(registry, "weekly_milestone_stats", scope="deleted")
+    drow = (deleted.get("rows") or [{}])[0]
+    check(
+        "软删除审计 有效 566 / 已删 36 / 全表 602（H4-01、H4-02）",
+        int(drow.get("active") or 0) == 566
+        and int(drow.get("deleted") or 0) == 36
+        and int(drow.get("total_rows") or 0) == 602,
+        str(drow),
+    )
+    per_task = await _call(registry, "weekly_milestone_stats", scope="per_task", top=8)
+    psum = per_task.get("summary") or {}
+    check(
+        "每任务均 3.70 个里程碑，3 个任务一个都没设（H5-02、H5-03）",
+        str(psum.get("avg_per_task")) == "3.70" and int(psum.get("tasks_without_milestone") or 0) == 3,
+        str(psum),
+    )
+    check(
+        "里程碑最多的任务 6 个（H5-04）",
+        int(_first(per_task, "milestones") or 0) == 6,
+        f"首行={_first(per_task, 'task_name')} {_first(per_task, 'milestones')}",
+    )
+    mm1 = await _call(registry, "weekly_milestone_stats", scope="mismatch", top=20)
+    check(
+        "任务标完成但里程碑未全完成 6 条（H6-01）",
+        mm1.get("row_count") == 6,
+        f"rows={mm1.get('row_count')}",
+    )
+    mm2 = await _call(registry, "weekly_milestone_stats", scope="mismatch", kind="milestones_done_task_open", top=20)
+    check(
+        "里程碑全完成但任务仍在办 8 条（H6-02）",
+        mm2.get("row_count") == 8,
+        f"rows={mm2.get('row_count')}",
+    )
+    by_ts = await _call(registry, "weekly_milestone_stats", scope="by_dimension", by="task_status", top=8)
+    ts = {str(r.get("bucket")): str(r.get("finish_rate_pct")) for r in by_ts.get("rows") or []}
+    check(
+        "按任务状态看里程碑完成率 已完成 93.8% 高于在办 44.6%（H6-03）",
+        ts.get("2") == "93.8" and ts.get("1") == "44.6",
+        str(ts),
+    )
+    bad_dim = await _call(registry, "weekly_milestone_stats", scope="by_dimension", by="owner")
+    check(
+        "里程碑不支持的维度明确报错",
+        bad_dim.get("ok") is False and bad_dim.get("error", {}).get("code") == "unsupported_group_by",
+        str(bad_dim.get("error"))[:120],
     )
 
     return report()
