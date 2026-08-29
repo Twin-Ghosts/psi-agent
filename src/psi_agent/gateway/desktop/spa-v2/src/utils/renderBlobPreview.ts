@@ -158,7 +158,7 @@ export async function renderBlobPreview(
 ): Promise<BlobPreviewHandle> {
   let objectUrl = ''
   let editorView: { destroy: () => void } | null = null
-  let pptxPreviewer: { destroy?: () => void } | null = null
+  let pptxPreviewer: { preview: (b: ArrayBuffer) => Promise<void>; destroy?: () => void } | null = null
   let notice: string | undefined
 
   const cleanup = () => {
@@ -199,7 +199,7 @@ export async function renderBlobPreview(
         host.append(frame)
       } else {
         const object = document.createElement('object')
-        objectUrl = URL.createObjectURL(new Blob([bytes], { type: 'image/svg+xml' }))
+        objectUrl = URL.createObjectURL(new Blob([bytesToArrayBuffer(bytes)], { type: 'image/svg+xml' }))
         object.type = 'image/svg+xml'
         object.data = objectUrl
         object.className = 'preview-svg-object'
@@ -212,7 +212,7 @@ export async function renderBlobPreview(
       const frame = document.createElement('div')
       frame.className = 'preview-image-frame'
       const img = document.createElement('img')
-      objectUrl = URL.createObjectURL(new Blob([bytes], { type: mimeType(file.name) }))
+      objectUrl = URL.createObjectURL(new Blob([bytesToArrayBuffer(bytes)], { type: mimeType(file.name) }))
       img.src = objectUrl
       img.alt = file.name
       img.className = 'preview-image artifact-preview-image'
@@ -224,7 +224,7 @@ export async function renderBlobPreview(
     if (AUDIO_EXTS.has(ext) || VIDEO_EXTS.has(ext)) {
       const kind = AUDIO_EXTS.has(ext) ? 'audio' : 'video'
       const el = document.createElement(kind)
-      objectUrl = URL.createObjectURL(new Blob([bytes], { type: mimeType(file.name) }))
+      objectUrl = URL.createObjectURL(new Blob([bytesToArrayBuffer(bytes)], { type: mimeType(file.name) }))
       el.src = objectUrl
       el.controls = true
       el.className = kind === 'audio' ? 'preview-audio' : 'preview-video'
@@ -385,7 +385,8 @@ export async function renderBlobPreview(
         wrap.append(canvas)
         const context = canvas.getContext('2d')
         if (!context) throw new Error('Canvas unavailable')
-        await page.render({ canvasContext: context, viewport }).promise
+        // pdfjs v6 的 RenderParameters 要 ``canvas`` 而不是 ``canvasContext``。
+        await page.render({ canvas, viewport }).promise
       }
       return { cleanup, notice }
     }

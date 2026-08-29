@@ -1,7 +1,8 @@
 export type SseChunk =
   | { type: 'text'; text: string }
   | { type: 'reasoning'; text: string; kind?: string }
-  | { type: 'blob'; name: string; data: string }
+  // ``path`` 是后端 blob 事件里实际带的字段 (chatStream 一直在读它), 之前漏在类型里。
+  | { type: 'blob'; name: string; data: string; path?: string }
   | { type: 'error'; error: string }
   | Record<string, unknown>
 

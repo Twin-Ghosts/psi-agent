@@ -83,6 +83,9 @@ export default function HubModelsPanel({
         onClose()
         return
       }
+      // 上面那个 early return 已经保证走到这里 preset 必有值, 但 TS 收窄不到,
+      // 这里显式再判一次 (比非空断言安全: 将来上面的条件改了也不会静默解引用 undefined)。
+      if (!preset) return
       const info = await createAi(presetToAiPayload(preset, apiKey))
       const list = await listAis()
       setAis(list)

@@ -1,8 +1,8 @@
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// ToB 前端脚手架的构建配置。只留「三项能力」所需的东西 (见方案 3.7):
-// 能构建 / 能起 dev server / 能连本机 gateway。业务端点的 proxy 由后续开发按需加。
+// ToB 前端的构建配置。骨架期的三项能力 (能构建 / 能起 dev server / 能连本机 gateway)
+// 原样保留, 只把业务用到的端点加进 proxy 表。
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const gateway = (env.GATEWAY_ORIGIN || 'http://127.0.0.1:8765').replace(/\/+$/, '')
@@ -24,8 +24,15 @@ export default defineConfig(({ mode }) => {
       // ``localhost``, 看不出差别 —— 实测踩过。
       host: '127.0.0.1',
       proxy: {
-        // 连通性验证的唯一端点 —— ``/defaults`` 在 main 上已存在, 不引入业务端点。
+        // 每一项都对应后端已存在的路由 (``gateway`` 下的 add_get/add_post/add_delete)。
+        // 注意没有 ``/auth``: 飞书免登的后端路由还没有, 归任务 5fef7。
         '/defaults': gateway,
+        '/ais': gateway,
+        // ``/sessions/{id}/chat`` 是 SSE, 必须关掉缓冲否则流式变成一次性返回。
+        '/sessions': { target: gateway, changeOrigin: true, ws: false },
+        '/titles': gateway,
+        '/summaries': gateway,
+        '/workspace': gateway,
       },
     },
   }
