@@ -120,6 +120,40 @@ def window_caliber(lo: str, hi: str, *, label: str) -> str:
     return f"{label} 未设时间过滤"
 
 
+GROUP_BOARD_CODE = "group"
+"""``task_board.code`` for the 集团组 board -- the stable business key, not the id.
+
+The name is editable in the OA, the id is an autoincrement that differs between
+the mock and the real store; only ``code`` survives both.
+"""
+
+
+def group_board_join(alias: str = "t", board: str = "b") -> str:
+    """Restrict a task query to the 集团组 board, soft-deleted boards excluded."""
+    return (
+        f"JOIN task_board {board} ON {board}.id = {alias}.board_id "
+        f"AND {board}.is_deleted = 0 AND {board}.code = '{GROUP_BOARD_CODE}'"
+    )
+
+
+def group_history_gate(hist: str = "h", alias: str = "t") -> str:
+    """The two gates every ``task_group_progress_history`` read must pass.
+
+    Both, not either.  The task must be a formal task (R-01) *and* the history
+    row itself must be published: 404 rows exist, 362 pass both, and dropping
+    ``is_published`` silently folds 42 un-approved drafts into the answer.  The
+    question bank tracks this separately from plain ``publish_gate`` because the
+    row-level flag has no counterpart on the task side.
+    """
+    return f"{formal_task_clause(alias)} AND {hist}.is_published = 1"
+
+
+GROUP_HISTORY_CALIBER = (
+    "任务侧 is_deleted = 0 AND workflow_status = 'published'，"
+    "且历史行自身 is_published = 1（两道闸门缺一不可，共 404 行、过闸 362 行）"
+)
+
+
 class QueryError(Exception):
     """A caller-visible failure that carries a stable code."""
 

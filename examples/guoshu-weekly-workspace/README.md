@@ -21,7 +21,7 @@ export GUOSHU_WEEKLY_MCP_TOKEN=demo-token
 python tests/smoke_test.py
 ```
 
-预期 `56/56 passed`。
+预期 `75/75 passed`。
 
 ## 数据层准备
 
@@ -83,19 +83,20 @@ guoshu-weekly-workspace/
 │   ├── weekly_schema.py       # 结构与字段字典
 │   ├── weekly_query.py        # 任务查询（列表 / 详情）
 │   ├── weekly_aggregate.py    # 聚合、快照时间、导入对账
-│   └── weekly_progress.py     # 进展、里程碑、审批、附件、健康自检
+│   ├── weekly_progress.py     # 进展、里程碑、审批、附件、健康自检
+│   └── weekly_group.py        # 集团组专表（明细 / 负责人 / 历史进展 / 统计）
 ├── mock-mcp/                  # 仅 demo 用，不属于交付物
 │   ├── _db.py                 # MySQL 连接（只读用户，密码不进日志）
 │   ├── _store.py              # 只读查询层 + 口径规则 + 字段管控
-│   └── server.py              # 20 个语义化取数工具（Streamable HTTP MCP）
+│   └── server.py              # 24 个语义化取数工具（Streamable HTTP MCP）
 └── tests/
-    ├── smoke_test.py          # 56 条契约断言，不花模型 token
+    ├── smoke_test.py          # 75 条契约断言，不花模型 token
     └── baseline.py            # 396 题准确率基线（LLM 判定）
 ```
 
 ## 取数契约
 
-20 个语义化工具，SQL 与口径规则固化在服务端，agent 侧不产 SQL：
+24 个语义化工具，SQL 与口径规则固化在服务端，agent 侧不产 SQL：
 
 | 工具 | 用途 |
 |------|------|
@@ -119,10 +120,19 @@ guoshu-weekly-workspace/
 | `weekly_task_lifecycle` | 任务创建/发布的时间分布与建到发的时长 |
 | `weekly_freshness_distribution` | 新鲜度分桶（30/90/180 天）、自定义天窗、时间漂移检出 |
 | `weekly_approval_turnaround` | 审批时效（汇总/按看板/最慢/待审积压） |
+| `weekly_group_detail_query` | 集团组明细（目标成果/实施举措/进度成效/完成时间文本） |
+| `weekly_group_owner_query` | 集团组按牵头人或项目负责人查任务（多值精确匹配） |
+| `weekly_group_history` | 集团组历史进展（专表，可按年/月/季/任务/填报人分组） |
+| `weekly_group_stats` | 集团组统计（负责人构成/完成时间格式/字数/附件/期数） |
 
 `weekly_workflow_query` 与 `weekly_submission_query` 是两张表，不可互相替代：
 动作流水**聚合不出**提交单状态。混用会答出「5 个提交单全部通过」而真值是
 「2 个全部驳回」。
+
+集团组的进展**不在** `task_progress` 里，而在自己的 `task_group_progress_history`
+（362 条已发布）。所以 `weekly_progress_history` / `weekly_progress_range` 查集团
+任务一律返回空，必须走 `weekly_group_history`。同理，目标成果、实施举措、完成时间
+文本和多值负责人只在 `task_group_detail`，`weekly_task_query` 没有这些列。
 
 每个返回都自带 `caliber`（本次生效口径）与 `snapshot_note`（演示数据声明），
 agent 据此给出依据、也据此判断不可答。
@@ -141,6 +151,8 @@ agent 据此给出依据、也据此判断不可答。
 | R-17 里程碑复核 | JOIN 回 task 表复核正式任务口径 |
 | 附件路径不外泄 | `storage_path` 在 `BLOCKED_FIELDS`，不进任何返回 |
 | 相对时间窗锚定快照日 | `_store.AS_OF = 2026-08-15`，非 `CURDATE()`，见下节 |
+| 集团历史双闸门 | `_store.group_history_gate()`，任务侧 R-01 + 行级 `is_published = 1` |
+| 集团组多值负责人 | `FIND_IN_SET` 逐元素匹配，不用 `LIKE` 以免跨人误命中 |
 
 ### 相对时间窗以快照日为基准
 

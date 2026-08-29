@@ -103,12 +103,16 @@ async def run() -> int:
         "weekly_progress_coverage",
         "weekly_task_ranking",
         "weekly_import_audit",
+        "weekly_group_detail_query",
+        "weekly_group_owner_query",
+        "weekly_group_history",
+        "weekly_group_stats",
         "weekly_freshness",
         "weekly_health",
     }
     loaded = set(registry.tools)
     check(
-        "所有 20 个工具注册，且无 helper 泄漏为工具",
+        "所有 24 个工具注册，且无 helper 泄漏为工具",
         loaded == expected_tools,
         f"缺 {sorted(expected_tools - loaded)}；多 {sorted(loaded - expected_tools)}",
     )
@@ -511,6 +515,132 @@ async def run() -> int:
         "待审积压不套发布闸门，否则查成空",
         pending.get("row_count") == 8 and pending["rows"][0]["pending_days"] == 583,
         f"rows={pending.get('row_count')} 首行={_first(pending, 'pending_days')}",
+    )
+
+    # 集团组两张专表：现有工具一条都读不到，Q/R 两类 56 题全靠这四个入口。
+    gd = await _call(registry, "weekly_group_detail_query", limit=8)
+    check(
+        "集团明细可读且带 task_name（Q1-01 前 8 条）",
+        gd.get("row_count") == 8 and _first(gd, "task_id") == 97 and "数据资产入表" in str(_first(gd, "task_name")),
+        f"rows={gd.get('row_count')} 首行={str(_first(gd, 'task_name'))[:30]}",
+    )
+    check(
+        "集团明细默认口径声明完成时间不可做日期运算（R-12）",
+        "R-12" in str(gd.get("caliber")),
+        str(gd.get("caliber"))[:120],
+    )
+    due26 = await _call(registry, "weekly_group_detail_query", contains="2026", field="completion_time", limit=200)
+    check(
+        "完成时间按文本匹配 2026（Q4-03 = 31 条，非日期运算）",
+        due26.get("row_count") == 31,
+        f"rows={due26.get('row_count')}",
+    )
+    bad_field = await _call(registry, "weekly_group_detail_query", fields="storage_path")
+    check(
+        "集团明细字段走白名单，未收录字段拒绝",
+        bad_field.get("ok") is False and bad_field.get("error", {}).get("code") == "unsupported_field",
+        str(bad_field.get("error"))[:120],
+    )
+
+    lead = await _call(registry, "weekly_group_owner_query", person="唐立本", role="lead")
+    proj = await _call(registry, "weekly_group_owner_query", person="唐立本", role="project")
+    check(
+        "牵头人与项目负责人是两个角色，不可混用（R1-01 = 5 / R1-02 = 3）",
+        lead.get("row_count") == 5 and proj.get("row_count") == 3,
+        f"lead={lead.get('row_count')} project={proj.get('row_count')}",
+    )
+    check(
+        "多值负责人按元素精确匹配，不跨人误命中",
+        "FIND_IN_SET" in str(lead.get("caliber")),
+        str(lead.get("caliber"))[:140],
+    )
+
+    hist = await _call(registry, "weekly_group_history", limit=1)
+    check(
+        "集团历史进展双闸门后 362 行（漏 is_published 会多出 42 行草稿）",
+        int(hist.get("total_count") or 0) == 362,
+        f"total_count={hist.get('total_count')} total_tasks={hist.get('total_tasks')}",
+    )
+    check(
+        "集团历史口径写明两道闸门缺一不可",
+        "两道闸门" in str(hist.get("caliber")),
+        str(hist.get("caliber"))[:140],
+    )
+    t99 = await _call(registry, "weekly_group_history", task="99")
+    check(
+        "单任务历史 7 期，版本号倒序（Q2-01）",
+        t99.get("row_count") == 7 and _first(t99, "version_no") == 7,
+        f"rows={t99.get('row_count')} 首版={_first(t99, 'version_no')}",
+    )
+    v3 = await _call(registry, "weekly_group_history", task="99", version_no=3)
+    check(
+        "可定位到指定期次（R2-03 第 3 期）",
+        v3.get("row_count") == 1 and _first(v3, "version_no") == 3,
+        f"rows={v3.get('row_count')} 版本={_first(v3, 'version_no')}",
+    )
+    by_year = await _call(registry, "weekly_group_history", by="year")
+    years = {str(r.get("bucket")): r.get("progress_count") for r in by_year.get("rows") or []}
+    check(
+        "按年份分布 2025=137 / 2026=225（Q6-01）",
+        years.get("2025") == 137 and years.get("2026") == 225,
+        str(years),
+    )
+    latest = await _call(registry, "weekly_group_history", latest_only=True, limit=200)
+    check(
+        "各任务最新一期共 46 条，与看板任务数一致（R2-01）",
+        latest.get("row_count") == 46,
+        f"rows={latest.get('row_count')}",
+    )
+    bad_by = await _call(registry, "weekly_group_history", by="week")
+    check(
+        "集团历史不支持的分组明确报错",
+        bad_by.get("ok") is False and bad_by.get("error", {}).get("code") == "unsupported_group_by",
+        str(bad_by.get("error"))[:120],
+    )
+
+    owners = await _call(registry, "weekly_group_stats", scope="owners")
+    orow = (owners.get("rows") or [{}])[0]
+    check(
+        "牵头人构成 46 / 多人 19 / 单人 27 / 去重 24 位（R1-03、R1-04）",
+        int(orow.get("tasks") or 0) == 46
+        and int(orow.get("multi_lead") or 0) == 19
+        and int(orow.get("single_lead") or 0) == 27
+        and int(owners.get("distinct_leads") or 0) == 24,
+        f"{orow} distinct={owners.get('distinct_leads')}",
+    )
+    ct = await _call(registry, "weekly_group_stats", scope="completion_time")
+    crow = (ct.get("rows") or [{}])[0]
+    check(
+        "完成时间格式分布 ISO 6 / 自由文本 40 / 空 0（Q4-02、Q4-04）",
+        int(crow.get("iso_date") or 0) == 6
+        and int(crow.get("free_text") or 0) == 40
+        and int(crow.get("blank") or 0) == 0,
+        str(crow),
+    )
+    lens = await _call(registry, "weekly_group_stats", scope="field_lengths")
+    lrow = (lens.get("rows") or [{}])[0]
+    check(
+        "目标成果字数 均 45.6 / 最长 51（R5-03）",
+        str(lrow.get("avg_chars")) == "45.6" and int(lrow.get("max_chars") or 0) == 51,
+        str(lrow),
+    )
+    att = await _call(registry, "weekly_group_stats", scope="attachments", top=8)
+    check(
+        "零附件任务保留在清单里 18/46（inner_join_drops_zero）",
+        int(att.get("no_attachment_summary", {}).get("no_attachment") or 0) == 18 and _first(att, "attachments") == 0,
+        f"summary={att.get('no_attachment_summary')} 首行附件={_first(att, 'attachments')}",
+    )
+    rounds = await _call(registry, "weekly_group_stats", scope="history_rounds", top=8, min_rounds=5)
+    check(
+        "至少 5 期的任务 46 个，边界取等（Q6-03）",
+        int(rounds.get("tasks_at_least", {}).get("tasks") or 0) == 46,
+        str(rounds.get("tasks_at_least")),
+    )
+    bad_scope = await _call(registry, "weekly_group_stats", scope="whatever")
+    check(
+        "集团统计不支持的口径明确报错",
+        bad_scope.get("ok") is False and bad_scope.get("error", {}).get("code") == "unsupported_scope",
+        str(bad_scope.get("error"))[:120],
     )
 
     return report()

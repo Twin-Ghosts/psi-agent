@@ -655,6 +655,47 @@ _CREATED_GROUPINGS: dict[str, str] = {
 
 _TURNAROUND_SCOPES = ("summary", "board", "slowest", "pending")
 
+# Columns of task_group_detail a caller may select or filter on. Whitelisted for
+# the same reason as _COMPLETENESS_FIELDS: these reach SQL as identifiers.
+_GROUP_DETAIL_FIELDS: dict[str, str] = {
+    "target_result": "目标成果",
+    "implementation_measure": "实施举措",
+    "completion_time": "完成时间（展示文本，不可做日期运算）",
+    "progress_effect": "进度成效当前正文",
+    "lead_owner_names": "牵头人姓名（多值，逗号分隔）",
+    "lead_owner_ids": "牵头人 ID（多值，逗号分隔）",
+    "project_owner_names": "项目负责人姓名（多值，逗号分隔）",
+    "project_owner_ids": "项目负责人 ID（多值，逗号分隔）",
+    "project_group": "项目组",
+}
+
+# Which multi-value owner column a person lookup searches. The two are distinct
+# roles: 唐立本 leads 5 group tasks but is project owner on 3, and collapsing
+# them answers a different question (the single_vs_multi_owner_column trap).
+_GROUP_OWNER_ROLES: dict[str, tuple[str, str]] = {
+    "lead": ("lead_owner_ids", "lead_owner_names"),
+    "project": ("project_owner_ids", "project_owner_names"),
+}
+
+_GROUP_STATS_SCOPES = (
+    "owners",
+    "completion_time",
+    "field_lengths",
+    "attachments",
+    "history_rounds",
+)
+
+# Buckets over task_group_progress_history.report_time -- the group board keeps
+# its progress in its own table, so the _PROGRESS_GROUPINGS over task_progress
+# cannot see any of it (R7-02: group_task_progress = 0, group_history = 362).
+_GROUP_HISTORY_GROUPINGS: dict[str, tuple[str, str]] = {
+    "year": ("YEAR(h.report_time)", "bucket"),
+    "month": ("DATE_FORMAT(h.report_time, '%%Y-%%m')", "bucket"),
+    "quarter": ("CONCAT(YEAR(h.report_time), 'Q', QUARTER(h.report_time))", "bucket"),
+    "task": ("t.task_name", "progress_count DESC, bucket"),
+    "reporter": ("h.reporter_id", "progress_count DESC, bucket"),
+}
+
 
 @mcp.tool()
 def weekly_field_completeness(field: str = "") -> str:
@@ -1152,6 +1193,409 @@ def weekly_approval_turnaround(scope: str = "summary", top: int = 8) -> str:
         )
 
     return _guard("weekly_approval_turnaround", work)
+
+
+@mcp.tool()
+def weekly_group_detail_query(
+    task: str = "",
+    fields: str = "",
+    contains: str = "",
+    field: str = "",
+    limit: int = 200,
+) -> str:
+    """Query the 集团组 board's own detail table (target/measures/owners/completion text).
+
+    The group board keeps 目标成果 / 实施举措 / 进度成效 / 完成时间 and its
+    multi-value owner columns in ``task_group_detail``, which no other tool
+    reaches: ``weekly_task_query`` returns the shared ``task`` columns and simply
+    has none of these. Use this for any 集团看板 question about those fields.
+
+    Args:
+        task: Task id or name to narrow to one task. Empty covers the whole board.
+        fields: Comma-separated columns to return; empty returns the common set.
+            Call with an unsupported name to see the supported list.
+        contains: Substring filter applied to ``field``. Use for "which tasks are
+            due in 2026" -- ``completion_time`` is display text, so this is a text
+            match, never date arithmetic (R-12).
+        field: Which column ``contains`` filters on. Required when ``contains`` is set.
+        limit: Max rows, capped at 200.
+    """
+
+    def work() -> dict[str, Any]:
+        requested = [f.strip() for f in (fields or "").split(",") if f.strip()]
+        unknown = [f for f in requested if f not in _GROUP_DETAIL_FIELDS]
+        if unknown:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported_field",
+                    "message": f"不支持的字段：{', '.join(unknown)}；支持 {', '.join(sorted(_GROUP_DETAIL_FIELDS))}",
+                },
+            }
+        selected = requested or [
+            "target_result",
+            "implementation_measure",
+            "progress_effect",
+            "completion_time",
+        ]
+
+        params: dict[str, Any] = {}
+        where = [store.formal_task_clause()]
+        caliber = [store.FORMAL_TASK_CALIBER, "集团看板（task_board.code = 'group'）"]
+
+        if task.strip():
+            task_id = store.resolve_task_id(task)
+            if task_id is None:
+                return {
+                    "ok": False,
+                    "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
+                }
+            params["tid"] = task_id
+            where.append("d.task_id = %(tid)s")
+
+        needle = (contains or "").strip()
+        if needle:
+            column = (field or "").strip()
+            if column not in _GROUP_DETAIL_FIELDS:
+                return {
+                    "ok": False,
+                    "error": {
+                        "code": "unsupported_field",
+                        "message": f"contains 需要指定 field；不支持 {column!r}，"
+                        f"支持 {', '.join(sorted(_GROUP_DETAIL_FIELDS))}",
+                    },
+                }
+            params["needle"] = f"%{needle}%"
+            where.append(f"d.{column} LIKE %(needle)s")
+            caliber.append(f"{column} 含「{needle}」（文本匹配，非日期运算）")
+            if column not in selected:
+                selected.append(column)
+
+        columns = ", ".join(f"d.{name}" for name in selected)
+        if "completion_time" in selected:
+            caliber.append("completion_time 为展示文本，不可做日期运算（R-12）")
+
+        return store.fetch(
+            f"SELECT d.task_id, t.task_name, {columns} "
+            "FROM task_group_detail d JOIN task t ON t.id = d.task_id "
+            f"{store.group_board_join()} "
+            f"WHERE {' AND '.join(where)} ORDER BY d.task_id",
+            params,
+            caliber="；".join(caliber),
+            limit=limit,
+        )
+
+    return _guard("weekly_group_detail_query", work)
+
+
+@mcp.tool()
+def weekly_group_owner_query(person: str = "", role: str = "lead", limit: int = 200) -> str:
+    """Find 集团组 tasks by owner, or list the board's owner columns.
+
+    The group board's owners are comma-separated multi-value text, so a plain
+    ``LIKE '%name%'`` collides across people (the multivalue_like_collision
+    trap). Matching goes through ``FIND_IN_SET`` on the id column instead, which
+    is exact per element.
+
+    Args:
+        person: Person id or name. Empty lists every task's owners for the role.
+        role: ``lead`` (牵头人) or ``project`` (项目负责人). These are different
+            roles over different columns and are not interchangeable.
+        limit: Max rows, capped at 200.
+    """
+
+    def work() -> dict[str, Any]:
+        key = (role or "lead").strip().lower()
+        if key not in _GROUP_OWNER_ROLES:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported_role",
+                    "message": f"不支持的角色：{role}；支持 {', '.join(sorted(_GROUP_OWNER_ROLES))}",
+                },
+            }
+        id_column, name_column = _GROUP_OWNER_ROLES[key]
+        label = "牵头人" if key == "lead" else "项目负责人"
+
+        params: dict[str, Any] = {}
+        where = [store.formal_task_clause()]
+        caliber = [store.FORMAL_TASK_CALIBER, f"集团看板 {label}（{id_column}）"]
+
+        token = (person or "").strip()
+        if token:
+            # The question may name a person while the column stores ids, so try
+            # both: FIND_IN_SET is exact per comma element either way, which is
+            # what keeps 唐立本 from matching a longer name containing it.
+            params["who"] = token
+            where.append(f"(FIND_IN_SET(%(who)s, d.{id_column}) > 0 OR FIND_IN_SET(%(who)s, d.{name_column}) > 0)")
+            caliber.append(f"FIND_IN_SET 精确匹配「{token}」（逗号多值，不用 LIKE 以免跨人误命中）")
+        else:
+            where.append(f"d.{id_column} <> ''")
+            caliber.append("仅列出该角色非空的任务")
+
+        return store.fetch(
+            f"SELECT d.task_id, t.task_name, d.{name_column}, d.{id_column}, "
+            f"LENGTH(d.{id_column}) - LENGTH(REPLACE(d.{id_column}, ',', '')) + 1 AS owner_count "
+            "FROM task_group_detail d JOIN task t ON t.id = d.task_id "
+            f"{store.group_board_join()} "
+            f"WHERE {' AND '.join(where)} ORDER BY owner_count DESC, d.task_id",
+            params,
+            caliber="；".join(caliber),
+            limit=limit,
+        )
+
+    return _guard("weekly_group_owner_query", work)
+
+
+@mcp.tool()
+def weekly_group_history(
+    task: str = "",
+    version_no: int = 0,
+    by: str = "",
+    latest_only: bool = False,
+    date_from: str = "",
+    date_to: str = "",
+    last_days: int = 0,
+    limit: int = 200,
+) -> str:
+    """Query the 集团组 board's progress history (its own table, not task_progress).
+
+    The group board's progress lives in ``task_group_progress_history`` -- 362
+    published rows -- while ``task_progress`` holds none of it. So
+    ``weekly_progress_history`` and ``weekly_progress_range`` both return empty
+    for group tasks, and this is the entry point for them.
+
+    Two gates apply together: the task must be formal (R-01) and the row itself
+    must have ``is_published = 1``. Dropping either folds 42 un-approved drafts in.
+
+    Args:
+        task: Task id or name. Empty covers the whole board.
+        version_no: Return one specific version (per-task, larger is newer).
+        by: Empty lists rows; ``year`` / ``month`` / ``quarter`` / ``task`` /
+            ``reporter`` returns counts per group.
+        latest_only: Keep only each task's newest published version.
+        date_from: Inclusive start on ``report_time``, YYYY-MM-DD.
+        date_to: Inclusive end on ``report_time``, YYYY-MM-DD.
+        last_days: Window of N days ending at the snapshot date, not today.
+        limit: Max rows, capped at 200.
+    """
+
+    def work() -> dict[str, Any]:
+        grouping = (by or "").strip().lower()
+        if grouping and grouping not in _GROUP_HISTORY_GROUPINGS:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported_group_by",
+                    "message": f"不支持的分组：{by}；支持 {', '.join(sorted(_GROUP_HISTORY_GROUPINGS))}",
+                },
+            }
+
+        params: dict[str, Any] = {}
+        where = [store.group_history_gate()]
+        caliber = [store.GROUP_HISTORY_CALIBER]
+
+        if task.strip():
+            task_id = store.resolve_task_id(task)
+            if task_id is None:
+                return {
+                    "ok": False,
+                    "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
+                }
+            params["tid"] = task_id
+            where.append("h.task_id = %(tid)s")
+        else:
+            # Board scoping is only needed for whole-board queries: a task filter
+            # already pins the board, and the extra join would be dead weight.
+            where.append(f"b.code = '{store.GROUP_BOARD_CODE}' AND b.is_deleted = 0")
+
+        if version_no:
+            params["vno"] = int(version_no)
+            where.append("h.version_no = %(vno)s")
+            caliber.append(f"仅第 {int(version_no)} 期")
+
+        lo, hi = store.date_window(date_from, date_to, last_days or None)
+        window = store.window_clause("h.report_time", lo, hi, params)
+        if window:
+            # report_time is a datetime and the bound end is a date, so a naive
+            # `<=` would cut the final day off at 00:00. Compare on the date part.
+            window = store.window_clause("DATE(h.report_time)", lo, hi, params)
+            where.append(window)
+            caliber.append(store.window_caliber(lo, hi, label="上报时间"))
+            if last_days:
+                caliber.append(store.as_of_caliber())
+
+        if latest_only:
+            where.append(
+                "h.version_no = (SELECT MAX(x.version_no) FROM task_group_progress_history x "
+                "WHERE x.task_id = h.task_id AND x.is_published = 1)"
+            )
+            caliber.append("仅各任务最新一期已发布版本")
+
+        joins = f"JOIN task t ON t.id = h.task_id {store.group_board_join()}"
+        clause = " AND ".join(where)
+
+        if not grouping:
+            totals = store.fetch(
+                "SELECT COUNT(*) AS total_rows, COUNT(DISTINCT h.task_id) AS total_tasks "
+                f"FROM task_group_progress_history h {joins} WHERE {clause}",
+                params,
+                caliber="；".join(caliber),
+                limit=1,
+            )
+            rows = store.fetch(
+                "SELECT h.task_id, t.task_name, h.version_no, h.progress_effect, "
+                "h.completion_time, h.reporter_id, h.report_time "
+                f"FROM task_group_progress_history h {joins} WHERE {clause} "
+                "ORDER BY h.task_id, h.version_no DESC, h.id DESC",
+                params,
+                caliber="；".join(caliber),
+                limit=limit,
+            )
+            first = totals["rows"][0] if totals["rows"] else {}
+            # Counting questions must survive the 200-row cap: the board has 362
+            # published rows, so a caller seeing 200 + has_more cannot recover it.
+            rows["total_count"] = first.get("total_rows")
+            rows["total_tasks"] = first.get("total_tasks")
+            return rows
+
+        expression, order = _GROUP_HISTORY_GROUPINGS[grouping]
+        select = f"{expression} AS bucket, COUNT(*) AS progress_count"
+        if grouping not in ("task",):
+            select += ", COUNT(DISTINCT h.task_id) AS task_count"
+        return store.fetch(
+            f"SELECT {select} FROM task_group_progress_history h {joins} "
+            f"WHERE {clause} GROUP BY bucket ORDER BY {order}",
+            params,
+            caliber="；".join(caliber) + f"；按 {grouping} 分组计数",
+            limit=limit,
+        )
+
+    return _guard("weekly_group_history", work)
+
+
+@mcp.tool()
+def weekly_group_stats(scope: str = "owners", top: int = 8, min_rounds: int = 0) -> str:
+    """Aggregate stats over the 集团组 board that plain listing cannot answer.
+
+    Args:
+        scope: ``owners`` (multi vs single lead, distinct leads),
+            ``completion_time`` (ISO vs free text vs blank),
+            ``field_lengths`` (target_result char stats),
+            ``attachments`` (per-task counts, zero kept),
+            ``history_rounds`` (rounds per task, and how many clear ``min_rounds``).
+        top: Row cap for the listing scopes.
+        min_rounds: For ``history_rounds``, count tasks with at least this many
+            published rounds. Inclusive -- "at least 5" means ``>= 5``.
+    """
+
+    def work() -> dict[str, Any]:
+        key = (scope or "owners").strip().lower()
+        if key not in _GROUP_STATS_SCOPES:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported_scope",
+                    "message": f"不支持的口径：{scope}；支持 {', '.join(_GROUP_STATS_SCOPES)}",
+                },
+            }
+        bounded = max(1, min(store.MAX_ROWS, int(top)))
+        clause = store.formal_task_clause()
+        join = store.group_board_join()
+        base = f"{store.FORMAL_TASK_CALIBER}；集团看板"
+
+        if key == "owners":
+            summary = store.fetch(
+                "SELECT COUNT(*) AS tasks, "
+                "SUM(d.lead_owner_ids LIKE '%%,%%') AS multi_lead, "
+                "SUM(d.lead_owner_ids NOT LIKE '%%,%%' AND d.lead_owner_ids <> '') AS single_lead, "
+                "SUM(d.lead_owner_ids = '' OR d.lead_owner_ids IS NULL) AS no_lead "
+                f"FROM task_group_detail d JOIN task t ON t.id = d.task_id {join} WHERE {clause}",
+                caliber=f"{base}；牵头人多值按逗号判定",
+                limit=1,
+            )
+            # Splitting the multi-value column needs a row source per position;
+            # 4 covers the widest cell in this store (max 2 today, headroom kept).
+            distinct = store.scalar(
+                "SELECT COUNT(*) AS distinct_leads FROM ("
+                "SELECT DISTINCT SUBSTRING_INDEX(SUBSTRING_INDEX(d.lead_owner_ids, ',', n.n), ',', -1) AS uid "
+                f"FROM task_group_detail d JOIN task t ON t.id = d.task_id {join} "
+                "JOIN (SELECT 1 n UNION SELECT 2 UNION SELECT 3 UNION SELECT 4) n "
+                "ON n.n <= LENGTH(d.lead_owner_ids) - LENGTH(REPLACE(d.lead_owner_ids, ',', '')) + 1 "
+                f"WHERE {clause} AND d.lead_owner_ids <> '') x",
+                caliber=f"{base}；逐元素拆分后去重计数",
+            )
+            summary["distinct_leads"] = distinct["value"]
+            return summary
+
+        if key == "completion_time":
+            return store.fetch(
+                "SELECT COUNT(*) AS tasks, "
+                "SUM(d.completion_time REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2}$') AS iso_date, "
+                "SUM(d.completion_time IS NOT NULL AND d.completion_time <> '' "
+                "AND d.completion_time NOT REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2}$') AS free_text, "
+                "SUM(d.completion_time IS NULL OR d.completion_time = '') AS blank "
+                f"FROM task_group_detail d JOIN task t ON t.id = d.task_id {join} WHERE {clause}",
+                caliber=f"{base}；completion_time 为展示文本，只做格式判别不做日期运算（R-12）",
+                limit=1,
+            )
+
+        if key == "field_lengths":
+            return store.fetch(
+                "SELECT COUNT(*) AS tasks, ROUND(AVG(CHAR_LENGTH(d.target_result)), 1) AS avg_chars, "
+                "MAX(CHAR_LENGTH(d.target_result)) AS max_chars, "
+                "MIN(CHAR_LENGTH(d.target_result)) AS min_chars "
+                f"FROM task_group_detail d JOIN task t ON t.id = d.task_id {join} "
+                f"WHERE {clause} AND d.target_result IS NOT NULL AND d.target_result <> ''",
+                caliber=f"{base}；仅统计 target_result 非空的任务；CHAR_LENGTH 按字符非字节",
+                limit=1,
+            )
+
+        if key == "attachments":
+            summary = store.fetch(
+                "SELECT COUNT(*) AS tasks, SUM(NOT EXISTS (SELECT 1 FROM task_attachment a "
+                "WHERE a.task_id = t.id AND a.is_deleted = 0)) AS no_attachment "
+                f"FROM task t {join} WHERE {clause}",
+                caliber=f"{base}；附件按 is_deleted = 0 计有效",
+                limit=1,
+            )
+            # LEFT JOIN, so tasks with zero attachments stay in the listing rather
+            # than vanishing -- the inner_join_drops_zero trap, and 18 of 46 tasks
+            # here have none, which is usually the point of asking.
+            rows = store.fetch(
+                "SELECT t.id AS task_id, t.task_name, COUNT(a.id) AS attachments "
+                f"FROM task t {join} "
+                "LEFT JOIN task_attachment a ON a.task_id = t.id AND a.is_deleted = 0 "
+                f"WHERE {clause} GROUP BY t.id, t.task_name "
+                "ORDER BY attachments ASC, t.id",
+                caliber=f"{base}；LEFT JOIN 保留零附件任务（R-08）",
+                limit=bounded,
+            )
+            rows["no_attachment_summary"] = summary["rows"][0] if summary["rows"] else {}
+            return rows
+
+        threshold = max(0, int(min_rounds))
+        rows = store.fetch(
+            "SELECT t.id AS task_id, t.task_name, COUNT(h.id) AS rounds "
+            f"FROM task t {join} "
+            "LEFT JOIN task_group_progress_history h ON h.task_id = t.id AND h.is_published = 1 "
+            f"WHERE {clause} GROUP BY t.id, t.task_name ORDER BY rounds DESC, t.id",
+            caliber=f"{store.GROUP_HISTORY_CALIBER}；LEFT JOIN 保留零期任务（R-08）",
+            limit=bounded,
+        )
+        if threshold:
+            cleared = store.scalar(
+                "SELECT COUNT(*) AS tasks FROM (SELECT h.task_id "
+                f"FROM task_group_progress_history h JOIN task t ON t.id = h.task_id {join} "
+                f"WHERE {store.group_history_gate()} "
+                "GROUP BY h.task_id HAVING COUNT(*) >= %(n)s) x",
+                {"n": threshold},
+                caliber=f"至少 {threshold} 期（含 {threshold}，边界取等）",
+            )
+            rows["tasks_at_least"] = {"min_rounds": threshold, "tasks": cleared["value"]}
+        return rows
+
+    return _guard("weekly_group_stats", work)
 
 
 @mcp.tool()
