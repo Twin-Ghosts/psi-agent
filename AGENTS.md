@@ -151,10 +151,10 @@ src/
         │   ├── spa/                # Vue 3 SPA v1（Vite + SFC）
         │   └── spa-v2/             # React SPA v2（任务工作台；默认 GET /）
         └── feishu/                  # **ToB 专属层**
-            ├── _routes.py          # register_feishu_routes + /feishu/route /feishu/routes /oauth/callback /oauth/code
+            ├── _routes.py          # register_feishu_routes + /feishu/route /feishu/routes /feishu-web/；register_oauth_routes + /oauth/callback /oauth/code
             ├── _feishu_manager.py  # FeishuManager — 飞书 open_id → Session 路由
             ├── _oauth_manager.py   # OAuthRelay — OAuth 回调中继（免手抄授权码；取件方全在 ToB 一侧）
-            └── _openapi.py         # ToB path 片段（/feishu/* /oauth/*）
+            └── _openapi.py         # ToB path 片段（FEISHU_PATHS /feishu/*）+ OAUTH_PATHS（/oauth/*，与产品线正交）
 ```
 
 gateway 内部同样是**单向**的：骨架层不 import `desktop/` 与 `feishu/`，两条产品线由各自包内的 `register_desktop_routes()`（`desktop/_routes.py`）/ `register_feishu_routes()`（`feishu/_routes.py`）往骨架产出的 app 上贴。归属判据是「这段代码认识哪些概念」，不是「当前谁在调用」。A5 搬完模块后这条曾不成立——两个装配函数还留在 `server.py`，骨架为给它们备料反向 import 了 7 个产品符号；A7 把函数连同专属 handler 搬进产品包收掉。判据命令与 `_openapi.py` 那一处刻意例外（只碰 dict 数据、不碰产品行为）见 `gateway/AGENTS.md`「依赖方向」。

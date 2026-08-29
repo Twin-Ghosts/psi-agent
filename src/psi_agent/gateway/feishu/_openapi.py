@@ -4,6 +4,11 @@
 
 ``/oauth/*`` 两条从 ``_openapi_core`` 挪来: 取件方(实测)全在 ``workspace/tob/tools/``,
 ToC 的登录走手机号 + 验证码不经过 OAuth 跳转 —— 详见 ``_oauth_manager`` 模块头。
+
+**但它们自成 ``OAUTH_PATHS``, 不在 ``FEISHU_PATHS`` 里**: 路由侧
+``register_oauth_routes()`` 每种 ``--product-line`` 组合都贴 (回调地址登记在第三方应用
+后台, 不随本进程挂了哪条线而变), 所以 spec 也必须每种组合都报 —— 挂在 feishu 开关上
+就会出现「路由在、spec 里没有」的错报。三份片段变四份, 并集与拆分前一致。
 """
 
 from __future__ import annotations
@@ -49,6 +54,9 @@ FEISHU_PATHS: dict[str, Any] = {
             },
         },
     },
+}
+
+OAUTH_PATHS: dict[str, Any] = {
     "/oauth/callback": {
         "get": {
             "summary": "OAuth redirect landing point (relays the code, no manual copy)",

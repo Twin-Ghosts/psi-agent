@@ -76,6 +76,7 @@ async def _handle_openapi(request: web.Request) -> web.Response:
     body = render_openapi(
         desktop=bool(request.app.get("openapi_desktop")),
         feishu=bool(request.app.get("openapi_feishu")),
+        oauth=bool(request.app.get("openapi_oauth")),
     )
     return web.Response(text=body, content_type="application/json")
 
@@ -176,9 +177,12 @@ async def create_core_app(
     app["default_workspace"] = default_workspace
     app["appdata"] = appdata
     # ``GET /openapi.json`` 只报本进程真的注册了的那些 path —— 各 register_* 把自己
-    # 那面旗子立起来 (见 ``_openapi.build_openapi_spec`` 的两个开关)。
+    # 那面旗子立起来 (见 ``_openapi.build_openapi_spec`` 的三个开关)。
     app["openapi_desktop"] = False
     app["openapi_feishu"] = False
+    # ``/oauth/*`` 与产品线正交, 但仍由 ``register_oauth_routes`` 立旗 —— 骨架单独建的
+    # app (测试、只用 REST 的调用方) 没贴过那两条路由, spec 里也不该报。
+    app["openapi_oauth"] = False
 
     app.router.add_get("/openapi.json", _handle_openapi)
     app.router.add_post("/ais", _create_ai)

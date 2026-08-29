@@ -7,6 +7,12 @@ A7: 与 ``desktop/_routes.py`` 同一个原因搬过来 —— 装配函数留�
 ``/oauth/*`` 两条也在这里: 取件方(实测)全在 ``workspace/tob/tools/`` 一侧, ToC 的登录走
 手机号 + 验证码不经过 OAuth 跳转 —— 理由详见 ``_oauth_manager`` 模块头。
 
+但它们由**独立的** ``register_oauth_routes()`` 注册, 不跟着 ``--product-line`` 走: 归属
+(代码住哪)与可达性(哪个进程有这两条)是两件事。回调地址 ``PSI_OAUTH_CALLBACK_BASE``
+要提前登记到第三方应用后台, 一个进程组合少贴这两条, 表现是用户点完授权拿到 404 ——
+而不是某个功能没开。``register_feishu_routes()`` 在原位置调它, 只挂 ToC 的进程由
+``Gateway.run`` 自己调, 于是任何组合下都在。
+
 ``_json`` / ``_error`` 从骨架 import: 方向是产品 → 骨架, 正是允许的那一向。
 """
 
@@ -139,6 +145,24 @@ async def _oauth_take_code(request: web.Request) -> web.Response:
     return _json({"state": state, "code": pending.code}, status=200)
 
 
+def register_oauth_routes(app: web.Application) -> web.Application:
+    """``/oauth/callback`` + ``/oauth/code`` 与它们共用的 ``OAuthRelay`` 信箱。
+
+    **与产品线正交, 每种 ``--product-line`` 组合都要贴。** 单独成函数正是为此: 只挂 ToC
+    的进程也得有这两条, 否则 ``PSI_OAUTH_CALLBACK_BASE`` 指过来的授权回调落到 404 ——
+    那个地址登记在第三方应用后台, 不随本进程挂了哪条产品线而变。
+
+    代码仍住 ``feishu/``, 按的是存在性判据: 取件方(实测)全在 ``workspace/tob/tools/``。
+    归属与可达性是两件事, 后者由调用点保证 (``register_feishu_routes`` 或 ``Gateway.run``,
+    恰好一处调到)。
+    """
+    app["oauth"] = OAuthRelay()
+    app["openapi_oauth"] = True
+    app.router.add_get("/oauth/callback", _oauth_callback)
+    app.router.add_get("/oauth/code", _oauth_take_code)
+    return app
+
+
 def register_feishu_routes(
     app: web.Application,
     *,
@@ -157,14 +181,13 @@ def register_feishu_routes(
     """
     sm: SessionManager = app["sm"]
     app["fm"] = FeishuManager(_sm=sm, _ai_id=feishu_ai_id, _workspace_root=feishu_workspace_root)
-    app["oauth"] = OAuthRelay()
     app["openapi_feishu"] = True
     app.router.add_post("/feishu/route", _feishu_route)
     app.router.add_get("/feishu/routes", _list_feishu_routes)
-    # ``/oauth/*`` 跟着 ``OAuthRelay`` 一起归本包: 取件方全在 ToB 一侧。ToC 进程照样有这
-    # 两条 —— 唯一的生产入口 ``gateway/__init__.py`` 两条线都贴, 所以行为不变。
-    app.router.add_get("/oauth/callback", _oauth_callback)
-    app.router.add_get("/oauth/code", _oauth_take_code)
+    # ``/oauth/*`` 归本包(取件方全在 ToB 一侧), 但注册与产品线开关解耦 —— 见
+    # ``register_oauth_routes``。在此处调用是为了让 ``both`` 组合的注册顺序与拆分前
+    # 逐条不变; 幂等由调用方保证 (``Gateway.run`` 只在不挂飞书时自己调)。
+    register_oauth_routes(app)
 
     # ToB 前端的静态挂载点 —— 写法参照 ToC 侧两个 ``add_static``, 但存在性判断用同步的
     # ``pathlib``: 本函数是 ``def`` 而非 ``async def``, 改成协程要动 4 个调用点, 而这里

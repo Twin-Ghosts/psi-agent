@@ -6,6 +6,7 @@ import os
 import socket
 import webbrowser
 from dataclasses import dataclass
+from typing import Literal
 
 import anyio
 from aiohttp import web
@@ -22,7 +23,7 @@ from psi_agent.gateway.desktop._routes import register_desktop_routes
 from psi_agent.gateway.desktop._spa_shell import DEFAULT_APP_NAME
 from psi_agent.gateway.desktop._tray import GatewayTray
 from psi_agent.gateway.desktop._webview import GatewayWebView
-from psi_agent.gateway.feishu._routes import register_feishu_routes
+from psi_agent.gateway.feishu._routes import register_feishu_routes, register_oauth_routes
 from psi_agent.gateway.server import create_core_app
 from psi_agent.runtime._ai_manager import AIManager
 from psi_agent.runtime._router_manager import RouterManager, RouterUpstreamInfo
@@ -41,6 +42,26 @@ def _random_port() -> int:
         s.close()
 
 
+async def _redirect_to_feishu_web(request: web.Request) -> web.Response:
+    """``--product-line feishu`` 下的 ``GET /``: 302 到 ``/feishu-web/``。
+
+    只在不挂 ToC 时注册。ToC 的 ``GET /`` 有 spa-v2 → spa 的降级链 (``desktop/_routes.py``),
+    两条线都挂时根路径仍归它, 行为不变。
+
+    刻意用重定向而不是直接返回 ToB 的 index: 静态挂载点 ``/feishu-web/`` 是 ``vite.config.ts``
+    的 ``base``, 前端资源路径都以它开头; 在 ``/`` 直接吐 index 会让相对资源请求打到根下而
+    404。dist 目录不存在时 ``/feishu-web/`` 本身没注册, 用户跟着跳过去拿 404 —— 与只挂
+    ToC 且 dist 缺失时的表现一致 (没有产物就是没有前端), 不再额外造一个假页面。
+
+    **指向 ``index.html`` 而不是目录** (实测): ``add_static(..., show_index=False)`` 对
+    ``/feishu-web/`` 这个裸目录回 **403** 而非 index (ToC 侧靠 ``add_static`` 之前另注册
+    三条 ``→ index.html`` 的 handler 绕过, 见 ``desktop/_routes.py`` 那句注释)。跳到目录
+    会让 ToB 单挂时的首页变成 403; 直接跳文件即可, 无需给飞书侧补那三条 —— 补了会改动
+    ``both`` 默认组合的路由集合, 而那一条要求逐条不变。
+    """
+    return web.Response(status=302, headers={"Location": "/feishu-web/index.html"})
+
+
 @dataclass
 class Gateway:
     """Start the gateway REST + Web UI server."""
@@ -49,7 +70,32 @@ class Gateway:
     """Listen address. Empty = random high port on 127.0.0.1."""
 
     socket_path: str = "psi"
-    """Prefix for AI/Session socket paths (Unix sockets on POSIX, Named Pipes on Windows)."""
+    """Prefix for AI/Session socket paths (Unix sockets on POSIX, Named Pipes on Windows).
+
+    **两个 Gateway 同时跑时必须给不同值** (或改 ``--default-workspace``, 见下)。冲突不来自
+    共享前缀, 而是**同一个完整管道名**: 同 workspace 的调度 Session id 由 workspace 路径的
+    sha256 确定性派生 (``runtime/_scheduler_manager.py``), 两个进程必然算出同一个名字;
+    ``_session_manager`` 的去重只在进程内, 抓不到跨进程重名。Windows 上表现为
+    ``PermissionError(13, ...)`` / ``[WinError 5] 拒绝访问``。
+    """
+
+    product_line: Literal["both", "desktop", "feishu"] = "both"
+    """挂哪条(哪几条)产品线的前端与路由。**默认 both = 现有行为, 一条都不少。**
+
+    - ``both``    ToC (``/spa/`` ``/spa-v2/`` ``/ui/*`` ``/workspace/*`` ``/auth/*``) +
+      ToB (``/feishu/*`` ``/feishu-web/``)。生产入口用这个: 飞书容器起的也是它。
+    - ``desktop`` 只挂 ToC。``/feishu/*`` 与 ``/feishu-web/`` 不注册 (404)。
+    - ``feishu``  只挂 ToB。``/spa*`` ``/ui/*`` ``/workspace/*`` ``/auth/*`` 不注册,
+      ``GET /`` 302 到 ``/feishu-web/index.html`` (dist 缺失时那条静态挂载本身没注册,
+      跟过去拿 404 —— 无 ToC 外壳可降级)。
+
+    枚举而非两个布尔: 布尔组合允许「都关」, 那是个起了服务但没有任何前端的无意义状态。
+    骨架 REST (``/ais`` ``/sessions`` …) 与 ``/oauth/*`` 每种取值下都在 —— 前者是两条线
+    共用的内核面, 后者的回调地址登记在第三方应用后台, 不随本进程挂了哪条线而变。
+
+    ``--default-agent`` 是**独立的一维**: 本参数只决定挂哪套 HTTP 面, agent 包选哪个由它
+    决定 (空则软默认, 见该字段)。开发时挂飞书前端配 ToC agent 是合法组合, 不予阻止。
+    """
 
     icon: str | None = None
     """Path to icon image file (png/jpg/ico). Used as favicon, tray icon (--tray), and webview icon (--webview)."""
@@ -237,11 +283,13 @@ class Gateway:
 
             attention = AttentionHub()
             schedm = SchedulerManager(_sm=sm, _ai_id=self.scheduler_ai_id or self.feishu_ai_id)
-            # 骨架 + 两条产品线各自往上贴。**这一个进程仍然两条线都贴**: `psi-agent
-            # gateway` 是唯一的入口, 生产上飞书容器起的也是它 (同容器里另起一个
-            # `psi-agent channel feishu` 连过来), 所以这里少贴哪一面都是行为回归。
-            # 拆分的收益落在装配函数上 —— 谁认识什么现在写在函数签名里, 只想起一条线
-            # 的进程 (ToB 容器、测试) 只贴自己那面即可。
+            # 骨架 + 按 --product-line 贴产品线。**默认 both 仍是两条都贴**: 生产上飞书
+            # 容器起的也是 `psi-agent gateway` (同容器里另起一个 `psi-agent channel
+            # feishu` 连过来), 默认值一动就是静默的行为回归。开发时用 desktop / feishu
+            # 单挂一条, 省掉另一条线的前端与 manager。
+            want_desktop = self.product_line in ("both", "desktop")
+            want_feishu = self.product_line in ("both", "feishu")
+            logger.info(f"Product line: {self.product_line} (desktop={want_desktop}, feishu={want_feishu})")
             app = await create_core_app(
                 aim,
                 sm,
@@ -254,18 +302,28 @@ class Gateway:
                 schedm=schedm,
                 sum_m=sum_m,
             )
-            await register_desktop_routes(
-                app,
-                favicon_path=self.icon,
-                app_name=self.app_name,
-                attention=attention,
-                authm=authm,
-            )
-            register_feishu_routes(
-                app,
-                feishu_ai_id=self.feishu_ai_id,
-                feishu_workspace_root=self.feishu_workspace_root,
-            )
+            if want_desktop:
+                await register_desktop_routes(
+                    app,
+                    favicon_path=self.icon,
+                    app_name=self.app_name,
+                    attention=attention,
+                    authm=authm,
+                )
+            if want_feishu:
+                register_feishu_routes(
+                    app,
+                    feishu_ai_id=self.feishu_ai_id,
+                    feishu_workspace_root=self.feishu_workspace_root,
+                )
+                # ``GET /`` 的兜底链住在 ToC 那边 (spa-v2 → spa)。只挂飞书时那条链没注册,
+                # 根路径得自己交代去处, 否则用户访问裸地址拿到 404 还以为服务没起来。
+                if not want_desktop:
+                    app.router.add_get("/", _redirect_to_feishu_web)
+            else:
+                # 只挂 ToC: ``/oauth/*`` 随飞书装配一起没了, 这里补上 —— 回调地址登记在
+                # 第三方应用后台, 少这两条就是用户点完授权落到 404。
+                register_oauth_routes(app)
 
             # Restored sessions need a scheduler Session for their workspace too
             # (on demand: skipped when there are no schedules).
