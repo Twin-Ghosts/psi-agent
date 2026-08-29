@@ -46,7 +46,7 @@ def _load(path: Path) -> Any:
     return module
 
 
-# Verbatim from workspace/tob/HEARTBEAT.md — the text that actually
+# Verbatim from agents/feishu/HEARTBEAT.md — the text that actually
 # hijacked compaction in the observed history.
 HEARTBEAT_TASK = (
     "# Heartbeat Task\n\n"

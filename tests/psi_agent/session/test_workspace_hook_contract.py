@@ -84,7 +84,7 @@ EXPECTED: dict[str, tuple[str, ...]] = {
 # Sibling helpers the workspaces import by bare name. Several ship their own
 # copy, so a cached entry from one workspace satisfies the next one's import and
 # loads the wrong file — which is itself one of the silent failures this guards:
-# ``workspace/tob`` resolves 0 of 6 hooks if ``openclaw``'s ``prompt_sections``
+# ``agents/feishu`` resolves 0 of 6 hooks if ``openclaw``'s ``prompt_sections``
 # is left in ``sys.modules``.
 _SIBLING_MODULES = (
     "prompt_sections",

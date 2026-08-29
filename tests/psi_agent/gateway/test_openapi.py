@@ -60,7 +60,7 @@ def test_fragments_own_only_their_own_prefixes() -> None:
     assert all(k.startswith(("/ui/", "/workspace/")) for k in DESKTOP_PATHS)
     assert all(k.startswith(("/feishu/", "/oauth/")) for k in FEISHU_PATHS)
     assert not any(k.startswith(("/ui/", "/workspace/", "/feishu/", "/oauth/")) for k in CORE_PATHS)
-    # /oauth/* 归 ToB: 取件方全在 workspace/tob/tools 一侧, ToC 的登录不走 OAuth 跳转。
+    # /oauth/* 归 ToB: 取件方全在 agents/feishu/tools 一侧, ToC 的登录不走 OAuth 跳转。
     assert {"/oauth/callback", "/oauth/code"} <= set(FEISHU_PATHS)
 
 
