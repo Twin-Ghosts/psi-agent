@@ -76,6 +76,21 @@ class Gateway:
     群聊每个 chat_id 得到 ``<root>/chat-<chat_id>``, 文件/历史互相隔离。空 = 以 Gateway 进程
     cwd 为父目录。"""
 
+    feishu_app_id: str = ""
+    """飞书自建应用的 App ID (CLI 参数 > ``PSI_FEISHU_APP_ID`` 环境变量)。
+
+    网页应用免登要用它: 前端经 ``GET /feishu/app-id`` 取, 再传给 ``tt.requestAccess``;
+    后端拿它 + secret 把 code 换成 ``user_access_token``。空 = 未配, ``/auth/feishu``
+    返回 400 (而非 500), 前端显示「未配置免登」。
+    """
+
+    feishu_app_secret: str = ""
+    """飞书自建应用的 App Secret (CLI 参数 > ``PSI_FEISHU_APP_SECRET`` 环境变量)。
+
+    **只在服务端使用, 永不下发前端** —— ``GET /feishu/app-id`` 只回 app_id。与 channel
+    侧读的是同一对凭证 (同一个自建应用), 但两个进程各自读环境变量, 不互相传递。
+    """
+
     default_agent: str = ""
     """CLI: default agent package for new Sessions / GET /defaults.
 
@@ -265,6 +280,8 @@ class Gateway:
                 app,
                 feishu_ai_id=self.feishu_ai_id,
                 feishu_workspace_root=self.feishu_workspace_root,
+                feishu_app_id=self.feishu_app_id or os.environ.get("PSI_FEISHU_APP_ID", ""),
+                feishu_app_secret=self.feishu_app_secret or os.environ.get("PSI_FEISHU_APP_SECRET", ""),
             )
 
             # Restored sessions need a scheduler Session for their workspace too

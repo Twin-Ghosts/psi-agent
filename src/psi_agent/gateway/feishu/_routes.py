@@ -18,9 +18,10 @@ from pathlib import Path
 from aiohttp import web
 from loguru import logger
 
+from psi_agent.gateway.feishu._auth import AuthError, FeishuAuth, Identity, dev_open_id
 from psi_agent.gateway.feishu._feishu_manager import FeishuManager
 from psi_agent.gateway.feishu._oauth_manager import OAuthRelay
-from psi_agent.gateway.server import _error, _json
+from psi_agent.gateway.server import _error, _json, _read_json
 from psi_agent.runtime._scheduler_manager import SchedulerManager
 from psi_agent.runtime._session_manager import SessionManager
 
@@ -89,6 +90,112 @@ async def _list_feishu_routes(request: web.Request) -> web.Response:
     return _json([asdict(r) for r in fm.list_routes()])
 
 
+SID_COOKIE = "psi_feishu_sid"
+"""登录态 cookie 名。``HttpOnly`` 是要点: 页面脚本读不到它, XSS 也偷不走登录态。"""
+
+
+def current_identity(request: web.Request) -> Identity | None:
+    """当前请求的身份, 未登录返回 None。
+
+    唯一来源是 ``HttpOnly`` cookie 里的 sid —— **不读 body/query 里的 open_id**。
+    前端能伪造任何字段, 但伪造不出一个签发过的高熵 sid。会话过滤路由 (见下) 全部
+    经由本函数取身份, 于是「谁在问」只有一个判据。
+    """
+    auth: FeishuAuth = request.app["feishu_auth"]
+    return auth.lookup(request.cookies.get(SID_COOKIE, ""))
+
+
+async def _auth_feishu(request: web.Request) -> web.Response:
+    """``POST /auth/feishu`` —— body ``{code}`` → ``{open_id, name}`` + 登录 cookie。
+
+    **body 里的 ``open_id`` 一律忽略**: 身份只能是 ``code`` 换回来的。前端传了也不看,
+    这是本端点的安全前提。
+
+    ``PSI_FEISHU_DEV_OPEN_ID`` 设了才有开发旁路, 且每次打 WARNING。默认不设置 → 无 code
+    就是 400。
+    """
+    auth: FeishuAuth = request.app["feishu_auth"]
+    body = await _read_json(request)
+    code = ""
+    if isinstance(body, dict):
+        code = str(body.get("code") or "")
+
+    if not code:
+        # dev_open_id() 自己就打 WARNING (Task 3 已实现), 这里不要再打第二遍:
+        # 同一次旁路登录刷两条同义告警, 只会让真正的告警更难被看见。
+        bypass = dev_open_id()
+        if bypass:
+            return _issue_login(Identity(open_id=bypass, name=bypass), auth)
+        return _error("missing code", status=400)
+
+    try:
+        identity = await auth.identity_from_code(code)
+    except AuthError as e:
+        # 伪造/过期 code, 或 Gateway 未配凭证 —— 都是 4xx, 不是 500。
+        logger.info(f"Feishu login rejected: {e}")
+        return _error(str(e), status=400)
+    except Exception as e:
+        logger.error(f"Unexpected error during Feishu login: {e!r}")
+        return _error("login failed", status=500)
+    return _issue_login(identity, auth)
+
+
+def _issue_login(identity: Identity, auth: FeishuAuth) -> web.Response:
+    """签发登录 cookie 并回身份。
+
+    ``auth`` 必填而非可选: 两个调用点 (正常登录与开发旁路) 都必须签 cookie, 漏签的表现
+    是登录看着成功、下一秒 ``/auth/me`` 401 —— 可选参数只会让这种漏法静默通过。
+    """
+    resp = _json({"open_id": identity.open_id, "name": identity.name})
+    resp.set_cookie(
+        SID_COOKIE,
+        auth.issue(identity),
+        httponly=True,
+        samesite="Lax",
+        path="/",
+    )
+    return resp
+
+
+async def _auth_me(request: web.Request) -> web.Response:
+    identity = current_identity(request)
+    if identity is None:
+        return _error("not logged in", status=401)
+    return _json({"open_id": identity.open_id, "name": identity.name})
+
+
+async def _auth_logout(request: web.Request) -> web.Response:
+    auth: FeishuAuth = request.app["feishu_auth"]
+    auth.revoke(request.cookies.get(SID_COOKIE, ""))
+    resp = _json({"status": "ok"})
+    resp.del_cookie(SID_COOKIE, path="/")
+    return resp
+
+
+async def _feishu_app_id(request: web.Request) -> web.Response:
+    """前端免登要的 appID —— **只给 app_id, 永不给 app_secret**。
+
+    前端因此不必写死 appID (PR 755 把它连同一个真实 open_id 一起硬编码在前端, 上云后
+    所有访问者都变成同一个人)。未配置时返回空串而非 404: 前端据此显示「未配置免登」
+    这条可读的提示, 而不是撞一个语义不明的 404。
+    """
+    auth: FeishuAuth = request.app["feishu_auth"]
+    return _json({"app_id": auth.app_id})
+
+
+def register_auth_routes(app: web.Application) -> web.Application:
+    """把登录四条路由贴到 *app*。
+
+    与 ``register_feishu_routes`` 分开是为了让单测能只贴这几条 —— 那边会建
+    ``FeishuManager``, 要求一个真的 ``SessionManager`` 与 task group。
+    """
+    app.router.add_post("/auth/feishu", _auth_feishu)
+    app.router.add_get("/auth/me", _auth_me)
+    app.router.add_post("/auth/logout", _auth_logout)
+    app.router.add_get("/feishu/app-id", _feishu_app_id)
+    return app
+
+
 _OAUTH_DONE_HTML = (
     "<!doctype html><meta charset=utf-8><title>授权完成</title>"
     "<body style='font:16px/1.7 system-ui;padding:3rem;text-align:center'>"
@@ -144,6 +251,8 @@ def register_feishu_routes(
     *,
     feishu_ai_id: str = "",
     feishu_workspace_root: str = "",
+    feishu_app_id: str = "",
+    feishu_app_secret: str = "",
 ) -> web.Application:
     """ToB: 飞书会话 → Session 的路由表。
 
@@ -159,6 +268,13 @@ def register_feishu_routes(
     app["fm"] = FeishuManager(_sm=sm, _ai_id=feishu_ai_id, _workspace_root=feishu_workspace_root)
     app["oauth"] = OAuthRelay()
     app["openapi_feishu"] = True
+    # 网页应用免登。**Gateway 从此持有 app_secret** —— 与 ``_oauth_manager`` 模块头那句
+    # 「Gateway 侧刻意不碰 token 交换: 不知道 app_secret」是一次有意的变更, 不是疏漏:
+    # 免登必须由后端拿 code 去换 token, 换的动作只能发生在知道 secret 的一侧, 而这一侧
+    # 必须是服务端 (放前端等于公开 secret)。OAuthRelay 那条路径**照旧不碰 token**,
+    # 两者互不影响。
+    app["feishu_auth"] = FeishuAuth(app_id=feishu_app_id, app_secret=feishu_app_secret)
+    register_auth_routes(app)
     app.router.add_post("/feishu/route", _feishu_route)
     app.router.add_get("/feishu/routes", _list_feishu_routes)
     # ``/oauth/*`` 跟着 ``OAuthRelay`` 一起归本包: 取件方全在 ToB 一侧。ToC 进程照样有这
