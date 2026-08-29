@@ -12,7 +12,7 @@ You write Python functions and Markdown. The framework handles socket communicat
 - **Workspace is the agent**: Drop Python functions in `workspace/` for tools, write a system prompt for personality, add a cron for scheduled tasks
 - **Streaming interactions**: REPL/CLI show AI reasoning (dimmed) and final response in real time
 - **One-command launch**: `psi-agent run config.yml` starts AI + Session + Channel from a single YAML
-- **Web management console**: `psi-agent gateway` starts a REST API + Web Console SPA for visual management
+- **Web management console**: `psi-agent gateway --gateway desktop` starts a REST API + Web Console SPA for visual management
 
 ## Architecture
 
@@ -23,7 +23,7 @@ User ←→ Web UI → HTTP → Gateway ── TCP/Unix/Named Pipe ── Sessio
 
 AI layer is stateless. Session maintains conversation history. Channel is a pure UI client — the three core components are independent processes communicating via the OpenAI Chat Completions HTTP/SSE protocol over sockets. Gateway provides an HTTP bridge for the Web UI, internally reusing Channel sockets to communicate with Session.
 
-For developers: start components independently, mix and match for debugging and customization. For users: `psi-agent run config.yml` launches everything in one command, and `psi-agent gateway` provides a visual web console for managing everything.
+For developers: start components independently, mix and match for debugging and customization. For users: `psi-agent run config.yml` launches everything in one command, and `psi-agent gateway --gateway desktop` provides a visual web console for managing everything.
 
 ## Quick Start
 
