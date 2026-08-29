@@ -23,7 +23,7 @@ async def weekly_task_query(
     status: str = "",
     owner: str = "",
     keyword: str = "",
-    limit: int = 50,
+    limit: int = 200,
 ) -> str:
     """Query formal weekly-report tasks with optional filters.
 

@@ -23,12 +23,35 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _db
 import _store as store
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 mcp = FastMCP("guoshu-weekly-mock")
 
 BEARER_TOKEN = os.environ.get("GUOSHU_WEEKLY_MOCK_TOKEN", "demo-token")
 SENSITIVE_TOKEN = os.environ.get("GUOSHU_WEEKLY_MOCK_ADMIN_TOKEN", "demo-admin-token")
+
+
+def _caller_may_read_sensitive(ctx: Context | None) -> bool:
+    """Decide sensitive-field access from the caller's bearer token.
+
+    R-04/R-14 say approval opinions are returned *by permission* -- blanket
+    redaction fails the requirement just as surely as blanket exposure does, and
+    it also makes the capability untestable.  The decision is taken here, from
+    the transport's Authorization header, because that is the one input the model
+    cannot influence: nothing a user or a prompt says can widen this.
+
+    In production the header maps to an OA identity and a row-level policy; the
+    demo has two fixed tokens so the two branches are both exercisable.
+    """
+    if ctx is None:
+        return False
+    request = getattr(ctx.request_context, "request", None)
+    if request is None:
+        return False
+    headers = getattr(request, "headers", None) or {}
+    raw = headers.get("authorization") or headers.get("Authorization") or ""
+    token = raw.removeprefix("Bearer").removeprefix("bearer").strip()
+    return bool(token) and token == SENSITIVE_TOKEN
 
 
 def _dump(payload: dict[str, Any]) -> str:
@@ -75,10 +98,28 @@ def weekly_schema(board: str = "") -> str:
             params,
             caliber="is_deleted = 0；parent_id 为空是一级分类",
         )
+        # Column lists answer "which fields does table X have" without the agent
+        # having to reverse-engineer them from a sample row (it guessed 8 of 9
+        # that way and missed is_deleted).  Blocked fields are filtered out here,
+        # so they are absent from the schema as well as from the data.
+        columns = store.fetch(
+            "SELECT TABLE_NAME AS table_name, COLUMN_NAME AS column_name, "
+            "DATA_TYPE AS data_type, COLUMN_COMMENT AS comment "
+            "FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = %(db)s AND COLUMN_NAME NOT IN %(blocked)s "
+            "ORDER BY TABLE_NAME, ORDINAL_POSITION",
+            {"db": _db.DB_NAME, "blocked": tuple(sorted(store.BLOCKED_FIELDS))},
+            caliber=f"已排除禁止外泄字段：{', '.join(sorted(store.BLOCKED_FIELDS))}",
+            limit=store.MAX_ROWS,
+        )
+        by_table: dict[str, list[str]] = {}
+        for row in columns["rows"]:
+            by_table.setdefault(str(row["table_name"]), []).append(str(row["column_name"]))
         return {
             "ok": True,
             "boards": boards["rows"],
             "categories": categories["rows"],
+            "table_columns": by_table,
             "field_notes": {
                 "formal_task": store.FORMAL_TASK_CALIBER,
                 "status": "0未开始 / 1进行中 / 2已完成 / 3已停用",
@@ -86,8 +127,9 @@ def weekly_schema(board: str = "") -> str:
                 "owner_multi_value": "分管领导等为多值分隔文本，须去空格后匹配（R-13）",
                 "blocked_fields": sorted(store.BLOCKED_FIELDS),
                 "sensitive_fields": sorted(store.SENSITIVE_FIELDS),
+                "table_columns_note": "已剔除禁止外泄字段，故此清单即可对外引用的全部字段",
             },
-            "snapshot_note": "演示数据（weekly_mock 自建库），非集团真实周报",
+            "snapshot_note": store.SNAPSHOT_NOTE,
         }
 
     return _guard("weekly_schema", work)
@@ -100,7 +142,7 @@ def weekly_task_query(
     status: str = "",
     owner: str = "",
     keyword: str = "",
-    limit: int = 50,
+    limit: int = 200,
 ) -> str:
     """Query formal tasks. Applies R-01 (is_deleted=0 AND published) server-side.
 
@@ -134,14 +176,23 @@ def weekly_task_query(
             where.append("t.status = %(st)s")
             params["st"] = int(status.strip())
         if owner.strip():
-            # R-13: strip spaces on both sides before matching multi-value text.
-            token = owner.strip()
+            # All six owner columns: three ids and three names. Covering only the
+            # name columns for lead/project silently dropped tasks where the
+            # person is recorded by id alone (task 150 holds lead_owner_id
+            # 'u3208' with lead_owner_name empty) -- 7 rows instead of 8.
+            #
+            # Ids match exactly; names match as substrings because they are
+            # multi-value text. R-13: strip spaces on both sides first.
+            token = owner.strip().replace(" ", "")
             where.append(
-                "(REPLACE(IFNULL(t.project_owner_name,''),' ','') LIKE %(own)s "
-                "OR REPLACE(IFNULL(t.lead_owner_name,''),' ','') LIKE %(own)s "
-                "OR REPLACE(IFNULL(t.owner_user_id,''),' ','') LIKE %(own)s)"
+                "(REPLACE(IFNULL(t.owner_user_id,''),' ','') = %(own_exact)s "
+                "OR REPLACE(IFNULL(t.project_owner_id,''),' ','') = %(own_exact)s "
+                "OR REPLACE(IFNULL(t.lead_owner_id,''),' ','') = %(own_exact)s "
+                "OR REPLACE(IFNULL(t.project_owner_name,''),' ','') LIKE %(own)s "
+                "OR REPLACE(IFNULL(t.lead_owner_name,''),' ','') LIKE %(own)s)"
             )
-            params["own"] = f"%{token.replace(' ', '')}%"
+            params["own_exact"] = token
+            params["own"] = f"%{token}%"
         if keyword.strip():
             where.append("t.task_name LIKE %(kw)s")
             params["kw"] = f"%{keyword.strip()}%"
@@ -168,12 +219,13 @@ def weekly_task_query(
 
 
 @mcp.tool()
-def weekly_task_detail(task: str) -> str:
+def weekly_task_detail(task: str, ctx: Context | None = None) -> str:
     """Fetch one formal task with its group detail, latest progress and year goal.
 
     Args:
         task: Task id or task name (fuzzy).
     """
+    may_read = _caller_may_read_sensitive(ctx)
 
     def work() -> dict[str, Any]:
         found = store.resolve_task(task)
@@ -195,7 +247,9 @@ def weekly_task_detail(task: str) -> str:
             "FROM task_progress WHERE task_id = %(tid)s AND is_published = 1 "
             "ORDER BY version_no DESC, id DESC",
             {"tid": task_id},
-            caliber="is_published = 1（仅正式发布进展）；review_comment 按权限展示",
+            caliber="is_published = 1（仅正式发布进展）；review_comment 按权限展示"
+            + ("（本次凭证有权限，原文返回）" if may_read else "（本次凭证无权限，已遮蔽）"),
+            can_read_sensitive=may_read,
             limit=3,
         )
         goal = store.fetch(
@@ -226,7 +280,9 @@ def weekly_task_detail(task: str) -> str:
 
 
 @mcp.tool()
-def weekly_progress_history(task: str, published_only: bool = True, limit: int = 30) -> str:
+def weekly_progress_history(
+    task: str, published_only: bool = True, limit: int = 200, ctx: Context | None = None
+) -> str:
     """Return progress versions for one task, newest first (version_no desc).
 
     Args:
@@ -234,10 +290,11 @@ def weekly_progress_history(task: str, published_only: bool = True, limit: int =
         published_only: True keeps only is_published=1 rows (formal progress).
         limit: Max rows, capped at 200.
     """
+    may_read = _caller_may_read_sensitive(ctx)
 
     def work() -> dict[str, Any]:
-        found = store.resolve_task(task)
-        if found is None:
+        task_id = store.resolve_task_id(task)
+        if task_id is None:
             return {
                 "ok": False,
                 "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
@@ -251,8 +308,10 @@ def weekly_progress_history(task: str, published_only: bool = True, limit: int =
             "SELECT id, task_id, version_no, latest_progress, next_work, progress_date, "
             "report_time, is_published, review_comment "
             f"FROM task_progress WHERE {where} ORDER BY version_no DESC, id DESC",
-            {"tid": int(found["id"])},
-            caliber=caliber,
+            {"tid": task_id},
+            caliber=caliber
+            + ("；review_comment 原文返回（本次凭证有敏感字段权限）" if may_read else "；review_comment 已按权限遮蔽"),
+            can_read_sensitive=may_read,
             limit=limit,
         )
 
@@ -334,7 +393,7 @@ def weekly_aggregate(group_by: str, board: str = "", metric: str = "count") -> s
 
 
 @mcp.tool()
-def weekly_milestone_query(year: str = "", status: str = "", limit: int = 50) -> str:
+def weekly_milestone_query(year: str = "", status: str = "", limit: int = 200) -> str:
     """List milestones, joined back to task to re-check the formal-task caliber (R-17).
 
     Args:
@@ -370,26 +429,27 @@ def weekly_milestone_query(year: str = "", status: str = "", limit: int = 50) ->
 
 
 @mcp.tool()
-def weekly_workflow_query(task: str = "", limit: int = 50) -> str:
+def weekly_workflow_query(task: str = "", limit: int = 200, ctx: Context | None = None) -> str:
     """Trace approval submissions and actions. Opinions are permission-gated (R-04/R-14).
 
     Args:
         task: Task id or name; empty returns the most recent actions overall.
         limit: Max rows, capped at 200.
     """
+    may_read = _caller_may_read_sensitive(ctx)
 
     def work() -> dict[str, Any]:
         params: dict[str, Any] = {}
         where = ["1 = 1"]
         if task.strip():
-            found = store.resolve_task(task)
-            if found is None:
+            task_id = store.resolve_task_id(task)
+            if task_id is None:
                 return {
                     "ok": False,
                     "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
                 }
             where.append("a.task_id = %(tid)s")
-            params["tid"] = int(found["id"])
+            params["tid"] = task_id
         return store.fetch(
             "SELECT a.id, a.submission_id, a.task_id, s.round_no, a.node_type, a.action, "
             "a.operator_name, a.opinion, a.created_at "
@@ -398,7 +458,12 @@ def weekly_workflow_query(task: str = "", limit: int = 50) -> str:
             f"WHERE {' AND '.join(where)} "
             "ORDER BY a.task_id, s.round_no, a.id",
             params,
-            caliber="opinion 属敏感字段，按权限展示（R-04/R-14）；payload 草稿快照不返回",
+            caliber=(
+                "opinion 属敏感字段，按权限展示（R-04/R-14）；"
+                + ("本次凭证有敏感字段权限，opinion 原文返回" if may_read else "本次凭证无敏感字段权限，opinion 已遮蔽")
+                + "；payload 草稿快照不返回"
+            ),
+            can_read_sensitive=may_read,
             limit=limit,
         )
 
@@ -406,7 +471,7 @@ def weekly_workflow_query(task: str = "", limit: int = 50) -> str:
 
 
 @mcp.tool()
-def weekly_attachment_query(task: str = "", limit: int = 50) -> str:
+def weekly_attachment_query(task: str = "", limit: int = 200) -> str:
     """List attachments without ever returning storage_path (chapter 7.2).
 
     Args:
@@ -418,14 +483,14 @@ def weekly_attachment_query(task: str = "", limit: int = 50) -> str:
         params: dict[str, Any] = {}
         where = ["att.is_deleted = 0"]
         if task.strip():
-            found = store.resolve_task(task)
-            if found is None:
+            task_id = store.resolve_task_id(task)
+            if task_id is None:
                 return {
                     "ok": False,
                     "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
                 }
             where.append("att.task_id = %(tid)s")
-            params["tid"] = int(found["id"])
+            params["tid"] = task_id
         return store.fetch(
             "SELECT att.id, att.task_id, att.progress_id, att.workflow_submission_id, "
             "att.file_name, att.file_size, att.uploader_id, att.upload_time "
@@ -439,7 +504,268 @@ def weekly_attachment_query(task: str = "", limit: int = 50) -> str:
 
 
 @mcp.tool()
-def weekly_import_audit(limit: int = 30) -> str:
+def weekly_submission_query(
+    task: str = "",
+    reporter: str = "",
+    status: str = "",
+    exclude_status: str = "",
+    limit: int = 200,
+) -> str:
+    """Query approval submission forms (task_workflow_submission).
+
+    Distinct from weekly_workflow_query, which returns the action *log*: a
+    submission carries round_no and its own status, and the action log cannot be
+    aggregated into it.  payload (the draft snapshot) is never returned.
+
+    Args:
+        task: Task id or name; empty covers all tasks.
+        reporter: Reporter id or name, exact match after trimming.
+        status: Keep only this submission status.
+        exclude_status: Drop this status (e.g. approved, for "not yet approved").
+        limit: Max rows, capped at 200.
+    """
+
+    def work() -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        where = ["t.is_deleted = 0"]
+        if task.strip():
+            task_id = store.resolve_task_id(task)
+            if task_id is None:
+                return {
+                    "ok": False,
+                    "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
+                }
+            where.append("s.task_id = %(tid)s")
+            params["tid"] = task_id
+        if reporter.strip():
+            token = reporter.strip()
+            where.append("(TRIM(IFNULL(s.reporter_id,'')) = %(rep)s OR TRIM(IFNULL(s.reporter_name,'')) = %(rep)s)")
+            params["rep"] = token
+        if status.strip():
+            where.append("s.status = %(st)s")
+            params["st"] = status.strip()
+        if exclude_status.strip():
+            where.append("s.status <> %(exst)s")
+            params["exst"] = exclude_status.strip()
+
+        clause = " AND ".join(where)
+        rows = store.fetch(
+            "SELECT s.id, s.task_id, t.task_name, s.round_no, s.status, s.submission_kind, "
+            "s.reporter_id, s.reporter_name, s.signer_name, s.need_sign, "
+            "s.submitted_at, s.completed_at "
+            "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+            f"WHERE {clause} ORDER BY s.task_id, s.round_no, s.id",
+            params,
+            caliber=(
+                "task_id + round_no 唯一；payload 草稿快照默认不并入正式数据，不返回；"
+                "submission_kind 区分 initial / progress"
+            ),
+            limit=limit,
+        )
+        breakdown = store.fetch(
+            "SELECT s.status, COUNT(*) AS cnt "
+            "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+            f"WHERE {clause} GROUP BY s.status ORDER BY cnt DESC",
+            params,
+            caliber="按提交单状态分档计数",
+            limit=20,
+        )
+        rows["status_breakdown"] = breakdown["rows"]
+        return rows
+
+    return _guard("weekly_submission_query", work)
+
+
+@mcp.tool()
+def weekly_owner_roles(person: str) -> str:
+    """Count one person's formal tasks split by the role they hold.
+
+    weekly_task_query's owner filter ORs the three owner columns together, so it
+    cannot answer "how many as project owner vs as lead"; this separates them.
+    Matching strips spaces first (R-13) and accepts either id or name.
+
+    Args:
+        person: User id or name.
+    """
+
+    def work() -> dict[str, Any]:
+        token = (person or "").strip().replace(" ", "")
+        if not token:
+            return {"ok": False, "error": {"code": "invalid_argument", "message": "person 不能为空"}}
+        clause = store.formal_task_clause()
+        # Each role counted separately, plus any_role as the de-duplicated union.
+        return store.fetch(
+            "SELECT "
+            "SUM(REPLACE(IFNULL(t.owner_user_id,''),' ','') = %(p)s) AS as_owner, "
+            "SUM(REPLACE(IFNULL(t.project_owner_id,''),' ','') = %(p)s "
+            "  OR REPLACE(IFNULL(t.project_owner_name,''),' ','') = %(p)s) AS as_project_owner, "
+            "SUM(REPLACE(IFNULL(t.lead_owner_id,''),' ','') = %(p)s "
+            "  OR REPLACE(IFNULL(t.lead_owner_name,''),' ','') = %(p)s) AS as_lead_owner, "
+            "SUM(REPLACE(IFNULL(t.owner_user_id,''),' ','') = %(p)s "
+            "  OR REPLACE(IFNULL(t.project_owner_id,''),' ','') = %(p)s "
+            "  OR REPLACE(IFNULL(t.project_owner_name,''),' ','') = %(p)s "
+            "  OR REPLACE(IFNULL(t.lead_owner_id,''),' ','') = %(p)s "
+            "  OR REPLACE(IFNULL(t.lead_owner_name,''),' ','') = %(p)s) AS any_role "
+            f"FROM task t WHERE {clause}",
+            {"p": token},
+            caliber=f"{store.FORMAL_TASK_CALIBER}；多值列去空格后匹配（R-13）；any_role 为三角色去重并集",
+            limit=1,
+        )
+
+    return _guard("weekly_owner_roles", work)
+
+
+# Fields whose fill-in rate can be asked about (R-07 / R-19). Whitelisted rather
+# than interpolated from the argument: the column name reaches SQL as an
+# identifier, which no placeholder can bind.
+_COMPLETENESS_FIELDS: dict[str, tuple[str, str]] = {
+    "overall_goal": ("task", "总体目标"),
+    "annual_goals": ("task", "年度目标"),
+    "project_owner_name": ("task", "项目负责人"),
+    "lead_owner_name": ("task", "分管领导"),
+    "project_group": ("task", "项目组"),
+    "target_result": ("task_group_detail", "目标成果"),
+    "implementation_measure": ("task_group_detail", "实施举措"),
+    "progress_effect": ("task_group_detail", "进度成效"),
+    "completion_time": ("task_group_detail", "完成时间（文本）"),
+}
+
+
+@mcp.tool()
+def weekly_field_completeness(field: str = "") -> str:
+    """Count how many formal tasks have a given field filled in (R-07 / R-19).
+
+    Answers "how many tasks have an overall goal / a named project owner" with one
+    call. Without this the only route is fetching every task and counting by hand,
+    which burns the tool-call budget and tends to run out mid-answer.
+
+    Args:
+        field: Column to measure; empty lists the supported columns.
+    """
+
+    def work() -> dict[str, Any]:
+        token = (field or "").strip()
+        if not token:
+            return {
+                "ok": True,
+                "supported_fields": {
+                    name: {"table": table, "label": label}
+                    for name, (table, label) in sorted(_COMPLETENESS_FIELDS.items())
+                },
+                "caliber": "传入 field 以统计该字段的填报完整度",
+                "snapshot_note": store.SNAPSHOT_NOTE,
+            }
+        if token not in _COMPLETENESS_FIELDS:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported_field",
+                    "message": f"不支持的字段：{token}；支持 {', '.join(sorted(_COMPLETENESS_FIELDS))}",
+                },
+            }
+        table, label = _COMPLETENESS_FIELDS[token]
+        clause = store.formal_task_clause()
+        if table == "task":
+            sql = (
+                f"SELECT COUNT(*) AS total, SUM(t.{token} IS NOT NULL AND t.{token} <> '') AS filled, "
+                f"SUM(t.{token} IS NULL OR t.{token} = '') AS missing "
+                f"FROM task t WHERE {clause}"
+            )
+        else:
+            # LEFT JOIN so tasks with no detail row count as missing, not vanish (R-08).
+            sql = (
+                f"SELECT COUNT(*) AS total, SUM(d.{token} IS NOT NULL AND d.{token} <> '') AS filled, "
+                f"SUM(d.{token} IS NULL OR d.{token} = '') AS missing "
+                f"FROM task t LEFT JOIN {table} d ON d.task_id = t.id WHERE {clause}"
+            )
+        result = store.fetch(
+            sql,
+            caliber=(
+                f"{store.FORMAL_TASK_CALIBER}；统计「{label}」非空占比（R-07/R-19）；"
+                "空字符串按未填计入 missing" + ("；LEFT JOIN 保留无明细行的任务（R-08）" if table != "task" else "")
+            ),
+            limit=1,
+        )
+        result["field"] = token
+        result["field_label"] = label
+        return result
+
+    return _guard("weekly_field_completeness", work)
+
+
+@mcp.tool()
+def weekly_progress_coverage() -> str:
+    """Summarise how far back published progress goes and how much it covers.
+
+    Returns row count, tasks covered, earliest/latest progress date and the
+    highest version number -- the "how long is the history" question, answered
+    without walking every task.
+    """
+
+    def work() -> dict[str, Any]:
+        return store.fetch(
+            "SELECT COUNT(*) AS progress_rows, COUNT(DISTINCT p.task_id) AS tasks_covered, "
+            "MIN(p.progress_date) AS earliest, MAX(p.progress_date) AS latest, "
+            "MAX(p.version_no) AS max_version "
+            "FROM task_progress p JOIN task t ON t.id = p.task_id "
+            f"WHERE {store.formal_task_clause()} AND p.is_published = 1",
+            caliber=f"{store.FORMAL_TASK_CALIBER}；仅正式发布进展（is_published = 1）",
+            limit=1,
+        )
+
+    return _guard("weekly_progress_coverage", work)
+
+
+@mcp.tool()
+def weekly_task_ranking(metric: str = "attachments", top: int = 5) -> str:
+    """Rank formal tasks by a child-record count (attachments, progress, milestones).
+
+    Answers "which task has the most X" directly. Ties keep the id order used by
+    the reference queries, so the ranking is reproducible.
+
+    Args:
+        metric: attachments / progress / milestones / submissions.
+        top: How many rows to return, 1..50.
+    """
+
+    def work() -> dict[str, Any]:
+        joins = {
+            "attachments": ("task_attachment", "a.is_deleted = 0", "附件数"),
+            "progress": ("task_progress", "a.is_published = 1", "正式进展版本数"),
+            "milestones": ("task_milestone", "a.is_deleted = 0", "里程碑数"),
+            "submissions": ("task_workflow_submission", "1 = 1", "审批提交单数"),
+        }
+        chosen = joins.get(metric.strip())
+        if chosen is None:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported_metric",
+                    "message": f"metric 支持 {', '.join(sorted(joins))}",
+                },
+            }
+        table, extra, label = chosen
+        try:
+            bounded = max(1, min(50, int(top)))
+        except TypeError, ValueError:
+            return {"ok": False, "error": {"code": "invalid_argument", "message": "top 必须是整数"}}
+        result = store.fetch(
+            f"SELECT t.id, t.task_name, COUNT(a.id) AS cnt "
+            f"FROM task t JOIN {table} a ON a.task_id = t.id AND {extra} "
+            f"WHERE {store.formal_task_clause()} "
+            f"GROUP BY t.id, t.task_name ORDER BY cnt DESC, t.id LIMIT {bounded}",
+            caliber=f"{store.FORMAL_TASK_CALIBER}；按{label}降序，并列按 task id 升序",
+            limit=bounded,
+        )
+        result["metric"] = metric.strip()
+        result["metric_label"] = label
+        return result
+
+    return _guard("weekly_task_ranking", work)
+
+
+@mcp.tool()
+def weekly_import_audit(limit: int = 200) -> str:
     """Reconcile Excel import batches: batch count vs distinct import times (R-09/R-10).
 
     Args:

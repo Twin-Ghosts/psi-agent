@@ -161,20 +161,26 @@ def resolve_board(board: str) -> int | None:
 
 
 def resolve_task(task: str) -> dict[str, Any] | None:
-    """Locate one formal task by id or (fuzzy) name."""
+    """Locate one formal task by id, or by name.
+
+    A purely numeric token is an id and nothing else.  Falling through to name
+    matching on a numeric miss is what made ``task="2"`` return a *different*
+    task: id 2 is not published, so the LIKE branch matched some other row whose
+    name merely contained "2", and the caller then reported that row's data as
+    task 2's.  A wrong task silently substituted for the requested one is worse
+    than an honest miss.
+    """
     token = (task or "").strip()
     if not token:
         return None
     conn = connect()
     try:
         if token.isdigit():
-            row = _one(
+            return _one(
                 conn,
                 f"SELECT * FROM task t WHERE t.id = %(id)s AND {formal_task_clause()}",
                 {"id": int(token)},
             )
-            if row is not None:
-                return row
         row = _one(
             conn,
             f"SELECT * FROM task t WHERE {formal_task_clause()} AND t.task_name = %(name)s",
@@ -192,3 +198,22 @@ def resolve_task(task: str) -> dict[str, Any] | None:
         )
     finally:
         conn.close()
+
+
+def resolve_task_id(task: str) -> int | None:
+    """Resolve a foreign-key task_id, WITHOUT the formal-task filter.
+
+    Submissions, attachments and progress rows hang off ``task_id`` as a plain
+    foreign key.  Questions about them ("task 2's submissions") are asking about
+    that key, not about whether the parent task is currently published -- gating
+    on R-01 here silently drops rows that genuinely exist.  Returns the integer
+    directly for a numeric token; otherwise falls back to formal-task name
+    resolution, which is the only way a name can be turned into an id.
+    """
+    token = (task or "").strip()
+    if not token:
+        return None
+    if token.isdigit():
+        return int(token)
+    found = resolve_task(token)
+    return None if found is None else int(found["id"])

@@ -43,7 +43,7 @@ async def weekly_freshness() -> str:
     return await _call("weekly_freshness", {})
 
 
-async def weekly_import_audit(limit: int = 30) -> str:
+async def weekly_import_audit(limit: int = 200) -> str:
     """Reconcile Excel import batches against distinct snapshot dates (R-09/R-10).
 
     Compare batch_count with distinct_dates and distinct_import_times to tell a
