@@ -53,7 +53,7 @@ async def test_ensure_workspace_dir_creates(tmp_path: Path) -> None:
 @pytest.mark.anyio
 async def test_resolve_default_agent_soft_haitun_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
-    agent = tmp_path / "workspace" / "tob"
+    agent = tmp_path / "agents" / "feishu"
     await anyio.Path(agent).mkdir(parents=True)
     assert await resolve_default_agent("") == str(await anyio.Path(agent).resolve())
 
@@ -75,7 +75,7 @@ async def test_resolve_default_agent_repo_layout_wins_over_cwd_tools(
     monkeypatch.chdir(tmp_path)
     await anyio.Path(tmp_path / "tools").mkdir()
     await anyio.Path(tmp_path / "skills").mkdir()
-    agent = tmp_path / "workspace" / "tob"
+    agent = tmp_path / "agents" / "feishu"
     await anyio.Path(agent).mkdir(parents=True)
     assert await resolve_default_agent("") == str(await anyio.Path(agent).resolve())
 
