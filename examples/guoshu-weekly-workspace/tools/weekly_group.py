@@ -22,13 +22,17 @@ async def weekly_group_detail_query(
     fields: str = "",
     contains: str = "",
     field: str = "",
+    status: str = "",
+    non_empty: str = "",
     limit: int = 200,
 ) -> str:
     """Query the group board's own detail table: goals, measures, owners, due text.
 
     The group board (集团组) keeps 目标成果 / 实施举措 / 进度成效 / 完成时间 and its
     owner columns in a separate table. weekly_task_query does not carry any of
-    those columns, so use this tool for group-board questions about them.
+    those columns, so use this tool for group-board questions about them. The
+    owner columns are here too: pass fields="lead_owner_names,project_owner_names"
+    for "牵头人和项目负责人都有谁", they are not on the shared task row.
 
     completion_time is display text like "2026年内" or "2026Q4", not a date. Filter
     it with contains, and never compute date arithmetic on it.
@@ -38,7 +42,14 @@ async def weekly_group_detail_query(
         fields: Comma-separated columns to return; empty returns the common set.
         contains: Substring filter applied to the column named by field.
         field: Which column contains filters on; required when contains is set.
-        limit: Max rows, capped at 200.
+        status: Task business status 0/1/2/3. The status lives on the task and the
+            effect text lives here, so "状态与成效描述矛盾" needs both sides at
+            once: status="0" plus non_empty="progress_effect".
+        non_empty: Comma-separated columns that must be non-empty. Without it the
+            contradiction question also collects tasks that are 未开始 and blank,
+            which are not contradictory at all.
+        limit: Max rows, capped at 200. The reply carries total_count; when it
+            exceeds the rows returned, the listing is short, not the answer.
     """
     try:
         bounded = max(1, min(200, int(limit)))
@@ -53,6 +64,8 @@ async def weekly_group_detail_query(
             "fields": fields,
             "contains": contains,
             "field": field,
+            "status": status,
+            "non_empty": non_empty,
             "limit": bounded,
         },
     )
@@ -90,6 +103,7 @@ async def weekly_group_history(
     date_from: str = "",
     date_to: str = "",
     last_days: int = 0,
+    last_months: int = 0,
     limit: int = 200,
 ) -> str:
     """Query the group board's progress history -- it lives in its own table.
@@ -102,22 +116,36 @@ async def weekly_group_history(
     at 200 while the totals stay exact. Relative windows are anchored to the data
     snapshot date on the server, so do not compute dates yourself.
 
+    "最近三个月" is last_months=3, not last_days=90. Calendar months land on
+    2026-05-15 and 90 days on 2026-05-17, and three May rows sit in between, so
+    substituting one for the other changes the May bucket from 16 to 13. Passing
+    both is an error rather than a silently merged third window.
+
     Args:
         task: Task id or name; empty covers the whole board.
         version_no: Return one specific period (larger is newer, per task).
         by: Empty lists rows; year / month / quarter / task / reporter counts them.
+            lag ranks tasks by days since their last report -- use it for "哪些
+            任务最久没报", and read lag_days rather than deriving it from dates.
+            Tasks that never reported are absent from that ranking by definition;
+            total_tasks counts the ones on it, not the whole board.
         latest_only: Keep only each task's newest published period.
         date_from: Inclusive start on report time, YYYY-MM-DD.
         date_to: Inclusive end on report time, YYYY-MM-DD.
         last_days: Window of N days ending at the snapshot date; 0 disables it.
+        last_months: Window of N calendar months ending at the snapshot date;
+            0 disables it. Mutually exclusive with last_days.
         limit: Max rows, capped at 200.
     """
     try:
         bounded = max(1, min(200, int(limit)))
         version = max(0, int(version_no))
         days = max(0, int(last_days))
+        months = max(0, int(last_months))
     except TypeError, ValueError:
-        return _invalid("version_no, last_days and limit must be integers")
+        return _invalid("version_no, last_days, last_months and limit must be integers")
+    if days and months:
+        return _invalid("pass either last_days or last_months, not both: their boundaries differ")
     return await _call(
         "weekly_group_history",
         {
@@ -128,6 +156,7 @@ async def weekly_group_history(
             "date_from": date_from,
             "date_to": date_to,
             "last_days": days,
+            "last_months": months,
             "limit": bounded,
         },
     )
@@ -146,7 +175,11 @@ async def weekly_group_stats(scope: str = "owners", top: int = 8, min_rounds: in
             (how many people share one owner cell, widest first) /
             completion_time (ISO vs free text vs blank) / completion_time_values
             (the distinct strings actually stored -- report them verbatim rather
-            than folding them into categories of your own) / field_lengths
+            than folding them into categories of your own) /
+            completion_time_formats (those strings grouped into 6 写法 buckets;
+            "各种写法各有多少条" wants this, and answering it with the 28 distinct
+            values of completion_time_values is off by a whole magnitude) /
+            field_lengths
             (target_result char stats) / attachments (per-task counts,
             zero-attachment tasks kept) / history_rounds (published periods
             per task) / effect_consistency (each task's current progress_effect

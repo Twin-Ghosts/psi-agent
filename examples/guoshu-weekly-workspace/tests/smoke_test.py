@@ -1686,6 +1686,239 @@ async def run() -> int:
         f"err={bad_rboard.get('error')}",
     )
 
+    # ---- A6：审批流转状态 / 自然月窗 / 滞报榜 / 写法归档 / 最新一期 / 孤儿引用 ----
+
+    # B6-01. 审批流转状态是全库口径，唯一不加发布闸门的分组。加了闸门只会剩
+    # published 一档 128，问题问的那 22 条全部消失。
+    wf = await _call(registry, "weekly_aggregate", group_by="workflow_status")
+    wf_map = {str(r.get("group_name")): int(r.get("cnt", -1)) for r in wf.get("rows") or []}
+    check(
+        "B6-01 审批流转状态 7 档，published 128 / pending_audit 7 / cancelled 1",
+        wf_map
+        == {
+            "published": 128,
+            "pending_audit": 7,
+            "pending_leader": 5,
+            "pending_fill": 3,
+            "rejected": 3,
+            "signing": 3,
+            "cancelled": 1,
+        },
+        str(wf_map),
+    )
+    wf_totals = wf.get("totals") or {}
+    check(
+        "B6-02/04 未发布 22 条、已发布占比 85.3 由服务端算好",
+        int(wf_totals.get("total_tasks", -1)) == 150
+        and int(wf_totals.get("unpublished_tasks", -1)) == 22
+        and str(wf_totals.get("published_pct")) == "85.3",
+        str(wf_totals),
+    )
+    check(
+        "B6 口径点明与业务状态不是一套词汇，且未发布不能按在途各档相加",
+        "不是一套词汇" in str(wf.get("caliber", "")) and "cancelled" in str(wf.get("caliber", "")),
+        str(wf.get("caliber"))[:200],
+    )
+    # 对照组：业务状态分组仍带发布闸门，两个口径不能互相顶替。
+    biz = await _call(registry, "weekly_aggregate", group_by="status")
+    biz_map = {str(r.get("group_name")): int(r.get("cnt", -1)) for r in biz.get("rows") or []}
+    check(
+        "B6 对照 业务状态仍在发布闸门内（14/78/31/5，合计 128）",
+        biz_map == {"未开始": 14, "进行中": 78, "已完成": 31, "已停用": 5},
+        str(biz_map),
+    )
+
+    # R6-03. 自然月与 90 天是两个窗口：三个月前是 2026-05-15，90 天前是
+    # 2026-05-17，中间夹着 3 行，5 月桶因此 16 vs 13。
+    m3 = await _call(registry, "weekly_group_history", by="month", last_months=3)
+    m3_map = {str(r.get("bucket")): int(r.get("progress_count", -1)) for r in m3.get("rows") or []}
+    check(
+        "R6-03 最近三个月按自然月回溯 16/30/12/45",
+        m3_map == {"2026-05": 16, "2026-06": 30, "2026-07": 12, "2026-08": 45},
+        str(m3_map),
+    )
+    d90 = await _call(registry, "weekly_group_history", by="month", last_days=90)
+    check(
+        "R6-03 反例 90 天窗 5 月只有 13，两个窗口不可互替",
+        int({str(r.get("bucket")): r.get("progress_count") for r in d90.get("rows") or []}.get("2026-05", -1)) == 13,
+        str({str(r.get("bucket")): r.get("progress_count") for r in d90.get("rows") or []}),
+    )
+    check(
+        "R6-03 口径写明自然月回溯而非 90 天",
+        "自然月回溯" in str(m3.get("caliber", "")) and "2026-05-15" in str(m3.get("caliber", "")),
+        str(m3.get("caliber"))[:220],
+    )
+    both = await _call(registry, "weekly_group_history", by="month", last_days=90, last_months=3)
+    check(
+        "R6-03 两个窗口同时给显式报错，不静默合成第三个窗口",
+        both.get("ok") is False and both.get("error", {}).get("code") == "invalid_argument",
+        str(both.get("error")),
+    )
+
+    # R6-04. 滞报榜取 MAX(report_time)，用最早一期会把老任务全排到榜首。
+    lag = await _call(registry, "weekly_group_history", by="lag", limit=5)
+    check(
+        "R6-04 滞报最久前 5 名 105/110/137/124/99，天数 16/14/14/13/12",
+        [(int(r.get("task_id", -1)), int(r.get("lag_days", -1))) for r in lag.get("rows") or []]
+        == [(105, 16), (110, 14), (137, 14), (124, 13), (99, 12)],
+        str([(r.get("task_id"), r.get("lag_days")) for r in lag.get("rows") or []]),
+    )
+    check(
+        "R6-04 上榜任务 46 个，口径声明从未报过的不在榜上",
+        int(lag.get("total_tasks", -1)) == 46 and "从未报过的不在榜上" in str(lag.get("caliber", "")),
+        f"total={lag.get('total_tasks')} caliber={str(lag.get('caliber'))[:120]}",
+    )
+
+    # E4-03. 「各种写法各有多少条」问的是 6 个格式档，不是 28 个去重取值；
+    # 两者差一个量级，档位判别的优先级也必须固定（'2026年6月底' 归含「底」）。
+    fmt = await _call(registry, "weekly_group_stats", scope="completion_time_formats")
+    fmt_map = {str(r.get("fmt")): int(r.get("cnt", -1)) for r in fmt.get("rows") or []}
+    check(
+        "E4-03 完成时间 6 档 其他 12 / 含底 11 / 标准日期 6 / 季度 6 / 中文年月 6 / 中文年月日 5",
+        fmt_map
+        == {
+            "其他": 12,
+            "模糊表述（含“底”）": 11,
+            "标准日期 YYYY-MM-DD": 6,
+            "季度 YYYYQn": 6,
+            "中文年月": 6,
+            "中文年月日": 5,
+        },
+        str(fmt_map),
+    )
+    check(
+        "E4-03 各档相加 46 等于 total_count（一条只进一档）",
+        sum(fmt_map.values()) == 46 and int(fmt.get("total_count", -1)) == 46,
+        f"sum={sum(fmt_map.values())} total={fmt.get('total_count')}",
+    )
+    # 去重取值是另一个口径，28 个，两者不能互答。
+    vals = await _call(registry, "weekly_group_stats", scope="completion_time_values", top=60)
+    check(
+        "E4-03 对照 去重取值 28 个，与 6 档不是同一个问题",
+        int(vals.get("total_count", -1)) == 28,
+        f"total={vals.get('total_count')}",
+    )
+
+    # K4-04. 状态在 task 上、成效在集团明细表里，矛盾判定必须两侧同时给条件；
+    # 缺 non_empty 会把「未开始且成效为空」也收进来，那并不矛盾。
+    k44 = await _call(
+        registry,
+        "weekly_group_detail_query",
+        status="0",
+        non_empty="progress_effect",
+        fields="progress_effect",
+    )
+    check(
+        "K4-04 未开始却写了成效的 6 条（97/108/130/137/140/142）",
+        [int(r.get("task_id", -1)) for r in k44.get("rows") or []] == [97, 108, 130, 137, 140, 142]
+        and int(k44.get("total_count", -1)) == 6,
+        str([r.get("task_id") for r in k44.get("rows") or []]),
+    )
+    check(
+        "K4-04 口径区分业务状态与审批流转状态",
+        "与审批流转状态" in str(k44.get("caliber", "")) and "progress_effect 非空" in str(k44.get("caliber", "")),
+        str(k44.get("caliber"))[:200],
+    )
+    k44_open = await _call(registry, "weekly_group_detail_query", status="0", fields="progress_effect")
+    check(
+        "K4-04 不加 non_empty 时行数会变（矛盾判定必须带非空条件）",
+        int(k44_open.get("total_count", -1)) >= 6,
+        f"total={k44_open.get('total_count')}",
+    )
+    bad_status = await _call(registry, "weekly_group_detail_query", status="9")
+    check(
+        "weekly_group_detail_query 非法 status 报错而非静默忽略",
+        bad_status.get("ok") is False and bad_status.get("error", {}).get("code") == "invalid_status",
+        str(bad_status.get("error")),
+    )
+    bad_ne = await _call(registry, "weekly_group_detail_query", non_empty="nope")
+    check(
+        "weekly_group_detail_query 非法 non_empty 列名报错并给出值域",
+        bad_ne.get("ok") is False and bad_ne.get("error", {}).get("code") == "unsupported_field",
+        str(bad_ne.get("error"))[:160],
+    )
+
+    # F5-01. 牵头人/项目负责人两列都在集团明细表里，不在共享的 task 行上。
+    f51 = await _call(
+        registry,
+        "weekly_group_detail_query",
+        fields="lead_owner_names,project_owner_names,project_group",
+        limit=8,
+    )
+    check(
+        "F5-01 前 8 条带牵头人与项目负责人（首行 唐立本 / 胡建国,方永康,邓少华）",
+        f51.get("row_count") == 8
+        and _first(f51, "lead_owner_names") == "唐立本"
+        and _first(f51, "project_owner_names") == "胡建国,方永康,邓少华",
+        f"lead={_first(f51, 'lead_owner_names')} proj={_first(f51, 'project_owner_names')}",
+    )
+    check(
+        "F5-01 total_count 46 说明只是截断到 8 条，不是全部",
+        int(f51.get("total_count", -1)) == 46,
+        f"total={f51.get('total_count')}",
+    )
+
+    # C4-01 / C4-02. 一任务一行是这个 scope 的全部意义：任务 13 有 16 期，
+    # 不按 version_no 收敛就会出 16 行，且最老那期的下一步会被当成现在的安排。
+    c41 = await _call(registry, "weekly_progress_coverage", scope="latest_round", project_group="算力网络组")
+    check(
+        "C4-01 算力网络组最新一期下一步 8 条，一任务一行",
+        [int(r.get("task_id", -1)) for r in c41.get("rows") or []] == [8, 9, 13, 17, 31, 44, 45, 94]
+        and int(c41.get("total_count", -1)) == 8,
+        str([r.get("task_id") for r in c41.get("rows") or []]),
+    )
+    check(
+        "C4-01 任务 13 取到 version_no 16 而非更早期号",
+        {int(r.get("task_id", -1)): int(r.get("version_no", -1)) for r in c41.get("rows") or []}.get(13) == 16,
+        str([(r.get("task_id"), r.get("version_no")) for r in c41.get("rows") or []]),
+    )
+    check(
+        "C4-01 口径写明不按 progress_date 取最新",
+        "不是按 progress_date 取最新" in str(c41.get("caliber", "")),
+        str(c41.get("caliber"))[:200],
+    )
+    c42 = await _call(registry, "weekly_progress_coverage", scope="latest_round", project_group="标准安全组")
+    check(
+        "C4-02 标准安全组 10 条（首行任务 1，末行任务 86）",
+        [int(r.get("task_id", -1)) for r in c42.get("rows") or []] == [1, 11, 12, 18, 24, 30, 36, 46, 52, 86]
+        and int(c42.get("total_count", -1)) == 10,
+        str([r.get("task_id") for r in c42.get("rows") or []]),
+    )
+    # C4-04. 0 是结论：最新一期都写了下一步。别把它当空结果去换口径重查。
+    c44 = await _call(registry, "weekly_progress_coverage", scope="missing_next")
+    check(
+        # 用字符串比而不是 int(x or -1)：0 本身是假值，会被 or 兑成 -1 而误判。
+        "C4-04 最新一期缺下一步的任务数 = 0",
+        str(_first(c44, "tasks_missing_next")) == "0",
+        str(c44.get("rows")),
+    )
+    check(
+        "C4-04 口径写明中间某期空着不算",
+        "中间某期空着不算" in str(c44.get("caliber", "")),
+        str(c44.get("caliber"))[-80:],
+    )
+
+    # R7-04. 孤儿与「未走导入」是两回事：120 条手工填报不能算成引用不完整。
+    orph = await _call(registry, "weekly_import_audit", orphans=True)
+    check(
+        # SUM() 回字符串、COUNT() 回整数，一律按字符串比，顺带避开 0 被 or 兑掉。
+        "R7-04 孤儿进展 0 条 / 孤儿批次 0 个，未走导入的 120 条单列",
+        str(_first(orph, "orphan_rows")) == "0"
+        and str(_first(orph, "orphan_batch_ids")) == "0"
+        and str(_first(orph, "rows_without_import")) == "120",
+        str(orph.get("rows")),
+    )
+    check(
+        "R7-04 附带 20 个批次的对账数，孤儿检查与对账同时给",
+        int(orph.get("reconciliation", {}).get("batch_count") or 0) == 20,
+        str(orph.get("reconciliation")),
+    )
+    check(
+        "R7-04 口径声明 0 即引用完整、不要换口径重算",
+        "不要换口径重算" in str(orph.get("caliber", "")),
+        str(orph.get("caliber"))[-60:],
+    )
+
     return report()
 
 

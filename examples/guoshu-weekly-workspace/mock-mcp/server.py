@@ -382,6 +382,18 @@ def weekly_aggregate(group_by: str, board: str = "", metric: str = "count", top:
                 "WHEN 2 THEN '已完成' WHEN 3 THEN '已停用' ELSE '未知' END AS group_name, "
                 f"COUNT(*) AS cnt FROM task t WHERE {scope} GROUP BY t.status ORDER BY t.status"
             )
+        elif group_by == "workflow_status":
+            # 唯一不加发布闸门的分组：问的就是审批流转状态分布，把 published 当
+            # 前置条件会只剩一档 128，其余六档（未发布的 22 条）全部消失。
+            # 与 group_by=status 是两套词汇：这里是审批流转（published /
+            # pending_audit / ...），那里是业务进度（未开始 / 进行中 / ...）。
+            wf_scope = "t.is_deleted = 0"
+            if board.strip():
+                wf_scope += " AND t.board_id = %(bid)s"
+            sql = (
+                "SELECT t.workflow_status AS group_name, COUNT(*) AS cnt FROM task t "
+                f"WHERE {wf_scope} GROUP BY t.workflow_status ORDER BY cnt DESC, t.workflow_status"
+            )
         elif group_by == "project_group":
             # 组里「几个人牵头」必须由服务端去重，交给模型自己数人名会数错。
             sql = (
@@ -402,11 +414,23 @@ def weekly_aggregate(group_by: str, board: str = "", metric: str = "count", top:
                 "ok": False,
                 "error": {
                     "code": "unsupported_group_by",
-                    "message": "group_by 支持 board / category / primary_category / status / project_group / owner",
+                    "message": "group_by 支持 board / category / primary_category / status / "
+                    "workflow_status / project_group / owner",
                 },
             }
         caliber = f"{store.FORMAL_TASK_CALIBER}；LEFT JOIN 保留空分组（R-02/R-08）"
-        if group_by == "primary_category":
+        if group_by == "workflow_status":
+            caliber = (
+                "仅 is_deleted = 0，本口径不加发布闸门（问的就是审批流转状态分布，"
+                "加了只会剩 published 一档）；"
+                "group_name 是审批流转状态（published / pending_audit / pending_leader / "
+                "pending_fill / rejected / signing / cancelled），"
+                "与 group_by=status 的业务进度状态（未开始 / 进行中 / 已完成 / 已停用）不是一套词汇；"
+                "各档相加等于未删除任务总数 total_tasks，"
+                "「尚未发布」= total_tasks - published，不要按在途状态逐项相加（cancelled 既非已发布也非在途）；"
+                "published_pct 已由服务端算好，直接引用"
+            )
+        elif group_by == "primary_category":
             caliber = (
                 f"{store.FORMAL_TASK_CALIBER}；按一级分类（二级分类的 parent_id）汇总，"
                 "不是二级分类；看板过滤落在分类树所属看板上；"
@@ -435,6 +459,20 @@ def weekly_aggregate(group_by: str, board: str = "", metric: str = "count", top:
         result["group_by"] = group_by
         if cut:
             result["total_groups"] = tied_total["value"]
+        if group_by == "workflow_status":
+            # 「未发布几条」「已发布占比」和分档是同一题的三面，一次给全：分开问
+            # 会让模型拿在途各档相加去凑未发布，而 cancelled 两边都不属于。
+            wf_where = "t.is_deleted = 0" + (" AND t.board_id = %(bid)s" if board.strip() else "")
+            totals = store.fetch(
+                "SELECT COUNT(*) AS total_tasks, "
+                "SUM(t.workflow_status = 'published') AS published_tasks, "
+                "SUM(t.workflow_status <> 'published') AS unpublished_tasks, "
+                "ROUND(SUM(t.workflow_status = 'published') / COUNT(*) * 100, 1) AS published_pct "
+                f"FROM task t WHERE {wf_where}",
+                params,
+                limit=1,
+            )
+            result["totals"] = totals["rows"][0] if totals["rows"] else {}
         return result
 
     return _guard("weekly_aggregate", work)
@@ -1446,7 +1484,16 @@ _TURNAROUND_SCOPES = ("summary", "board", "slowest", "pending")
 # 进展覆盖面的四个口径。unpublished / version_gaps 都是「让模型自己数会数错」
 # 的那类：一个要辨两套状态码值，一个要拿最大期号减实际期数。
 # unpublished_by_task 再往下一层，落到「哪些任务挂着未发布进展」的逐任务清单。
-_COVERAGE_SCOPES = ("summary", "unpublished", "unpublished_by_task", "version_gaps")
+_COVERAGE_SCOPES = ("summary", "unpublished", "unpublished_by_task", "version_gaps", "latest_round", "missing_next")
+
+# 「最新一期」的定序键：version_no 大者为新，同期再按 id 兜底，两级都要。
+# 只按 progress_date 或只按 id 取最新都会取错行（latest_by_wrong_key）：
+# 期号与日期并非单调同向，补报的老期号可能有更晚的 progress_date。
+_LATEST_PROGRESS_CTE = (
+    "(SELECT p.*, ROW_NUMBER() OVER (PARTITION BY p.task_id "
+    "ORDER BY p.version_no DESC, p.id DESC) AS rn "
+    "FROM task_progress p WHERE p.is_published = 1)"
+)
 
 # 提交单的附加口径。空串走通用清单；两个 external 口径专门回答 O2OA 外部标识
 # （o2_process_id / o2_work_id / o2_task_id）填得全不全，这三列此前没有任何
@@ -1535,12 +1582,26 @@ _GROUP_STATS_SCOPES = (
     "owners",
     "completion_time",
     "completion_time_values",
+    "completion_time_formats",
     "field_lengths",
     "attachments",
     "history_rounds",
     "separators",
     "owner_widths",
     "effect_consistency",
+)
+
+# 完成时间的「写法」分档。判别顺序即优先级，不能重排：'2026年6月底' 同时命中
+# 「含底」与「中文年月」，先判到哪档就算哪档，调换后两档会把 11 拆成 6+5。
+# 标准日期与季度用 REGEXP 锚定全串，避免 '2026Q3前' 之类被算成规范写法。
+_COMPLETION_TIME_FORMAT_CASE = (
+    "CASE "
+    "WHEN d.completion_time REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN '标准日期 YYYY-MM-DD' "
+    "WHEN d.completion_time REGEXP '^[0-9]{4}Q[1-4]$' THEN '季度 YYYYQn' "
+    "WHEN d.completion_time LIKE '%%底%%' THEN '模糊表述（含“底”）' "
+    "WHEN d.completion_time LIKE '%%年%%月%%日%%' THEN '中文年月日' "
+    "WHEN d.completion_time LIKE '%%年%%月%%' THEN '中文年月' "
+    "ELSE '其他' END"
 )
 
 # Buckets over task_group_progress_history.report_time -- the group board keeps
@@ -1552,6 +1613,9 @@ _GROUP_HISTORY_GROUPINGS: dict[str, tuple[str, str]] = {
     "quarter": ("CONCAT(YEAR(h.report_time), 'Q', QUARTER(h.report_time))", "bucket"),
     "task": ("t.task_name", "progress_count DESC, bucket"),
     "reporter": ("h.reporter_id", "progress_count DESC, bucket"),
+    # 滞报榜按任务给最后一次上报距快照日的天数。放进分组白名单而不是单独开
+    # 工具：问的仍是这张历史表的分面，只是聚合出的是 lag 而非条数。
+    "lag": ("t.id", "lag_days DESC, bucket"),
 }
 
 _YEAR_GOAL_SCOPES = ("by_year", "coverage", "missing", "missing_by_group", "span", "multi_year")
@@ -1779,7 +1843,7 @@ def weekly_progress_range(
 
 
 @mcp.tool()
-def weekly_progress_coverage(scope: str = "summary", limit: int = 200) -> str:
+def weekly_progress_coverage(scope: str = "summary", project_group: str = "", limit: int = 200) -> str:
     """Summarise how far back published progress goes and how much it covers.
 
     Args:
@@ -1789,6 +1853,12 @@ def weekly_progress_coverage(scope: str = "summary", limit: int = 200) -> str:
             task's workflow_status. ``unpublished_by_task`` lists the tasks that
             hold unpublished periods while their submission is already published,
             most periods first. ``version_gaps`` tasks missing a period.
+            ``latest_round`` gives each task's NEWEST published period with its
+            ``next_work`` -- use it for "下一步打算做什么", never the full history
+            (a task with 19 periods would otherwise contribute 19 rows and its
+            oldest plan reads as current). ``missing_next`` counts tasks whose
+            newest period left 下一步 blank.
+        project_group: Narrow to one 项目组, for "算力网络组各任务下一步做什么".
         limit: Max rows for the listing scopes, capped at 200.
     """
 
@@ -1804,6 +1874,54 @@ def weekly_progress_coverage(scope: str = "summary", limit: int = 200) -> str:
             }
         bounded = max(1, min(store.MAX_ROWS, int(limit)))
         clause = store.formal_task_clause()
+
+        if key in ("latest_round", "missing_next"):
+            params: dict[str, Any] = {}
+            where = [clause]
+            caliber = [
+                store.FORMAL_TASK_CALIBER,
+                "每任务只取最新一期已发布进展（version_no 倒序、同期按 id 兜底）；"
+                "不是全部历史，也不是按 progress_date 取最新（补报的老期号可能日期更晚）",
+            ]
+            if project_group.strip():
+                params["pg"] = project_group.strip()
+                where.append("TRIM(t.project_group) = %(pg)s")
+                caliber.append(f"仅项目组 = {project_group.strip()}")
+            latest_where = " AND ".join(where)
+
+            if key == "missing_next":
+                return store.fetch(
+                    "SELECT COUNT(*) AS tasks_missing_next "
+                    f"FROM task t JOIN {_LATEST_PROGRESS_CTE} p ON p.task_id = t.id AND p.rn = 1 "
+                    f"WHERE {latest_where} AND (p.next_work IS NULL OR p.next_work = '')",
+                    params,
+                    caliber="；".join([*caliber, "只看最新一期是否留空，中间某期空着不算"]),
+                    limit=1,
+                )
+
+            total = store.scalar(
+                f"SELECT COUNT(*) FROM task t JOIN {_LATEST_PROGRESS_CTE} p ON p.task_id = t.id AND p.rn = 1 "
+                f"WHERE {latest_where} AND p.next_work IS NOT NULL AND p.next_work <> ''",
+                params,
+            )
+            rows = store.fetch(
+                "SELECT t.id AS task_id, t.task_name, t.project_group, p.version_no, "
+                "p.next_work, p.progress_date "
+                f"FROM task t JOIN {_LATEST_PROGRESS_CTE} p ON p.task_id = t.id AND p.rn = 1 "
+                f"WHERE {latest_where} AND p.next_work IS NOT NULL AND p.next_work <> '' "
+                "ORDER BY t.id",
+                params,
+                caliber="；".join(
+                    [
+                        *caliber,
+                        "仅列出最新一期写了下一步的任务；一任务一行，total_count 即任务数",
+                        "下一步为空的任务数另用 scope=missing_next",
+                    ]
+                ),
+                limit=bounded,
+            )
+            rows["total_count"] = total["value"]
+            return rows
 
         if key == "unpublished":
             # 未发布进展自己带一套审批状态码值（0 草稿 / 1 待审核 / 2 驳回 /
@@ -2091,7 +2209,7 @@ def weekly_rank(
 
 
 @mcp.tool()
-def weekly_import_audit(limit: int = 200, reconcile_rows: bool = False) -> str:
+def weekly_import_audit(limit: int = 200, reconcile_rows: bool = False, orphans: bool = False) -> str:
     """Reconcile Excel import batches: batch count vs distinct import times (R-09/R-10).
 
     Args:
@@ -2101,6 +2219,10 @@ def weekly_import_audit(limit: int = 200, reconcile_rows: bool = False) -> str:
             Required for "对得上吗" -- the declared figure lives on the batch row
             and the landed figure only exists as a count over task_progress, so
             no listing of either table alone can answer it.
+        orphans: True checks the other direction -- progress rows pointing at an
+            import batch that no longer exists. "有没有挂在不存在的批次上" is a
+            NOT EXISTS question; listing either table alone cannot answer it, and
+            the honest answer here is zero, which is a finding, not a failure.
     """
 
     def work() -> dict[str, Any]:
@@ -2111,6 +2233,27 @@ def weekly_import_audit(limit: int = 200, reconcile_rows: bool = False) -> str:
             caliber="批次数 vs 去重业务快照日期数 vs 去重导入时间数（R-09/R-10）",
             limit=1,
         )
+        if orphans:
+            # NOT EXISTS 而非 LEFT JOIN ... IS NULL：这里只要判定存在性。
+            # import_id IS NULL 是「没走导入」不是「挂错批次」，用 SUM 单列出来，
+            # 不能混进孤儿数，否则手工填报的进展会全被报成孤儿。
+            result = store.fetch(
+                "SELECT SUM(p.import_id IS NOT NULL AND NOT EXISTS "
+                "(SELECT 1 FROM task_progress_import i WHERE i.id = p.import_id)) AS orphan_rows, "
+                "COUNT(DISTINCT CASE WHEN NOT EXISTS "
+                "(SELECT 1 FROM task_progress_import i WHERE i.id = p.import_id) "
+                "THEN p.import_id END) AS orphan_batch_ids, "
+                "SUM(p.import_id IS NULL) AS rows_without_import "
+                "FROM task_progress p",
+                caliber=(
+                    "孤儿定义：import_id 非空且 task_progress_import 里查不到该批次（NOT EXISTS）；"
+                    "import_id IS NULL 是未经导入的手工填报，不算孤儿，另计为 rows_without_import；"
+                    "orphan_rows = 0 即引用完整，这是结论本身，不要换口径重算"
+                ),
+                limit=1,
+            )
+            result["reconciliation"] = summary["rows"][0] if summary["rows"] else {}
+            return result
         if reconcile_rows:
             # LEFT JOIN 不可换成 JOIN：一条进展都没落库的批次（第 20 批声明 43、
             # 实落 0）正是「对不上」的极端情形，INNER JOIN 会把它整行丢掉。
@@ -2868,6 +3011,8 @@ def weekly_group_detail_query(
     fields: str = "",
     contains: str = "",
     field: str = "",
+    status: str = "",
+    non_empty: str = "",
     limit: int = 200,
 ) -> str:
     """Query the 集团组 board's own detail table (target/measures/owners/completion text).
@@ -2885,6 +3030,13 @@ def weekly_group_detail_query(
             due in 2026" -- ``completion_time`` is display text, so this is a text
             match, never date arithmetic (R-12).
         field: Which column ``contains`` filters on. Required when ``contains`` is set.
+        status: Business status 0/1/2/3 on the task side. Needed for "状态与成效
+            描述矛盾的任务" -- the contradiction is 未开始 (0) next to a written
+            effect, and the status lives on ``task`` while the effect lives here,
+            so neither table alone can express it.
+        non_empty: Comma-separated columns required to be non-empty. Pair with
+            ``status`` for the contradiction question: without it, tasks that are
+            未开始 *and* blank come along and inflate the count.
         limit: Max rows, capped at 200.
     """
 
@@ -2938,19 +3090,56 @@ def weekly_group_detail_query(
             if column not in selected:
                 selected.append(column)
 
+        if status.strip():
+            if status.strip() not in {"0", "1", "2", "3"}:
+                return {
+                    "ok": False,
+                    "error": {"code": "invalid_status", "message": "status 只能是 0/1/2/3"},
+                }
+            params["st"] = int(status.strip())
+            where.append("t.status = %(st)s")
+            caliber.append(
+                f"任务业务状态 = {status.strip()}"
+                "（0 未开始 / 1 进行中 / 2 已完成 / 3 已停用，与审批流转状态 workflow_status 不是一回事）"
+            )
+
+        required = [f.strip() for f in (non_empty or "").split(",") if f.strip()]
+        bad = [f for f in required if f not in _GROUP_DETAIL_FIELDS]
+        if bad:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported_field",
+                    "message": f"non_empty 不支持：{', '.join(bad)}；支持 {', '.join(sorted(_GROUP_DETAIL_FIELDS))}",
+                },
+            }
+        for column in required:
+            where.append(f"d.{column} IS NOT NULL AND d.{column} <> ''")
+            caliber.append(f"{column} 非空")
+            if column not in selected:
+                selected.append(column)
+
         columns = ", ".join(f"d.{name}" for name in selected)
         if "completion_time" in selected:
             caliber.append("completion_time 为展示文本，不可做日期运算（R-12）")
 
-        return store.fetch(
-            f"SELECT d.task_id, t.task_name, {columns} "
+        clause = " AND ".join(where)
+        total = store.scalar(
+            "SELECT COUNT(*) FROM task_group_detail d JOIN task t ON t.id = d.task_id "
+            f"{store.group_board_join()} WHERE {clause}",
+            params,
+        )
+        rows = store.fetch(
+            f"SELECT d.task_id, t.task_name, t.status, {columns} "
             "FROM task_group_detail d JOIN task t ON t.id = d.task_id "
             f"{store.group_board_join()} "
-            f"WHERE {' AND '.join(where)} ORDER BY d.task_id",
+            f"WHERE {clause} ORDER BY d.task_id",
             params,
-            caliber="；".join(caliber),
+            caliber="；".join([*caliber, "total_count 为符合条件的任务总数，判断列全看它而非返回行数"]),
             limit=limit,
         )
+        rows["total_count"] = total["value"]
+        return rows
 
     return _guard("weekly_group_detail_query", work)
 
@@ -3023,6 +3212,7 @@ def weekly_group_history(
     date_from: str = "",
     date_to: str = "",
     last_days: int = 0,
+    last_months: int = 0,
     limit: int = 200,
 ) -> str:
     """Query the 集团组 board's progress history (its own table, not task_progress).
@@ -3039,11 +3229,16 @@ def weekly_group_history(
         task: Task id or name. Empty covers the whole board.
         version_no: Return one specific version (per-task, larger is newer).
         by: Empty lists rows; ``year`` / ``month`` / ``quarter`` / ``task`` /
-            ``reporter`` returns counts per group.
+            ``reporter`` returns counts per group. ``lag`` ranks tasks by how
+            many days since their last report -- use it for "谁最久没报".
         latest_only: Keep only each task's newest published version.
         date_from: Inclusive start on ``report_time``, YYYY-MM-DD.
         date_to: Inclusive end on ``report_time``, YYYY-MM-DD.
         last_days: Window of N days ending at the snapshot date, not today.
+        last_months: Window of N calendar months ending at the snapshot date.
+            "最近三个月" means this, not ``last_days=90``: three months back from
+            2026-08-15 is 2026-05-15, while 90 days lands on 2026-05-17 and drops
+            three May rows. Do not substitute one for the other.
         limit: Max rows, capped at 200.
     """
 
@@ -3081,7 +3276,22 @@ def weekly_group_history(
             where.append("h.version_no = %(vno)s")
             caliber.append(f"仅第 {int(version_no)} 期")
 
-        lo, hi = store.date_window(date_from, date_to, last_days or None)
+        if last_months and last_days:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "invalid_argument",
+                    "message": "last_days 与 last_months 只能给一个：两者边界不同，同时给会得出第三个窗口",
+                },
+            }
+        if last_months:
+            lo, hi = store.month_window(last_months)
+            if date_from.strip():
+                lo = date_from.strip()
+            if date_to.strip():
+                hi = date_to.strip()
+        else:
+            lo, hi = store.date_window(date_from, date_to, last_days or None)
         window = store.window_clause("h.report_time", lo, hi, params)
         if window:
             # report_time is a datetime and the bound end is a date, so a naive
@@ -3089,8 +3299,10 @@ def weekly_group_history(
             window = store.window_clause("DATE(h.report_time)", lo, hi, params)
             where.append(window)
             caliber.append(store.window_caliber(lo, hi, label="上报时间"))
-            if last_days:
+            if last_days or last_months:
                 caliber.append(store.as_of_caliber())
+            if last_months:
+                caliber.append(f"最近 {int(last_months)} 个月按自然月回溯（非 {int(last_months) * 30} 天）")
 
         if latest_only:
             where.append(
@@ -3127,6 +3339,36 @@ def weekly_group_history(
             return rows
 
         expression, order = _GROUP_HISTORY_GROUPINGS[grouping]
+
+        if grouping == "lag":
+            # 滞报天数取 MAX(report_time) 与快照日之差，不是 MIN：问的是「最后
+            # 一次报到现在多久」，用最早一期会把老任务全排到榜首。
+            # 分母 total_tasks 一并给出：本表只有报过的任务，从未报过的不在这张
+            # 榜上，拿行数当「集团组任务数」会少算。
+            total = store.scalar(
+                f"SELECT COUNT(DISTINCT h.task_id) FROM task_group_progress_history h {joins} WHERE {clause}",
+                params,
+            )
+            rows = store.fetch(
+                "SELECT t.id AS task_id, t.task_name, "
+                f"DATEDIFF('{store.AS_OF}', MAX(h.report_time)) AS lag_days, "
+                "COUNT(*) AS rounds, MAX(h.report_time) AS last_report_time "
+                f"FROM task_group_progress_history h {joins} WHERE {clause} "
+                "GROUP BY t.id, t.task_name ORDER BY lag_days DESC, t.id",
+                params,
+                caliber="；".join(
+                    [
+                        *caliber,
+                        f"lag_days = 快照日 {store.AS_OF} 减最后一次上报日（MAX(report_time)，不是最早一期）",
+                        "只含报过进展的任务，从未报过的不在榜上；total_tasks 为上榜任务数，勿当作集团组任务总数",
+                        "并列按 task id 升序",
+                    ]
+                ),
+                limit=limit,
+            )
+            rows["total_tasks"] = total["value"]
+            return rows
+
         select = f"{expression} AS bucket, COUNT(*) AS progress_count"
         if grouping not in ("task",):
             select += ", COUNT(DISTINCT h.task_id) AS task_count"
@@ -3232,6 +3474,31 @@ def weekly_group_stats(scope: str = "owners", top: int = 8, min_rounds: int = 0)
                 caliber=(f"{base}；owner_count = 分隔符个数 + 1，顿号与逗号都计入；按人数倒序，最多的一条即首行"),
                 limit=bounded,
             )
+
+        if key == "completion_time_formats":
+            # 「各种写法各有多少条」问的是格式档位，不是去重取值：库里 28 个不同
+            # 取值归成 6 档，拿 completion_time_values 的 28 去答会答错一个量级。
+            # 判别顺序即优先级，见 _COMPLETION_TIME_FORMAT_CASE 的注释。
+            total = store.scalar(
+                f"SELECT COUNT(*) FROM task_group_detail d JOIN task t ON t.id = d.task_id {join} "
+                f"WHERE {clause} AND d.completion_time IS NOT NULL AND d.completion_time <> ''",
+            )
+            rows = store.fetch(
+                f"SELECT {_COMPLETION_TIME_FORMAT_CASE} AS fmt, COUNT(*) AS cnt "
+                f"FROM task_group_detail d JOIN task t ON t.id = d.task_id {join} "
+                f"WHERE {clause} AND d.completion_time IS NOT NULL AND d.completion_time <> '' "
+                "GROUP BY fmt ORDER BY cnt DESC, fmt",
+                caliber=(
+                    f"{base}；按写法归档（标准日期 / 季度 / 含「底」的模糊表述 / 中文年月日 / "
+                    "中文年月 / 其他），一条只进一档，各档相加等于 total_count；"
+                    "档数是写法种类数，不是去重取值数（去重取值另有 completion_time_values）；"
+                    "'2026年6月底' 归入含「底」一档而非中文年月，判别按此优先级固定；"
+                    "仅统计该栏非空的任务，空值不进任何一档"
+                ),
+                limit=bounded,
+            )
+            rows["total_count"] = total["value"]
+            return rows
 
         if key == "completion_time":
             return store.fetch(

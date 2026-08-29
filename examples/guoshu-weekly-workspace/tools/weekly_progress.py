@@ -352,11 +352,17 @@ async def weekly_field_completeness(field: str = "", list_missing: bool = False,
     )
 
 
-async def weekly_progress_coverage(scope: str = "summary", limit: int = 200) -> str:
+async def weekly_progress_coverage(scope: str = "summary", project_group: str = "", limit: int = 200) -> str:
     """Summarise progress history depth: row count, tasks covered, date span, max version.
 
     Use this for "how far back does the history go" or "how many progress records
     are there in total" -- one call instead of walking every task.
+
+    For "下一步打算做什么" use scope="latest_round", never the full history: the
+    newest period is picked by version_no (ties broken by id), and a task with 19
+    periods would otherwise contribute 19 rows whose oldest plan reads as current.
+    Picking by progress_date is also wrong -- a late-filed old period can carry a
+    newer date than the latest one.
 
     Args:
         scope: summary (depth totals) / unpublished (未发布进展按自身审批码值分档,
@@ -365,14 +371,22 @@ async def weekly_progress_coverage(scope: str = "summary", limit: int = 200) -> 
             progress rows are still unpublished, counted per task in PERIODS:
             version_no is de-duplicated, so this is "几期" and not "几行") /
             version_gaps (tasks whose max version_no exceeds their actual row
-            count, i.e. missing periods).
+            count, i.e. missing periods) / latest_round (each task's newest
+            period with its next_work, one row per task) / missing_next (how many
+            tasks left 下一步 blank in their newest period -- only the newest one
+            counts, a gap in the middle does not).
+        project_group: Narrow latest_round / missing_next to one 项目组, for
+            "算力网络组各任务下一步做什么". Matched exactly after trimming.
         limit: Max rows for the listing scopes, capped at 200.
     """
     try:
         bounded = max(1, min(200, int(limit)))
     except TypeError, ValueError:
         return _invalid("limit must be an integer")
-    return await _call("weekly_progress_coverage", {"scope": scope, "limit": bounded})
+    return await _call(
+        "weekly_progress_coverage",
+        {"scope": scope, "project_group": project_group, "limit": bounded},
+    )
 
 
 async def weekly_task_ranking(metric: str = "attachments", top: int = 5) -> str:

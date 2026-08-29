@@ -29,9 +29,16 @@ async def weekly_aggregate(group_by: str, board: str = "", metric: str = "count"
     分类 with group_by="category" answers with 47 buckets where the question
     wanted 6.
 
+    status and workflow_status are two different vocabularies over two different
+    populations. status is the business progress of published tasks (未开始 /
+    进行中 / 已完成 / 已停用, 128 tasks); workflow_status is where a task sits in
+    the approval flow (published / pending_audit / ... , 150 tasks) and is the
+    ONE dimension that drops the publish gate, because gating it would leave the
+    single published bucket and hide the 22 tasks the question is about.
+
     Args:
         group_by: One of board / category / primary_category / status /
-            project_group / owner.
+            workflow_status / project_group / owner.
         board: Optional board code or name to scope the aggregation. For
             primary_category this scopes the category tree's own board, which is
             a different path from the task's board.
@@ -39,7 +46,9 @@ async def weekly_aggregate(group_by: str, board: str = "", metric: str = "count"
         top: When > 0, hard-cuts to that many groups in SQL and says in the
             caliber how many groups exist in total. Use it for "前 N 个" so the
             row count is the answer -- ties past the boundary are excluded by
-            the question, not missing from the data.
+            the question, not missing from the data. Ignored for workflow_status,
+            whose reply also carries a totals block with the unpublished count
+            and the published share already computed.
     """
     if not group_by.strip():
         return _invalid("group_by must not be empty")
@@ -62,7 +71,7 @@ async def weekly_freshness() -> str:
     return await _call("weekly_freshness", {})
 
 
-async def weekly_import_audit(limit: int = 200, reconcile_rows: bool = False) -> str:
+async def weekly_import_audit(limit: int = 200, reconcile_rows: bool = False, orphans: bool = False) -> str:
     """Reconcile Excel import batches against distinct snapshot dates (R-09/R-10).
 
     Compare batch_count with distinct_dates and distinct_import_times to tell a
@@ -75,6 +84,12 @@ async def weekly_import_audit(limit: int = 200, reconcile_rows: bool = False) ->
             changed_tasks. Required for "声明与实际对不上" questions -- the
             default path reports the declared number only and cannot tell you
             whether it is true.
+        orphans: When True, check the reverse direction: progress rows whose
+            import_id points at a batch that does not exist. Answer with
+            orphan_rows as returned -- zero means referential integrity holds,
+            which is the finding, not an empty result to work around. Note
+            rows_without_import beside it counts rows that never came from an
+            import at all; those are not orphans.
     """
     try:
         bounded = max(1, min(200, int(limit)))
@@ -82,7 +97,7 @@ async def weekly_import_audit(limit: int = 200, reconcile_rows: bool = False) ->
         return _invalid("limit must be an integer")
     return await _call(
         "weekly_import_audit",
-        {"limit": bounded, "reconcile_rows": bool(reconcile_rows)},
+        {"limit": bounded, "reconcile_rows": bool(reconcile_rows), "orphans": bool(orphans)},
     )
 
 

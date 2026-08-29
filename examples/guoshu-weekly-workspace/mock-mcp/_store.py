@@ -98,6 +98,33 @@ def date_window(
     return lo, hi
 
 
+def month_window(months: str | int) -> tuple[str, str]:
+    """Resolve "最近 N 个月" into an inclusive date pair anchored at :data:`AS_OF`.
+
+    Calendar months, not ``months * 30`` days: three months back from 2026-08-15
+    is 2026-05-15, whereas ``last_days=90`` lands on 2026-05-17 and silently
+    drops the three group-history rows in between.  The question bank tracks the
+    two as different windows (``incomparable_periods``), so they get different
+    parameters rather than one approximating the other.
+    """
+    try:
+        n = int(str(months).strip())
+    except (TypeError, ValueError) as exc:
+        raise QueryError("invalid_argument", f"last_months 必须是整数：{months!r}") from exc
+    if n <= 0:
+        raise QueryError("invalid_argument", f"last_months 必须为正数：{n}")
+    conn = connect()
+    try:
+        row = _one(
+            conn,
+            "SELECT DATE_SUB(%(as_of)s, INTERVAL %(n)s MONTH) AS lo",
+            {"as_of": AS_OF, "n": n},
+        )
+    finally:
+        conn.close()
+    return (str(row["lo"]) if row else ""), AS_OF
+
+
 def window_clause(column: str, lo: str, hi: str, params: dict[str, Any], *, prefix: str = "w") -> str:
     """Build the bound SQL fragment for a resolved window. ``column`` is caller-controlled."""
     parts: list[str] = []

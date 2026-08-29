@@ -21,7 +21,7 @@ export GUOSHU_WEEKLY_MCP_TOKEN=demo-token
 python tests/smoke_test.py
 ```
 
-预期 `179/179 passed`。
+预期 `236/236 passed`。
 
 ## 数据层准备
 
@@ -91,7 +91,7 @@ guoshu-weekly-workspace/
 │   ├── _store.py              # 只读查询层 + 口径规则 + 字段管控
 │   └── server.py              # 31 个语义化取数工具（Streamable HTTP MCP）
 └── tests/
-    ├── smoke_test.py          # 207 条契约断言，不花模型 token
+    ├── smoke_test.py          # 236 条契约断言，不花模型 token
     └── baseline.py            # 396 题准确率基线（LLM 判定）
 ```
 
@@ -105,8 +105,8 @@ guoshu-weekly-workspace/
 | `weekly_task_query` | 按看板/分类/状态/负责人/关键词查正式任务 |
 | `weekly_task_detail` | 单任务详情（明细 + 近期进展 + 年度目标） |
 | `weekly_progress_history` | 进展版本回溯，`version_no` 倒序 |
-| `weekly_progress_coverage` | 进展历史覆盖度（行数/任务数/起止/最大版本）、未发布进展分档、期号缺号 |
-| `weekly_aggregate` | 按 board/category/**primary_category**/status/project_group/owner 聚合，`top` 硬切前 N 组 |
+| `weekly_progress_coverage` | 进展历史覆盖度（行数/任务数/起止/最大版本）、未发布进展分档、期号缺号、**每任务最新一期的下一步安排**、最新一期缺下一步计数 |
+| `weekly_aggregate` | 按 board/category/**primary_category**/status/project_group/owner/**workflow_status** 聚合，`top` 硬切前 N 组 |
 | `weekly_scale` | 多子表一次成表：规模（里程碑/附件/年度目标，**全部 `COUNT(DISTINCT)` 防 JOIN 放大**）/ 完备度（有该项的任务数）/ 进展密度（分母含零期任务） |
 | `weekly_field_completeness` | 字段填报完整度（R-07/R-19），字段走白名单 |
 | `weekly_task_ranking` | 按子表计数排名（附件/进展/里程碑/提交单） |
@@ -118,17 +118,17 @@ guoshu-weekly-workspace/
 | `weekly_person_stats` | 人员统计（任务量/人均/独苗/跨组/双角色/标识写法/填报人/审核人/自审） |
 | `weekly_attachment_stats` | 附件统计（容量/类型/最大/上传人/挂载去向/在途提交单/逐月/软删/孤儿） |
 | `weekly_attachment_query` | 附件清单（不含 `storage_path`） |
-| `weekly_import_audit` | 导入批次对账，`reconcile_rows` 反查实际落库行核对声明值 |
+| `weekly_import_audit` | 导入批次对账，`reconcile_rows` 反查实际落库行核对声明值，`orphans` 查批次引用完整性 |
 | `weekly_freshness` | 各看板最新进展时间 |
 | `weekly_health` | 连通性自检与各表行数 |
 | `weekly_progress_range` | 时间窗内的进展（全表跨任务，可按月/季/任务分组计数），`peak` 直接给峰值组 |
 | `weekly_task_lifecycle` | 任务创建/发布的时间分布与建到发的时长 |
 | `weekly_freshness_distribution` | 新鲜度分桶（30/90/180 天）、自定义天窗、时间漂移检出、滞后清单（含从未上报）、近期上报清单 |
 | `weekly_approval_turnaround` | 审批时效（汇总/按看板/最慢/待审积压） |
-| `weekly_group_detail_query` | 集团组明细（目标成果/实施举措/进度成效/完成时间文本） |
+| `weekly_group_detail_query` | 集团组明细（目标成果/实施举措/进度成效/完成时间文本/多值负责人），可按 `status` 与 `non_empty` 交叉筛矛盾数据 |
 | `weekly_group_owner_query` | 集团组按牵头人或项目负责人查任务（多值精确匹配） |
-| `weekly_group_history` | 集团组历史进展（专表，可按年/月/季/任务/填报人分组） |
-| `weekly_group_stats` | 集团组统计（负责人构成/分隔符写法/一栏几人/完成时间格式与去重取值/字数/附件/期数/成效一致性） |
+| `weekly_group_history` | 集团组历史进展（专表，可按年/月/季/任务/填报人/**滞报天数**分组，天窗可用 `last_days` 或**日历月** `last_months`） |
+| `weekly_group_stats` | 集团组统计（负责人构成/分隔符写法/一栏几人/完成时间**写法分档**与去重取值/字数/附件/期数/成效一致性） |
 | `weekly_year_goal_query` | 年度目标条目（按任务/年份，带里程碑摘要） |
 | `weekly_year_goal_stats` | 年度目标统计（分年/覆盖率/缺口，可限在办/缺口分组/跨年跨度/连续设标） |
 | `weekly_milestone_stats` | 里程碑统计（完成率/多维分解/软删审计/每任务分布/任务与里程碑错配） |
@@ -181,6 +181,14 @@ agent 据此给出依据、也据此判断不可答。
 | 声明值必须反查才算对账 | `changed_tasks` 是批次自己声明的数字，`reconcile_rows=True` 才反查实际落库；`LEFT JOIN` 不可换 `JOIN`——声明 43 实落 0 那批正是最极端的对不上 |
 | 「最长的标识」问标识不问任务 | 同一个标识挂 3 个任务只算一个标识，不去重会返回 128 行、并列几个也数不出来 |
 | 逐任务清单看 `total_count` | 问「每个任务各多少」时 `top` 只是页大小，`total_count` 与 `row_count` 相等才说明列全了 |
+| 审批流转状态是唯一不加发布闸门的分组 | `group_by=workflow_status` 若照例先筛 `published`，七档只剩一档 128，未发布的 22 条全部消失；它与 `group_by=status`（未开始/进行中/已完成/已停用）是两套词汇、两个总体（150 vs 128） |
+| 「未发布」用取反不用相加 | `workflow_status <> 'published'` 得 22；把在途各档相加会漏掉 `cancelled` 那 1 条——它既未发布也不在途 |
+| 「最近三个月」是日历月不是 90 天 | `last_months=3` 从 2026-08-15 回到 05-15，`last_days=90` 落在 05-17，中间三行让 5 月由 16 变 13；两个参数互斥，同时给会得出第三个窗口，服务端直接报错 |
+| 「最新一期」按 `version_no` 定序 | `weekly_progress_coverage` 的 `latest_round` 用 `ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY version_no DESC, id DESC)`；按 `progress_date` 取最新会错——补报的老期号可能日期更晚，而不收敛则 16 期任务出 16 行、最老那期的下一步被当成现在的安排 |
+| 完成时间「写法分档」≠去重取值数 | 分档得 6 类（46 条各进一档，相加等于 `total_count`），去重取值是 28 个，两者差一个量级；判别顺序即优先级，`2026年6月底` 固定进含「底」档 |
+| 滞报天数取最后一次上报 | `grouping=lag` 用 `MAX(report_time)` 与快照日之差，用 `MIN` 会把老任务全排到榜首；同时回 `total_tasks`，因为从未上报的任务不在这张表里，拿行数当集团组任务数会少算 |
+| 孤儿引用与「未走导入」是两件事 | `orphans=True` 按 `NOT EXISTS` 判 `import_id` 有值却查不到批次，结果 0 即引用完整；`import_id IS NULL` 的 120 条是手工填报，单列为 `rows_without_import`，混进孤儿数会把它们全报成异常 |
+| 0 是结论不是空结果 | 孤儿数 0、最新一期缺下一步 0，口径里直接写明「这是结论本身，不要换口径重算」，否则模型会反复改条件去凑非零 |
 
 ### 相对时间窗以快照日为基准
 
@@ -216,7 +224,7 @@ R-04/R-14 要的是「按权限返回」。一律遮蔽同样不满足需求—�
 | 数据权限 | 敏感字段按 token 两档分级 | 按 OA 真实身份做行级权限 |
 | 前端 | 无（经 psi-agent 既有接口） | 专建对话应用 + BFF（方案第六章） |
 | 材料生成 | 无 | 报告下载与图表（P1，第 5 期） |
-| 评测 | 207 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
+| 评测 | 236 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
 
 ### mock 数据层的两处不可外推
 

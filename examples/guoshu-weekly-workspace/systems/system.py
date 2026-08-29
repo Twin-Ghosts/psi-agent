@@ -44,6 +44,10 @@ TOOL_GUIDE = """\
   空分组会保留；group_by=project_group 还直接给出各组的牵头人数与责任人数（已去重）。
   问「一级分类」用 primary_category，问「分类」若指二级才用 category——任务只挂二级分类，
   两者档数不同（技术组 6 档 vs 全库 47 档）。要「前 N 个分类」就带 top，服务端硬切并回显总组数。
+  问「审批流转状态分布」「多少条还没发布」用 group_by=workflow_status——这是唯一不加发布闸门
+  的分组（总体 150 条，其余分组都是已发布的 128 条），并附 totals 直接给未发布数与已发布占比。
+  它与 group_by=status 是两套词汇：前者是审批流转（published / pending_audit / ...），
+  后者是业务进度（未开始 / 进行中 / 已完成 / 已停用），不要互相代答。
 - weekly_scale：一次给出各看板/专项组/一级分类的任务数、里程碑数、附件数、年度目标数。
   凡是「某维度有多少任务、多少里程碑、多少附件」这类多指标同问，只调这一次，不要按维度
   分别调 weekly_aggregate 再把数字拼起来——拼起来的那条路正是 JOIN 放大的来源。
@@ -64,6 +68,10 @@ TOOL_GUIDE = """\
   按自身审批码值分档（0 草稿/1 待审核/2 驳回/3 通过，与任务的 workflow_status 是两套词汇），
   scope=unpublished_by_task 给「提交单已发布、进展却还挂着未发布」的任务及各自期数
   （已按 version_no 去重，是期数不是行数），scope=version_gaps 给期号有缺的任务。
+  问「各任务最新一期的下一步安排」用 scope=latest_round（可带 project_group 限定项目组）：
+  服务端按 version_no 收敛到一任务一行，不要用 weekly_progress_history 拉全部历史自己挑最新，
+  也不要按 progress_date 挑——补报的老期号可能日期更晚。问「最新一期没写下一步的有几个」
+  用 scope=missing_next，中间某期空着不算。
 - weekly_freshness_distribution：按进展陈旧程度分档（30/90/180 天/从未）。
   要「哪些任务很久没上报」用 stale_days（只算在办，含从未上报），
   要「最近哪些任务上报了」用 recent_days（不限状态）。
@@ -91,15 +99,25 @@ TOOL_GUIDE = """\
   在途提交单上的附件/逐月趋势/软删审计/孤儿行。清单工具封顶 200 条，求和计数一律用这个。
 - weekly_import_audit：导入批次对账（批次数 vs 去重快照日期数）。默认只报批次自己声明的
   changed_tasks；问「声明与实际对不上」必须带 reconcile_rows=True，服务端反查实际落库并
-  直接给出 mismatched_batches。
+  直接给出 mismatched_batches。问「有没有进展挂在不存在的批次上」带 orphans=True：
+  orphan_rows = 0 就是「引用完整」这个结论本身，不要当成空结果换口径重查；
+  import_id 为空的 120 条是未经导入的手工填报，服务端单列为 rows_without_import，不算孤儿。
 
 专项组看板（有自己的表，不要拿通用工具查）
-- weekly_group_detail_query：专项组明细表（目标/措施/负责人/完成情况文本）。
+- weekly_group_detail_query：专项组明细表（目标/措施/负责人/完成情况文本）。牵头人与项目
+  负责人两列在这张表上，不在 task 行上：fields="lead_owner_names,project_owner_names"。
+  问矛盾数据（如「状态还是未开始、却已经写了进度成效」）用 status 与 non_empty 交叉筛，
+  两侧同时给条件——只给 status 会把「未开始且成效为空」也收进来，那并不矛盾。
 - weekly_group_owner_query：按负责人查专项组任务，或列出该看板的负责人字段。
 - weekly_group_history：专项组进展历史（独立表，非 task_progress）。
+  「最近三个月」用 last_months=3（日历月），不要折成 last_days=90：两者边界不同（回到
+  05-15 与 05-17），5 月那一档会由 16 变 13；两个参数互斥，同时给服务端直接报错。
+  问「哪些任务最久没上报」用 grouping=lag，服务端按最后一次上报算滞报天数并给出总任务数。
 - weekly_group_stats：专项组看板的聚合统计，含多值负责人栏的分隔符写法（separators）
   与一栏里几个人（owner_widths）；completion_time_values 给库里真实存在的写法（原样报，
-  不要归纳成自己的类别名），effect_consistency 比对明细表成效与历史表最新一期是否一致。
+  不要归纳成自己的类别名），completion_time_formats 才是「有几种写法」的分档（6 档，46 条
+  各进一档、相加等于 total_count）——去重取值有 28 个，拿它答分档会差一个量级；
+  effect_consistency 比对明细表成效与历史表最新一期是否一致。
 """
 
 CALIBER_RULES = """\
@@ -149,6 +167,19 @@ CALIBER_RULES = """\
     未经反查不算已核对，要判断「对不上」必须用带反查的口径。
 21. 逐个列举类问题看 total_count：它是口径下的对象总数，top 只是页大小。
     total_count 与 row_count 相等才算列全，不等就把 top 提上去重取，别就地作答。
+22. 「未发布」是发布闸门的反面，不是各在途档相加：直接看 workflow_status 分组给的
+    totals（未发布 22 条），拿五个在途档相加会漏掉 cancelled——它两边都不属于。
+    也因此，问审批流转分布的那次查询不带发布闸门，总体是 150 而不是 128。
+23. 「最近 N 个月」是日历月，不折成 N×30 天。三个月从快照日回到 05-15，90 天落在
+    05-17，中间的行会静默丢掉（5 月由 16 变 13）。两种窗口互不可替，按问法选参数。
+24. 「最新一期」按期号（version_no）定序，不按日期：补报的老期号可能带更晚的日期。
+    要一任务一行的最新一期，用服务端已收敛的 scope，不要自己在历史清单里挑。
+25. 「有几种写法」问的是分档数，不是去重取值数（6 档 vs 28 个取值）。分档的判别顺序
+    即优先级，一条只进一档，各档相加应等于 total_count；照服务端的档名报，不要自拟。
+26. 0 不是空结果：孤儿引用 0、最新一期缺下一步 0，都是结论本身。caliber 写明
+    「不要换口径重算」的，就照此作答，不要反复改条件去凑一个非零数。
+27. 引用完整性只判「指向了查不到的记录」；外键为空是「没走那条路」，不是挂错。
+    手工填报（import_id 为空）的 120 条另计，混进孤儿数会把正常数据报成异常。
 
 ## 判为不可答
 
