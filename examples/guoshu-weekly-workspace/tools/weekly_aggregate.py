@@ -17,21 +17,40 @@ _call = _module.__dict__["call"]
 _invalid = _module.__dict__["invalid_argument"]
 
 
-async def weekly_aggregate(group_by: str, board: str = "", metric: str = "count") -> str:
+async def weekly_aggregate(group_by: str, board: str = "", metric: str = "count", top: int = 0) -> str:
     """Aggregate formal tasks by one dimension.
 
     Empty groups are preserved (the service puts the caliber on the JOIN's ON
     clause, per R-02/R-08), so a zero row means genuinely zero tasks -- do not
     treat a missing group as zero without checking here first.
 
+    category and primary_category are two different questions: tasks only attach
+    to 二级分类, and 一级分类 is reached through the parent_id hop. Asking for
+    分类 with group_by="category" answers with 47 buckets where the question
+    wanted 6.
+
     Args:
-        group_by: One of board / category / status / project_group / owner.
-        board: Optional board code or name to scope the aggregation.
+        group_by: One of board / category / primary_category / status /
+            project_group / owner.
+        board: Optional board code or name to scope the aggregation. For
+            primary_category this scopes the category tree's own board, which is
+            a different path from the task's board.
         metric: Only "count" is supported.
+        top: When > 0, hard-cuts to that many groups in SQL and says in the
+            caliber how many groups exist in total. Use it for "前 N 个" so the
+            row count is the answer -- ties past the boundary are excluded by
+            the question, not missing from the data.
     """
     if not group_by.strip():
         return _invalid("group_by must not be empty")
-    return await _call("weekly_aggregate", {"group_by": group_by, "board": board, "metric": metric})
+    try:
+        cut = max(0, int(top))
+    except TypeError, ValueError:
+        return _invalid("top must be an integer")
+    return await _call(
+        "weekly_aggregate",
+        {"group_by": group_by, "board": board, "metric": metric, "top": cut},
+    )
 
 
 async def weekly_freshness() -> str:

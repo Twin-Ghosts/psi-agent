@@ -21,7 +21,7 @@ export GUOSHU_WEEKLY_MCP_TOKEN=demo-token
 python tests/smoke_test.py
 ```
 
-预期 `153/153 passed`。
+预期 `179/179 passed`。
 
 ## 数据层准备
 
@@ -89,15 +89,15 @@ guoshu-weekly-workspace/
 ├── mock-mcp/                  # 仅 demo 用，不属于交付物
 │   ├── _db.py                 # MySQL 连接（只读用户，密码不进日志）
 │   ├── _store.py              # 只读查询层 + 口径规则 + 字段管控
-│   └── server.py              # 29 个语义化取数工具（Streamable HTTP MCP）
+│   └── server.py              # 30 个语义化取数工具（Streamable HTTP MCP）
 └── tests/
-    ├── smoke_test.py          # 153 条契约断言，不花模型 token
+    ├── smoke_test.py          # 179 条契约断言，不花模型 token
     └── baseline.py            # 396 题准确率基线（LLM 判定）
 ```
 
 ## 取数契约
 
-29 个语义化工具，SQL 与口径规则固化在服务端，agent 侧不产 SQL：
+30 个语义化工具，SQL 与口径规则固化在服务端，agent 侧不产 SQL：
 
 | 工具 | 用途 |
 |------|------|
@@ -105,13 +105,14 @@ guoshu-weekly-workspace/
 | `weekly_task_query` | 按看板/分类/状态/负责人/关键词查正式任务 |
 | `weekly_task_detail` | 单任务详情（明细 + 近期进展 + 年度目标） |
 | `weekly_progress_history` | 进展版本回溯，`version_no` 倒序 |
-| `weekly_progress_coverage` | 进展历史覆盖度（行数/任务数/起止/最大版本） |
-| `weekly_aggregate` | 按 board/category/status/project_group/owner 聚合 |
+| `weekly_progress_coverage` | 进展历史覆盖度（行数/任务数/起止/最大版本）、未发布进展分档、期号缺号 |
+| `weekly_aggregate` | 按 board/category/**primary_category**/status/project_group/owner 聚合，`top` 硬切前 N 组 |
 | `weekly_field_completeness` | 字段填报完整度（R-07/R-19），字段走白名单 |
 | `weekly_task_ranking` | 按子表计数排名（附件/进展/里程碑/提交单） |
-| `weekly_milestone_query` | 里程碑清单（已复核正式任务口径） |
-| `weekly_workflow_query` | 审批动作流水（谁在哪个环节做了什么） |
-| `weekly_submission_query` | 审批提交单（`round_no` / `status` / 填报人） |
+| `weekly_rank` | 排名并列口径三选一：硬切 N 条 / 保留并列 / 每组各自第一 |
+| `weekly_milestone_query` | 里程碑清单（已复核正式任务口径），单任务按 `sort_order` 编排 |
+| `weekly_workflow_query` | 审批动作流水（谁在哪个环节做了什么），可按 action/看板过滤、按任务聚合次数 |
+| `weekly_submission_query` | 审批提交单（`round_no` / `status` / 填报人），可查任务状态与最新单状态不一致 |
 | `weekly_owner_roles` | 按角色分别计数（as_owner / as_lead / any_role） |
 | `weekly_person_stats` | 人员统计（任务量/人均/独苗/跨组/双角色/标识写法/填报人/审核人/自审） |
 | `weekly_attachment_stats` | 附件统计（容量/类型/最大/上传人/挂载去向/在途提交单/逐月/软删/孤儿） |
@@ -119,16 +120,16 @@ guoshu-weekly-workspace/
 | `weekly_import_audit` | 导入批次对账 |
 | `weekly_freshness` | 各看板最新进展时间 |
 | `weekly_health` | 连通性自检与各表行数 |
-| `weekly_progress_range` | 时间窗内的进展（全表跨任务，可按月/季/任务分组计数） |
+| `weekly_progress_range` | 时间窗内的进展（全表跨任务，可按月/季/任务分组计数），`peak` 直接给峰值组 |
 | `weekly_task_lifecycle` | 任务创建/发布的时间分布与建到发的时长 |
-| `weekly_freshness_distribution` | 新鲜度分桶（30/90/180 天）、自定义天窗、时间漂移检出 |
+| `weekly_freshness_distribution` | 新鲜度分桶（30/90/180 天）、自定义天窗、时间漂移检出、滞后清单（含从未上报）、近期上报清单 |
 | `weekly_approval_turnaround` | 审批时效（汇总/按看板/最慢/待审积压） |
 | `weekly_group_detail_query` | 集团组明细（目标成果/实施举措/进度成效/完成时间文本） |
 | `weekly_group_owner_query` | 集团组按牵头人或项目负责人查任务（多值精确匹配） |
 | `weekly_group_history` | 集团组历史进展（专表，可按年/月/季/任务/填报人分组） |
-| `weekly_group_stats` | 集团组统计（负责人构成/分隔符写法/一栏几人/完成时间格式/字数/附件/期数） |
+| `weekly_group_stats` | 集团组统计（负责人构成/分隔符写法/一栏几人/完成时间格式与去重取值/字数/附件/期数/成效一致性） |
 | `weekly_year_goal_query` | 年度目标条目（按任务/年份，带里程碑摘要） |
-| `weekly_year_goal_stats` | 年度目标统计（分年/覆盖率/缺口/缺口分组/跨年跨度/连续设标） |
+| `weekly_year_goal_stats` | 年度目标统计（分年/覆盖率/缺口，可限在办/缺口分组/跨年跨度/连续设标） |
 | `weekly_milestone_stats` | 里程碑统计（完成率/多维分解/软删审计/每任务分布/任务与里程碑错配） |
 
 `weekly_workflow_query` 与 `weekly_submission_query` 是两张表，不可互相替代：
@@ -206,7 +207,7 @@ R-04/R-14 要的是「按权限返回」。一律遮蔽同样不满足需求—�
 | 数据权限 | 敏感字段按 token 两档分级 | 按 OA 真实身份做行级权限 |
 | 前端 | 无（经 psi-agent 既有接口） | 专建对话应用 + BFF（方案第六章） |
 | 材料生成 | 无 | 报告下载与图表（P1，第 5 期） |
-| 评测 | 153 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
+| 评测 | 179 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
 
 ### mock 数据层的两处不可外推
 

@@ -114,10 +114,11 @@ async def run() -> int:
         "weekly_health",
         "weekly_person_stats",
         "weekly_attachment_stats",
+        "weekly_rank",
     }
     loaded = set(registry.tools)
     check(
-        "所有 29 个工具注册，且无 helper 泄漏为工具",
+        "所有 30 个工具注册，且无 helper 泄漏为工具",
         loaded == expected_tools,
         f"缺 {sorted(expected_tools - loaded)}；多 {sorted(loaded - expected_tools)}",
     )
@@ -717,6 +718,231 @@ async def run() -> int:
         "人员统计不支持的口径显式报错",
         bad_person.get("ok") is False and bad_person.get("error", {}).get("code") == "unsupported_scope",
         f"err={bad_person.get('error')}",
+    )
+
+    # --- A4: 集合边界 --------------------------------------------------------
+    # L 类。同一份数据、同一个度量，三种并列口径的行数各不相同。这三条断言绑在
+    # 一起才有意义：任何一档退化成另一档，都会让「前 3 名」答出别人的行数。
+    cut3 = await _call(registry, "weekly_rank", metric="progress_rounds", mode="cut", top=3)
+    check(
+        "L2-03 cut 硬切 3 条，口径写明边界外并列不补列",
+        cut3.get("row_count") == 3
+        and "硬切前 3 条" in str(cut3.get("caliber", ""))
+        and "不要补列" in str(cut3.get("caliber", "")),
+        f"row_count={cut3.get('row_count')} caliber={str(cut3.get('caliber'))[:160]}",
+    )
+    ties3 = await _call(registry, "weekly_rank", metric="progress_rounds", mode="keep_ties", top=3)
+    check(
+        "L3-01 keep_ties 前 3 名共 12 行（并列全列），且每行带 rk",
+        ties3.get("row_count") == 12
+        and all("rk" in r for r in ties3.get("rows", []))
+        and ties3.get("has_more") is False,
+        f"row_count={ties3.get('row_count')}",
+    )
+    per_group = await _call(
+        registry, "weekly_rank", metric="progress_rounds", mode="per_group", group_by="project_group"
+    )
+    check(
+        "L4-01 per_group 一组一行共 11 行，不受 top 影响且未截断",
+        per_group.get("row_count") == 11
+        and per_group.get("has_more") is False
+        and len({r.get("bucket") for r in per_group.get("rows", [])}) == 11,
+        f"row_count={per_group.get('row_count')} has_more={per_group.get('has_more')}",
+    )
+    # ascending 那一端必须留住零值行：期数为 0 的任务正是「最少」的答案，
+    # INNER JOIN 会把它们整行丢掉（inner_join_drops_zero）。
+    fewest = await _call(registry, "weekly_rank", metric="progress_rounds", mode="cut", top=5, ascending=True)
+    check(
+        "L 类 ascending 保留零期数任务（LEFT JOIN，非 INNER）",
+        fewest.get("row_count") == 5 and all(int(r.get("metric_value", -1)) == 0 for r in fewest.get("rows", [])),
+        f"rows={[(r.get('task_id'), r.get('metric_value')) for r in fewest.get('rows', [])]}",
+    )
+    bad_metric = await _call(registry, "weekly_rank", metric="salary")
+    check(
+        "weekly_rank 未知 metric 报错并列出值域",
+        bad_metric.get("ok") is False
+        and bad_metric.get("error", {}).get("code") == "unsupported_metric"
+        and "progress_rounds" in str(bad_metric.get("error", {}).get("message", "")),
+        f"err={bad_metric.get('error')}",
+    )
+    bad_mode = await _call(registry, "weekly_rank", mode="dense_rank")
+    check(
+        "weekly_rank 未知 mode 报错并列出三档",
+        bad_mode.get("ok") is False and bad_mode.get("error", {}).get("code") == "unsupported_mode",
+        f"err={bad_mode.get('error')}",
+    )
+    no_axis = await _call(registry, "weekly_rank", mode="per_group")
+    check(
+        "per_group 缺 group_by 报错而非静默退回全局排名",
+        no_axis.get("ok") is False and no_axis.get("error", {}).get("code") == "unsupported_group_by",
+        f"err={no_axis.get('error')}",
+    )
+
+    # B4-01. 任务只挂二级分类，一级分类要经 parent_id 上跳；按 category 分组
+    # 会返回 47 档，那是另一个问题的答案。
+    pcat = await _call(registry, "weekly_aggregate", group_by="primary_category", board="tech")
+    check(
+        "B4-01 技术组一级分类 6 档，首档 关键技术攻关 18",
+        pcat.get("row_count") == 6
+        and (pcat.get("rows") or [{}])[0].get("group_name") == "关键技术攻关"
+        and int((pcat.get("rows") or [{}])[0].get("cnt", 0)) == 18,
+        f"rows={[(r.get('group_name'), r.get('cnt')) for r in pcat.get('rows', [])]}",
+    )
+    check(
+        "一级分类口径点明不是二级分类，且看板过滤走分类树",
+        "不是二级分类" in str(pcat.get("caliber", "")),
+    )
+    # B4-03. 9 个二级分类并列 5 个任务，「前 5」必须硬切，并告知总组数。
+    cat5 = await _call(registry, "weekly_aggregate", group_by="category", top=5)
+    check(
+        "B4-03 二级分类硬切 5 组并回显共 47 组",
+        cat5.get("row_count") == 5 and cat5.get("total_groups") == 47 and "共 47 组" in str(cat5.get("caliber", "")),
+        f"row_count={cat5.get('row_count')} total_groups={cat5.get('total_groups')}",
+    )
+
+    # G2-01. 「在办任务没定目标」问的是 status IN (0, 1) 那批；不加这道过滤会
+    # 把已完成/已暂停的混进来（11 行 vs 10 行）。
+    miss_all = await _call(registry, "weekly_year_goal_stats", scope="missing", year=2026, top=200)
+    miss_open = await _call(
+        registry, "weekly_year_goal_stats", scope="missing", year=2026, top=200, in_progress_only=True
+    )
+    check(
+        "G2-01 2026 无目标共 11 个，其中在办 10 个（0 未开始同样在办）",
+        miss_all.get("total_count") == 11
+        and miss_open.get("total_count") == 10
+        and "仅在办任务" in str(miss_open.get("caliber", "")),
+        f"all={miss_all.get('total_count')} open={miss_open.get('total_count')}",
+    )
+
+    # O4-01. 单任务里程碑此前没有 task 参数，问「任务 19 有哪些里程碑」会拿回
+    # 全board首页——一个完整、像样、但属于另一个问题的答案。
+    ms19 = await _call(registry, "weekly_milestone_query", task="19")
+    check(
+        "O4-01 任务 19 恰好 2 条里程碑，按任务内 sort_order 编排",
+        ms19.get("total_count") == 2
+        and {int(r.get("task_id", 0)) for r in ms19.get("rows", [])} == {19}
+        and [int(r.get("sort_order", 0)) for r in ms19.get("rows", [])] == [1, 2]
+        and "sort_order" in str(ms19.get("caliber", "")),
+        f"total={ms19.get('total_count')} "
+        f"rows={[(r.get('task_id'), r.get('sort_order')) for r in ms19.get('rows', [])]}",
+    )
+    ms_all = await _call(registry, "weekly_milestone_query")
+    check(
+        "里程碑不带 task 时覆盖全部 474 条（明细截断但总数精确）",
+        ms_all.get("total_count") == 474 and ms_all.get("has_more") is True,
+        f"total={ms_all.get('total_count')}",
+    )
+
+    # C6-02. 未发布进展的 status 是进展行自己的审批码值，与任务的
+    # workflow_status 是两套词汇，套错就答成 published/pending_audit。
+    unpub = await _call(registry, "weekly_progress_coverage", scope="unpublished")
+    check(
+        "C6-02 未发布进展 草稿 26 / 待审核 58 / 驳回 39，合计 123",
+        [(int(r.get("status", -1)), int(r.get("cnt", 0))) for r in unpub.get("rows", [])] == [(0, 26), (1, 58), (2, 39)]
+        and unpub.get("total_count") == 123,
+        f"rows={unpub.get('rows')} total={unpub.get('total_count')}",
+    )
+    check(
+        "未发布进展口径显式排除拿 workflow_status 来套",
+        "不要拿任务的 workflow_status" in str(unpub.get("caliber", "")),
+    )
+    gaps = await _call(registry, "weekly_progress_coverage", scope="version_gaps")
+    check(
+        "期号缺号 5 个任务，missing_count = 最大期号 - 实际期数",
+        gaps.get("row_count") == 5
+        and all(
+            int(r.get("max_version", 0)) - int(r.get("rounds", 0)) == int(r.get("missing_count", -1))
+            for r in gaps.get("rows", [])
+        ),
+        f"rows={gaps.get('rows')}",
+    )
+
+    # 库里真实存在的 completion_time 写法有 28 种，含「持续推进」这类非日期文本。
+    ct_values = await _call(registry, "weekly_group_stats", scope="completion_time_values", top=200)
+    check(
+        "completion_time 去重后 28 种，含非日期文本且原样返回",
+        ct_values.get("total_count") == 28
+        and "持续推进" in {str(r.get("completion_time")) for r in ct_values.get("rows", [])}
+        and "不要归纳成自己的类别名" in str(ct_values.get("caliber", "")),
+        f"total={ct_values.get('total_count')}",
+    )
+    effect = await _call(registry, "weekly_group_stats", scope="effect_consistency", top=200)
+    check(
+        "成效一致性 46 行，不一致的排最前（same 升序）",
+        effect.get("row_count") == 46
+        and [int(r.get("same", -1)) for r in effect.get("rows", [])]
+        == sorted(int(r.get("same", -1)) for r in effect.get("rows", [])),
+        f"row_count={effect.get('row_count')}",
+    )
+
+    # 任务 workflow_status 与最新提交单 status 是两套码值，跨两次调用用眼比对
+    # 会把行集混掉；这一档专门做这次比较，并且故意不加发布闸门。
+    mismatch = await _call(registry, "weekly_submission_query", status_mismatch=True)
+    check(
+        "任务状态与最新提交单状态不一致 16 个，口径说明不加发布闸门",
+        mismatch.get("row_count") == 16
+        and "不加发布闸门" in str(mismatch.get("caliber", ""))
+        and all(r.get("workflow_status") != r.get("latest_submission_status") for r in mismatch.get("rows", [])),
+        f"row_count={mismatch.get('row_count')}",
+    )
+
+    # 动作日志比 200 行上限长，所以过滤必须落在服务端；值域外的 action 报错，
+    # 不能静默不过滤——那会返回全量并看着像答案。
+    bad_action = await _call(registry, "weekly_workflow_query", action="submit")
+    check(
+        "action 值域外报错并列出四个真实取值（不静默退回全量）",
+        bad_action.get("ok") is False
+        and bad_action.get("error", {}).get("code") == "unsupported_action"
+        and "submitted" in str(bad_action.get("error", {}).get("message", ""))
+        and "[" not in str(bad_action.get("error", {}).get("message", "")),
+        f"err={bad_action.get('error')}",
+    )
+    by_task = await _call(registry, "weekly_workflow_query", by_task=True)
+    check(
+        "动作日志按任务聚合 150 行，口径点明 action_count 是次数",
+        by_task.get("row_count") == 150 and "次数不是任务数" in str(by_task.get("caliber", "")),
+        f"row_count={by_task.get('row_count')}",
+    )
+
+    # 「哪个月上报最多」的裁决落服务端：返回 19 行让模型自己挑，它会把
+    # 2026-02(61) 和名次靠后的月份看成并列。
+    peak = await _call(registry, "weekly_progress_range", by="month", peak=True)
+    check(
+        "峰值月 2026-02 共 61 条，单行返回且无假截断信号",
+        peak.get("row_count") == 1
+        and (peak.get("rows") or [{}])[0].get("bucket") == "2026-02"
+        and int((peak.get("rows") or [{}])[0].get("progress_count", 0)) == 61
+        and peak.get("has_more") is False,
+        f"rows={peak.get('rows')} has_more={peak.get('has_more')}",
+    )
+
+    # 滞后清单：在办含 status 0，从未上报（NULL）算滞后且排最前。
+    stale = await _call(registry, "weekly_freshness_distribution", stale_days=30)
+    check(
+        "滞后 30 天的在办任务 46 个，从未上报排最前且 days_since 为空",
+        stale.get("total_count") == 46
+        and (stale.get("rows") or [{}])[0].get("latest_progress_time") is None
+        and (stale.get("rows") or [{}])[0].get("days_since") is None
+        and "0 未开始同样在办" in str(stale.get("caliber", "")),
+        f"total={stale.get('total_count')} first={(stale.get('rows') or [{}])[0]}",
+    )
+    stale_pg = await _call(registry, "weekly_freshness_distribution", stale_days=30, by="project_group")
+    check(
+        "滞后按专项组分组 11 组，各组相加等于 46",
+        stale_pg.get("row_count") == 11 and sum(int(r.get("stale_count", 0)) for r in stale_pg.get("rows", [])) == 46,
+        f"rows={[(r.get('project_group'), r.get('stale_count')) for r in stale_pg.get('rows', [])]}",
+    )
+    recent = await _call(registry, "weekly_freshness_distribution", recent_days=7)
+    check(
+        "近 7 天上报 23 个任务，不加 status 过滤（问的是有无上报）",
+        recent.get("row_count") == 23 and "不加 status 过滤" in str(recent.get("caliber", "")),
+        f"row_count={recent.get('row_count')}",
+    )
+    bad_by = await _call(registry, "weekly_freshness_distribution", stale_days=30, by="owner")
+    check(
+        "滞后清单不支持的分组轴显式报错",
+        bad_by.get("ok") is False and bad_by.get("error", {}).get("code") == "unsupported_group_by",
+        f"err={bad_by.get('error')}",
     )
 
     # --- role-split counting (weekly_task_query ORs the owner columns) ------

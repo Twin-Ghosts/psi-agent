@@ -319,13 +319,17 @@ def weekly_progress_history(
 
 
 @mcp.tool()
-def weekly_aggregate(group_by: str, board: str = "", metric: str = "count") -> str:
+def weekly_aggregate(group_by: str, board: str = "", metric: str = "count", top: int = 0) -> str:
     """Aggregate formal tasks. Uses LEFT JOIN so empty groups still appear (R-02/R-08).
 
     Args:
-        group_by: One of board / category / status / project_group / owner.
+        group_by: One of board / category / primary_category / status /
+            project_group / owner.
         board: Optional board code or name to scope the aggregation.
         metric: Only "count" is supported in the demo.
+        top: When > 0, hard-cut to that many groups after the ordering. "任务最多
+            的前 5 个分类" means exactly 5 rows even though 9 categories tie at 5
+            tasks -- the cut is the answer, not a truncation to apologise for.
     """
 
     def work() -> dict[str, Any]:
@@ -356,6 +360,22 @@ def weekly_aggregate(group_by: str, board: str = "", metric: str = "count") -> s
                 f"LEFT JOIN task t ON t.category_id = c.id AND {scope} "
                 "WHERE c.is_deleted = 0 GROUP BY c.id, c.name ORDER BY cnt DESC, c.id"
             )
+        elif group_by == "primary_category":
+            # 任务只挂到二级分类，一级分类得经 parent_id 上跳一层。按 category
+            # 分组会返回 47 个二级分类，那是另一个问题的答案。
+            # 看板过滤落在分类树所属看板上（c.board_id），与 task.board_id 是两条路径。
+            board_filter = ""
+            if board.strip():
+                board_filter = "AND cb.id = %(bid)s"
+            sql = (
+                "SELECT pc.name AS group_name, COUNT(*) AS cnt FROM task t "
+                "JOIN task_category c ON c.id = t.category_id AND c.is_deleted = 0 "
+                "JOIN task_board cb ON cb.id = c.board_id AND cb.is_deleted = 0 "
+                f"{board_filter} "
+                "JOIN task_category pc ON pc.id = c.parent_id AND pc.is_deleted = 0 "
+                f"WHERE {store.formal_task_clause()} "
+                "GROUP BY pc.id, pc.name ORDER BY cnt DESC, pc.id"
+            )
         elif group_by == "status":
             sql = (
                 "SELECT CASE t.status WHEN 0 THEN '未开始' WHEN 1 THEN '进行中' "
@@ -382,24 +402,52 @@ def weekly_aggregate(group_by: str, board: str = "", metric: str = "count") -> s
                 "ok": False,
                 "error": {
                     "code": "unsupported_group_by",
-                    "message": "group_by 支持 board / category / status / project_group / owner",
+                    "message": "group_by 支持 board / category / primary_category / status / project_group / owner",
                 },
             }
         caliber = f"{store.FORMAL_TASK_CALIBER}；LEFT JOIN 保留空分组（R-02/R-08）"
-        if group_by == "project_group":
+        if group_by == "primary_category":
+            caliber = (
+                f"{store.FORMAL_TASK_CALIBER}；按一级分类（二级分类的 parent_id）汇总，"
+                "不是二级分类；看板过滤落在分类树所属看板上；"
+                "只统计挂到分类树上的任务，未挂分类的任务不进任何一档"
+            )
+        elif group_by == "project_group":
             caliber += "；lead_owner_count / project_owner_count 已由服务端按人名去重，直接引用该数字，不要自己数人名"
-        result = store.fetch(sql, params, caliber=caliber)
+        cut = 0
+        if top:
+            try:
+                cut = max(1, min(store.MAX_ROWS, int(top)))
+            except TypeError, ValueError:
+                return {"ok": False, "error": {"code": "invalid_argument", "message": "top 必须是整数"}}
+            # 截断落在 SQL 里，并在 caliber 写明并列被切掉了几个：模型看到 5 行
+            # 就答 5 行，不会因为「还有并列的」而补列成 9 行。
+            tied_total = store.scalar(
+                f"SELECT COUNT(*) FROM ({sql}) all_groups",
+                params,
+            )
+            sql += f" LIMIT {cut}"
+            caliber += (
+                f"；按上述定序硬切前 {cut} 组（共 {tied_total['value']} 组）；"
+                "边界外与末位并列的分组不属于本题答案，不要补列"
+            )
+        result = store.fetch(sql, params, caliber=caliber, limit=cut or store.MAX_ROWS)
         result["group_by"] = group_by
+        if cut:
+            result["total_groups"] = tied_total["value"]
         return result
 
     return _guard("weekly_aggregate", work)
 
 
 @mcp.tool()
-def weekly_milestone_query(year: str = "", status: str = "", limit: int = 200) -> str:
+def weekly_milestone_query(task: str = "", year: str = "", status: str = "", limit: int = 200) -> str:
     """List milestones, joined back to task to re-check the formal-task caliber (R-17).
 
     Args:
+        task: Task id or name. Empty covers every formal task -- so "任务 19 有哪些
+            里程碑" must pass it, otherwise the answer is the first page of the
+            whole board and the row set silently belongs to a different question.
         year: Four-digit year, empty for all.
         status: 0 未完成 / 1 已完成, empty for all.
         limit: Max rows, capped at 200.
@@ -408,6 +456,17 @@ def weekly_milestone_query(year: str = "", status: str = "", limit: int = 200) -
     def work() -> dict[str, Any]:
         where = ["m.is_deleted = 0", store.formal_task_clause()]
         params: dict[str, Any] = {}
+        scoped = False
+        if task.strip():
+            task_id = store.resolve_task_id(task)
+            if task_id is None:
+                return {
+                    "ok": False,
+                    "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
+                }
+            where.append("m.task_id = %(tid)s")
+            params["tid"] = task_id
+            scoped = True
         if year.strip():
             if not year.strip().isdigit():
                 return {"ok": False, "error": {"code": "invalid_year", "message": "year 须为数字"}}
@@ -418,25 +477,50 @@ def weekly_milestone_query(year: str = "", status: str = "", limit: int = 200) -
                 return {"ok": False, "error": {"code": "invalid_status", "message": "status 只能是 0/1"}}
             where.append("m.status = %(st)s")
             params["st"] = int(status.strip())
-        return store.fetch(
-            "SELECT m.id, m.task_id, t.task_name, m.year, m.category, m.group_name, "
-            "m.content, m.status "
-            "FROM task_milestone m JOIN task t ON t.id = m.task_id "
-            f"WHERE {' AND '.join(where)} ORDER BY m.year DESC, m.id",
+        clause = " AND ".join(where)
+        caliber = f"m.is_deleted = 0 且关联任务满足 {store.FORMAL_TASK_CALIBER}（R-17）"
+        # 单任务问「里程碑安排」要按任务内的编排顺序（sort_order）读，那是这份
+        # 清单的业务次序；全局浏览才按年度倒序。次序不同会被判成另一个集合。
+        order = "m.year, m.sort_order, m.id" if scoped else "m.year DESC, m.id"
+        if scoped:
+            caliber += "；按 sort_order 给出该任务内的编排顺序；已按 total_count 给全，勿另行截断"
+        total = store.scalar(
+            f"SELECT COUNT(*) FROM task_milestone m JOIN task t ON t.id = m.task_id WHERE {clause}",
             params,
-            caliber=f"m.is_deleted = 0 且关联任务满足 {store.FORMAL_TASK_CALIBER}（R-17）",
+        )
+        rows = store.fetch(
+            "SELECT m.id, m.task_id, t.task_name, m.year, m.category, m.group_name, "
+            "m.content, m.status, m.sort_order "
+            "FROM task_milestone m JOIN task t ON t.id = m.task_id "
+            f"WHERE {clause} ORDER BY {order}",
+            params,
+            caliber=caliber,
             limit=limit,
         )
+        rows["total_count"] = total["value"]
+        return rows
 
     return _guard("weekly_milestone_query", work)
 
 
 @mcp.tool()
-def weekly_workflow_query(task: str = "", limit: int = 200, ctx: Context | None = None) -> str:
+def weekly_workflow_query(
+    task: str = "",
+    action: str = "",
+    board: str = "",
+    by_task: bool = False,
+    limit: int = 200,
+    ctx: Context | None = None,
+) -> str:
     """Trace approval submissions and actions. Opinions are permission-gated (R-04/R-14).
 
     Args:
         task: Task id or name; empty returns the most recent actions overall.
+        action: Keep only this action (e.g. ``rejected``). Call with an unknown
+            value to see the domain -- an out-of-domain word would otherwise
+            filter nothing and the full log would pass as a filtered set.
+        board: Board code or name to scope by. "集团看板哪些任务被驳回过" needs it.
+        by_task: True aggregates per task into action_count instead of listing rows.
         limit: Max rows, capped at 200.
     """
     may_read = _caller_may_read_sensitive(ctx)
@@ -444,6 +528,52 @@ def weekly_workflow_query(task: str = "", limit: int = 200, ctx: Context | None 
     def work() -> dict[str, Any]:
         params: dict[str, Any] = {}
         where = ["1 = 1"]
+        caliber_extra: list[str] = []
+        board_join = ""
+        if action.strip():
+            domain = {
+                str(row["action"]).strip()
+                for row in store.fetch(
+                    "SELECT DISTINCT action FROM task_workflow_action ORDER BY action",
+                    limit=50,
+                )["rows"]
+                if row["action"] is not None
+            }
+            token = action.strip()
+            if token not in domain:
+                return {
+                    "ok": False,
+                    "error": {
+                        "code": "unsupported_action",
+                        "message": f"action 不在值域内：{token}；支持 {', '.join(sorted(domain))}",
+                    },
+                }
+            where.append("a.action = %(act)s")
+            params["act"] = token
+            caliber_extra.append(f"仅 action = {token}")
+        if board.strip():
+            board_id = store.resolve_board(board)
+            if board_id is None:
+                return {"ok": False, "error": {"code": "board_not_found", "message": f"未匹配到看板：{board}"}}
+            board_join = "JOIN task t ON t.id = a.task_id"
+            where.append("t.is_deleted = 0 AND t.board_id = %(bid)s")
+            params["bid"] = board_id
+            caliber_extra.append("按看板过滤时任务侧只加 is_deleted = 0（动作日志本就跨发布状态）")
+        if by_task:
+            # 「哪些任务被驳回过」问的是任务集合与次数，不是动作流水。逐条明细
+            # 里同一任务会出现多次，模型按行数报会把次数当成任务数。
+            joins = board_join or "JOIN task t ON t.id = a.task_id"
+            if not board.strip():
+                where.append("t.is_deleted = 0")
+            return store.fetch(
+                "SELECT a.task_id, t.task_name, COUNT(*) AS action_count "
+                f"FROM task_workflow_action a {joins} "
+                f"WHERE {' AND '.join(where)} "
+                "GROUP BY a.task_id, t.task_name ORDER BY action_count DESC, a.task_id",
+                params,
+                caliber="；".join([*caliber_extra, "按任务聚合，action_count 是次数不是任务数；并列按 task id 升序"]),
+                limit=limit,
+            )
         if task.strip():
             task_id = store.resolve_task_id(task)
             if task_id is None:
@@ -456,15 +586,22 @@ def weekly_workflow_query(task: str = "", limit: int = 200, ctx: Context | None 
         return store.fetch(
             "SELECT a.id, a.submission_id, a.task_id, s.round_no, a.node_type, a.action, "
             "a.operator_name, a.opinion, a.created_at "
-            "FROM task_workflow_action a "
+            f"FROM task_workflow_action a {board_join} "
             "LEFT JOIN task_workflow_submission s ON s.id = a.submission_id "
             f"WHERE {' AND '.join(where)} "
             "ORDER BY a.task_id, s.round_no, a.id",
             params,
-            caliber=(
-                "opinion 属敏感字段，按权限展示（R-04/R-14）；"
-                + ("本次凭证有敏感字段权限，opinion 原文返回" if may_read else "本次凭证无敏感字段权限，opinion 已遮蔽")
-                + "；payload 草稿快照不返回"
+            caliber="；".join(
+                [
+                    *caliber_extra,
+                    "opinion 属敏感字段，按权限展示（R-04/R-14）"
+                    + (
+                        "；本次凭证有敏感字段权限，opinion 原文返回"
+                        if may_read
+                        else "；本次凭证无敏感字段权限，opinion 已遮蔽"
+                    ),
+                    "payload 草稿快照不返回",
+                ]
             ),
             can_read_sensitive=may_read,
             limit=limit,
@@ -726,6 +863,7 @@ def weekly_submission_query(
     reporter: str = "",
     status: str = "",
     exclude_status: str = "",
+    status_mismatch: bool = False,
     limit: int = 200,
 ) -> str:
     """Query approval submission forms (task_workflow_submission).
@@ -739,10 +877,32 @@ def weekly_submission_query(
         reporter: Reporter id or name, exact match after trimming.
         status: Keep only this submission status.
         exclude_status: Drop this status (e.g. approved, for "not yet approved").
+        status_mismatch: True 只保留「任务 workflow_status 与其最新一轮提交单状态
+            disagrees with its newest submission's status, one row per task. The two
+            are separate vocabularies, so the comparison happens server-side.
         limit: Max rows, capped at 200.
     """
 
     def work() -> dict[str, Any]:
+        if status_mismatch:
+            # 最新一轮 = 该任务 round_no 最大的那张单。只加 is_deleted = 0：
+            # 任务侧若再加发布闸门，会把「已发布但最新单还在流程里」这批
+            # 恰恰是本题答案的行滤掉。
+            return store.fetch(
+                "SELECT t.id AS task_id, t.task_name, t.workflow_status, "
+                "s.round_no, s.status AS latest_submission_status "
+                "FROM task t JOIN task_workflow_submission s ON s.task_id = t.id "
+                "AND s.round_no = (SELECT MAX(x.round_no) FROM task_workflow_submission x "
+                "WHERE x.task_id = t.id) "
+                "WHERE t.is_deleted = 0 AND t.workflow_status <> s.status ORDER BY t.id",
+                caliber=(
+                    "仅 t.is_deleted = 0（不加发布闸门：已发布但最新单仍在流程中的任务正是本题答案）；"
+                    "最新一轮取 round_no 最大的提交单；"
+                    "任务 workflow_status 与提交单 status 是两套码值，此处按字面不等判定；"
+                    "行数即不一致任务总数，按 task id 升序"
+                ),
+                limit=limit,
+            )
         params: dict[str, Any] = {}
         where = ["t.is_deleted = 0"]
         if task.strip():
@@ -1116,6 +1276,38 @@ _CREATED_GROUPINGS: dict[str, str] = {
 
 _TURNAROUND_SCOPES = ("summary", "board", "slowest", "pending")
 
+# 进展覆盖面的三个口径。unpublished / version_gaps 都是「让模型自己数会数错」
+# 的那类：一个要辨两套状态码值，一个要拿最大期号减实际期数。
+_COVERAGE_SCOPES = ("summary", "unpublished", "version_gaps")
+
+# 排名口径的三种语义。哪一种都不能由模型按返回行自己拿主意：
+#   cut       ——「前 N 条」，并列也要按定序硬切到 N 条；
+#   keep_ties ——「并列的都要列出来」，第 N 名有几个并列就返回几行；
+#   per_group ——「每组各自的第一名」，一组一行，组内并列按定序取第一。
+# 同一份数据在三种语义下行数不同（进展期数前 3 名：cut=3、keep_ties=12），
+# 让模型自己在 200 行明细上判断，多返回和少返回都会被判集合不一致。
+_RANK_MODES = ("cut", "keep_ties", "per_group")
+
+# 可排名的度量。每项给出：子表、子表自身闸门、计数表达式、中文标签。
+# 全部走 LEFT JOIN，零值行才不会被 INNER JOIN 静默丢掉（inner_join_drops_zero）。
+_RANK_METRICS: dict[str, tuple[str, str, str, str]] = {
+    "progress_rounds": ("task_progress", "x.is_published = 1", "COUNT(x.id)", "已发布进展期数"),
+    "milestones": ("task_milestone", "x.is_deleted = 0", "COUNT(x.id)", "里程碑数"),
+    "milestones_done": ("task_milestone", "x.is_deleted = 0", "SUM(x.status = 1)", "已完成里程碑数"),
+    "attachments": ("task_attachment", "x.is_deleted = 0", "COUNT(x.id)", "附件数"),
+    "submissions": ("task_workflow_submission", "1 = 1", "COUNT(x.id)", "审批提交单数"),
+    "group_rounds": ("task_group_progress_history", "x.is_published = 1", "COUNT(x.id)", "集团看板成效期数"),
+}
+
+# per_group 的分组轴。键是对外口径名，值是 (分组表达式, 分组定序键)。
+# 定序键进 ROW_NUMBER 的 ORDER BY 尾部，保证组内并列的裁决可复现。
+_RANK_GROUPINGS: dict[str, tuple[str, str]] = {
+    "project_group": ("t.project_group", "t.project_group"),
+    "board": ("b.name", "b.sort_order"),
+    "primary_category": ("pc.name", "pc.id"),
+    "status": ("t.status", "t.status"),
+}
+
 # Columns of task_group_detail a caller may select or filter on. Whitelisted for
 # the same reason as _COMPLETENESS_FIELDS: these reach SQL as identifiers.
 _GROUP_DETAIL_FIELDS: dict[str, str] = {
@@ -1141,11 +1333,13 @@ _GROUP_OWNER_ROLES: dict[str, tuple[str, str]] = {
 _GROUP_STATS_SCOPES = (
     "owners",
     "completion_time",
+    "completion_time_values",
     "field_lengths",
     "attachments",
     "history_rounds",
     "separators",
     "owner_widths",
+    "effect_consistency",
 )
 
 # Buckets over task_group_progress_history.report_time -- the group board keeps
@@ -1270,6 +1464,7 @@ def weekly_progress_range(
     last_days: int = 0,
     by: str = "",
     date_field: str = "progress_date",
+    peak: bool = False,
     limit: int = 200,
     ctx: Context | None = None,
 ) -> str:
@@ -1289,6 +1484,8 @@ def weekly_progress_range(
         by: Empty lists rows; ``month`` / ``quarter`` / ``task`` returns counts per group.
         date_field: ``progress_date`` (the period reported on) or ``report_time``
             (when it was submitted). These differ for late filings.
+        peak: True returns only the highest-count bucket. The ordering and the
+            tie-break run server-side, so the single row is the answer.
         limit: Max rows, capped at 200.
     """
     may_read = _caller_may_read_sensitive(ctx)
@@ -1358,11 +1555,22 @@ def weekly_progress_range(
         select = f"{expression} AS bucket, COUNT(*) AS progress_count"
         if grouping != "task":
             select += ", COUNT(DISTINCT p.task_id) AS task_count"
+        group_order = order
+        note = f"；按 {grouping} 分组计数"
+        tail = ""
+        if peak:
+            # 「哪个月最高」的裁决落在服务端。按 bucket 时序返回 19 行让模型自己
+            # 挑最大值，它会把 2026-02(61) 和名次靠后的月份看成并列。
+            group_order = "progress_count DESC, bucket"
+            # LIMIT 落在 SQL 里而不是靠 limit 参数截断：靠截断会带出
+            # has_more = True，看着像「还有行没给」，与「首行即答案」相冲。
+            tail = " LIMIT 1"
+            note += "；已按计数降序、并列取 bucket 升序，首行即峰值，勿另行比较"
         return store.fetch(
             f"SELECT {select} FROM task_progress p JOIN task t ON t.id = p.task_id "
-            f"WHERE {where} GROUP BY bucket ORDER BY {order}",
+            f"WHERE {where} GROUP BY bucket ORDER BY {group_order}{tail}",
             params,
-            caliber=caliber + f"；按 {grouping} 分组计数",
+            caliber=caliber + note,
             limit=limit,
         )
 
@@ -1370,21 +1578,78 @@ def weekly_progress_range(
 
 
 @mcp.tool()
-def weekly_progress_coverage() -> str:
+def weekly_progress_coverage(scope: str = "summary", limit: int = 200) -> str:
     """Summarise how far back published progress goes and how much it covers.
 
-    Returns row count, tasks covered, earliest/latest progress date and the
-    highest version number -- the "how long is the history" question, answered
-    without walking every task.
+    Args:
+        scope: ``summary`` row count, tasks covered, date span, max version_no.
+            ``unpublished`` splits unpublished progress by its OWN approval code
+            (0 草稿 / 1 待审核 / 2 驳回 / 3 通过) -- a different vocabulary from the
+            task's workflow_status. ``version_gaps`` tasks missing a period.
+        limit: Max rows for the listing scopes, capped at 200.
     """
 
     def work() -> dict[str, Any]:
+        key = (scope or "summary").strip().lower()
+        if key not in _COVERAGE_SCOPES:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported_scope",
+                    "message": f"不支持的口径：{scope}；支持 {', '.join(_COVERAGE_SCOPES)}",
+                },
+            }
+        bounded = max(1, min(store.MAX_ROWS, int(limit)))
+        clause = store.formal_task_clause()
+
+        if key == "unpublished":
+            # 未发布进展自己带一套审批状态码值（0 草稿 / 1 待审核 / 2 驳回 /
+            # 3 通过），和任务的 workflow_status 不是一回事。分档必须在服务端做，
+            # 否则模型会拿 pending_audit 这类任务侧的词来套。
+            total = store.scalar(
+                "SELECT COUNT(*) FROM task_progress p JOIN task t ON t.id = p.task_id "
+                f"WHERE {clause} AND p.is_published = 0",
+            )
+            rows = store.fetch(
+                "SELECT p.status, CASE p.status WHEN 0 THEN '草稿' WHEN 1 THEN '待审核' "
+                "WHEN 2 THEN '驳回' WHEN 3 THEN '通过' ELSE '未知' END AS status_label, "
+                "COUNT(*) AS cnt FROM task_progress p JOIN task t ON t.id = p.task_id "
+                f"WHERE {clause} AND p.is_published = 0 GROUP BY p.status ORDER BY p.status",
+                caliber=(
+                    f"{store.FORMAL_TASK_CALIBER}；仅未发布进展（p.is_published = 0）；"
+                    "status 是进展行自己的审批码值 0 草稿 / 1 待审核 / 2 驳回 / 3 通过，"
+                    "不要拿任务的 workflow_status（published、pending_audit 等）来套；"
+                    "各档相加等于 total_count"
+                ),
+                limit=bounded,
+            )
+            rows["total_count"] = total["value"]
+            return rows
+
+        if key == "version_gaps":
+            # 缺号 = 最大期号 - 实际期数。按已发布口径算，未发布的那几期本就
+            # 不该占号；HAVING 而非 WHERE，因为判据是聚合结果。
+            return store.fetch(
+                "SELECT t.id AS task_id, t.task_name, COUNT(*) AS rounds, "
+                "MAX(p.version_no) AS max_version, MAX(p.version_no) - COUNT(*) AS missing_count "
+                "FROM task_progress p JOIN task t ON t.id = p.task_id "
+                f"WHERE {clause} AND p.is_published = 1 "
+                "GROUP BY t.id, t.task_name HAVING missing_count <> 0 "
+                "ORDER BY missing_count DESC, t.id",
+                caliber=(
+                    f"{store.FORMAL_TASK_CALIBER}；仅已发布进展；"
+                    "missing_count = 最大期号 - 实际期数，非 0 即中间缺号；"
+                    "并列按 task id 升序，行数即缺号任务总数"
+                ),
+                limit=bounded,
+            )
+
         return store.fetch(
             "SELECT COUNT(*) AS progress_rows, COUNT(DISTINCT p.task_id) AS tasks_covered, "
             "MIN(p.progress_date) AS earliest, MAX(p.progress_date) AS latest, "
             "MAX(p.version_no) AS max_version "
             "FROM task_progress p JOIN task t ON t.id = p.task_id "
-            f"WHERE {store.formal_task_clause()} AND p.is_published = 1",
+            f"WHERE {clause} AND p.is_published = 1",
             caliber=f"{store.FORMAL_TASK_CALIBER}；仅正式发布进展（is_published = 1）",
             limit=1,
         )
@@ -1438,6 +1703,133 @@ def weekly_task_ranking(metric: str = "attachments", top: int = 5) -> str:
         return result
 
     return _guard("weekly_task_ranking", work)
+
+
+@mcp.tool()
+def weekly_rank(
+    metric: str = "progress_rounds",
+    mode: str = "cut",
+    top: int = 5,
+    ascending: bool = False,
+    group_by: str = "",
+) -> str:
+    """Rank formal tasks with the tie rule decided server-side (cut / keep_ties / per_group).
+
+    前 N 条 / 并列全列 / 每组第一 are three different SETS over one metric, and
+    their row counts differ. The rule is applied in SQL and stated in caliber, so
+    the caller reports the rows as returned rather than padding or trimming them.
+
+    Args:
+        metric: progress_rounds / milestones / milestones_done / attachments /
+            submissions / group_rounds.
+        mode: ``cut`` hard-cuts to top rows, ties ordered by task id. ``keep_ties``
+            uses RANK() and keeps every task down to place top. ``per_group``
+            takes the first place within each bucket, one row per group.
+        top: How many rows for cut, or which place for keep_ties. 1..200.
+            per_group ignores it -- the group count IS the row count.
+        ascending: True ranks from the bottom. Zero-value rows are kept.
+        group_by: Required for per_group: project_group / board /
+            primary_category / status.
+    """
+
+    def work() -> dict[str, Any]:
+        chosen = _RANK_METRICS.get((metric or "").strip())
+        if chosen is None:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported_metric",
+                    "message": f"metric 支持 {', '.join(sorted(_RANK_METRICS))}",
+                },
+            }
+        key = (mode or "cut").strip().lower()
+        if key not in _RANK_MODES:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported_mode",
+                    "message": f"mode 支持 {', '.join(_RANK_MODES)}",
+                },
+            }
+        try:
+            bounded = max(1, min(store.MAX_ROWS, int(top)))
+        except TypeError, ValueError:
+            return {"ok": False, "error": {"code": "invalid_argument", "message": "top 必须是整数"}}
+
+        table, gate, expression, label = chosen
+        direction = "ASC" if ascending else "DESC"
+        # LEFT JOIN 而非 JOIN：期数为 0 的任务是「最少」那一端的正确答案，
+        # INNER JOIN 会把它们整行丢掉（inner_join_drops_zero）。
+        join = f"LEFT JOIN {table} x ON x.task_id = t.id AND {gate}"
+        clause = store.formal_task_clause()
+        base = f"{store.FORMAL_TASK_CALIBER}；按{label}{'升序' if ascending else '降序'}"
+
+        if key == "per_group":
+            grouping = _RANK_GROUPINGS.get((group_by or "").strip())
+            if grouping is None:
+                return {
+                    "ok": False,
+                    "error": {
+                        "code": "unsupported_group_by",
+                        "message": f"per_group 需要 group_by，支持 {', '.join(sorted(_RANK_GROUPINGS))}",
+                    },
+                }
+            axis, order_key = grouping
+            extra = ""
+            if group_by.strip() == "board":
+                extra = "JOIN task_board b ON b.id = t.board_id AND b.is_deleted = 0"
+            elif group_by.strip() == "primary_category":
+                # 一级分类要经二级分类的 parent_id 上跳一层，任务本身只挂到二级。
+                extra = (
+                    "JOIN task_category c ON c.id = t.category_id AND c.is_deleted = 0 "
+                    "JOIN task_category pc ON pc.id = c.parent_id AND pc.is_deleted = 0"
+                )
+            # top 在这一档没有意义：一组一行，行数由分组数决定。拿 top 当上限
+            # 会切掉后面的组，而 caliber 又说「行数等于分组数」，两边对不上，
+            # 模型照 caliber 答就答漏了。
+            return store.fetch(
+                f"SELECT bucket, task_id, task_name, metric_value FROM ("
+                f"SELECT {axis} AS bucket, t.id AS task_id, t.task_name, {expression} AS metric_value, "
+                f"ROW_NUMBER() OVER (PARTITION BY {order_key} "
+                f"ORDER BY {expression} {direction}, t.id) AS rn "
+                f"FROM task t {extra} {join} WHERE {clause} AND {axis} IS NOT NULL "
+                f"GROUP BY {order_key}, {axis}, t.id, t.task_name) r "
+                f"WHERE r.rn = 1 ORDER BY r.bucket",
+                caliber=(
+                    f"{base}；每个{group_by.strip()}只返回第一名（一组一行）；"
+                    "组内并列按 task id 升序裁决，行数等于分组数，不要把并列的都列出来；"
+                    "本档不受 top 影响"
+                ),
+                limit=store.MAX_ROWS,
+            )
+
+        if key == "keep_ties":
+            # RANK() 而非 ROW_NUMBER()：问句明说要并列，第 N 名有几个就返回几个，
+            # 行数因此可能远大于 top（进展期数前 3 名共 12 行）。
+            return store.fetch(
+                f"SELECT task_id, task_name, metric_value, rk FROM ("
+                f"SELECT t.id AS task_id, t.task_name, {expression} AS metric_value, "
+                f"RANK() OVER (ORDER BY {expression} {direction}) AS rk "
+                f"FROM task t {join} WHERE {clause} GROUP BY t.id, t.task_name) r "
+                f"WHERE r.rk <= %(n)s ORDER BY r.rk, r.task_name",
+                {"n": bounded},
+                caliber=(
+                    f"{base}；RANK() 保留并列，返回到第 {bounded} 名为止的全部任务；"
+                    f"行数通常大于 {bounded}，rk 相同即并列，按 row_count 全部列出"
+                ),
+                limit=store.MAX_ROWS,
+            )
+
+        return store.fetch(
+            f"SELECT t.id AS task_id, t.task_name, {expression} AS metric_value "
+            f"FROM task t {join} WHERE {clause} "
+            f"GROUP BY t.id, t.task_name ORDER BY metric_value {direction}, t.id "
+            f"LIMIT {bounded}",
+            caliber=(f"{base}；硬切前 {bounded} 条，并列按 task id 升序定序；边界外的并列任务不属于本题答案，不要补列"),
+            limit=bounded,
+        )
+
+    return _guard("weekly_rank", work)
 
 
 @mcp.tool()
@@ -1523,7 +1915,15 @@ def weekly_task_lifecycle(by: str = "", year: int = 0) -> str:
 
 
 @mcp.tool()
-def weekly_freshness_distribution(task: str = "", within_days: int = 0, drift: bool = False, limit: int = 200) -> str:
+def weekly_freshness_distribution(
+    task: str = "",
+    within_days: int = 0,
+    drift: bool = False,
+    stale_days: int = 0,
+    recent_days: int = 0,
+    by: str = "",
+    limit: int = 200,
+) -> str:
     """Bucket formal tasks by how stale their latest progress is (30/90/180 天/从未).
 
     Also cross-checks ``task.latest_progress_time`` against the real newest
@@ -1539,10 +1939,86 @@ def weekly_freshness_distribution(task: str = "", within_days: int = 0, drift: b
             cannot be read off them.
         drift: True lists only the tasks whose ``latest_progress_time`` disagrees
             with their real newest published progress row.
-        limit: Max rows for the drift listing, capped at 200.
+        stale_days: When > 0, lists 在办任务 (status 0 and 1 both count) whose
+            newest progress is older than that many days. Never reported (NULL)
+            counts as stale and sorts first.
+        recent_days: When > 0, lists tasks that DID report within that window,
+            newest first. 与 stale_days 是相反的一端。
+        by: ``project_group`` 让 stale_days 返回各组滞后计数而不是清单。
+        limit: Max rows for the listing branches, capped at 200.
     """
 
     def work() -> dict[str, Any]:
+        if stale_days or recent_days:
+            days = int(stale_days or recent_days)
+            if days <= 0:
+                return {
+                    "ok": False,
+                    "error": {"code": "invalid_argument", "message": "天数必须为正整数"},
+                }
+            bounded = max(1, min(store.MAX_ROWS, int(limit)))
+            if recent_days:
+                # 「最近一周更新过」不加 status 过滤：问的是有没有报进展，
+                # 不是任务在不在办。
+                return store.fetch(
+                    "SELECT t.id, t.task_name, t.status, t.latest_progress_time, "
+                    "DATEDIFF(%(as_of)s, t.latest_progress_time) AS days_since "
+                    f"FROM task t WHERE {store.formal_task_clause()} "
+                    "AND t.latest_progress_time >= DATE_SUB(%(as_of)s, INTERVAL %(d)s DAY) "
+                    "ORDER BY t.latest_progress_time DESC, t.id",
+                    {"as_of": store.AS_OF, "d": days},
+                    caliber=(
+                        f"{store.FORMAL_TASK_CALIBER}；仅 latest_progress_time 落在近 {days} 天内；"
+                        f"{store.as_of_caliber()}；不加 status 过滤（问的是有无上报，不是是否在办）；"
+                        "按上报时间倒序"
+                    ),
+                    limit=bounded,
+                )
+            # 「在办」= status IN (0, 1)：0 未开始也在办，只取 1 会漏行
+            # （negation_includes_cancelled）。NULL 即从未上报，算滞后且排最前
+            # ——它没有天数可算，days_since 返回 NULL 是如实表达而非缺失。
+            in_progress = "t.status IN (0, 1)"
+            stale = (
+                "(t.latest_progress_time IS NULL OR t.latest_progress_time < DATE_SUB(%(as_of)s, INTERVAL %(d)s DAY))"
+            )
+            params = {"as_of": store.AS_OF, "d": days}
+            note = (
+                f"{store.FORMAL_TASK_CALIBER}；在办即 status IN (0, 1)（0 未开始同样在办）；"
+                f"滞后超过 {days} 天，含从未上报（latest_progress_time 为 NULL）；"
+                f"{store.as_of_caliber()}"
+            )
+            if (by or "").strip() == "project_group":
+                return store.fetch(
+                    "SELECT t.project_group, COUNT(*) AS stale_count "
+                    f"FROM task t WHERE {store.formal_task_clause()} AND {in_progress} AND {stale} "
+                    "GROUP BY t.project_group ORDER BY stale_count DESC, t.project_group",
+                    params,
+                    caliber=note + "；按专项组计数，各组相加等于清单总数",
+                    limit=bounded,
+                )
+            if (by or "").strip():
+                return {
+                    "ok": False,
+                    "error": {
+                        "code": "unsupported_group_by",
+                        "message": "by 目前只支持 project_group",
+                    },
+                }
+            total = store.scalar(
+                f"SELECT COUNT(*) FROM task t WHERE {store.formal_task_clause()} AND {in_progress} AND {stale}",
+                params,
+            )
+            rows = store.fetch(
+                "SELECT t.id, t.task_name, t.status, t.latest_progress_time, "
+                "DATEDIFF(%(as_of)s, t.latest_progress_time) AS days_since "
+                f"FROM task t WHERE {store.formal_task_clause()} AND {in_progress} AND {stale} "
+                "ORDER BY t.latest_progress_time IS NOT NULL, t.latest_progress_time, t.id",
+                params,
+                caliber=note + "；从未上报的排在最前，其 days_since 为空",
+                limit=bounded,
+            )
+            rows["total_count"] = total["value"]
+            return rows
         if within_days and not task.strip():
             lo, _ = store.date_window(last_days=within_days)
             return store.fetch(
@@ -1764,6 +2240,7 @@ def weekly_year_goal_stats(
     year_to: int = 0,
     min_years: int = 3,
     top: int = 8,
+    in_progress_only: bool = False,
 ) -> str:
     """Aggregate annual-goal coverage: which years are set, and who is missing one.
 
@@ -1777,6 +2254,8 @@ def weekly_year_goal_stats(
         year_to: Second year, for ``multi_year``.
         min_years: Threshold for ``span``. Inclusive.
         top: Row cap for the listing scopes.
+        in_progress_only: True keeps only 在办任务 (status IN (0, 1)). Required for
+            "在办任务还没定目标" -- otherwise 已完成 / 已暂停 tasks inflate the gap list.
     """
 
     def work() -> dict[str, Any]:
@@ -1849,14 +2328,30 @@ def weekly_year_goal_stats(
             )
 
         if key == "missing":
-            return store.fetch(
+            # 「在办任务还没定目标」问的是在办那批，已完成/已暂停的没定目标不算缺口。
+            # 不加这道过滤会把 status 2/3 的行混进来，集合就对不上了。
+            extra = " AND t.status IN (0, 1)" if in_progress_only else ""
+            note = (
+                "；仅在办任务（status IN (0, 1)，0 未开始同样在办）"
+                if in_progress_only
+                else "；含全部状态，未按在办过滤"
+            )
+            total = store.scalar(
+                f"SELECT COUNT(*) FROM task t WHERE {clause}{extra} "
+                "AND NOT EXISTS (SELECT 1 FROM task_year_goal g "
+                "WHERE g.task_id = t.id AND g.year = %(yr)s)",
+                {"yr": int(year)},
+            )
+            rows = store.fetch(
                 "SELECT t.id AS task_id, t.task_name, t.status, t.project_group "
-                f"FROM task t WHERE {clause} AND NOT EXISTS (SELECT 1 FROM task_year_goal g "
+                f"FROM task t WHERE {clause}{extra} AND NOT EXISTS (SELECT 1 FROM task_year_goal g "
                 "WHERE g.task_id = t.id AND g.year = %(yr)s) ORDER BY t.id",
                 {"yr": int(year)},
-                caliber=f"{base}；{int(year)} 年度无目标行；status 0 未开始 / 1 进行中 / 2 已完成 / 3 已暂停",
+                caliber=f"{base}；{int(year)} 年度无目标行{note}；status 0 未开始 / 1 进行中 / 2 已完成 / 3 已暂停",
                 limit=bounded,
             )
+            rows["total_count"] = total["value"]
+            return rows
 
         if key == "missing_by_group":
             return store.fetch(
@@ -2439,6 +2934,52 @@ def weekly_group_stats(scope: str = "owners", top: int = 8, min_rounds: int = 0)
                 f"FROM task_group_detail d JOIN task t ON t.id = d.task_id {join} WHERE {clause}",
                 caliber=f"{base}；completion_time 为展示文本，只做格式判别不做日期运算（R-12）",
                 limit=1,
+            )
+
+        if key == "completion_time_values":
+            # 「都有哪些写法」问的是去重后的取值本身，按文本序排列。让模型翻
+            # 46 行明细自己归纳，得到的是它总结出的类别名（「持续推进」这种），
+            # 不是库里真实存在的取值。
+            total = store.scalar(
+                "SELECT COUNT(DISTINCT d.completion_time) "
+                f"FROM task_group_detail d JOIN task t ON t.id = d.task_id {join} "
+                f"WHERE {clause} AND d.completion_time IS NOT NULL AND d.completion_time <> ''",
+            )
+            rows = store.fetch(
+                "SELECT DISTINCT d.completion_time "
+                f"FROM task_group_detail d JOIN task t ON t.id = d.task_id {join} "
+                f"WHERE {clause} AND d.completion_time IS NOT NULL AND d.completion_time <> '' "
+                "ORDER BY d.completion_time",
+                caliber=(
+                    f"{base}；去重后的 completion_time 原样取值，按文本升序；"
+                    "这是库里真实存在的写法，不要归纳成自己的类别名；"
+                    f"共 {total['value']} 种，top 决定返回前几种"
+                ),
+                limit=bounded,
+            )
+            rows["total_count"] = total["value"]
+            return rows
+
+        if key == "effect_consistency":
+            # 明细表的当前成效 vs 历史表最新一期的成效。逐条比对必须在服务端做：
+            # 两段长文本靠模型眼看，46 行里会把不一致的说成一致。
+            # 历史侧要 is_published = 1，未发布的那几期不是「最新一期」。
+            return store.fetch(
+                "SELECT d.task_id, t.task_name, x.version_no, "
+                "(d.progress_effect = x.progress_effect) AS same "
+                f"FROM task_group_detail d JOIN task t ON t.id = d.task_id {join} "
+                "JOIN (SELECT h.task_id, h.progress_effect, h.version_no, "
+                "ROW_NUMBER() OVER (PARTITION BY h.task_id "
+                "ORDER BY h.version_no DESC, h.id DESC) rn "
+                "FROM task_group_progress_history h WHERE h.is_published = 1) x "
+                "ON x.task_id = d.task_id AND x.rn = 1 "
+                f"WHERE {clause} ORDER BY same, d.task_id",
+                caliber=(
+                    f"{base}；明细表 progress_effect 与历史表最新一期（is_published = 1）逐字比对；"
+                    "same = 1 一致、0 不一致；不一致的排在最前，"
+                    "先看 same = 0 有几行再下「全部一致」的结论"
+                ),
+                limit=bounded,
             )
 
         if key == "field_lengths":

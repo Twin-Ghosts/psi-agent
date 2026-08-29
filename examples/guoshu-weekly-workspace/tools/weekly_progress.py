@@ -47,6 +47,7 @@ async def weekly_progress_range(
     last_days: int = 0,
     by: str = "",
     date_field: str = "progress_date",
+    peak: bool = False,
     limit: int = 200,
 ) -> str:
     """Query or count published progress in a time window, across all tasks.
@@ -67,6 +68,9 @@ async def weekly_progress_range(
         last_days: Window of N days ending at the snapshot date; 0 disables it.
         by: Empty lists rows; month / quarter / task returns counts per group.
         date_field: progress_date (period reported on) or report_time (when filed).
+        peak: With by set, returns only the highest-count group ("哪个月上报最多").
+            The ordering and the tie-break happen on the server; the single row
+            you get back is the answer, so do not re-compare bucket counts.
         limit: Max rows to return, capped at 200.
     """
     try:
@@ -82,6 +86,7 @@ async def weekly_progress_range(
             "last_days": days,
             "by": by,
             "date_field": date_field,
+            "peak": bool(peak),
             "limit": bounded,
         },
     )
@@ -106,12 +111,21 @@ async def weekly_task_lifecycle(by: str = "", year: int = 0) -> str:
 
 
 async def weekly_freshness_distribution(
-    task: str = "", within_days: int = 0, drift: bool = False, limit: int = 200
+    task: str = "",
+    within_days: int = 0,
+    drift: bool = False,
+    stale_days: int = 0,
+    recent_days: int = 0,
+    by: str = "",
+    limit: int = 200,
 ) -> str:
     """Report how stale progress is: 30/90/180-day buckets, a custom window, or drift.
 
     The default bucket view also carries newest_progress and days_behind, which
     answer "how current is the board overall".
+
+    stale_days and recent_days are the LISTINGS behind "哪些任务很久没上报" and
+    "最近有哪些任务上报了". Both anchor to the snapshot date on the server.
 
     Args:
         task: Empty covers all formal tasks; an id/name returns that one task.
@@ -120,16 +134,34 @@ async def weekly_freshness_distribution(
             express, such as 7 days.
         drift: True lists only tasks whose latest_progress_time disagrees with
             their real newest published progress row.
-        limit: Max rows for the drift listing, capped at 200.
+        stale_days: When > 0, lists 在办任务 (status 0 未开始 and 1 进行中, both
+            count) whose newest progress is older than that many days. Never
+            reported counts as stale and sorts first, with days_since NULL.
+        recent_days: When > 0, lists tasks that reported within that many days,
+            newest first. No status filter -- the question is whether a report
+            came in, not whether the task is still open.
+        by: With stale_days, "project_group" returns stale_count per 专项组
+            instead of the rows.
+        limit: Max rows for the listing views, capped at 200.
     """
     try:
         bounded = max(1, min(200, int(limit)))
         days = max(0, int(within_days))
+        stale = max(0, int(stale_days))
+        recent = max(0, int(recent_days))
     except TypeError, ValueError:
-        return _invalid("within_days and limit must be integers")
+        return _invalid("within_days, stale_days, recent_days and limit must be integers")
     return await _call(
         "weekly_freshness_distribution",
-        {"task": task, "within_days": days, "drift": bool(drift), "limit": bounded},
+        {
+            "task": task,
+            "within_days": days,
+            "drift": bool(drift),
+            "stale_days": stale,
+            "recent_days": recent,
+            "by": by,
+            "limit": bounded,
+        },
     )
 
 
@@ -151,10 +183,18 @@ async def weekly_approval_turnaround(scope: str = "summary", top: int = 8) -> st
     return await _call("weekly_approval_turnaround", {"scope": scope, "top": bounded})
 
 
-async def weekly_milestone_query(year: str = "", status: str = "", limit: int = 200) -> str:
+async def weekly_milestone_query(task: str = "", year: str = "", status: str = "", limit: int = 200) -> str:
     """List milestones, re-checked against the formal-task caliber (R-17).
 
+    Pass task for any single-task question. Leaving it empty covers every formal
+    task, so "task 19 的里程碑" without it returns the first page of the whole
+    board -- a complete, plausible-looking answer to a different question.
+    Single-task listings come back in the task's own sort_order, which is the
+    business sequence of that plan; board-wide browsing comes back newest year
+    first.
+
     Args:
+        task: Task id or name; empty covers every formal task.
         year: Four-digit year, empty for all years.
         status: 0未完成 / 1已完成, empty for both.
         limit: Max rows to return, capped at 200.
@@ -165,16 +205,27 @@ async def weekly_milestone_query(year: str = "", status: str = "", limit: int = 
         return _invalid("limit must be an integer")
     return await _call(
         "weekly_milestone_query",
-        {"year": year, "status": status, "limit": bounded},
+        {"task": task, "year": year, "status": status, "limit": bounded},
     )
 
 
-async def weekly_workflow_query(task: str = "", limit: int = 200) -> str:
+async def weekly_workflow_query(
+    task: str = "",
+    action: str = "",
+    board: str = "",
+    by_task: bool = False,
+    limit: int = 200,
+) -> str:
     """Trace the approval action LOG (who did what, at which node).
 
     This is the action history, not the submission forms. For submission status
     or round counts use weekly_submission_query -- the action log cannot be
     aggregated into submission status.
+
+    Filter with action / board rather than reading 200 rows and sorting by eye:
+    the log is longer than the row cap, so a hand-filtered page is a subset of
+    the real answer. An unsupported action name comes back as an error listing
+    the values that exist, not as an unfiltered result.
 
     Approval opinions are permission-gated (R-04/R-14): when the service returns
     "[按权限不展示]", say the field is withheld by permission -- do not guess at
@@ -182,13 +233,26 @@ async def weekly_workflow_query(task: str = "", limit: int = 200) -> str:
 
     Args:
         task: Task id or name; empty returns recent actions across all tasks.
+        action: Keep only this action; empty keeps all. Errors list the domain.
+        board: Board code or name to scope the log.
+        by_task: True returns action_count per task (次数, not 任务数) instead of
+            the action rows.
         limit: Max rows to return, capped at 200.
     """
     try:
         bounded = max(1, min(200, int(limit)))
     except TypeError, ValueError:
         return _invalid("limit must be an integer")
-    return await _call("weekly_workflow_query", {"task": task, "limit": bounded})
+    return await _call(
+        "weekly_workflow_query",
+        {
+            "task": task,
+            "action": action,
+            "board": board,
+            "by_task": bool(by_task),
+            "limit": bounded,
+        },
+    )
 
 
 async def weekly_submission_query(
@@ -196,6 +260,7 @@ async def weekly_submission_query(
     reporter: str = "",
     status: str = "",
     exclude_status: str = "",
+    status_mismatch: bool = False,
     limit: int = 200,
 ) -> str:
     """Query approval submission forms: round_no, status, reporter, signer.
@@ -204,11 +269,19 @@ async def weekly_submission_query(
     yet approved". Returns a status_breakdown alongside the rows. The draft
     snapshot (payload) is never returned and must not be reported as formal data.
 
+    task.workflow_status and submission.status are two separate vocabularies over
+    two tables; comparing them by eye across two calls mixes up the row sets. Use
+    status_mismatch for that comparison instead.
+
     Args:
         task: Task id or name; empty covers all tasks.
         reporter: Reporter id or name.
         status: Keep only this status.
         exclude_status: Drop this status, e.g. "approved" for pending ones.
+        status_mismatch: True returns the tasks whose workflow_status disagrees
+            with their newest submission's status. Deliberately drops the
+            published gate -- a published task whose latest form is still in
+            flight is exactly what this asks for.
         limit: Max rows to return, capped at 200.
     """
     try:
@@ -222,6 +295,7 @@ async def weekly_submission_query(
             "reporter": reporter,
             "status": status,
             "exclude_status": exclude_status,
+            "status_mismatch": bool(status_mismatch),
             "limit": bounded,
         },
     )
@@ -269,17 +343,33 @@ async def weekly_field_completeness(field: str = "", list_missing: bool = False,
     )
 
 
-async def weekly_progress_coverage() -> str:
+async def weekly_progress_coverage(scope: str = "summary", limit: int = 200) -> str:
     """Summarise progress history depth: row count, tasks covered, date span, max version.
 
     Use this for "how far back does the history go" or "how many progress records
     are there in total" -- one call instead of walking every task.
+
+    Args:
+        scope: summary (depth totals) / unpublished (未发布进展按自身审批码值分档,
+            0 草稿 / 1 待审核 / 2 驳回 / 3 通过 -- not the task's workflow_status) /
+            version_gaps (tasks whose max version_no exceeds their actual row
+            count, i.e. missing periods).
+        limit: Max rows for the listing scopes, capped at 200.
     """
-    return await _call("weekly_progress_coverage", {})
+    try:
+        bounded = max(1, min(200, int(limit)))
+    except TypeError, ValueError:
+        return _invalid("limit must be an integer")
+    return await _call("weekly_progress_coverage", {"scope": scope, "limit": bounded})
 
 
 async def weekly_task_ranking(metric: str = "attachments", top: int = 5) -> str:
     """Rank formal tasks by child-record count: which task has the most X.
+
+    This is the plain "top N" view. When the question turns on ties -- "并列的都
+    列出来", "每个专项组各自的第一名", "最少的几个" -- use weekly_rank instead:
+    the same metric yields a different row count under each reading, and that
+    decision cannot be made from the rows this tool returns.
 
     Args:
         metric: attachments / progress / milestones / submissions.
@@ -290,6 +380,55 @@ async def weekly_task_ranking(metric: str = "attachments", top: int = 5) -> str:
     except TypeError, ValueError:
         return _invalid("top must be an integer")
     return await _call("weekly_task_ranking", {"metric": metric, "top": bounded})
+
+
+async def weekly_rank(
+    metric: str = "progress_rounds",
+    mode: str = "cut",
+    top: int = 5,
+    ascending: bool = False,
+    group_by: str = "",
+) -> str:
+    """Rank formal tasks with the tie rule decided on the server: cut / keep_ties / per_group.
+
+    "前 5 条"、"并列的也都列出来" 和 "每组各自第一" are three different SETS over
+    one metric, and their row counts differ -- 前 3 名 by progress periods is 3
+    rows under cut and 12 rows under keep_ties. Pick the mode that matches the
+    wording, then report the rows as returned: the caliber states which rule was
+    applied, so neither padding the list with ties nor trimming it is correct.
+
+    Zero-value rows survive (LEFT JOIN), so ascending genuinely answers "the
+    fewest" -- a task with no progress at all is the right answer to that, and
+    an inner join would have silently dropped it.
+
+    Args:
+        metric: progress_rounds (已发布进展期数) / milestones / milestones_done /
+            attachments / submissions / group_rounds (集团看板成效期数).
+        mode: cut -- hard-cut to top rows, ties past the boundary excluded;
+            keep_ties -- RANK(), every task down to place top, so expect more
+            than top rows; per_group -- ROW_NUMBER() per bucket, one row per
+            group, ties inside a group settled by task id.
+        top: cut takes this many rows; keep_ties ranks down to this place. 1..200.
+            per_group ignores it -- one row per group means the group count is
+            the row count.
+        ascending: True ranks from the bottom ("期数最少的 5 个").
+        group_by: Required for per_group: project_group / board /
+            primary_category / status.
+    """
+    try:
+        bounded = max(1, min(200, int(top)))
+    except TypeError, ValueError:
+        return _invalid("top must be an integer")
+    return await _call(
+        "weekly_rank",
+        {
+            "metric": metric,
+            "mode": mode,
+            "top": bounded,
+            "ascending": bool(ascending),
+            "group_by": group_by,
+        },
+    )
 
 
 async def weekly_attachment_query(task: str = "", limit: int = 200) -> str:

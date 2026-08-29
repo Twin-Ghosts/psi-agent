@@ -18,7 +18,7 @@ import anyio
 from psi_agent._yaml import parse_yaml_header
 
 TOOL_GUIDE = """\
-## 取数工具（共 29 个，按用途分组）
+## 取数工具（共 30 个，按用途分组）
 
 清单即全集：这里没有的工具就是没有。聚合、统计、覆盖率、排名类问题优先找下面的
 统计类工具，别用清单类工具拉明细再自己数——服务端算的才是口径内的数。
@@ -32,12 +32,17 @@ TOOL_GUIDE = """\
 - weekly_task_query：按看板/分类/状态/负责人/关键词查正式任务，带 total_count 与 has_more。
 - weekly_task_detail：单任务详情（明细 + 近期进展 + 年度目标）。
 - weekly_owner_roles：一个人分角色（责任人/牵头/分管）各带多少任务。
-- weekly_task_ranking：按子记录数（附件/进展/里程碑）给任务排名。
+- weekly_task_ranking：按子记录数（附件/进展/里程碑）给任务排名，普通「前 N 名」用它。
+- weekly_rank：并列口径三选一的排名。问句涉及并列、分组第一或「最少的几个」时用它，
+  mode=cut 硬切 N 条 / keep_ties 把第 N 名的并列全列出 / per_group 每组各取第一，
+  ascending=True 取最少那一端（期数为 0 的任务会保留）。
 - weekly_task_lifecycle：任务创建时间与创建到发布的耗时。
 
 聚合与完整性
-- weekly_aggregate：按 board/category/status/project_group/owner 聚合计数，空分组会保留；
-  group_by=project_group 还直接给出各组的牵头人数与责任人数（已去重）。
+- weekly_aggregate：按 board/category/primary_category/status/project_group/owner 聚合计数，
+  空分组会保留；group_by=project_group 还直接给出各组的牵头人数与责任人数（已去重）。
+  问「一级分类」用 primary_category，问「分类」若指二级才用 category——任务只挂二级分类，
+  两者档数不同（技术组 6 档 vs 全库 47 档）。要「前 N 个分类」就带 top，服务端硬切并回显总组数。
 - weekly_field_completeness：某字段填了多少、缺多少（R-07/R-19）；list_missing=True 直接给缺项清单。
   问「谁没指定负责人」要查 ID 列（project_owner_id），姓名列 128 条全满、ID 列只有 119 条，
   只看姓名列会答成「无缺失」。
@@ -46,19 +51,29 @@ TOOL_GUIDE = """\
 
 进展与时效
 - weekly_progress_history：单任务的进展版本，version_no 倒序，第一条即当期。
-- weekly_progress_range：跨全部任务按时间窗查/计数已发布进展。
-- weekly_progress_coverage：进展覆盖范围与回溯深度汇总。
+- weekly_progress_range：跨全部任务按时间窗查/计数已发布进展。问「哪个月/哪个季度最多」
+  带 peak=True，服务端直接给峰值那一组，不要自己在各组计数间比大小。
+- weekly_progress_coverage：进展覆盖范围与回溯深度汇总；scope=unpublished 给未发布进展
+  按自身审批码值分档（0 草稿/1 待审核/2 驳回/3 通过，与任务的 workflow_status 是两套词汇），
+  scope=version_gaps 给期号有缺的任务。
 - weekly_freshness_distribution：按进展陈旧程度分档（30/90/180 天/从未）。
+  要「哪些任务很久没上报」用 stale_days（只算在办，含从未上报），
+  要「最近哪些任务上报了」用 recent_days（不限状态）。
 
 年度目标与里程碑
 - weekly_year_goal_query：年度目标与里程碑摘要清单。
 - weekly_year_goal_stats：年度目标覆盖率、哪些任务缺目标、跨年度分布。
-- weekly_milestone_query：里程碑清单，已复核正式任务口径。
+  问「在办任务还没定目标」带 in_progress_only=True，已完成/已暂停的缺目标不算缺口。
+- weekly_milestone_query：里程碑清单，已复核正式任务口径。问单个任务的里程碑必须传 task，
+  不传会返回全看板首页——那是一个完整、像样、但属于另一个问题的答案。
 - weekly_milestone_stats：里程碑完成率的各维度聚合（清单类问题才用上一个）。
 
 审批与附件
-- weekly_workflow_query：审批动作流水，审批意见按权限展示。
+- weekly_workflow_query：审批动作流水，审批意见按权限展示。要筛某个动作或某个看板就传
+  action / board，日志比 200 条上限长，翻明细自己筛出来的是子集；by_task=True 给每个任务的
+  动作次数（是次数，不是任务数）。
 - weekly_submission_query：审批提交单（按 task_id + round_no），带状态分档与状态值域。
+  问「任务状态与审批单状态对不上的有哪些」用 status_mismatch=True，别跨两次调用用眼比对。
 - weekly_approval_turnaround：审批耗时（整体/按看板/最慢/在办积压）。
 - weekly_attachment_query：附件清单，不含 storage_path；file_size 单位是字节。
 - weekly_attachment_stats：附件聚合——总容量/按类型/最大文件/按上传人/上传人数/挂载去向/
@@ -70,7 +85,8 @@ TOOL_GUIDE = """\
 - weekly_group_owner_query：按负责人查专项组任务，或列出该看板的负责人字段。
 - weekly_group_history：专项组进展历史（独立表，非 task_progress）。
 - weekly_group_stats：专项组看板的聚合统计，含多值负责人栏的分隔符写法（separators）
-  与一栏里几个人（owner_widths）。
+  与一栏里几个人（owner_widths）；completion_time_values 给库里真实存在的写法（原样报，
+  不要归纳成自己的类别名），effect_consistency 比对明细表成效与历史表最新一期是否一致。
 """
 
 CALIBER_RULES = """\
@@ -95,6 +111,17 @@ CALIBER_RULES = """\
     照抄 caliber，不要把两道口径混着说。
 11. 返回 0 行时先看 caliber 怎么说：写明「0 行即不存在」的，就如实答不存在；
     没有这句的，先确认是否过滤条件本身没生效，再下结论。
+12. 排名的并列口径由服务端裁决，不要自己在明细上加减行。同一个度量下「前 3 条」
+    「并列的都列出来」「每组各自第一」是三个不同的集合（进展期数分别是 3 行、12 行、
+    11 行）。照 caliber 说的那一档报：写「硬切」的就不要因为还有并列而补列，
+    写「保留并列」的就不要裁到 N 条，写「一组一行」的就不要把组内并列都列上。
+13. 「在办」= status IN (0, 1)，0 未开始同样在办，只取 1 会漏行。
+    「从未上报」（latest_progress_time 为空）算滞后，不是数据缺失，不要从清单里剔掉。
+14. 状态码值分属不同的表，不能互相套用：任务的 workflow_status（published /
+    pending_audit 等）、进展行的 status（0 草稿 / 1 待审核 / 2 驳回 / 3 通过）、
+    提交单的 status 是三套词汇。拿错一套会答出一份看着合理的错数。
+15. 单个对象的问题必须把该对象作为参数传下去（任务里程碑传 task 等）。
+    不传得到的是全量首页——行数、字段、格式都对，只是回答的不是这个问题。
 
 ## 判为不可答
 

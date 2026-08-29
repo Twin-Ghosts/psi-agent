@@ -45,6 +45,7 @@ async def weekly_year_goal_stats(
     year: int = 0,
     year_to: int = 0,
     min_years: int = 3,
+    in_progress_only: bool = False,
     top: int = 8,
 ) -> str:
     """Aggregate annual-goal coverage: which years are set, and who lacks a goal.
@@ -61,6 +62,9 @@ async def weekly_year_goal_stats(
         year: Primary year. Required except for by_year and span.
         year_to: Second year, for multi_year.
         min_years: Threshold for span; inclusive.
+        in_progress_only: For missing, keep only 在办任务 (status 0 未开始 and
+            1 进行中). "在办任务还没定目标" asks about that subset -- 已完成 or
+            已暂停 tasks without a goal are not a gap and inflate the row set.
         top: Row cap for the listing scopes.
     """
     try:
@@ -72,7 +76,14 @@ async def weekly_year_goal_stats(
         return _invalid("year, year_to, min_years and top must be integers")
     return await _call(
         "weekly_year_goal_stats",
-        {"scope": scope, "year": yr, "year_to": yr2, "min_years": span, "top": bounded},
+        {
+            "scope": scope,
+            "year": yr,
+            "year_to": yr2,
+            "min_years": span,
+            "in_progress_only": bool(in_progress_only),
+            "top": bounded,
+        },
     )
 
 
