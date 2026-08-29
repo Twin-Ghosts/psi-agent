@@ -631,6 +631,31 @@ _COMPLETENESS_FIELDS: dict[str, tuple[str, str]] = {
 }
 
 
+# Which date column a time window applies to. Whitelisted for the same reason as
+# _COMPLETENESS_FIELDS: it reaches SQL as an identifier, not a bound value.
+# The two are not interchangeable -- a progress row filed late has a report_time
+# months after the progress_date it covers, and E2-04 turns exactly on that gap.
+_PROGRESS_DATE_FIELDS: dict[str, str] = {
+    "progress_date": "进展周期",
+    "report_time": "上报时间",
+}
+
+# Bucket expression and ORDER BY for grouped counts. `bucket` is the SELECT alias.
+_PROGRESS_GROUPINGS: dict[str, tuple[str, str]] = {
+    "month": ("DATE_FORMAT(p.progress_date, '%%Y-%%m')", "bucket"),
+    "quarter": ("CONCAT(YEAR(p.progress_date), 'Q', QUARTER(p.progress_date))", "bucket"),
+    "task": ("t.task_name", "progress_count DESC, bucket"),
+}
+
+# Buckets over task.created_at -- the setup clock, not the reporting clock.
+_CREATED_GROUPINGS: dict[str, str] = {
+    "month": "DATE_FORMAT(t.created_at, '%%Y-%%m')",
+    "year": "YEAR(t.created_at)",
+}
+
+_TURNAROUND_SCOPES = ("summary", "board", "slowest", "pending")
+
+
 @mcp.tool()
 def weekly_field_completeness(field: str = "") -> str:
     """Count how many formal tasks have a given field filled in (R-07 / R-19).
@@ -691,6 +716,112 @@ def weekly_field_completeness(field: str = "") -> str:
         return result
 
     return _guard("weekly_field_completeness", work)
+
+
+@mcp.tool()
+def weekly_progress_range(
+    date_from: str = "",
+    date_to: str = "",
+    last_days: int = 0,
+    by: str = "",
+    date_field: str = "progress_date",
+    limit: int = 200,
+    ctx: Context | None = None,
+) -> str:
+    """Query or count published progress across a time window, over ALL tasks.
+
+    This is the time-axis entry point. Without it the only way to answer "how
+    many progress reports in the last 30 days" is to walk every task's history
+    one call at a time, which exhausts the tool budget before an answer exists.
+
+    Relative windows are measured from the data snapshot date, not from the
+    current clock -- see ``_store.AS_OF``.
+
+    Args:
+        date_from: Inclusive start, YYYY-MM-DD. Empty means unbounded.
+        date_to: Inclusive end, YYYY-MM-DD. Empty means unbounded.
+        last_days: Window of N days ending at the snapshot date. Overrides date_from.
+        by: Empty lists rows; ``month`` / ``quarter`` / ``task`` returns counts per group.
+        date_field: ``progress_date`` (the period reported on) or ``report_time``
+            (when it was submitted). These differ for late filings.
+        limit: Max rows, capped at 200.
+    """
+    may_read = _caller_may_read_sensitive(ctx)
+
+    def work() -> dict[str, Any]:
+        if date_field not in _PROGRESS_DATE_FIELDS:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported_field",
+                    "message": f"不支持的 date_field：{date_field}；支持 {', '.join(sorted(_PROGRESS_DATE_FIELDS))}",
+                },
+            }
+        grouping = (by or "").strip().lower()
+        if grouping and grouping not in _PROGRESS_GROUPINGS:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported_group_by",
+                    "message": f"不支持的 by：{by}；支持 {', '.join(sorted(_PROGRESS_GROUPINGS))}",
+                },
+            }
+
+        column = f"p.{date_field}"
+        lo, hi = store.date_window(date_from, date_to, last_days or None)
+        params: dict[str, Any] = {}
+        where = f"{store.formal_task_clause()} AND p.is_published = 1"
+        window = store.window_clause(column, lo, hi, params)
+        if window:
+            where += f" AND {window}"
+
+        field_label = _PROGRESS_DATE_FIELDS[date_field]
+        caliber = (
+            f"{store.FORMAL_TASK_CALIBER}；仅正式发布进展（is_published = 1）；"
+            f"{store.window_caliber(lo, hi, label=field_label)}；{store.as_of_caliber()}"
+        )
+
+        if not grouping:
+            # Counts must survive truncation: "今年以来报了多少期" is 366 rows, well
+            # past MAX_ROWS, and a caller seeing 200 + has_more cannot recover the
+            # real total. Both totals are reported because E1 asks for each
+            # separately (rows = 期数, tasks = 更新过进展的任务数).
+            totals = store.fetch(
+                "SELECT COUNT(*) AS total_rows, COUNT(DISTINCT p.task_id) AS total_tasks "
+                "FROM task_progress p JOIN task t ON t.id = p.task_id "
+                f"WHERE {where}",
+                params,
+                caliber=caliber,
+                limit=1,
+            )
+            rows = store.fetch(
+                "SELECT t.id AS task_id, t.task_name, p.version_no, p.progress_date, "
+                "p.report_time, DATEDIFF(p.report_time, p.progress_date) AS lag_days "
+                "FROM task_progress p JOIN task t ON t.id = p.task_id "
+                f"WHERE {where} ORDER BY p.{date_field} DESC, t.id",
+                params,
+                caliber=caliber + "；lag_days>0 表示补报更早周期",
+                can_read_sensitive=may_read,
+                limit=limit,
+            )
+            first = totals["rows"][0] if totals["rows"] else {}
+            rows["total_count"] = first.get("total_rows")
+            rows["total_tasks"] = first.get("total_tasks")
+            return rows
+
+        expression, order = _PROGRESS_GROUPINGS[grouping]
+        select = f"{expression} AS bucket, COUNT(*) AS progress_count"
+        if grouping != "task":
+            select += ", COUNT(DISTINCT p.task_id) AS task_count"
+        return store.fetch(
+            f"SELECT {select} FROM task_progress p JOIN task t ON t.id = p.task_id "
+            f"WHERE {where} GROUP BY bucket ORDER BY {order}",
+            params,
+            caliber=caliber + f"；按 {grouping} 分组计数",
+            limit=limit,
+        )
+
+    return _guard("weekly_progress_range", work)
 
 
 @mcp.tool()
@@ -790,6 +921,237 @@ def weekly_import_audit(limit: int = 200) -> str:
         return rows
 
     return _guard("weekly_import_audit", work)
+
+
+@mcp.tool()
+def weekly_task_lifecycle(by: str = "", year: int = 0) -> str:
+    """Report when formal tasks were created and how long they took to publish.
+
+    Answers the "when was this set up" axis, which is ``task.created_at`` /
+    ``published_at`` -- a different clock from progress reporting. Without this
+    the only route is listing tasks and counting dates by hand.
+
+    Args:
+        by: Empty returns min/max/avg summary; ``month`` or ``year`` returns counts per bucket.
+        year: Restrict to one creation year (0 means all years).
+    """
+
+    def work() -> dict[str, Any]:
+        grouping = (by or "").strip().lower()
+        if grouping and grouping not in _CREATED_GROUPINGS:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported_group_by",
+                    "message": f"不支持的 by：{by}；支持 {', '.join(sorted(_CREATED_GROUPINGS))}",
+                },
+            }
+        params: dict[str, Any] = {}
+        where = store.formal_task_clause()
+        caliber = store.FORMAL_TASK_CALIBER
+        if year:
+            where += " AND YEAR(t.created_at) = %(yr)s"
+            params["yr"] = int(year)
+            caliber += f"；仅 created_at 属于 {int(year)} 年"
+
+        if grouping:
+            expression = _CREATED_GROUPINGS[grouping]
+            return store.fetch(
+                f"SELECT {expression} AS bucket, COUNT(*) AS created_count "
+                f"FROM task t WHERE {where} GROUP BY bucket ORDER BY bucket",
+                params,
+                caliber=caliber + f"；按 created_at 的{grouping}分组",
+            )
+        return store.fetch(
+            "SELECT COUNT(*) AS formal_tasks, MIN(t.created_at) AS earliest_created, "
+            "MAX(t.created_at) AS latest_created, "
+            "SUM(t.published_at IS NOT NULL) AS with_published_at, "
+            "ROUND(AVG(DATEDIFF(t.published_at, t.created_at)), 1) AS avg_days_to_publish, "
+            "MAX(DATEDIFF(t.published_at, t.created_at)) AS max_days_to_publish "
+            f"FROM task t WHERE {where}",
+            params,
+            caliber=caliber + "；到发布天数仅统计 published_at 非空的任务",
+            limit=1,
+        )
+
+    return _guard("weekly_task_lifecycle", work)
+
+
+@mcp.tool()
+def weekly_freshness_distribution(task: str = "", within_days: int = 0, drift: bool = False, limit: int = 200) -> str:
+    """Bucket formal tasks by how stale their latest progress is (30/90/180 天/从未).
+
+    Also cross-checks ``task.latest_progress_time`` against the real newest
+    published progress row: the denormalised column can drift, and a stale
+    freshness answer is indistinguishable from a correct one without this check.
+
+    Args:
+        task: Empty returns the distribution; a task id/name returns that task's
+            own freshness plus the drift check.
+        within_days: When > 0, returns how many formal tasks reported within that
+            many days of the snapshot date instead of the fixed buckets. The
+            buckets are 30/90/180, so an arbitrary window (E6-03 asks for 7)
+            cannot be read off them.
+        drift: True lists only the tasks whose ``latest_progress_time`` disagrees
+            with their real newest published progress row.
+        limit: Max rows for the drift listing, capped at 200.
+    """
+
+    def work() -> dict[str, Any]:
+        if within_days and not task.strip():
+            lo, _ = store.date_window(last_days=within_days)
+            return store.fetch(
+                "SELECT COUNT(*) AS task_count, MAX(t.latest_progress_time) AS newest_progress, "
+                "DATEDIFF(%(as_of)s, MAX(t.latest_progress_time)) AS days_behind "
+                f"FROM task t WHERE {store.formal_task_clause()} "
+                "AND t.latest_progress_time >= %(lo)s",
+                {"as_of": store.AS_OF, "lo": lo},
+                caliber=(
+                    f"{store.FORMAL_TASK_CALIBER}；latest_progress_time 不早于 {lo}"
+                    f"（{int(within_days)} 天窗）；{store.as_of_caliber()}"
+                ),
+                limit=1,
+            )
+        if task.strip():
+            task_id = store.resolve_task_id(task)
+            if task_id is None:
+                return {
+                    "ok": False,
+                    "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
+                }
+            return store.fetch(
+                "SELECT t.id AS task_id, t.task_name, t.latest_progress_time, "
+                "MAX(p.report_time) AS actual_latest_report, "
+                "DATEDIFF(%(as_of)s, t.latest_progress_time) AS days_behind "
+                "FROM task t LEFT JOIN task_progress p ON p.task_id = t.id AND p.is_published = 1 "
+                f"WHERE t.id = %(tid)s AND {store.formal_task_clause()} "
+                "GROUP BY t.id, t.task_name, t.latest_progress_time",
+                {"tid": task_id, "as_of": store.AS_OF},
+                caliber=f"{store.FORMAL_TASK_CALIBER}；{store.as_of_caliber()}",
+                limit=1,
+            )
+        if drift:
+            # The denormalised column vs the real newest published row. Only rows
+            # that actually disagree are returned -- a "no drift" answer is then
+            # row_count == 0, which is checkable, unlike a full dump.
+            return store.fetch(
+                "SELECT t.id AS task_id, t.task_name, t.latest_progress_time, "
+                "MAX(p.report_time) AS actual_latest_report "
+                "FROM task t JOIN task_progress p ON p.task_id = t.id AND p.is_published = 1 "
+                f"WHERE {store.formal_task_clause()} "
+                "GROUP BY t.id, t.task_name, t.latest_progress_time "
+                "HAVING t.latest_progress_time IS NULL AND actual_latest_report IS NOT NULL "
+                "OR t.latest_progress_time <> actual_latest_report "
+                "ORDER BY t.id",
+                caliber=(
+                    f"{store.FORMAL_TASK_CALIBER}；仅列出 latest_progress_time 与"
+                    "实际最新已发布进展 report_time 不一致的任务"
+                ),
+                limit=limit,
+            )
+        buckets = store.fetch(
+            "SELECT CASE "
+            "WHEN t.latest_progress_time IS NULL THEN '4 从未报进展' "
+            "WHEN t.latest_progress_time >= DATE_SUB(%(as_of)s, INTERVAL 30 DAY) THEN '1 30 天内' "
+            "WHEN t.latest_progress_time >= DATE_SUB(%(as_of)s, INTERVAL 90 DAY) THEN '2 31-90 天' "
+            "WHEN t.latest_progress_time >= DATE_SUB(%(as_of)s, INTERVAL 180 DAY) THEN '3 91-180 天' "
+            "ELSE '5 超过 180 天' END AS freshness_bucket, COUNT(*) AS task_count "
+            f"FROM task t WHERE {store.formal_task_clause()} "
+            "GROUP BY freshness_bucket ORDER BY freshness_bucket",
+            {"as_of": store.AS_OF},
+            caliber=f"{store.FORMAL_TASK_CALIBER}；{store.as_of_caliber()}",
+        )
+        # E6-01 asks how current the board is overall, which the buckets do not
+        # state: the newest timestamp and how far it lags the snapshot date.
+        overall = store.fetch(
+            "SELECT MAX(t.latest_progress_time) AS newest_progress, "
+            "DATEDIFF(%(as_of)s, MAX(t.latest_progress_time)) AS days_behind "
+            f"FROM task t WHERE {store.formal_task_clause()}",
+            {"as_of": store.AS_OF},
+            limit=1,
+        )
+        first = overall["rows"][0] if overall["rows"] else {}
+        buckets["newest_progress"] = first.get("newest_progress")
+        buckets["days_behind"] = first.get("days_behind")
+        buckets["as_of"] = store.AS_OF
+        return buckets
+
+    return _guard("weekly_freshness_distribution", work)
+
+
+@mcp.tool()
+def weekly_approval_turnaround(scope: str = "summary", top: int = 8) -> str:
+    """Measure approval elapsed time: overall, per board, slowest, or still-pending backlog.
+
+    ``pending`` deliberately drops the published filter: a submission stuck in
+    approval is by definition not published yet, so gating on R-01 would report
+    an empty backlog.
+
+    Args:
+        scope: summary / board / slowest / pending.
+        top: Row cap for slowest and pending, 1..50.
+    """
+
+    def work() -> dict[str, Any]:
+        key = (scope or "summary").strip().lower()
+        if key not in _TURNAROUND_SCOPES:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported_scope",
+                    "message": f"不支持的 scope：{scope}；支持 {', '.join(sorted(_TURNAROUND_SCOPES))}",
+                },
+            }
+        try:
+            bounded = max(1, min(50, int(top)))
+        except TypeError, ValueError:
+            return {"ok": False, "error": {"code": "invalid_argument", "message": "top 必须是整数"}}
+
+        done = "s.completed_at IS NOT NULL AND s.submitted_at IS NOT NULL"
+        formal = store.formal_task_clause()
+        if key == "summary":
+            return store.fetch(
+                "SELECT COUNT(*) AS completed_rounds, "
+                "ROUND(AVG(DATEDIFF(s.completed_at, s.submitted_at)), 1) AS avg_days, "
+                "MAX(DATEDIFF(s.completed_at, s.submitted_at)) AS max_days "
+                "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+                f"WHERE {formal} AND {done}",
+                caliber=f"{store.FORMAL_TASK_CALIBER}；仅已完成轮次（completed_at 非空）",
+                limit=1,
+            )
+        if key == "board":
+            return store.fetch(
+                "SELECT b.name AS board_name, COUNT(*) AS n, "
+                "ROUND(AVG(DATEDIFF(s.completed_at, s.submitted_at)), 1) AS avg_days "
+                "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+                "JOIN task_board b ON b.id = t.board_id AND b.is_deleted = 0 "
+                f"WHERE {formal} AND {done} GROUP BY b.id, b.name ORDER BY b.sort_order",
+                caliber=f"{store.FORMAL_TASK_CALIBER}；仅已完成轮次",
+            )
+        if key == "slowest":
+            return store.fetch(
+                "SELECT t.task_name, s.round_no, s.submitted_at, s.completed_at, "
+                "DATEDIFF(s.completed_at, s.submitted_at) AS days "
+                "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+                f"WHERE {formal} AND {done} ORDER BY days DESC, t.id",
+                caliber=f"{store.FORMAL_TASK_CALIBER}；仅已完成轮次，按耗时降序",
+                limit=bounded,
+            )
+        return store.fetch(
+            "SELECT t.task_name, s.round_no, s.status, s.submitted_at, "
+            "DATEDIFF(%(as_of)s, s.submitted_at) AS pending_days "
+            "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+            "WHERE t.is_deleted = 0 AND s.completed_at IS NULL AND s.submitted_at IS NOT NULL "
+            "ORDER BY pending_days DESC, t.id",
+            {"as_of": store.AS_OF},
+            caliber=(
+                "仅 is_deleted = 0（不加发布闸门：待审提交单本就尚未发布）；"
+                f"未完成即 completed_at 为空；{store.as_of_caliber()}"
+            ),
+            limit=bounded,
+        )
+
+    return _guard("weekly_approval_turnaround", work)
 
 
 @mcp.tool()

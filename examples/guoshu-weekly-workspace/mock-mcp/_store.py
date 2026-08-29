@@ -14,10 +14,16 @@ reach this layer directly.
 # ruff: noqa: RUF001  中文口径文案里的全角标点是给模型看的字面量, 不能换成半角。
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import _db
 import pymysql
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+"""Dates reach SQL as bound parameters, so this is a clarity guard, not the
+injection defense: a malformed date would otherwise be silently coerced by MySQL
+and answer a different question than the one asked."""
 
 MAX_ROWS = 200
 """Hard cap on rows returned to the agent.
@@ -36,6 +42,82 @@ BLOCKED_FIELDS = frozenset({"storage_path", "payload"})
 SENSITIVE_FIELDS = frozenset({"review_comment", "opinion"})
 
 SNAPSHOT_NOTE = "演示数据（weekly_mock 自建库），非集团真实周报"
+
+AS_OF = "2026-08-15"
+"""The snapshot's "today" -- every relative time window is measured from here.
+
+Not ``CURDATE()``, and this is the whole point.  The data stops at
+``progress_date`` 2026-08-01 while the machine's wall clock is well past it, so
+answering "the last 30 days" from the real clock silently slides the window off
+the data and returns a smaller count than the truth.  The question bank flags
+this as the ``now_instead_of_as_of`` trap.
+
+Fixing the anchor on the service side also removes the model's ability to get it
+wrong: it never has to know today's date, and cannot substitute its own.
+"""
+
+
+def as_of_caliber() -> str:
+    return f"相对时间窗以数据快照日 {AS_OF} 为基准（非当前系统时间）"
+
+
+def date_window(
+    date_from: str = "",
+    date_to: str = "",
+    last_days: str | int | None = None,
+) -> tuple[str, str]:
+    """Resolve a caller's time window into an inclusive ``(from, to)`` date pair.
+
+    ``last_days`` is relative to :data:`AS_OF`.  An empty window means "no time
+    filter" and is returned as ``("", "")`` so callers can skip the clause
+    entirely rather than binding a wide-open range.
+    """
+    lo = (date_from or "").strip()
+    hi = (date_to or "").strip()
+    if last_days is not None and str(last_days).strip():
+        try:
+            days = int(str(last_days).strip())
+        except (TypeError, ValueError) as exc:
+            raise QueryError("invalid_argument", f"last_days 必须是整数：{last_days!r}") from exc
+        if days <= 0:
+            raise QueryError("invalid_argument", f"last_days 必须为正数：{days}")
+        conn = connect()
+        try:
+            row = _one(
+                conn,
+                "SELECT DATE_SUB(%(as_of)s, INTERVAL %(d)s DAY) AS lo",
+                {"as_of": AS_OF, "d": days},
+            )
+        finally:
+            conn.close()
+        lo = str(row["lo"]) if row else lo
+        hi = hi or AS_OF
+    for label, value in (("date_from", lo), ("date_to", hi)):
+        if value and not _DATE_RE.match(value):
+            raise QueryError("invalid_argument", f"{label} 需为 YYYY-MM-DD：{value!r}")
+    return lo, hi
+
+
+def window_clause(column: str, lo: str, hi: str, params: dict[str, Any], *, prefix: str = "w") -> str:
+    """Build the bound SQL fragment for a resolved window. ``column`` is caller-controlled."""
+    parts: list[str] = []
+    if lo:
+        params[f"{prefix}_lo"] = lo
+        parts.append(f"{column} >= %({prefix}_lo)s")
+    if hi:
+        params[f"{prefix}_hi"] = hi
+        parts.append(f"{column} <= %({prefix}_hi)s")
+    return " AND ".join(parts)
+
+
+def window_caliber(lo: str, hi: str, *, label: str) -> str:
+    if lo and hi:
+        return f"{label} 介于 {lo} 与 {hi} 之间（含端点）"
+    if lo:
+        return f"{label} 自 {lo} 起（含）"
+    if hi:
+        return f"{label} 截至 {hi}（含）"
+    return f"{label} 未设时间过滤"
 
 
 class QueryError(Exception):

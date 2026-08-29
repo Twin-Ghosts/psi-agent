@@ -21,7 +21,7 @@ export GUOSHU_WEEKLY_MCP_TOKEN=demo-token
 python tests/smoke_test.py
 ```
 
-预期 `26/26 passed`。
+预期 `56/56 passed`。
 
 ## 数据层准备
 
@@ -87,15 +87,15 @@ guoshu-weekly-workspace/
 ├── mock-mcp/                  # 仅 demo 用，不属于交付物
 │   ├── _db.py                 # MySQL 连接（只读用户，密码不进日志）
 │   ├── _store.py              # 只读查询层 + 口径规则 + 字段管控
-│   └── server.py              # 16 个语义化取数工具（Streamable HTTP MCP）
+│   └── server.py              # 20 个语义化取数工具（Streamable HTTP MCP）
 └── tests/
-    ├── smoke_test.py          # 44 条契约断言，不花模型 token
+    ├── smoke_test.py          # 56 条契约断言，不花模型 token
     └── baseline.py            # 396 题准确率基线（LLM 判定）
 ```
 
 ## 取数契约
 
-16 个语义化工具，SQL 与口径规则固化在服务端，agent 侧不产 SQL：
+20 个语义化工具，SQL 与口径规则固化在服务端，agent 侧不产 SQL：
 
 | 工具 | 用途 |
 |------|------|
@@ -115,6 +115,10 @@ guoshu-weekly-workspace/
 | `weekly_import_audit` | 导入批次对账 |
 | `weekly_freshness` | 各看板最新进展时间 |
 | `weekly_health` | 连通性自检与各表行数 |
+| `weekly_progress_range` | 时间窗内的进展（全表跨任务，可按月/季/任务分组计数） |
+| `weekly_task_lifecycle` | 任务创建/发布的时间分布与建到发的时长 |
+| `weekly_freshness_distribution` | 新鲜度分桶（30/90/180 天）、自定义天窗、时间漂移检出 |
+| `weekly_approval_turnaround` | 审批时效（汇总/按看板/最慢/待审积压） |
 
 `weekly_workflow_query` 与 `weekly_submission_query` 是两张表，不可互相替代：
 动作流水**聚合不出**提交单状态。混用会答出「5 个提交单全部通过」而真值是
@@ -136,6 +140,16 @@ agent 据此给出依据、也据此判断不可答。
 | R-12 完成时间是文本 | 任务详情的顶层 `caliber` 无条件声明 |
 | R-17 里程碑复核 | JOIN 回 task 表复核正式任务口径 |
 | 附件路径不外泄 | `storage_path` 在 `BLOCKED_FIELDS`，不进任何返回 |
+| 相对时间窗锚定快照日 | `_store.AS_OF = 2026-08-15`，非 `CURDATE()`，见下节 |
+
+### 相对时间窗以快照日为基准
+
+「最近 30 天」「今年以来」这类问法，基准是数据快照日 `2026-08-15`，
+不是机器墙钟。数据止于 `progress_date` 2026-08-01，而墙钟已经走过去了：
+按当前时间算窗口会静默滑出数据区间，答出一个比真值小的数。
+
+锚点固定在服务端，模型因此既不需要知道今天几号、也无法用自己的日期替换它。
+每个返回的 `caliber` 会写明本次生效的窗口与基准日。
 
 ### 敏感字段权限分级
 

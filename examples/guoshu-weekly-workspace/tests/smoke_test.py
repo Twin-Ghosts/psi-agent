@@ -11,7 +11,7 @@ Run (with the mock service already up):
     python tests/smoke_test.py
 """
 
-# ruff: noqa: RUF001  中文口径文案里的全角标点是给模型看的字面量, 不能换成半角。
+# ruff: noqa: RUF001, RUF003  中文口径文案与注释里的全角标点是给人看的正文, 不能换成半角。
 # ruff: noqa: T201  这是命令行脚本, stdout 就是它的输出通道。
 from __future__ import annotations
 
@@ -40,6 +40,12 @@ _results: list[tuple[str, str, str]] = []
 
 def check(name: str, condition: bool, detail: str = "") -> None:
     _results.append((PASS if condition else FAIL, name, detail))
+
+
+def _first(result: dict[str, Any], field: str) -> Any:
+    """First row's ``field``, or ``None`` when the result came back empty."""
+    rows = result.get("rows") or []
+    return rows[0].get(field) if rows else None
 
 
 async def _call(registry: ToolRegistry, tool: str, **kwargs: Any) -> dict[str, Any]:
@@ -83,6 +89,10 @@ async def run() -> int:
         "weekly_task_query",
         "weekly_task_detail",
         "weekly_progress_history",
+        "weekly_progress_range",
+        "weekly_task_lifecycle",
+        "weekly_freshness_distribution",
+        "weekly_approval_turnaround",
         "weekly_aggregate",
         "weekly_milestone_query",
         "weekly_workflow_query",
@@ -98,7 +108,7 @@ async def run() -> int:
     }
     loaded = set(registry.tools)
     check(
-        "所有 16 个工具注册，且无 helper 泄漏为工具",
+        "所有 20 个工具注册，且无 helper 泄漏为工具",
         loaded == expected_tools,
         f"缺 {sorted(expected_tools - loaded)}；多 {sorted(loaded - expected_tools)}",
     )
@@ -414,6 +424,93 @@ async def run() -> int:
         "按负责人姓名可检出任务（去空格匹配）",
         named.get("ok") is True and named.get("total_count", 0) > 0,
         f"total={named.get('total_count')}",
+    )
+
+    # 时间维度：相对窗以数据快照日为锚，不是机器墙钟。两者相差十余天，
+    # 用 CURDATE() 会把窗口滑出数据、算出偏小的数。
+    w30 = await _call(registry, "weekly_progress_range", last_days=30)
+    check(
+        "最近 30 天进展期数与任务数（锚定快照日）",
+        w30.get("total_count") == 17 and w30.get("total_tasks") == 17,
+        f"total_count={w30.get('total_count')} total_tasks={w30.get('total_tasks')}",
+    )
+    check(
+        "相对时间窗口径显式声明以快照日为基准",
+        "2026-08-15" in str(w30.get("caliber", "")),
+        str(w30.get("caliber"))[:120],
+    )
+    ytd = await _call(registry, "weekly_progress_range", date_from="2026-01-01", date_to="2026-08-15")
+    check(
+        "计数不受 200 行截断影响（今年以来 366 期）",
+        ytd.get("total_count") == 366 and ytd.get("row_count") == 200 and ytd.get("has_more") is True,
+        f"total={ytd.get('total_count')} rows={ytd.get('row_count')} has_more={ytd.get('has_more')}",
+    )
+    months = await _call(registry, "weekly_progress_range", date_from="2026-01-01", date_to="2026-08-15", by="month")
+    check(
+        "按月分组趋势可直答（7 个月桶）",
+        months.get("ok") is True and months.get("row_count") == 7,
+        f"rows={months.get('row_count')}",
+    )
+    # progress_date 与 report_time 不可互换：补报时两者相差数十天。
+    late = await _call(
+        registry,
+        "weekly_progress_range",
+        date_from="2026-07-01",
+        date_to="2026-07-31",
+        date_field="report_time",
+    )
+    check(
+        "按上报时间可查出补报更早周期的进展（lag_days>0）",
+        late.get("ok") is True and sum(1 for r in late.get("rows", []) if int(r.get("lag_days") or 0) > 0) == 3,
+        f"rows={late.get('row_count')}",
+    )
+    check(
+        "不支持的 date_field 明确报错，不静默改口径",
+        (await _call(registry, "weekly_progress_range", date_field="created_at")).get("error", {}).get("code")
+        == "unsupported_field",
+        "",
+    )
+    life = await _call(registry, "weekly_task_lifecycle")
+    check(
+        "任务创建到发布的时长汇总（128 条 / 均 30.3 天 / 最长 60 天）",
+        life.get("ok") is True
+        # SUM() 是 Decimal，经 JSON 序列化成字符串，取数一律先转 int/str 再比。
+        and int(life["rows"][0]["with_published_at"]) == 128
+        and str(life["rows"][0]["avg_days_to_publish"]) == "30.3"
+        and int(life["rows"][0]["max_days_to_publish"]) == 60,
+        str(life.get("rows"))[:140],
+    )
+    fresh = await _call(registry, "weekly_freshness_distribution")
+    check(
+        "新鲜度分档带全局最新时间与落后天数",
+        fresh.get("row_count") == 5 and fresh.get("days_behind") == 1,
+        f"buckets={fresh.get('row_count')} days_behind={fresh.get('days_behind')}",
+    )
+    check(
+        "自定义天窗可答分档表达不了的区间（7 天内 23 条）",
+        (await _call(registry, "weekly_freshness_distribution", within_days=7))["rows"][0]["task_count"] == 23,
+        "",
+    )
+    drift = await _call(registry, "weekly_freshness_distribution", drift=True, limit=8)
+    check(
+        "冗余列漂移可检出（latest_progress_time 与实际最新不一致）",
+        drift.get("ok") is True and drift.get("row_count") == 8,
+        f"rows={drift.get('row_count')}",
+    )
+    turn = await _call(registry, "weekly_approval_turnaround", scope="summary")
+    check(
+        "审批时效汇总（400 轮 / 均 14.7 天 / 最长 59 天）",
+        turn["rows"][0]["completed_rounds"] == 400
+        and str(turn["rows"][0]["avg_days"]) == "14.7"
+        and turn["rows"][0]["max_days"] == 59,
+        str(turn.get("rows"))[:140],
+    )
+    # 待审提交单本就尚未发布，加 R-01 闸门会把积压查成空。
+    pending = await _call(registry, "weekly_approval_turnaround", scope="pending", top=8)
+    check(
+        "待审积压不套发布闸门，否则查成空",
+        pending.get("row_count") == 8 and pending["rows"][0]["pending_days"] == 583,
+        f"rows={pending.get('row_count')} 首行={_first(pending, 'pending_days')}",
     )
 
     return report()

@@ -41,6 +41,116 @@ async def weekly_progress_history(task: str, published_only: bool = True, limit:
     )
 
 
+async def weekly_progress_range(
+    date_from: str = "",
+    date_to: str = "",
+    last_days: int = 0,
+    by: str = "",
+    date_field: str = "progress_date",
+    limit: int = 200,
+) -> str:
+    """Query or count published progress in a time window, across all tasks.
+
+    Use this for any "how many / which progress in <period>" question. Walking
+    weekly_progress_history task by task cannot answer those: it exhausts the
+    tool budget long before the window is covered.
+
+    Relative windows are anchored to the data snapshot date on the server, not to
+    today's clock. Do not compute date arithmetic yourself.
+
+    Read total_count / total_tasks for counting questions -- rows may be
+    truncated at 200 while the totals stay exact.
+
+    Args:
+        date_from: Inclusive start, YYYY-MM-DD. Empty means unbounded.
+        date_to: Inclusive end, YYYY-MM-DD. Empty means unbounded.
+        last_days: Window of N days ending at the snapshot date; 0 disables it.
+        by: Empty lists rows; month / quarter / task returns counts per group.
+        date_field: progress_date (period reported on) or report_time (when filed).
+        limit: Max rows to return, capped at 200.
+    """
+    try:
+        bounded = max(1, min(200, int(limit)))
+        days = max(0, int(last_days))
+    except TypeError, ValueError:
+        return _invalid("limit and last_days must be integers")
+    return await _call(
+        "weekly_progress_range",
+        {
+            "date_from": date_from,
+            "date_to": date_to,
+            "last_days": days,
+            "by": by,
+            "date_field": date_field,
+            "limit": bounded,
+        },
+    )
+
+
+async def weekly_task_lifecycle(by: str = "", year: int = 0) -> str:
+    """Report when formal tasks were created and how long they took to publish.
+
+    This is task.created_at / published_at -- the setup clock, a different axis
+    from progress reporting. Use it for "when was this set up", "how many tasks
+    were opened in <year>", "how long from creation to publication".
+
+    Args:
+        by: Empty returns a min/max/average summary; month or year counts per bucket.
+        year: Restrict to one creation year; 0 means all years.
+    """
+    try:
+        yr = max(0, int(year))
+    except TypeError, ValueError:
+        return _invalid("year must be an integer")
+    return await _call("weekly_task_lifecycle", {"by": by, "year": yr})
+
+
+async def weekly_freshness_distribution(
+    task: str = "", within_days: int = 0, drift: bool = False, limit: int = 200
+) -> str:
+    """Report how stale progress is: 30/90/180-day buckets, a custom window, or drift.
+
+    The default bucket view also carries newest_progress and days_behind, which
+    answer "how current is the board overall".
+
+    Args:
+        task: Empty covers all formal tasks; an id/name returns that one task.
+        within_days: When > 0, counts tasks that reported within that many days
+            of the snapshot date. Use this for windows the fixed buckets cannot
+            express, such as 7 days.
+        drift: True lists only tasks whose latest_progress_time disagrees with
+            their real newest published progress row.
+        limit: Max rows for the drift listing, capped at 200.
+    """
+    try:
+        bounded = max(1, min(200, int(limit)))
+        days = max(0, int(within_days))
+    except TypeError, ValueError:
+        return _invalid("within_days and limit must be integers")
+    return await _call(
+        "weekly_freshness_distribution",
+        {"task": task, "within_days": days, "drift": bool(drift), "limit": bounded},
+    )
+
+
+async def weekly_approval_turnaround(scope: str = "summary", top: int = 8) -> str:
+    """Measure approval elapsed time: overall, per board, slowest rounds, or backlog.
+
+    scope="pending" is the still-unfinished backlog and deliberately does not
+    apply the published filter -- a submission stuck in approval is by definition
+    not published yet.
+
+    Args:
+        scope: summary / board / slowest / pending.
+        top: Row cap for slowest and pending, 1..50.
+    """
+    try:
+        bounded = max(1, min(50, int(top)))
+    except TypeError, ValueError:
+        return _invalid("top must be an integer")
+    return await _call("weekly_approval_turnaround", {"scope": scope, "top": bounded})
+
+
 async def weekly_milestone_query(year: str = "", status: str = "", limit: int = 200) -> str:
     """List milestones, re-checked against the formal-task caliber (R-17).
 
