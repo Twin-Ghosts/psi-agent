@@ -28,7 +28,7 @@ except ImportError:  # pragma: no cover — standalone import without editable i
 
 
 def package_fallback() -> str:
-    """``workspace/tob`` when this file lives under ``tools/``."""
+    """``agents/desktop`` when this file lives under ``tools/``."""
     return str(Path(__file__).resolve().parents[1])
 
 

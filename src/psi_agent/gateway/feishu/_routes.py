@@ -4,7 +4,7 @@ A7: 与 ``desktop/_routes.py`` 同一个原因搬过来 —— 装配函数留�
 骨架为了给它备料必须 ``from psi_agent.gateway.feishu._feishu_manager import FeishuManager``,
 于是「骨架不认识产品线」这条只靠纪律维持。现在骨架对本包一无所知。
 
-``/oauth/*`` 两条也在这里: 取件方(实测)全在 ``workspace/tob/tools/`` 一侧, ToC 的登录走
+``/oauth/*`` 两条也在这里: 取件方(实测)全在 ``agents/feishu/tools/`` 一侧, ToC 的登录走
 手机号 + 验证码不经过 OAuth 跳转 —— 理由详见 ``_oauth_manager`` 模块头。
 
 但它们由**独立的** ``register_oauth_routes()`` 注册, 不跟着 ``--product-line`` 走: 归属
@@ -152,7 +152,7 @@ def register_oauth_routes(app: web.Application) -> web.Application:
     的进程也得有这两条, 否则 ``PSI_OAUTH_CALLBACK_BASE`` 指过来的授权回调落到 404 ——
     那个地址登记在第三方应用后台, 不随本进程挂了哪条产品线而变。
 
-    代码仍住 ``feishu/``, 按的是存在性判据: 取件方(实测)全在 ``workspace/tob/tools/``。
+    代码仍住 ``feishu/``, 按的是存在性判据: 取件方(实测)全在 ``agents/feishu/tools/``。
     归属与可达性是两件事, 后者由调用点保证 (``register_feishu_routes`` 或 ``Gateway.run``,
     恰好一处调到)。
     """

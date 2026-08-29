@@ -125,7 +125,7 @@ class Gateway:
     default_agent: str = ""
     """CLI: default agent package for new Sessions / GET /defaults.
 
-    Empty → soft-default ``workspace/tob`` under cwd when present;
+    Empty → soft-default ``agents/feishu`` under cwd when present;
     else cwd when it looks like an install layout (``tools/`` + ``skills/``);
     else Session keeps single-root compat (``agent=\"\"`` → same as workspace).
     """

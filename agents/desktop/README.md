@@ -1,8 +1,8 @@
-# workspace/toc — 桌面版 (ToC) 能力包 🐬
+# agents/desktop — 桌面版 (ToC) 能力包 🐬
 
-**这是 `workspace/tob` 的抽取产物**: 保留通用能力, 去掉飞书那一路 (工具 / 技能 / 提示词
+**这是 `agents/feishu` 的抽取产物**: 保留通用能力, 去掉飞书那一路 (工具 / 技能 / 提示词
 段落 / 事件源 / 长期记忆)。两个包的 `systems/` 除三处提示词文字外逐字节相同, 内核对两者
-都解析出全部 6 个 hook。ToB 版原文与被去掉的部分见 `workspace/tob/`。
+都解析出全部 6 个 hook。ToB 版原文与被去掉的部分见 `agents/feishu/`。
 
 它的 agent 是 **Haitun (海豚)**, 组成:
 
@@ -39,7 +39,7 @@ uv run psi-agent ai \
 
 # 2) Session (this workspace)
 uv run psi-agent session \
-  --workspace workspace/tob \
+  --workspace agents/desktop \
   --ai-socket /tmp/ai.sock --channel-socket /tmp/ch.sock
 
 # 3) REPL
@@ -54,7 +54,7 @@ uv run psi-agent channel repl --session-socket /tmp/ch.sock
   bundled Python parser/compiler and checked `run_flow` executor for Agent and Program Steps;
   Human waits continue through `run_flow_resume`. No separate setup is required. The existing
   `fusion-flow-legacy` Node/Fuclaw runtime remains available for explicit `.flow.ts` work:
-  first use `cd workspace/tob/skills/fusion-flow-legacy && npm install`.
+  first use `cd agents/desktop/skills/fusion-flow-legacy && npm install`.
   One-off flows go under `flows/<task-slug>/`; saved reusable declarations go under
   `flows/workflows/<slug>/`. `flows/curated/` remains only as a compatibility catalog for
   `flow_manage` and legacy assets.
@@ -69,18 +69,18 @@ uv run psi-agent channel repl --session-socket /tmp/ch.sock
 
 ## Fusion Memory: 本能力包没有
 
-跨会话长期记忆那组工具不在 `workspace/toc` 里 —— 它们经
+跨会话长期记忆那组工具不在 `agents/desktop` 里 —— 它们经
 `_fusion_memory_mcp.py` → `_fusion_memory_membership.py` → `_feishu_impl.py`
 落到飞书, 「谁的身份写记忆」是拿飞书 `open_id` 认的, 桌面版没有飞书身份。
 
 ToB 版这一节原有约 68 行配置说明 (8 个 `FUSION_MEMORY_*` 变量 + 信任边界), 见
-`workspace/tob/README.md`。桌面版要做记忆需另设计按本机用户认身份的方案, 属讨论项:
+`agents/feishu/README.md`。桌面版要做记忆需另设计按本机用户认身份的方案, 属讨论项:
 `docs/superpowers/specs/2026-08-28-gateway-workspace-refactor-report.md` 第九章。
 
 ## Smoke test
 
 ```bash
-uv run python workspace/tob/systems/system.py
+uv run python agents/desktop/systems/system.py
 ```
 
 ## Windows 安装包

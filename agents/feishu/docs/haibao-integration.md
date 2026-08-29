@@ -1,7 +1,7 @@
 # Haitun 通过 MCP 调用 Haibao
 
 本文记录 Haitun 的 MCP-only Haibao ChatBI 接入。Haitun Adapter、两个公开 Tool 和
-Haibao Skill 已 bundled 在 `workspace/tob`。生产所需的私有 Haibao MCP
+Haibao Skill 已 bundled 在 `agents/feishu`。生产所需的私有 Haibao MCP
 Server 由 operator-provisioned 外部服务提供，不 bundled 在本仓库；本文不表示生产
 环境已经 deployed，也不包含私有服务实现。
 
@@ -36,7 +36,7 @@ Server 由 operator-provisioned 外部服务提供，不 bundled 在本仓库；
 ### 2.1 文件图
 
 ```text
-workspace/tob/
+agents/feishu/
 ├── .env.haibao.example
 ├── tools/
 │   ├── _haibao_mcp.py
@@ -215,7 +215,7 @@ Haitun 侧不得实现或配置以下内容：ChatBI 直连 API、数据库连�
 
 ```bash
 uv run psi-agent session \
-  --workspace workspace/tob \
+  --workspace agents/feishu \
   --ai-socket /tmp/ai.sock \
   --channel-socket /tmp/ch.sock
 ```
@@ -225,7 +225,7 @@ uv run psi-agent session \
 本地验证命令：
 
 ```bash
-uv run pytest -c NUL -o asyncio_mode=auto -p no:cacheprovider workspace/tob/tests/test_haibao_tools.py -v
+uv run pytest -c NUL -o asyncio_mode=auto -p no:cacheprovider agents/feishu/tests/test_haibao_tools.py -v
 uv run pytest -c NUL -o asyncio_mode=auto -p no:cacheprovider tests/psi_agent/session/test_tool_registry.py -v
 uv run ruff check .
 uv run ruff format --check .

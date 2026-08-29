@@ -1,4 +1,4 @@
-# workspace/toc — 桌面版 (ToC) 能力包 (海豚 / Haitun agent 🐬)
+# agents/desktop — 桌面版 (ToC) 能力包 (海豚 / Haitun agent 🐬)
 
 A consolidated psi-agent workspace. Its persona is fixed: a **Haitun agent** (always stated
 in the system prompt). It merges the most useful parts of the other example workspaces:
@@ -71,7 +71,7 @@ ToB 没有安装器, 结构上不存在这个问题 —— 这一节只对 ToC �
 身份, 整条链落不了地。
 
 ToB 版 `AGENTS.md` 这一节列的 8 个 `FUSION_MEMORY_*` 变量与那套信任边界说明, 对本能力包
-一律不适用, 所以整节没有照抄 —— 要看原文去 `workspace/tob/AGENTS.md`。
+一律不适用, 所以整节没有照抄 —— 要看原文去 `agents/feishu/AGENTS.md`。
 
 桌面版将来要做记忆, 是**另设计一套按本机用户认身份的**, 不是把这套搬过来。这一项列在
 `docs/superpowers/specs/2026-08-28-gateway-workspace-refactor-report.md` 第九章讨论项。
@@ -94,13 +94,13 @@ service tools:
 
 ## Channel events: 本能力包没有
 
-`channel_events/` 整个目录**不在** `workspace/toc` 里 (ToB 有 41 个文件)。事件源是飞书
+`channel_events/` 整个目录**不在** `agents/desktop` 里 (ToB 有 41 个文件)。事件源是飞书
 平台推送 + 本 agent 合成两类, `source` 枚举里除 `haitun` 外全是聊天平台; 桌面版是本机
 单用户直接对话, 没有「平台把事件推给我」这个形态。
 
 `triggers/` 与 `trigger_manage` 保留了 —— 定时任务和触发器机制本身是通用的, 只是没有
 飞书那一路信号源。ToB 版这一节讲的 `source` / `event` 两层设计与注册改哪一层, 对本能力包
-用不上, 故未照抄; 原文在 `workspace/tob/AGENTS.md`。
+用不上, 故未照抄; 原文在 `agents/feishu/AGENTS.md`。
 
 ## Tools (`tools/`)
 
@@ -154,7 +154,7 @@ service tools:
 | `c_drive_cleanup` (`c_drive_cleanup.py` + `_c_drive_cleanup_impl.py`) | Windows C-drive `scan` / `status` / `clean` tool. The first scan in a Session requires confirmation; cleanup requires the user's affirmation and deletes only unchanged candidates from allowlisted temporary/cache locations. Large files, exact duplicates, and stale Downloads are report-only. See `skills/windows-c-drive-cleanup/SKILL.md` for the agent workflow. |
 
 本表比 ToB 版少 27 行: 飞书那批工具与依赖飞书身份的 `memory_*` / `assignment_*` /
-`handbook_onboarding_*` / `channel_event_check` 都不在本能力包里。原表在 `workspace/tob/AGENTS.md`。
+`handbook_onboarding_*` / `channel_event_check` 都不在本能力包里。原表在 `agents/feishu/AGENTS.md`。
 
 ## Skills (`skills/`)
 
@@ -217,7 +217,7 @@ service tools:
 
 本节比 ToB 版少 43 个 skill 条目: 飞书域技能 (30 个 `feishu-*`) 与依赖飞书身份或
 `memory_*` 工具的合同 / 行政财务 / 组织记忆类技能都不在本能力包里。原文见
-`workspace/tob/AGENTS.md`。
+`agents/feishu/AGENTS.md`。
 ## Schedules (`schedules/`)
 
 - Use `schedule_manage` to add / list / view / update / delete tasks instead of editing
@@ -305,5 +305,5 @@ invoked by the current framework — do not "clean them up" as dead code:
 ## Smoke test
 
 ```bash
-uv run python workspace/tob/systems/system.py   # prints the assembled prompt
+uv run python agents/desktop/systems/system.py   # prints the assembled prompt
 ```
