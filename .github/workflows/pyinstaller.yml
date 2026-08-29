@@ -95,7 +95,7 @@ jobs:
           name: psi-agent-pyinstaller-windows-latest
           path: dist-exe
       - shell: cmd
-        run: copy dist-exe\psi-agent.exe "workspace\tob\psi-agent.exe"
+        run: copy dist-exe\psi-agent.exe "agents\feishu\psi-agent.exe"
       - uses: msys2/setup-msys2@v2
         id: msys2
         with:
@@ -108,10 +108,10 @@ jobs:
             mingw-w64-ucrt-x86_64-nodejs mingw-w64-ucrt-x86_64-uv
       - shell: pwsh
         run: |
-          robocopy "${{ steps.msys2.outputs.msys2-location }}" "workspace\tob\msys64" /E /NFL /NDL /NJH /NJS /NP
+          robocopy "${{ steps.msys2.outputs.msys2-location }}" "agents\feishu\msys64" /E /NFL /NDL /NJH /NJS /NP
           if ($LASTEXITCODE -ge 8) { exit 1 } else { exit 0 }
       - shell: pwsh
-        run: Remove-Item -Recurse -Force "workspace\tob\msys64\var\cache\pacman\pkg\*" -ErrorAction SilentlyContinue
+        run: Remove-Item -Recurse -Force "agents\feishu\msys64\var\cache\pacman\pkg\*" -ErrorAction SilentlyContinue
       - run: choco install innosetup --no-progress
       - name: Build launcher with updater config
         shell: pwsh
@@ -129,7 +129,7 @@ jobs:
           SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
         run: |
           # 只把 key 写进打包目录，不落库；PR 分支没有 secret 时生成空 .env，打包照常成功。
-          $path = "workspace\tob\.env"
+          $path = "agents\feishu\.env"
           $lines = [System.Collections.Generic.List[string]]::new()
           if ($env:SERPER_API_KEY) {
             $lines.Add("SERPER_API_KEY=$env:SERPER_API_KEY")
@@ -152,8 +152,8 @@ jobs:
       - name: Collect version files
         shell: pwsh
         run: |
-          Copy-Item -Force "workspace\tob\haitun-version.txt" "installer-output\"
-          Copy-Item -Force "workspace\tob\msys64\msys-version.txt" "installer-output\"
+          Copy-Item -Force "agents\feishu\haitun-version.txt" "installer-output\"
+          Copy-Item -Force "agents\feishu\msys64\msys-version.txt" "installer-output\"
       - uses: actions/upload-artifact@v7
         with:
           name: haitun-agent-installers
