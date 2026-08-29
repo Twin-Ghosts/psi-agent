@@ -7,15 +7,14 @@
 
 ## 快速开始
 
-```bash
-# 1. 构建 mock 数据层（把 MySQL dump 转成 SQLite，一次性）
-cd mock-mcp
-python build_sqlite.py ~/Downloads/weekly_mock-full-20260817.sql
+前置：MySQL 8.4 已起，`weekly_mock` 库已导入（见「数据层准备」）。
 
-# 2. 起 mock 取数服务
+```bash
+# 1. 起 mock 取数服务
+cd mock-mcp
 python server.py --port 18900
 
-# 3. 另开一个终端，跑契约测试
+# 2. 另开一个终端，跑契约测试
 cd ..
 export GUOSHU_WEEKLY_MCP_URL=http://127.0.0.1:18900/mcp
 export GUOSHU_WEEKLY_MCP_TOKEN=demo-token
@@ -23,6 +22,43 @@ python tests/smoke_test.py
 ```
 
 预期 `26/26 passed`。
+
+## 数据层准备
+
+用原生 MySQL 8.4 而非翻译层：396 道参考 SQL 全部原样可跑（100%），
+执行计划来自与生产同一个优化器。
+
+```bash
+# 免安装 ZIP，整个装在一个目录里，卸载 = 停服务 + 删目录
+# https://cdn.mysql.com//Downloads/MySQL-8.4/mysql-8.4.11-winx64.zip
+
+mysqld --defaults-file=my.ini --initialize-insecure --console
+mysqld --defaults-file=my.ini --console
+
+mysql -u root -e "CREATE DATABASE weekly_mock CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;"
+mysql -u root --default-character-set=utf8mb4 weekly_mock < weekly_mock-full-20260817.sql
+
+# 只读用户：让「只读」由数据库强制，而不只是注释里的声明
+mysql -u root -e "
+CREATE USER 'weekly_ro'@'127.0.0.1' IDENTIFIED BY 'weekly-ro-2026';
+GRANT SELECT ON weekly_mock.* TO 'weekly_ro'@'127.0.0.1';"
+```
+
+`my.ini` 要点：`character-set-server = utf8mb4`、`collation-server =
+utf8mb4_0900_ai_ci`（与 dump 一致，中文不乱码）、`bind-address = 127.0.0.1`
+（本机演示，零远程暴露面）。
+
+**不要写 `default_authentication_plugin`** —— 该变量在 MySQL 8.4 已移除
+（属 8.0 时代），写了会让 `--initialize` 直接失败。8.4 默认就是
+`caching_sha2_password`，无需覆盖。
+
+导入后校验行数请用 `SELECT COUNT(*)`，**不要信
+`information_schema.TABLE_ROWS`** —— 那是 InnoDB 估算值，实测 158 行的表读出 14。
+
+预期 12 张表：task 158、task_attachment 543、task_board 2、task_category 47、
+task_group_detail 55、task_group_progress_history 404、task_milestone 602、
+task_progress 1068、task_progress_import 20、task_workflow_action 1613、
+task_workflow_submission 470、task_year_goal 387。
 
 ### 接进 psi-agent 对话
 
@@ -49,8 +85,7 @@ guoshu-weekly-workspace/
 │   ├── weekly_aggregate.py    # 聚合、快照时间、导入对账
 │   └── weekly_progress.py     # 进展、里程碑、审批、附件、健康自检
 ├── mock-mcp/                  # 仅 demo 用，不属于交付物
-│   ├── build_sqlite.py        # MySQL dump → SQLite
-│   ├── _sqlite_compat.py      # MySQL 函数与 INTERVAL 语法兼容层
+│   ├── _db.py                 # MySQL 连接（只读用户，密码不进日志）
 │   ├── _store.py              # 只读查询层 + 口径规则 + 字段管控
 │   └── server.py              # 11 个语义化取数工具（Streamable HTTP MCP）
 └── tests/smoke_test.py        # 26 条契约断言，不花模型 token
@@ -96,7 +131,7 @@ agent 据此给出依据、也据此判断不可答。
 
 | 项 | demo 现状 | 生产需要 |
 |----|-----------|----------|
-| 数据源 | SQLite（本机无 MySQL/Docker） | 入口组 MCP + oa_biz 真实库 |
+| 数据源 | 本机 MySQL 8.4 + weekly_mock | 入口组 MCP + oa_biz 真实库 |
 | 鉴权 | 单个进程级 token | per-user token map + BFF 身份映射 |
 | 数据权限 | 敏感字段一律遮蔽 | 按 OA 真实身份做行级权限 |
 | 前端 | 无（经 psi-agent 既有接口） | 专建对话应用 + BFF（方案第六章） |
@@ -105,12 +140,13 @@ agent 据此给出依据、也据此判断不可答。
 
 ### mock 数据层的两处不可外推
 
-- **性能**：SQLite 单机查询远快于真实库，`≤10s / ≤30s` 的验收必须在真实库重测。
+- **性能**：引擎虽与生产同为 MySQL 8.4，但数据量（1.1 MB）、网络与并发都不同，
+  `≤10s / ≤30s` 的验收仍须在真实库重测。
 - **脏值口径**：R-11（分管领导多种填法）在干净的 mock 数据上测不出真实价值，
   要等真实库适配。
 
-`gold_sql` 在 SQLite 上的可跑率是 394/396；余下 2 题查 `information_schema`，
-属权限边界题，本就该判不可答。
+`gold_sql` 在本机 MySQL 上的可跑率是 **396/396（100%）**，含两道查
+`information_schema` 的权限边界题——它们能跑，但 Agent 侧仍应判为不可答。
 
 ## 切到真实服务
 
@@ -130,7 +166,11 @@ export GUOSHU_WEEKLY_MCP_TOKEN=<入口组签发>
 | `GUOSHU_WEEKLY_MCP_TOKEN` | 是 | bearer token，由启动方提供 |
 | `GUOSHU_WEEKLY_MCP_TIMEOUT_SECONDS` | 否 | 默认 30，限 0.1~120 |
 | `GUOSHU_WEEKLY_MCP_MAX_RETRIES` | 否 | 默认 2，限 0~5，仅读操作重试 |
-| `GUOSHU_WEEKLY_MOCK_DB` | 否 | mock 服务的 SQLite 路径 |
+| `GUOSHU_WEEKLY_MYSQL_HOST` | 否 | mock 库地址，默认 `127.0.0.1` |
+| `GUOSHU_WEEKLY_MYSQL_PORT` | 否 | 默认 `3306` |
+| `GUOSHU_WEEKLY_MYSQL_USER` | 否 | 默认 `weekly_ro`（只读） |
+| `GUOSHU_WEEKLY_MYSQL_PASSWORD` | 否 | 只读用户口令 |
+| `GUOSHU_WEEKLY_MYSQL_DB` | 否 | 默认 `weekly_mock` |
 
 Agent 不读、不写、不打印 token，不改 `.env`，不向用户索要凭证。
 连不上就如实报错——**没有本地兜底**，也不得启动本地周报服务。

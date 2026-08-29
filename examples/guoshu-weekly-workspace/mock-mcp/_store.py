@@ -1,26 +1,23 @@
-"""Read-only query layer over the demo's SQLite mock store.
+"""Read-only query layer over the demo's MySQL mock store.
 
 Every business rule from chapter 七 of the plan lives here, on the *service*
 side of the MCP boundary -- the agent cannot bypass or misstate them.  The
 formal-task filter (R-01: ``is_deleted = 0 AND workflow_status = 'published'``)
 is applied by ``formal_task_clause`` and reported back in each result envelope
 so the agent can cite the caliber it actually got.
+
+Placeholders are pymysql's ``%(name)s`` form.  Values are always bound, never
+interpolated -- the injection surface stays closed even though the agent cannot
+reach this layer directly.
 """
 
 # ruff: noqa: RUF001  中文口径文案里的全角标点是给模型看的字面量, 不能换成半角。
 from __future__ import annotations
 
-import os
-import sqlite3
-from pathlib import Path
 from typing import Any
 
-import _sqlite_compat as compat
-
-DB_PATH = os.environ.get(
-    "GUOSHU_WEEKLY_MOCK_DB",
-    str(Path(__file__).resolve().parent / "weekly_mock.sqlite3"),
-)
+import _db
+import pymysql
 
 MAX_ROWS = 200
 """Hard cap on rows returned to the agent.
@@ -38,6 +35,8 @@ BLOCKED_FIELDS = frozenset({"storage_path", "payload"})
 # Fields released only when the caller holds the matching permission.
 SENSITIVE_FIELDS = frozenset({"review_comment", "opinion"})
 
+SNAPSHOT_NOTE = "演示数据（weekly_mock 自建库），非集团真实周报"
+
 
 class QueryError(Exception):
     """A caller-visible failure that carries a stable code."""
@@ -47,13 +46,14 @@ class QueryError(Exception):
         self.code = code
 
 
-def connect() -> sqlite3.Connection:
-    if not Path(DB_PATH).exists():
+def connect() -> Any:
+    try:
+        return _db.connect()
+    except pymysql.Error as exc:
         raise QueryError(
-            "store_missing",
-            f"mock store not built: {DB_PATH}. Run build_sqlite.py first.",
-        )
-    return compat.connect(DB_PATH, read_only=True)
+            "store_unreachable",
+            f"cannot reach {_db.DSN_DESCRIPTION}: {exc.args[-1] if exc.args else exc}",
+        ) from exc
 
 
 def formal_task_clause(alias: str = "t") -> str:
@@ -85,11 +85,13 @@ def fetch(
     bounded = max(1, min(MAX_ROWS, int(limit)))
     conn = connect()
     try:
-        cursor = conn.execute(compat.rewrite_sql(sql), params or {})
-        raw = cursor.fetchmany(bounded + 1)
-        columns = [d[0] for d in cursor.description] if cursor.description else []
-    except sqlite3.Error as exc:
-        raise QueryError("query_failed", str(exc)) from exc
+        with conn.cursor() as cursor:
+            cursor.execute(sql, params or {})
+            # One extra row distinguishes "exactly full" from "truncated".
+            raw = cursor.fetchmany(bounded + 1)
+            columns = [d[0] for d in cursor.description] if cursor.description else []
+    except pymysql.Error as exc:
+        raise QueryError("query_failed", str(exc.args[-1] if exc.args else exc)) from exc
     finally:
         conn.close()
 
@@ -104,25 +106,34 @@ def fetch(
         "row_count": len(rows),
         "has_more": has_more,
         "caliber": caliber or "无附加口径",
-        "snapshot_note": "演示数据（weekly_mock 自建库），非集团真实周报",
+        "snapshot_note": SNAPSHOT_NOTE,
     }
 
 
 def scalar(sql: str, params: dict[str, Any] | None = None, *, caliber: str = "") -> dict[str, Any]:
     conn = connect()
     try:
-        row = conn.execute(compat.rewrite_sql(sql), params or {}).fetchone()
-    except sqlite3.Error as exc:
-        raise QueryError("query_failed", str(exc)) from exc
+        with conn.cursor() as cursor:
+            cursor.execute(sql, params or {})
+            row = cursor.fetchone()
+    except pymysql.Error as exc:
+        raise QueryError("query_failed", str(exc.args[-1] if exc.args else exc)) from exc
     finally:
         conn.close()
-    value = None if row is None else row[0]
+    value = None if not row else next(iter(row.values()))
     return {
         "ok": True,
         "value": value,
         "caliber": caliber or "无附加口径",
-        "snapshot_note": "演示数据（weekly_mock 自建库），非集团真实周报",
+        "snapshot_note": SNAPSHOT_NOTE,
     }
+
+
+def _one(conn: Any, sql: str, params: dict[str, Any]) -> dict[str, Any] | None:
+    with conn.cursor() as cursor:
+        cursor.execute(sql, params)
+        row = cursor.fetchone()
+    return dict(row) if row else None
 
 
 def resolve_board(board: str) -> int | None:
@@ -132,17 +143,19 @@ def resolve_board(board: str) -> int | None:
         return None
     conn = connect()
     try:
-        row = conn.execute(
-            "SELECT id FROM task_board WHERE is_deleted = 0 AND (code = :t OR name = :t)",
+        row = _one(
+            conn,
+            "SELECT id FROM task_board WHERE is_deleted = 0 AND (code = %(t)s OR name = %(t)s)",
             {"t": token},
-        ).fetchone()
+        )
         if row is not None:
-            return int(row[0])
-        row = conn.execute(
-            "SELECT id FROM task_board WHERE is_deleted = 0 AND name LIKE :like",
+            return int(row["id"])
+        row = _one(
+            conn,
+            "SELECT id FROM task_board WHERE is_deleted = 0 AND name LIKE %(like)s",
             {"like": f"%{token}%"},
-        ).fetchone()
-        return None if row is None else int(row[0])
+        )
+        return None if row is None else int(row["id"])
     finally:
         conn.close()
 
@@ -155,23 +168,27 @@ def resolve_task(task: str) -> dict[str, Any] | None:
     conn = connect()
     try:
         if token.isdigit():
-            row = conn.execute(
-                f"SELECT * FROM task t WHERE t.id = :id AND {formal_task_clause()}",
+            row = _one(
+                conn,
+                f"SELECT * FROM task t WHERE t.id = %(id)s AND {formal_task_clause()}",
                 {"id": int(token)},
-            ).fetchone()
+            )
             if row is not None:
-                return dict(row)
-        row = conn.execute(
-            f"SELECT * FROM task t WHERE {formal_task_clause()} AND t.task_name = :name",
+                return row
+        row = _one(
+            conn,
+            f"SELECT * FROM task t WHERE {formal_task_clause()} AND t.task_name = %(name)s",
             {"name": token},
-        ).fetchone()
+        )
         if row is not None:
-            return dict(row)
-        row = conn.execute(
-            f"SELECT * FROM task t WHERE {formal_task_clause()} AND t.task_name LIKE :like "
-            "ORDER BY LENGTH(t.task_name) LIMIT 1",
+            return row
+        # Shortest match wins: with substring matching, the shortest name is the
+        # least over-specified reading of what the user typed.
+        return _one(
+            conn,
+            f"SELECT * FROM task t WHERE {formal_task_clause()} AND t.task_name LIKE %(like)s "
+            "ORDER BY CHAR_LENGTH(t.task_name) LIMIT 1",
             {"like": f"%{token}%"},
-        ).fetchone()
-        return None if row is None else dict(row)
+        )
     finally:
         conn.close()

@@ -21,6 +21,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import _db
 import _store as store
 from mcp.server.fastmcp import FastMCP
 
@@ -66,7 +67,7 @@ def weekly_schema(board: str = "") -> str:
             board_id = store.resolve_board(board)
             if board_id is None:
                 return {"ok": False, "error": {"code": "board_not_found", "message": f"未匹配到看板：{board}"}}
-            where += " AND c.board_id = :bid"
+            where += " AND c.board_id = %(bid)s"
             params["bid"] = board_id
         categories = store.fetch(
             "SELECT c.id, c.board_id, c.parent_id, c.name, c.sort_order "
@@ -119,10 +120,10 @@ def weekly_task_query(
             board_id = store.resolve_board(board)
             if board_id is None:
                 return {"ok": False, "error": {"code": "board_not_found", "message": f"未匹配到看板：{board}"}}
-            where.append("t.board_id = :bid")
+            where.append("t.board_id = %(bid)s")
             params["bid"] = board_id
         if category.strip():
-            where.append("t.category_id IN (SELECT id FROM task_category WHERE is_deleted = 0 AND name LIKE :cat)")
+            where.append("t.category_id IN (SELECT id FROM task_category WHERE is_deleted = 0 AND name LIKE %(cat)s)")
             params["cat"] = f"%{category.strip()}%"
         if status.strip():
             if status.strip() not in {"0", "1", "2", "3"}:
@@ -130,19 +131,19 @@ def weekly_task_query(
                     "ok": False,
                     "error": {"code": "invalid_status", "message": "status 只能是 0/1/2/3"},
                 }
-            where.append("t.status = :st")
+            where.append("t.status = %(st)s")
             params["st"] = int(status.strip())
         if owner.strip():
             # R-13: strip spaces on both sides before matching multi-value text.
             token = owner.strip()
             where.append(
-                "(REPLACE(IFNULL(t.project_owner_name,''),' ','') LIKE :own "
-                "OR REPLACE(IFNULL(t.lead_owner_name,''),' ','') LIKE :own "
-                "OR REPLACE(IFNULL(t.owner_user_id,''),' ','') LIKE :own)"
+                "(REPLACE(IFNULL(t.project_owner_name,''),' ','') LIKE %(own)s "
+                "OR REPLACE(IFNULL(t.lead_owner_name,''),' ','') LIKE %(own)s "
+                "OR REPLACE(IFNULL(t.owner_user_id,''),' ','') LIKE %(own)s)"
             )
             params["own"] = f"%{token.replace(' ', '')}%"
         if keyword.strip():
-            where.append("t.task_name LIKE :kw")
+            where.append("t.task_name LIKE %(kw)s")
             params["kw"] = f"%{keyword.strip()}%"
 
         clause = " AND ".join(where)
@@ -183,7 +184,7 @@ def weekly_task_detail(task: str) -> str:
             }
         task_id = int(found["id"])
         detail = store.fetch(
-            "SELECT * FROM task_group_detail WHERE task_id = :tid",
+            "SELECT * FROM task_group_detail WHERE task_id = %(tid)s",
             {"tid": task_id},
             caliber="completion_time 为展示文本，不可做日期运算（R-12）",
             limit=1,
@@ -191,14 +192,14 @@ def weekly_task_detail(task: str) -> str:
         progress = store.fetch(
             "SELECT id, task_id, version_no, latest_progress, next_work, progress_date, "
             "report_time, is_published, review_comment "
-            "FROM task_progress WHERE task_id = :tid AND is_published = 1 "
+            "FROM task_progress WHERE task_id = %(tid)s AND is_published = 1 "
             "ORDER BY version_no DESC, id DESC",
             {"tid": task_id},
             caliber="is_published = 1（仅正式发布进展）；review_comment 按权限展示",
             limit=3,
         )
         goal = store.fetch(
-            "SELECT * FROM task_year_goal WHERE task_id = :tid ORDER BY year DESC",
+            "SELECT * FROM task_year_goal WHERE task_id = %(tid)s ORDER BY year DESC",
             {"tid": task_id},
             caliber="task_id + year 唯一",
             limit=5,
@@ -241,7 +242,7 @@ def weekly_progress_history(task: str, published_only: bool = True, limit: int =
                 "ok": False,
                 "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
             }
-        where = "task_id = :tid"
+        where = "task_id = %(tid)s"
         caliber = "按 version_no 倒序，越大越新"
         if published_only:
             where += " AND is_published = 1"
@@ -281,7 +282,7 @@ def weekly_aggregate(group_by: str, board: str = "", metric: str = "count") -> s
             board_id = store.resolve_board(board)
             if board_id is None:
                 return {"ok": False, "error": {"code": "board_not_found", "message": f"未匹配到看板：{board}"}}
-            scope += " AND t.board_id = :bid"
+            scope += " AND t.board_id = %(bid)s"
             params["bid"] = board_id
 
         if group_by == "board":
@@ -348,12 +349,12 @@ def weekly_milestone_query(year: str = "", status: str = "", limit: int = 50) ->
         if year.strip():
             if not year.strip().isdigit():
                 return {"ok": False, "error": {"code": "invalid_year", "message": "year 须为数字"}}
-            where.append("m.year = :yr")
+            where.append("m.year = %(yr)s")
             params["yr"] = int(year.strip())
         if status.strip():
             if status.strip() not in {"0", "1"}:
                 return {"ok": False, "error": {"code": "invalid_status", "message": "status 只能是 0/1"}}
-            where.append("m.status = :st")
+            where.append("m.status = %(st)s")
             params["st"] = int(status.strip())
         return store.fetch(
             "SELECT m.id, m.task_id, t.task_name, m.year, m.category, m.group_name, "
@@ -387,7 +388,7 @@ def weekly_workflow_query(task: str = "", limit: int = 50) -> str:
                     "ok": False,
                     "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
                 }
-            where.append("a.task_id = :tid")
+            where.append("a.task_id = %(tid)s")
             params["tid"] = int(found["id"])
         return store.fetch(
             "SELECT a.id, a.submission_id, a.task_id, s.round_no, a.node_type, a.action, "
@@ -423,7 +424,7 @@ def weekly_attachment_query(task: str = "", limit: int = 50) -> str:
                     "ok": False,
                     "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
                 }
-            where.append("att.task_id = :tid")
+            where.append("att.task_id = %(tid)s")
             params["tid"] = int(found["id"])
         return store.fetch(
             "SELECT att.id, att.task_id, att.progress_id, att.workflow_submission_id, "
@@ -489,18 +490,24 @@ def weekly_health() -> str:
     def work() -> dict[str, Any]:
         conn = store.connect()
         try:
-            tables = [
-                r[0]
-                for r in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
-                ).fetchall()
-            ]
-            counts = {t: conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0] for t in tables}
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT TABLE_NAME AS t FROM information_schema.TABLES "
+                    "WHERE TABLE_SCHEMA = %(db)s ORDER BY TABLE_NAME",
+                    {"db": _db.DB_NAME},
+                )
+                tables = [row["t"] for row in cursor.fetchall()]
+                # information_schema.TABLE_ROWS is an InnoDB estimate (it read 14
+                # for a 158-row table), so count for real.
+                counts: dict[str, int] = {}
+                for table in tables:
+                    cursor.execute(f"SELECT COUNT(*) AS c FROM `{table}`")
+                    counts[table] = int(cursor.fetchone()["c"])
         finally:
             conn.close()
         return {
             "ok": True,
-            "store": store.DB_PATH,
+            "store": _db.DSN_DESCRIPTION,
             "table_count": len(counts),
             "row_counts": counts,
             "caliber": store.FORMAL_TASK_CALIBER,
@@ -516,14 +523,18 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=18900)
     args = parser.parse_args()
 
-    if not Path(store.DB_PATH).exists():
-        print(f"mock store missing: {store.DB_PATH}", file=sys.stderr)
-        print("run: python build_sqlite.py", file=sys.stderr)
+    try:
+        probe = store.connect()
+        probe.close()
+    except store.QueryError as exc:
+        print(f"mock store unreachable: {exc}", file=sys.stderr)
+        print("start MySQL and import the dump -- see README", file=sys.stderr)
         return 2
 
     mcp.settings.host = args.host
     mcp.settings.port = args.port
     print(f"mock weekly MCP on http://{args.host}:{args.port}/mcp", flush=True)
+    print(f"store: {_db.DSN_DESCRIPTION}", flush=True)
     mcp.run(transport="streamable-http")
     return 0
 
