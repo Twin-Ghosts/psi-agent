@@ -25,7 +25,6 @@ export default defineConfig(({ mode }) => {
       host: '127.0.0.1',
       proxy: {
         // 每一项都对应后端已存在的路由 (``gateway`` 下的 add_get/add_post/add_delete)。
-        // 注意没有 ``/auth``: 飞书免登的后端路由还没有, 归任务 5fef7。
         '/defaults': gateway,
         '/ais': gateway,
         // ``/sessions/{id}/chat`` 是 SSE, 必须关掉缓冲否则流式变成一次性返回。
@@ -33,6 +32,14 @@ export default defineConfig(({ mode }) => {
         '/titles': gateway,
         '/summaries': gateway,
         '/workspace': gateway,
+        // 飞书免登(任务 5fef7 已落地): ``/auth/feishu`` ``/auth/me`` ``/auth/logout``, 全部是
+        // 一次性 JSON 请求/响应, 不是 SSE, 用普通字符串写法即可。
+        '/auth': gateway,
+        // ``/feishu/*``(``_routes.py`` 里的 ``register_feishu_routes``): app-id、按身份过滤的
+        // sessions/titles/summaries、以及 ``/feishu/route`` ``/feishu/routes`` 都是普通 JSON。
+        // 聊天流式仍然打骨架的 ``/sessions/{id}/chat``(上面那条), ``/feishu`` 下**没有**注册
+        // 任何 SSE 端点, 所以不需要 ``{ target, changeOrigin, ws: false }`` 的特殊处理。
+        '/feishu': gateway,
       },
     },
   }
