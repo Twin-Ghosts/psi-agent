@@ -70,9 +70,7 @@ async def _agent_short_name_choices(root: anyio.Path) -> list[str]:
     if not await root.is_dir():
         return []
     names = [
-        entry.name
-        async for entry in root.iterdir()
-        if await entry.is_dir() and not entry.name.startswith((".", "_"))
+        entry.name async for entry in root.iterdir() if await entry.is_dir() and not entry.name.startswith((".", "_"))
     ]
     return sorted(names)
 
@@ -145,8 +143,7 @@ async def resolve_agent_package(
                 f"{'{' + ','.join(choices) + '}' if choices else '(none)'}"
             )
         raise FileNotFoundError(
-            f"{label} {raw!r} is not an agent package: "
-            f"{str(await as_given.absolute())!r} is not a directory"
+            f"{label} {raw!r} is not an agent package: {str(await as_given.absolute())!r} is not a directory"
         )
     candidate_rel = repo_candidate.strip()
     if candidate_rel:
