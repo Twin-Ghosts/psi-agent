@@ -18,9 +18,16 @@
 | 行为零回归 | **达成** | 全量 57 failed / **1481 passed** / 7 skipped，失败集与基线**逐条相同** |
 | ToB 前端脚手架 | **达成** | 9 个源文件，构建 654ms，占位页 `GET /defaults` HTTP 200 |
 
-**要负责人拍的事集中在第九章**，共 5 项，都是**动手前必须先定边界**的设计题：出厂内容与用户数据怎么分（9.1）、开发启动方式（9.2）、`SOUL.md` 归谁（9.3）、`toc`/`tob` 的重复成本（9.4）、桌面版要不要长期记忆（9.5）。B3 正是没先定边界就动手、做完发现没换来保护而撤回的例子。
+**第九章的 7 项讨论已于 2026-08-29 过会，5 项拍定、2 项仍开放。**
 
-**还差的一件事**：`workspace/toc` 没接上 ToC gateway 真起进程跑过 —— 只验到内核能加载、6 个 hook 全解析、提示词组装正确，没发过一条真消息。等 9.2 定了启动形态才好接（见 7.1）。
+- **已定**：用户数据移出 `{app}` 落到 AppData 的 `.haitun`（9.1 + 9.3 + 9.6 收敛成一个方向，具体落点与实施推后）、开发启动方式**加参数分开选**而不是选个习惯（9.2）、`toc`/`tob` 的重复**短期接受、记为欠账**（9.4）、**一次性合并主干且改名先落**（9.7）。会上另追加一项：顶层 `workspace/` 改名 `agents/`、`tob`/`toc` 改名 `feishu`/`desktop`（9.8）。
+- **仍开放**：桌面版要不要长期记忆（9.5），依赖 ToC 身份体系，不是本轮范围。
+
+已定的都落成了 Kanban 任务，任务号见 9.0 的表。各小节保留了过会前的原始材料 —— B3 正是没先定边界就动手、做完发现没换来保护而撤回的例子，留着是为了让后来人看得到当时为什么这么选。
+
+**注意：本报告里所有 `workspace/tob`、`workspace/toc` 字面路径都是改名前的坐标**，读的时候按 `agents/feishu`、`agents/desktop` 换算。
+
+**还差的一件事**：`workspace/toc` 已能被 Gateway 挂上（负责人实操，启动日志 `Default agent: …\workspace\toc`），但**没在它上面真跑过一轮对话** —— 工具真调起、skill 真读入、回复真产出这一段没验。见 7.1。
 
 ---
 
@@ -103,8 +110,6 @@ Source: 11 条                               Source: 11 条  ← B3 已撤回, �
 | `workspace/` 下能力包个数 | 0（不存在） | **2**（`tob` + `toc`） |
 | 安装器 `Source:` 行数 | 11 | **11**（B3 的分包改动已撤回，见 7.3 与 9.1） |
 | 提交数 / 改动量 | — | 18 次提交（另加本轮 `toc` 抽取） |
-
-> 〔截图位 1〕启动日志：三行分别显示 `runtime` 管理器创建、`desktop._routes` 挂载、`feishu._routes` 挂载
 
 ### 2.5 `workspace/toc` 抽取（本轮新增）
 
@@ -201,7 +206,7 @@ desktop/_auth_manager.py:16                  仅注释, "跳转留给将来的 O
 
 **实测结果**：骨架层 `.py` 由 7 降到 **6**；`server.py` 1031 → **610** 行；骨架层反向 import 产品符号 **8 行 → 0 行**；`_openapi_core` 公共章节 18 → **16** 条，`FEISHU_PATHS` 2 → **4** 条，**26 个 path key 的并集与 schema 逐一不变**；全量失败集合与基线 57 行逐行相同。
 
-**这件事的方法论收获**：方案 §3.2 那四条判据里，「代码认识什么概念」和「先问存在性」会打架 —— 这个文件 69 行零飞书字样，按前者是通用的；消费者全在 ToB，按后者归产品包。**冲突时以「先问存在性」为准。** 我第一版判断错，错在拿一句写着「将来」的注释去支撑一个当下的位置决定。
+**这件事的方法论收获**：方案 §3.2 那四条判据里，「代码认识什么概念」和「先问存在性」会打架 —— 这个文件 69 行零飞书字样，按前者是通用的；消费者全在 ToB，按后者归产品包。**冲突时以「先问存在性」为准** —— 一句写着「将来」的注释不能支撑当下的位置决定。
 
 ### 4.2 两个 `_openapi*` 文件是干什么的
 
@@ -249,8 +254,6 @@ passed 由 1469 涨到 1481，多出的 12 条是 `toc` 进契约表后 3 个 wo
 diff --strip-trailing-cr   : IDENTICAL  ← 参数化标记 [asyncio] 完整保留
 ```
 
-> 〔截图位 2〕全量测试尾部输出 + failure-set diff 的 IDENTICAL 结果
-
 ### 5.2 路由表逐条核对
 
 A7 把装配函数整体搬包，最大风险是漏挂路由。用同一份脚本跑改前（`3d687c37`）与改后两棵树，路由表**逐条字节相同**。当前实测：
@@ -270,9 +273,6 @@ desktop routes: 46    feishu routes: 5    合计 51
 | ToB 脚手架 | 2 文件 / 189K | `/feishu-web/` | index + JS 200，页面显示 `GET /defaults: HTTP 200` |
 
 三份 `dist/` 均被 `.gitignore` 覆盖，**0 个产物被跟踪**，`git status` 无受跟踪改动。
-
-> 〔截图位 3〕ToC 桌面端 `/spa-v2/` 完整对话（含工具调用、标题生成）
-> 〔截图位 4〕ToB 占位页 `/feishu-web/` 显示 HTTP 200
 
 ### 5.4 三向同步
 
@@ -307,7 +307,7 @@ psi-agent gateway --listen http://127.0.0.1:8080 --browser
 
 ## 七、遗留与建议
 
-### 7.1 `workspace/toc` 本轮已落地，但还没接上 ToC gateway 真跑
+### 7.1 `workspace/toc` 本轮已落地，Gateway 已能挂上，还差真跑一轮对话
 
 **原来的遗留是**：`workspace/` 下只有 `tob` 一个包，它**一身两职** —— 既是 ToC 桌面端出厂的能力包（安装器 `haitun.iss:79` 打的就是它），又是 ToB 飞书机器人的 workspace。实测其构成：
 
@@ -325,17 +325,15 @@ psi-agent gateway --listen http://127.0.0.1:8080 --browser
 
 **本轮已做**（提交 `80b54129`）：**从现有包减出 ToC**，不按原方案"以 `openclaw-style` 为基线新建"—— 实测该基线只有 5 个 tools、1 个 skill，从它起步等于把 ToC 出厂能力砍到近零，是回退不是演进。落地数字与判定方法见 **2.5**：266 文件、85 工具文件注册 93 个工具、102 个 skill、hook 6/6、提示词点名不存在的工具 0 个。
 
-**上一版写的三条"为什么不在本轮做"，现在的实际情况是**：
+两件相关事实：`.iss` 现在打的仍是 `workspace\tob`，抽 `toc` 没改它一行，安装器该打哪个包属 **9.1**；共享层已查清 —— `ToolRegistry.load(cls, tools_dir: Path, session_id: str = "")` 只收**一个** `tools_dir`，不改内核就没有多根目录，`toc` 与 `tob` 之间的重复无法避免，列为 **9.4**。
 
-- ①「属新增交付物，不在本轮范围」—— 负责人本轮明确要求做，范围已放开。
-- ②「与 B4 / T1 绑定」—— 这条**不成立，是我判断错了**。抽 `workspace/toc` 只往库里加一个目录，不改 `.iss` 一行；`.iss` 现在打的仍是 `workspace\tob`。安装器该打哪个包，是 9.1 讨论定了之后的事，两件事不必绑在一起。
-- ③「共享层机制未查清」—— **本轮查清了，结论是没有共享层可做**：内核的 `ToolRegistry.load(cls, tools_dir: Path, session_id: str = "")` 只收**一个** `tools_dir`。不改内核就没有多根目录，`toc` 与 `tob` 之间不存在能共享的能力层，抽取必然意味着重复。这个代价是真的，列为 **9.4** 讨论项。
+**已经能挂上**：Gateway 起在 8080，启动日志打出 `Default agent: F:\code\psi-agent\workspace\toc`。能不能接与用哪种启动姿势无关 —— 接是已经通的，姿势才是 9.2 要定的。
 
-**还差什么**：`toc` 没接上 ToC gateway 真起进程跑过。本轮只验到内核能加载它、6 个 hook 全解析、提示词组装正确，没发过一条真消息。开发启动方式（一进程还是两进程）是 **9.2** 的讨论项，定下来才好接。
+**还差最后一步：没在 toc 上真跑过一轮对话。** 已验到的是内核能加载它（6 个 hook 全解析、93 工具、102 skill）、提示词组装正确（点名不存在的工具 0 个）、Gateway 认它作 default agent。**没验到的是发一条真消息走完一轮** —— 工具真调起来、skill 真读进去、回复真产出。这一步要人在界面上点，我没做。
 
 ### 7.2 其他已知未修（均非本轮引入）
 
-- **命名管道跨文件污染**：`tests/integration/test_gateway.py` 与 `tests/psi_agent/gateway/test_feishu_manager.py` 共用硬编码前缀 `gw-test`，全量跑时前者留下同名管道，后者绑定被 `[WinError 5]` 拒掉。表现为 `test_route_*` 里随机某条失败，单跑该文件 27/27 全绿。该前缀在改动前逐字相同。
+- **命名管道跨文件污染**：`tests/integration/test_gateway.py` 与 `tests/psi_agent/gateway/test_feishu_manager.py` 共用硬编码前缀 `gw-test`，全量跑时前者留下同名管道，后者绑定被 `[WinError 5]` 拒掉。表现为 `test_route_*` 里随机某条失败，单跑该文件 27/27 全绿。该前缀在改动前逐字相同。**与 9.2 里双进程那条是同一失败模式** —— 一个完整管道名有多个持有者，只是这里撞在前缀段、那里撞在 sid 段。
 - **`{app}\app` 升级时整目录换新**：用户数据（`SOUL.md`/`USER.md`/`schedules`）会被遗弃在 `{app}\app.backup`。本轮既不改善也不恶化；修法属 B4，已推后。
 - **运行时产物未 gitignore**：`workspace/tob/` 下的 `charts/`（252 个图表 PNG）、`channel_events/`、`.psi/` 无 gitignore 条目。虽从未被跟踪，但已被 Kanban 内部 checkpoint ref 全树暂存扫进去过 —— 证明风险真实存在。建议补 gitignore。
 
@@ -360,7 +358,8 @@ psi-agent gateway --listen http://127.0.0.1:8080 --browser
 | `feishu-web` 的 `npm run dev` 独立 dev server（vite proxy 路径） | **未跑**。只验了构建产物经 gateway 静态挂载的路径 |
 | 启动日志里 9 个 `ModuleNotFoundError`（`_feishu_impl` / `_assignment_tool_common` 等） | **未深查**。是工具首次加载的相对 import 失败，随后 refresh 全部 `added` 补回，与本轮改动无关 |
 | `tool_registry` 是否支持多 tools 根目录 | **已查（本轮）**。`ToolRegistry.load(cls, tools_dir, session_id="")` 只收一个根，不改内核就没有共享层，见 7.1 ③ 与 9.4 |
-| `workspace/toc` 接上 ToC gateway 真跑 | **未跑**。只验到内核能加载、6 个 hook 全解析、提示词组装正确，没起进程发过真消息 |
+| Gateway 挂载 `workspace/toc` | **已验（负责人实操）**。启动日志 `Default agent: F:\code\psi-agent\workspace\toc` |
+| 在 `toc` 上真跑一轮对话 | **未跑**。工具真调起、skill 真读入、回复真产出这一段没验，要人在界面上点 |
 | `toc` 那 93 个工具逐个调用 | **未验**。判据是能注册、依赖闭包完整，不是运行时行为 |
 | `toc` 那 102 个 skill 的正文 | **未逐篇读**。只核了不点名本包不存在的工具 |
 | ToC 用户实际用不到那 36 个 ToB 工具的比例 | **未查**。只按前缀数了名字，无调用数据 |
@@ -371,7 +370,23 @@ psi-agent gateway --listen http://127.0.0.1:8080 --browser
 
 ## 九、需要讨论的细节
 
-**这一章是要拿到会上定的，不是待办清单。** 共 5 项，每项都是**动手前必须先定边界**的设计题 —— 边界没定就写代码，会像 B3 那样做完再撤回。每项给的是：问题是什么、实测到的事实、可选项与代价、我的倾向。**倾向仅供参考，请负责人裁决。**
+### 9.0 讨论结论（2026-08-29 已过会，结论先行）
+
+**7 项里有 5 项已拍定，2 项仍开放。** 已定的 5 项都已落成 Kanban 任务，任务号见下表。下面各小节保留原始的问题陈述、实测事实与可选项，**并在标题后标注最终结论** —— 保留是为了让后来人看得到当时为什么这么选，不是还没定。
+
+| # | 题目 | 结论 | 落到哪 |
+|---|---|---|---|
+| 9.1 + 9.3 + 9.6 | 用户数据落点、`SOUL.md`/`USER.md` 归属、ToC 用户隔离 | **方向已定：用户数据移出 `{app}`，落到 AppData 下一个 `.haitun` 目录。** 三题合并成一个方向，具体落点与实施**推后**（不属本轮） | `3a79a`、`33fe6`（均已推后，不要在本轮启动） |
+| 9.2 | 开发时一进程还是两进程 | **已定：加启动参数分开选**（不是二选一的习惯问题，是补一个参数）。默认值保持现状（两条线都挂） | `88bd2` |
+| 9.4 | `toc`/`tob` 的重复成本 | **已定：短期接受重复（选项 A），记为欠账不是终局。** 不在本轮动内核 `load()` 签名 | 无任务，欠账记录在本节 |
+| 9.7 | 怎么合并回主干 | **已定：一次性合并（选项 A），改名先落再合并，且必须在远程仓库冻结期内做** | `848e4`（改名，进行中）→ `69225`（合并 main） |
+| 9.5 | 桌面版要不要长期记忆 | **仍开放。** 依赖 ToC 身份体系，不是本轮范围 | 无 |
+
+**另有一项本章原本没列、会上追加定下的**：顶层 `workspace/` 改名为 `agents/`，其下 `tob`/`toc` 改名为 `feishu`/`desktop`（与 `gateway/` 的子包命名对齐）。任务 `848e4`，已在跑。**所以本报告里所有 `workspace/tob`、`workspace/toc` 字面路径都是改名前的坐标**，读的时候按 `agents/feishu`、`agents/desktop` 换算。
+
+---
+
+**以下是过会前的原始材料。** 共 7 项，每项都是**动手前必须先定边界**的设计题 —— 边界没定就写代码，会像 B3 那样做完再撤回。每项给的是：问题是什么、实测到的事实、可选项与代价、我的倾向。**倾向仅供参考，请负责人裁决。**
 
 | # | 题目 | 为什么必须先讨论 | 卡住谁 |
 |---|---|---|---|
@@ -380,8 +395,18 @@ psi-agent gateway --listen http://127.0.0.1:8080 --browser
 | 9.3 | `SOUL.md` / `USER.md` 归谁 | 它既是出厂模板又是用户数据，两种身份互斥 | 9.1 的前置 |
 | 9.4 | `toc` 与 `tob` 的重复成本 | 内核只收一个 `tools_dir`，重复是结构性的 | 长期维护 |
 | 9.5 | 桌面版要不要长期记忆 | 现有实现认飞书身份，桌面版得另设一套 | ToC 产品能力 |
+| 9.6 | ToC 的用户隔离靠什么 | 现有隔离认飞书 id，桌面版单机多用户没有对应物 | 9.1、9.5 的共同前置 |
+| 9.7 | 这次重排怎么合并、怎么推给全团队 | 改动跨 18 次提交，动了 13 个 workspace 的加载路径 | 全团队日常开发 |
 
-### 9.1 ToC 出厂内容与用户数据混在一起
+### 9.1 ToC 出厂内容与用户数据混在一起 —— 已定方向 A，实施推后
+
+> **结论**：走**选项 A**，用户数据移出 `{app}`，落到 AppData 下一个 `.haitun` 目录。9.1 / 9.3 / 9.6 三题**收敛成同一个方向**，不再各自决策。
+>
+> **但具体落点与实施都推后**，不属本轮架构演进。推后的理由：本轮只做开发架构（包内/包外分类、根目录约定），装到哪、升级怎么保住、存量怎么迁、卸载删不删都属于打包部署，与「不做部署」这条边界同族；而且正确落点取决于 ToC/ToB workspace 的最终结构，结构没定就动它，落完还得再改一遍。任务 `3a79a`，**不要在本轮启动**。
+>
+> **落点还要比 `{app}\userdata` 再往外一层**：`[UninstallDelete]`（`haitun.iss:88-90`）删 `{app}\*` 和 `{app}`，挪到 `{app}\userdata` 在卸载重装时仍会丢。真正的归宿在 `{app}` 之外 —— 这也是为什么方向定在 AppData。`rollback-state.json`（`:77`）能活下来就是这条的先例：它在 `{app}\` 而不在 `{app}\app`，与 `onlyifdoesntexist` 无关。
+>
+> **另两件超出架构范围、需单独决定的**：存量用户的数据迁移（改了读取位置后，数据仍在 `{app}\app` 的用户会看起来丢东西，除非写迁移。负责人称「还没人真的在用这个能力」，但已装机用户的实际情况需要核实）；卸载语义（卸载该不该删掉用户养出来的海豚 —— 这是产品甚至法务决定）。
 
 **问题**：安装器 `haitun.iss` 用一条通配 `Source: workspace\tob\*` 整目录拷贝，出厂内容（`systems/` `tools/` `skills/` 与几份提示词模板）和用户数据（`SOUL.md` `USER.md` `schedules/`）落在同一个 `{app}\app` 下，结构上分不出来。
 
@@ -397,11 +422,21 @@ psi-agent gateway --listen http://127.0.0.1:8080 --browser
 
 **注意**：定下来之前 **B4（升级保数据）和 T1（真装真升实验）都动不了**，因为它们改的就是这一处。
 
-### 9.2 ToC / ToB 开发时怎么启动：一个进程还是两个
+### 9.2 ToC / ToB 开发时怎么启动：一个进程还是两个 —— 已定：加启动参数分开选
+
+> **结论**：**加启动参数，让开发时能自己选 gateway 与 agent 的组合。** 本节原先把这题写成「A 还是 B 的习惯问题，机制两边都不缺」，**这个判断被否了** —— 真正缺的是一个参数：用飞书 gateway + 飞书 agent 启动时应当**只**挂飞书前端与飞书 agent，而现在 `gateway/__init__.py` 的 257 与 264 行**无条件挂载两条产品线**，起飞书必然顺带把 ToC 前端也起起来。
+>
+> **默认值必须保持现状**（两条线都挂），否则云上 `launch-gateway.sh` 会静默少挂一条 —— 改默认值等于改生产行为。
+>
+> 参数粒度倾向枚举（`--gateway feishu|desktop|both`）而非两个独立布尔，因为布尔组合会出现「都关」这种无意义状态。agent 侧接到现有 `--default-agent`/`_defaults.py` 那套上，**不另造一套**。
+>
+> 一处连带影响：`/oauth/callback`、`/oauth/code` 现挂在 `feishu/_routes.py`，注释明说「ToC 进程照样有这两条 —— 唯一的生产入口两条线都贴，所以行为不变」。**改成可选之后这句注释的前提就不成立了**，要么改注释，要么保证 ToC 单独起时这两条仍在。另有 `desktop/_routes.py` 里 `/` 的 spa-v2→spa 降级链，关掉 ToC 后 `/` 该给谁要明确定。
+>
+> 任务 `88bd2`，无依赖，可与其他任务并行。
 
 **问题**：现在 `workspace/toc` 和 `workspace/tob` 两个包都在库里了，但开发时怎么起、起几个，没定。
 
-**实测事实（这条我第一版写错了，已改正）**：我原本写"路径写死指向 `workspace/tob`，现在起进程只能起 ToB 那个包"。**不对。** 实际的解析链是
+**实测事实**：`workspace/tob` 不是写死的目标，只是 explicit 为空时的仓库内候选（`_defaults.py:66`）。解析链是
 
 ```
 Gateway.default_agent (__init__.py:79, 真参数)
@@ -413,23 +448,64 @@ Gateway.default_agent (__init__.py:79, 真参数)
       4. 否则 "" → agent ≡ workspace
 ```
 
-`workspace/tob` 只是 **explicit 为空时**的仓库内候选（`_defaults.py:66`）。**所以 `toc` 今天就能选中，传 `default_agent` 指过去即可，不需要改任何代码。** 这也意味着下面选项 A 的代价比我原先估的还低 —— 不是"改一处加开关"，是"本来就支持"。
+**所以 `toc` 今天就能选中，传 `default_agent` 指过去即可，不需要改任何代码。**
+
+三条路径实测（直接调 `resolve_default_agent`）：
+
+```
+explicit 空(靠常量)      : F:\code\psi-agent\workspace\toc
+explicit=workspace/tob   : F:\code\psi-agent\workspace\tob
+explicit=workspace/toc   : F:\code\psi-agent\workspace\toc
+```
+
+`--default-agent` 是现成的 CLI flag（`psi-agent gateway --help` 里能看到），所以切产品线是：
+
+```bash
+psi-agent gateway --default-agent workspace/toc    # ToC
+psi-agent gateway --default-agent workspace/tob    # ToB
+```
+
+实操已验证 `toc` 能挂上：启动日志打出 `Default agent: F:\code\psi-agent\workspace\toc`。
+
+> **不要改 `DEFAULT_AGENT_REPO_CANDIDATE` 来切产品线**，三条理由：
+>
+> 1. `--default-agent` 已经存在，不必改代码，两条线还能同时起。
+> 2. **改常量会挂 2 个测试**（`test_resolve_default_agent_soft_haitun_workspace`、`test_resolve_default_agent_repo_layout_wins_over_cwd_tools`），因为 `test_defaults.py:76` 把 `workspace/tob` 写死了。控制实验：`git stash` 掉该行 **13 passed**，恢复后 **2 failed**。这 2 条会混在既有 57 条 Windows 基线失败里，不容易发现。
+> 3. **这个常量是发布期决策**，`_defaults.py:14` 写明它是品牌字面量的唯一落点。拿它当开发开关，谁忘了改回来装机包默认就变了。
+>
+> `agent 包` 与 `workspace` 是两件事：`--default-agent` 换能力包，`--default-workspace` 换用户工作区。切产品线只需换前者。
 
 **可选项**：
 
 - **A. 一个进程，启动时传 `default_agent` 选包**。代价：**零改动，机制已在**。缺点是同一时刻只能是一条线，两条线的路由都注册着但只有一个 workspace 在跑，容易让人误判"两条线都活着"。
-- **B. 两个进程各占一个端口**，各自带一个包。代价：本地要开两个终端两个端口，前端 dev proxy 要指对；但两条线真正独立，最接近生产形态（ToC 是装机的、ToB 是服务器上的，本来就是两个进程）。
+- **B. 两个进程各占一个端口**，各自带一个包。代价：两个终端两个端口、前端 dev proxy 要指对，**且必须给第二个进程换一个 `--socket-path`**（下面单列）；但两条线真正独立，最接近生产形态（ToC 是装机的、ToB 是服务器上的，本来就是两个进程）。
 - **C. 一个进程同时挂两个 workspace**。**这条按当前内核不成立** —— 见 9.4，`ToolRegistry.load()` 只收一个 `tools_dir`，要做得改内核。
 
-**倾向 B，但要说清它和 A 不是二选一。** A 的机制已经在了（上面那条解析链），所以现实路径是：**平时用 A**（传 `default_agent` 指向要调的那个包，零成本），**验证与联调用 B**（两个进程各占一个端口，跟生产同形）。生产上这两条线本来就是两个进程 —— ToC 是装机的、ToB 是服务器上的 —— 本地跟生产同形，本地验证才有意义。
+**B 的隐藏前提：第二个进程要换 `--socket-path`。** 实测两个 gateway 同 `socket_path=psi`、不同端口，会在建 Session 时报 `[WinError 5] 拒绝访问`，Session 起不来：
 
-**关于"两条线的路由都注册着"这件事，代码里已经有答案了，不必讨论**。`__init__.py:257` 和 `:264` 无条件各贴一面，`:240–244` 的注释写明了为什么：
+```
+ERROR serve_session: Failed to start session server on
+      \\.\pipe\psi\channels\<sid>: [WinError 5] 拒绝访问。
+ERROR Session '<sid>' crashed: PermissionError(13, '拒绝访问。', None, 5, None)
+```
 
-> 骨架 + 两条产品线各自往上贴。**这一个进程仍然两条线都贴**: `psi-agent gateway` 是唯一的入口, 生产上飞书容器起的也是它 (同容器里另起一个 `psi-agent channel feishu` 连过来), 所以这里少贴哪一面都是行为回归。拆分的收益落在装配函数上 —— 谁认识什么现在写在函数签名里, 只想起一条线的进程 (ToB 容器、测试) 只贴自己那面即可。
+冲突的是**完整管道名**，不是前缀 —— 同前缀不同 sid 的两条管道可以并存（实测两个进程各建一个 Session，零报错）。撞名的来源是 `_scheduler_manager.py:69`：调度 Session 的 id 由 workspace 路径 sha256 派生，两个进程只要 `--default-workspace` 指向同一目录就算出同一个 id，而 `_session_manager.py:131` 的去重只管进程内。
 
-所以"一个进程两条线路由都在"是**当前的正确行为**，不是缺陷；A6/A7 的收益是让"只贴一面"变得可能，而不是让默认进程只贴一面。**要讨论的因此只剩一句：本地开发要不要用上这个能力**（起两个各只贴一面的进程），还是就用一个全贴的进程按 `default_agent` 切包。
+修法两条，实测都成立：给第二个进程换 `--socket-path psi-tob`，或让两个进程用不同的 `--default-workspace`。另外 `--listen` 必须带 scheme，`--listen 127.0.0.1:18081` 会掉进 `_sockets.py:94` 的 Unix socket 分支在 Windows 上直接抛错。
 
-### 9.3 `SOUL.md` / `USER.md` 到底归谁
+**倾向 B，但它和 A 不是二选一。** 现实路径是**平时用 A**（`--default-agent` 指包，零改动），**验证与联调用 B**（两个进程，跟生产同形）。
+
+~~**所以 9.2 要定的只剩一句**：本地开发的默认姿势是 A 还是 B。机制两边都不缺，是习惯问题，定了写进 `AGENTS.md` 即可。~~
+
+**上面这句已被否**（见本节开头的结论）。机制并非两边都不缺：A 能选 agent 包但**不能只挂一条产品线的路由与前端**，这一层现在是无条件的。所以结论不是「选个习惯」，而是**补一个参数**。
+
+一个进程把两条线路由都注册着是**当前的正确行为**，不必讨论 —— `__init__.py:240–244` 的注释写明 `psi-agent gateway` 是唯一入口，生产上飞书容器起的也是它，少贴哪一面都是行为回归。A6/A7 的收益是让"只贴一面"变得可能（ToB 容器、测试用），而不是让默认进程只贴一面。
+
+### 9.3 `SOUL.md` / `USER.md` 到底归谁 —— 并入 9.1 的方向，实施推后
+
+> **结论**：不单独决策，**并入 9.1 的方向**（用户数据移出 `{app}`，落到 AppData 下的 `.haitun`）。「模板与实例分离」的倾向仍然是那个方向下的正确做法，但**实施随 9.1 一并推后**。
+>
+> 一条已被推翻的路线要留在这里，免得后来人重走：**「逐条加 `onlyifdoesntexist`」无效。** 该标志只防「文件还在原地时被覆盖」；`SwapComponent` 改名之后原地没有文件，被保护的文件照样重新写入。**这是改名问题，不是覆盖问题** —— B3 试过摘独立 `Source:`（11 → 14 条）已撤回，就是撞在这里。
 
 **问题**：这两个文件**同时**是出厂模板和用户数据。安装器要放一份初始版本进去（否则新装用户没有），可它们又会被 agent 自己改写、被用户积累内容 —— 一旦改过，就不能再当出厂文件覆盖。
 
@@ -439,7 +515,13 @@ Gateway.default_agent (__init__.py:79, 真参数)
 
 **倾向：模板与实例分离。** 这是唯一能让"出厂模板可持续更新"和"用户内容不被覆盖"同时成立的做法，别的选项都得牺牲一头。但它引入的"模板更新了怎么告知用户"是产品问题，不是工程问题，得产品一起定。
 
-### 9.4 `toc` 与 `tob` 的重复成本是结构性的
+### 9.4 `toc` 与 `tob` 的重复成本是结构性的 —— 已定：短期接受重复，记为欠账
+
+> **结论**：**短期按选项 A 走（接受重复）**，本轮不动内核 `ToolRegistry.load()` 的签名。**这是欠账，不是终局** —— 终局仍是选项 B（`load()` 收多个根，做成 `_shared` + 各自 `tools/` 两层）。
+>
+> 现在不动的理由：先让 `desktop`（原 `toc`）在 9.2 定下的参数形态下真跑起来，攒够「哪些文件真的需要共享」的实测，再动内核签名。现在动等于凭猜设计同名工具的覆盖优先级。
+>
+> **接受重复的代价要明说**：85 个工具文件、整个 `systems/`、102 个 skill 是拷贝，`feishu` 侧改一处通用工具的 bug，`desktop` 不会跟着变。靠约定和 review 守，漏一份就是**静默的行为分叉**。本节没有对应的 Kanban 任务 —— 这条欠账就记录在这里。
 
 **问题**：`workspace/toc` 抽出来了，但它和 `tob` 之间**没有共享层**，85 个工具文件、整个 `systems/`、102 个 skill 都是**拷贝**。tob 那边改一处通用工具的 bug，toc 不会跟着变。
 
@@ -449,7 +531,7 @@ Gateway.default_agent (__init__.py:79, 真参数)
 ToolRegistry.load(cls, tools_dir: Path, session_id: str = "")
 ```
 
-只收**一个** `tools_dir`。上一版报告把"共享层怎么做"列为未查项，本轮查清了：**不改内核就没有多根目录**，符号链接 / 构建期拷贝那些办法都是在绕这个签名。
+只收**一个** `tools_dir`。**不改内核就没有多根目录**，符号链接 / 构建期拷贝那些办法都是在绕这个签名。
 
 **可选项**：
 
@@ -459,7 +541,9 @@ ToolRegistry.load(cls, tools_dir: Path, session_id: str = "")
 
 **倾向 B，但不是现在。** 理由：这是唯一从结构上消掉问题的选项（A 是靠人守纪律，C 是把问题挪到构建期）。不是现在的理由是：先让 `toc` 在 9.2 定的形态下真跑起来，攒够"哪些文件真的需要共享"的实测，再动内核签名 —— 现在动等于凭猜设计覆盖优先级。**短期先按 A 走，但要明确记下这是欠账，不是终局。**
 
-### 9.5 桌面版要不要长期记忆
+### 9.5 桌面版要不要长期记忆 —— 仍开放
+
+> **仍未定。** 这题依赖 ToC 的身份体系（见 9.6 的选项 C），而那一层本身依赖一个尚未核过的前提：登录返回里有没有稳定账号 id 可作路径段。不是本轮范围，无对应任务。本节的价值是讲清「为什么 `desktop` 包里没有记忆工具」不是抽包时漏了。
 
 **问题**：`memory_*` 那 5 个工具（跨会话长期记忆）没进 `workspace/toc`。
 
@@ -480,6 +564,103 @@ memory_*  →  _fusion_memory_mcp.py:56       _load_sibling_module("_fusion_memo
 - **C. 桌面版记忆走云端**，用 ToC 账号体系认身份。代价：涉及数据出本机，是合规与产品决策，不只是工程。
 
 **倾向 B。** 理由：ToC 已经有手机号 + 验证码的登录，身份锚点是现成的，不必新造；写本地也避开了 C 的合规问题。但这是个新增能力，不是本轮范围 —— 这里只负责把"为什么 toc 没有记忆工具"讲清楚，别让人以为是抽包时漏了。
+
+### 9.6 ToC 的用户隔离靠什么 —— 并入 9.1 的方向（B 打底），C 仍开放
+
+> **结论**：**选项 B 并入 9.1 的方向** —— 用户数据落到 AppData 下的 `.haitun`，跨 OS 账号这一层天然就隔开了，与 9.1 是同一个动作，不额外花成本。
+>
+> **选项 C（按 ToC 登录身份隔离）仍开放**，因为它依赖一个我**没有核过**的前提：`_auth_manager.py` 现在只管拿 token，不产出可作路径段的稳定 id，得先确认云端返回里有没有这样一个字段。**这条要先查再定。**
+>
+> 所以 9.1 / 9.3 / 9.6 收敛成一句话：**用户数据搬到 AppData 的 `.haitun` 下**，一个动作同时解决升级保数据、模板与实例分离的落点、跨 OS 账号隔离三件事。同一个方向覆盖三题，这是选它的主要理由。
+
+**问题**：ToB 的多用户隔离是完整的，ToC 的没有对应物。桌面版是单机单进程，一台机器上如果有多个使用者（家庭共用、同一台办公机多人登录），谁的会话、文件、记忆归谁，现在没有任何边界。
+
+**实测事实**：ToB 侧隔离全部锚在飞书 id 上，三层都是（`gateway/feishu/_feishu_manager.py`）：
+
+```
+session id   私聊 feishu-<open_id>        群聊 feishu-chat-<chat_id>
+workspace    <root>/<open_id>            <root>/chat-<chat_id>
+管道名        psi\channels\<session id>
+```
+
+`_sanitize_open_id` 还专门把私聊 id 里的 `-` 转义，防止某人 open_id 恰为 `chat-oc_x` 时与群 `oc_x` 撞成同一个 session —— 注释直接写明那是"陌生人共享上下文的隐私事故"。**桌面版没有 `open_id`，这三层锚点同时失效**：所有会话落在同一个 `--default-workspace`（当前是 `{Desktop}/haitun交付`），共用同一份 `state/`、`histories/`、`todos/`。
+
+**可选项**：
+
+- **A. 不做隔离，一台机器一个使用者**。代价：等于把"别人别用我电脑"写成产品前提；同机多人时后来者能读到前者全部会话与文件，是隐私问题而非体验问题。
+- **B. 靠操作系统账号隔离** —— workspace 与 appdata 都落在 `{localappdata}`，Windows 账号天然分开。代价：同一 OS 账号下多人共用（很常见）仍然不隔离；且要求 9.1 选 A（用户数据搬出 `{app}`），两题绑在一起。
+- **C. 靠 ToC 登录身份隔离** —— 用已登录账号（手机号/邮箱换到的账号 id）作 workspace 与 session id 前缀，切换账号即切换数据。代价：要定义"未登录时写哪里"以及登录后怎么归档；`_auth_manager.py` 现在只管拿 token，不产出可作路径段的稳定 id，得先确认云端返回里有没有这样一个字段。
+
+**倾向 B 打底、C 叠加。** B 是几乎零成本就能拿到的一层（跟 9.1 的 A 同一个动作），先把跨 OS 账号这条守住；C 才是真正对齐"谁在用"的那层，但它依赖一个我**没有核过**的前提：登录返回里是否有稳定账号 id 可作路径段。**这条要先查再定。**
+
+**注意**：这题是 9.1 与 9.5 的共同前置 —— 9.1 要决定用户数据放哪，9.5 要决定记忆按谁归档，两者都得先知道"用户"在 ToC 里怎么标识。
+
+### 9.7 这次重排怎么合并、怎么推给全团队 —— 已定：一次性合并，改名先落，冻结期内做
+
+> **结论**：**走选项 A（一次性合并主干）**，且顺序是**先落改名（`848e4`）、再合并 main（`69225`）**，合并**必须在远程仓库冻结期内执行**，冻结通知由负责人发出。
+>
+> **合并面已于 2026-08-29 重测，下面正文里的旧数字作废，以这组为准**：
+>
+> | 项 | 实测值 |
+> |---|---|
+> | merge-base | `64b6273bbc75504e0a0951f3330f436c9a2bd60a` |
+> | main 领先 | **15** commits |
+> | 本分支领先 | **20** commits |
+> | main 动的文件 | **63** |
+> | 本分支动的文件 | **1063** |
+> | **重叠文件** | **仅 9 个** |
+> | `merge-tree` 实测冲突 | **8 个**（1 内容 + 7 file-location） |
+>
+> 9 个重叠文件：`.github/inno-setup/haitun.iss`、`.github/inno-setup/oss-publish.md`、`.github/workflows/ci.yml`、`.github/workflows/pyinstaller.yml`、`AGENTS.md`、`pyproject.toml`、`src/psi_agent/channel/feishu/__init__.py`、`src/psi_agent/session/AGENTS.md`、`tests/psi_agent/gateway/test_auth_manager.py`。
+>
+> **唯一的内容冲突**是 `tests/psi_agent/gateway/test_auth_manager.py`，而且它是**新出现的** —— 上一次量的时候只有 file-location 冲突，main 又推进了 1 个 commit 就多出一个内容冲突。**所以开工前必须重量一遍，别把这里的数字当最终值。**
+>
+> 7 个 `CONFLICT (file location)` 全部同源：main 在 `examples/haitun-workspace/` 里**新增**了文件，而本分支把这个目录搬走了。清单：`tests/test_feishu_leave_query.py`、`tests/test_feishu_sheet_find_columns.py`、`tests/test_feishu_sheet_grid_range.py`、`tests/test_feishu_sheet_truncation.py`、`tests/test_todo_completion_standard.py`、`tools/_feishu/leave.py`、`tools/feishu_leave_query.py`。main 在这个目录里共 **23 文件 / 2997 insertions**，这批改动是合并的主要工作量。
+>
+> **那 7 个文件必须逐个判断落点，不能照 git 的建议批量搬。** git 建议全搬到 `workspace/tob`（改名后 `agents/feishu`），但**至少 1 条是错的**：`feishu_leave_query.py` 的 docstring 引用 `GET /open-apis/approval/v4/instances`，是飞书专属工具，git 之所以建议它去 desktop 侧是因为 desktop 包里飞书工具数为 0，纯统计错觉。逐个看 docstring 与 import 定落点。
+>
+> **改名优先这个顺序的已知代价**：会产生 **1 个错建议 / 7 个**；先合并后改名是 0 个错建议。负责人已选改名优先，所以这 7 个由人判断。
+>
+> **git 的 rename 检测没问题** —— 实测 684 个 rename 全部识别（R100/R097），即便顶层与子目录两次叠加改名也如此，不必担心合并时丢历史。
+>
+> **最容易静默失败的一处**：那 7 个文件里**没有 `systems/system.py`**。三个测试文件用 glob `Path('agents').glob('*/systems/system.py')` 参数化，所以 **workspace 数会稳定停在 13，不会因为漏搬而变化** —— 测试数量看不出这 7 个文件有没有搬对。正确判据是逐文件核对 `examples/haitun-workspace/` 的 23 个改动各自落到哪，不是看测试数。
+
+**问题**：这次重排是 18 次提交、跨 gateway/runtime/session/workspace 四层的结构性改动，目前只在 `refactor/gateway-workspace-evolution` 一条分支上。怎么并回主干、并回去之后团队里在跑的分支和各自的 workspace 怎么跟上，没定。
+
+**实测事实**：
+
+- **改动面**：`gateway` 骨架层 `.py` 由 12 降到 6，10 个 manager 1740 行移出 gateway 到 `runtime/`，`haitun-workspace` 从 `examples/` 迁到 `workspace/tob`（60 处引用清零），另抽出 `workspace/toc`（266 文件）。**任何在途分支只要 import 过这些路径就会冲突。**
+- **workspace 数量**：内核加载路径受影响的 workspace 现有 **13 个**（`examples/` 11 个 + `workspace/tob`、`workspace/toc`，即三个测试文件 `WORKSPACES` glob 的口径），不止 `toc`/`tob` 两个。B5 当时记的 12 是 `toc` 抽出之前的数。
+- **测试基线**：Windows 上全量有 57 条既有失败（asyncio 子进程 `NotImplementedError` 等，非本轮引入），且在 57–62 间浮动。**这意味着"合并后跑一遍全绿"不是可用的验收判据**，只能比对失败集合是否与合并前逐条相同 —— 本轮 A7 就是这么验的（`diff` 结果 `IDENTICAL`）。
+
+**可选项**：
+
+- **A. 一次性合并主干**，团队各自 rebase。代价：所有在途分支同一天集中解冲突，冲突集中在 import 路径这类机械改动上，但量大；好处是只痛一次，之后不必维护双形态。
+- **B. 分批合并**（先 runtime 抽离、再 workspace 迁移、最后 toc）。代价：中间态存在多次，每次都要各自 rebase 一遍，累计痛感更大；且中间态的三向同步文档要写几份。
+- **C. 保留兼容层**（旧 import 路径转发到新位置，给一个过渡期）。代价：兼容层本身是要删的代码，且过渡期内两套路径并存，新人不知道该用哪个 —— 与本轮"消除反向依赖"的目标相反。
+
+**倾向 A。** 理由：这次改动的冲突绝大多数是 import 路径的机械替换，不是语义冲突，集中解一次的实际成本低于分三次；C 引入的兼容层与本轮目标直接冲突，B 的中间态会让三向同步文档写几份又废几份。
+
+**合并要满足的前置**（这几条是判据，不是建议）：
+
+1. **失败集合逐条比对**，不是看全绿 —— 合并前后的失败集合必须 `IDENTICAL`。
+2. **13 个 workspace 的加载路径各跑一次**，不只 `toc`/`tob`。
+3. **7.1 那一轮真实对话补上** —— 现在 `toc` 只验到"能加载"，没验到"能跑"。
+
+**推给团队要交付的**：`AGENTS.md` 里写清 9.2 定下的启动姿势（`--default-agent` 怎么用、要不要带 `--socket-path`）、新的目录归属（谁该往 `runtime/` 放、谁往产品包放）。**这一条是三向同步的要求，不是可选项** —— 结构变了而 `AGENTS.md` 没变，下一个人还会往骨架层加文件。
+
+### 9.8 顶层目录改名（会上追加决定）
+
+> **结论**：顶层 `workspace/` 改名 `agents/`，其下 `tob`/`toc` 改名 `feishu`/`desktop`，与 `gateway/` 的子包命名对齐。任务 `848e4`，**改名先落、合并 main（`69225`）后跑**。
+
+负责人明确担心「改错改混」，所以这项的重点不是动手快，是**判据先立住**。已量出的规模与陷阱：
+
+- `workspace/tob` + `workspace/toc` 字面路径全库 **306 处**，排除 `docs/` 后 **73 处**，分布在 **31 个文件**。核心一处是 `gateway/_defaults.py:66` 的 `DEFAULT_AGENT_REPO_CANDIDATE = "workspace/tob"`（同文件 docstring 14/25/103 行也提到）。
+- **陷阱一：`toc` 在 ToC 前端里是「目录」（table of contents）** —— `desktop/spa-v2/public/legal.css` 有 6 处 `.toc` CSS 类，`privacy.html` 1 处。改了会破坏隐私政策页排版。
+- **陷阱二：`ToC`/`ToB` 是产品线称谓，不是路径** —— `src/` 下 **102 处**，必须原样保留。
+- **量化后果**：`src/` 下不区分大小写搜 `toc|tob` 命中 **624 处**，其中真正是路径的只有 **21 处**。天真的 `sed s/toc/desktop/g` 会破坏 603 处。**禁止全局 sed，逐处判断。**
+- **必须保持不变的**：9 处 REST 路由字面量 `"/workspace/..."`（`cwd`/`places`/`browse`/`file`/`reveal` —— 这是 HTTP 接口，改了前端全 404）、19 处 `default_workspace`、11 处 `workspace_root`、`--default-workspace` flag、`SessionManager` 里的 `workspace=` 形参名。
+- **最容易静默失败的一处**：三个测试文件（`test_compaction_prompt_injection.py:26`、`test_compact_history_chaining.py:19`、`test_workspace_hook_contract.py:32`）用 glob `Path('workspace').glob('*/systems/system.py')` 参数化。改名后这个 glob **静默变成 0 命中，测试不报错、只是数量变少**。必须同步改成 `agents` 并确认参数化后仍是 13 个。
 
 ---
 
