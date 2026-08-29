@@ -307,6 +307,104 @@ async def run() -> int:
         f"row_count={pending.get('row_count')}",
     )
 
+    # --- A1: 闸门类问题的三处失分 ------------------------------------------
+    # M3-03. approved 不在提交单状态值域内（已发布叫 published），所以这个过滤
+    # 静默失效、结果等于未过滤。工具必须自己说出来，否则会被当成「已排除」。
+    check(
+        "M3-03 提交单状态值域随结果返回",
+        pending.get("status_domain")
+        == [
+            "cancelled",
+            "pending_audit",
+            "pending_fill",
+            "pending_leader",
+            "published",
+            "rejected",
+            "signing",
+        ],
+        f"status_domain={pending.get('status_domain')}",
+    )
+    pending_caliber = str(pending.get("caliber", ""))
+    check(
+        "M3-03 值域外的过滤词被显式点名为未生效",
+        "approved" in pending_caliber and "未筛掉任何行" in pending_caliber,
+        f"caliber={pending_caliber[-120:]}",
+    )
+    check(
+        "M3-03 u3208 共 29 条，total_count 与 row_count 一致且未截断",
+        pending.get("total_count") == 29 and pending.get("row_count") == 29 and pending.get("has_more") is False,
+        f"total={pending.get('total_count')} rows={pending.get('row_count')}",
+    )
+    pending_states = {r.get("status") for r in pending.get("rows", [])}
+    check(
+        "M3-03 结果含 published（说明过滤确实没生效，别按题面反推）",
+        "published" in pending_states,
+        f"states={sorted(pending_states)}",
+    )
+    check(
+        "M3-03 口径要求清单类问题逐条列全",
+        "逐条列全" in pending_caliber,
+    )
+
+    # M1-01. 附件大小是字节，模型此前换算成「约 3.8MB」而与精确值不一致。
+    att19 = await _call(registry, "weekly_attachment_query", task="19")
+    att_rows = att19.get("rows", [])
+    check(
+        "M1-01 任务 19 有 2 个未删除附件",
+        att19.get("ok") is True and att19.get("row_count") == 2,
+        f"row_count={att19.get('row_count')}",
+    )
+    check(
+        "M1-01 file_size 为精确字节 3995969 / 1637494",
+        [str(r.get("file_size")) for r in att_rows] == ["3995969", "1637494"],
+        f"sizes={[r.get('file_size') for r in att_rows]}",
+    )
+    att_caliber = str(att19.get("caliber", ""))
+    check(
+        "M1-01 口径明说字节原样不换算",
+        "字节" in att_caliber and "不要换算" in att_caliber,
+        f"caliber={att_caliber}",
+    )
+
+    # N3-04. 各组牵头人数此前要模型自己数人名，参考 9 被答成 14。
+    groups = await _call(registry, "weekly_aggregate", group_by="project_group")
+    grows = groups.get("rows", [])
+    check(
+        "N3-04 专项组聚合 11 组，任务数合计 128",
+        groups.get("ok") is True and len(grows) == 11 and sum(int(r["cnt"]) for r in grows) == 128,
+        f"groups={len(grows)} sum={sum(int(r['cnt']) for r in grows) if grows else 0}",
+    )
+    check(
+        "N3-04 服务端直接给出去重后的牵头人数与责任人数",
+        bool(grows) and {"cnt", "lead_owner_count", "project_owner_count"} <= set(grows[0]),
+        f"keys={sorted(grows[0]) if grows else []}",
+    )
+    check(
+        "N3-04 各组牵头人数与 gold 一致",
+        [int(r["lead_owner_count"]) for r in grows] == [9, 10, 11, 9, 9, 8, 7, 6, 6, 6, 5],
+        f"leads={[r.get('lead_owner_count') for r in grows]}",
+    )
+    check(
+        "N3-04 任务数序列与 gold 一致（同数按组名定序，避免并列漂移）",
+        [int(r["cnt"]) for r in grows] == [19, 15, 15, 14, 12, 11, 10, 10, 8, 8, 6],
+        f"cnt={[r.get('cnt') for r in grows]}",
+    )
+    check(
+        "N3-04 牵头人数不超过任务数",
+        all(int(r["lead_owner_count"]) <= int(r["cnt"]) for r in grows),
+    )
+    group_caliber = str(groups.get("caliber", ""))
+    check(
+        "N3-04 口径注明计数已由服务端去重，禁止自行数人名",
+        "去重" in group_caliber and "不要自己数" in group_caliber,
+        f"caliber={group_caliber[-100:]}",
+    )
+    other_agg = await _call(registry, "weekly_aggregate", group_by="owner")
+    check(
+        "其他聚合维度不受影响，仍只返回 group_name/cnt",
+        other_agg.get("ok") is True and "lead_owner_count" not in (other_agg.get("rows") or [{}])[0],
+    )
+
     # --- role-split counting (weekly_task_query ORs the owner columns) ------
     roles = await _call(registry, "weekly_owner_roles", person="u3208")
     role_row = (roles.get("rows") or [{}])[0]

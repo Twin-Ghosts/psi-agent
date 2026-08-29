@@ -363,15 +363,19 @@ def weekly_aggregate(group_by: str, board: str = "", metric: str = "count") -> s
                 f"COUNT(*) AS cnt FROM task t WHERE {scope} GROUP BY t.status ORDER BY t.status"
             )
         elif group_by == "project_group":
+            # 组里「几个人牵头」必须由服务端去重，交给模型自己数人名会数错。
             sql = (
                 "SELECT IFNULL(NULLIF(TRIM(t.project_group),''),'(未填)') AS group_name, "
-                f"COUNT(*) AS cnt FROM task t WHERE {scope} GROUP BY group_name ORDER BY cnt DESC"
+                "COUNT(*) AS cnt, "
+                "COUNT(DISTINCT NULLIF(TRIM(t.lead_owner_name),'')) AS lead_owner_count, "
+                "COUNT(DISTINCT NULLIF(TRIM(t.project_owner_name),'')) AS project_owner_count "
+                f"FROM task t WHERE {scope} GROUP BY group_name ORDER BY cnt DESC, group_name"
             )
         elif group_by == "owner":
             # R-11: 分管领导栏存在多种填法，先按填法枚举再计数，不做归一化猜测。
             sql = (
                 "SELECT IFNULL(NULLIF(TRIM(t.lead_owner_name),''),'(未填)') AS group_name, "
-                f"COUNT(*) AS cnt FROM task t WHERE {scope} GROUP BY group_name ORDER BY cnt DESC"
+                f"COUNT(*) AS cnt FROM task t WHERE {scope} GROUP BY group_name ORDER BY cnt DESC, group_name"
             )
         else:
             return {
@@ -381,11 +385,10 @@ def weekly_aggregate(group_by: str, board: str = "", metric: str = "count") -> s
                     "message": "group_by 支持 board / category / status / project_group / owner",
                 },
             }
-        result = store.fetch(
-            sql,
-            params,
-            caliber=f"{store.FORMAL_TASK_CALIBER}；LEFT JOIN 保留空分组（R-02/R-08）",
-        )
+        caliber = f"{store.FORMAL_TASK_CALIBER}；LEFT JOIN 保留空分组（R-02/R-08）"
+        if group_by == "project_group":
+            caliber += "；lead_owner_count / project_owner_count 已由服务端按人名去重，直接引用该数字，不要自己数人名"
+        result = store.fetch(sql, params, caliber=caliber)
         result["group_by"] = group_by
         return result
 
@@ -496,7 +499,10 @@ def weekly_attachment_query(task: str = "", limit: int = 200) -> str:
             "att.file_name, att.file_size, att.uploader_id, att.upload_time "
             f"FROM task_attachment att WHERE {' AND '.join(where)} ORDER BY att.id",
             params,
-            caliber="is_deleted = 0；storage_path 禁止外泄，不在返回字段内",
+            caliber=(
+                "is_deleted = 0；storage_path 禁止外泄，不在返回字段内；"
+                "file_size 单位是字节，原样报出，不要换算成 KB/MB 也不要写「约」"
+            ),
             limit=limit,
         )
 
@@ -548,6 +554,18 @@ def weekly_submission_query(
             where.append("s.status <> %(exst)s")
             params["exst"] = exclude_status.strip()
 
+        # 提交单状态和任务 workflow_status 不是同一套码值：这里给的词若不在值域内，
+        # 过滤会静默失效（等价于没过滤），必须显式告诉调用方，否则会把全量当成筛后结果。
+        domain = {
+            str(row["status"]).strip()
+            for row in store.fetch(
+                "SELECT DISTINCT status FROM task_workflow_submission ORDER BY status",
+                limit=50,
+            )["rows"]
+            if row["status"] is not None
+        }
+        unknown = [token for token in (status.strip(), exclude_status.strip()) if token and token not in domain]
+
         clause = " AND ".join(where)
         rows = store.fetch(
             "SELECT s.id, s.task_id, t.task_name, s.round_no, s.status, s.submission_kind, "
@@ -571,6 +589,18 @@ def weekly_submission_query(
             limit=20,
         )
         rows["status_breakdown"] = breakdown["rows"]
+        rows["status_domain"] = sorted(domain)
+        total = store.scalar(
+            f"SELECT COUNT(*) AS n FROM task_workflow_submission s JOIN task t ON t.id = s.task_id WHERE {clause}",
+            params,
+        )
+        rows["total_count"] = total.get("value")
+        if unknown:
+            rows["caliber"] += (
+                f"；注意 {'、'.join(unknown)} 不在提交单状态值域 {sorted(domain)} 内，"
+                "该过滤条件未筛掉任何行，结果等于未过滤，回答时不要说成「已排除」"
+            )
+        rows["caliber"] += "；列清单类问题按 total_count 逐条列全，不要只挑几条举例"
         return rows
 
     return _guard("weekly_submission_query", work)

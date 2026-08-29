@@ -21,7 +21,7 @@ export GUOSHU_WEEKLY_MCP_TOKEN=demo-token
 python tests/smoke_test.py
 ```
 
-预期 `98/98 passed`。
+预期 `113/113 passed`。
 
 ## 数据层准备
 
@@ -91,7 +91,7 @@ guoshu-weekly-workspace/
 │   ├── _store.py              # 只读查询层 + 口径规则 + 字段管控
 │   └── server.py              # 27 个语义化取数工具（Streamable HTTP MCP）
 └── tests/
-    ├── smoke_test.py          # 98 条契约断言，不花模型 token
+    ├── smoke_test.py          # 113 条契约断言，不花模型 token
     └── baseline.py            # 396 题准确率基线（LLM 判定）
 ```
 
@@ -160,6 +160,9 @@ agent 据此给出依据、也据此判断不可答。
 | 没设目标算 0 不算没有 | 覆盖率/缺口走 `NOT EXISTS` 全表口径，`JOIN` 会把 11 个缺口任务整行丢掉 |
 | 里程碑完成状态是两值码 | `status` 只有 1（未完成）/ 2（已完成），无「进行中」档，别按三态解读 |
 | 里程碑软删审计看全表 | `deleted` 口径故意不加任务闸门：问的是表本身，按任务过滤会少算 |
+| 提交单状态另有一套码值 | 已发布叫 `published` 不叫 `approved`；给值域外的词过滤会静默失效，工具随结果回 `status_domain` 并点名该条件未生效 |
+| 附件大小是字节不换算 | `file_size` 原样报出，换成「约 3.8MB」即与精确值不一致 |
+| 组内人数由服务端去重 | `group_by=project_group` 直接给 `lead_owner_count` / `project_owner_count`，让模型数人名会数错 |
 
 ### 相对时间窗以快照日为基准
 
@@ -195,7 +198,7 @@ R-04/R-14 要的是「按权限返回」。一律遮蔽同样不满足需求—�
 | 数据权限 | 敏感字段按 token 两档分级 | 按 OA 真实身份做行级权限 |
 | 前端 | 无（经 psi-agent 既有接口） | 专建对话应用 + BFF（方案第六章） |
 | 材料生成 | 无 | 报告下载与图表（P1，第 5 期） |
-| 评测 | 98 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
+| 评测 | 113 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
 
 ### mock 数据层的两处不可外推
 
