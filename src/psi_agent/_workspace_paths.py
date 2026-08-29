@@ -136,14 +136,16 @@ async def resolve_agent_package(
                 logger.info(f"{label}: {resolved} (short name {raw!r} under {root_rel!r})")
                 return resolved
             choices = await _agent_short_name_choices(cwd / root_rel)
+            offer = "{" + ",".join(choices) + "}" if choices else "(none)"
+            # 路径用引号夹而不是 ``!r``: repr 会把 Windows 的 ``\`` 转义成 ``\\``,
+            # 报错里印出的路径就没法直接复制粘贴去 ls。
             raise FileNotFoundError(
-                f"{label} {raw!r} is not an agent package: tried "
-                f"{str(await as_given.absolute())!r} and {str(await under_root.absolute())!r}, "
-                f"neither is a directory. Available short names under {root_rel!r}: "
-                f"{'{' + ','.join(choices) + '}' if choices else '(none)'}"
+                f"{label} '{raw}' is not an agent package: tried "
+                f"'{await as_given.absolute()}' and '{await under_root.absolute()}', "
+                f"neither is a directory. Available short names under '{root_rel}': {offer}"
             )
         raise FileNotFoundError(
-            f"{label} {raw!r} is not an agent package: {str(await as_given.absolute())!r} is not a directory"
+            f"{label} '{raw}' is not an agent package: '{await as_given.absolute()}' is not a directory"
         )
     candidate_rel = repo_candidate.strip()
     if candidate_rel:
