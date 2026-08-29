@@ -115,10 +115,11 @@ async def run() -> int:
         "weekly_person_stats",
         "weekly_attachment_stats",
         "weekly_rank",
+        "weekly_scale",
     }
     loaded = set(registry.tools)
     check(
-        "所有 30 个工具注册，且无 helper 泄漏为工具",
+        "所有 31 个工具注册，且无 helper 泄漏为工具",
         loaded == expected_tools,
         f"缺 {sorted(expected_tools - loaded)}；多 {sorted(loaded - expected_tools)}",
     )
@@ -1449,6 +1450,240 @@ async def run() -> int:
         "里程碑不支持的维度明确报错",
         bad_dim.get("ok") is False and bad_dim.get("error", {}).get("code") == "unsupported_group_by",
         str(bad_dim.get("error"))[:120],
+    )
+
+    # --- A5: JOIN 放大与去重 -------------------------------------------------
+    # K 类。三张子表一起 JOIN 时里程碑会被附件行数乘一遍：技术组真实 294，不去重
+    # 会报 1363（这也是 K6-01 标准答案本身错的地方，它对任务/目标用了 DISTINCT
+    # 却对里程碑用了裸 COUNT）。两个看板相加必须等于全库里程碑总数 474。
+    sc_board = await _call(registry, "weekly_scale", by="board")
+    sb = {str(r.get("bucket")): r for r in sc_board.get("rows") or []}
+    tech = sb.get("技术组重点任务进展") or {}
+    grp = sb.get("集团重点任务调度") or {}
+    check(
+        "K6-01 看板规模去重后 技术组 82/77/294/402、集团 46/40/180/52",
+        int(tech.get("tasks") or 0) == 82
+        and int(tech.get("with_year_goal") or 0) == 77
+        and int(tech.get("milestones") or 0) == 294
+        and int(tech.get("attachments") or 0) == 402
+        and int(grp.get("tasks") or 0) == 46
+        and int(grp.get("milestones") or 0) == 180
+        and int(grp.get("attachments") or 0) == 52,
+        f"tech={tech} group={grp}",
+    )
+    check(
+        "K6-01 各看板里程碑相加 474 等于全库总数（没被 JOIN 放大）",
+        sum(int(r.get("milestones") or 0) for r in sc_board.get("rows") or []) == 474,
+        f"sum={sum(int(r.get('milestones') or 0) for r in sc_board.get('rows') or [])}",
+    )
+    check(
+        "K6-01 口径给出「相加等于全库总数」这条自检法",
+        "COUNT(DISTINCT" in str(sc_board.get("caliber", ""))
+        and "相加等于全库里程碑总数" in str(sc_board.get("caliber", "")),
+        str(sc_board.get("caliber"))[:160],
+    )
+    # 一次 JOIN 出四个维度，才能避免「分四次查再拼」这条放大路径。
+    sc_grp = await _call(registry, "weekly_scale", by="project_group")
+    check(
+        "K6-02 按专项组 11 行，首组 标准安全组 19/79/50",
+        sc_grp.get("row_count") == 11
+        and str(_first(sc_grp, "bucket")) == "标准安全组"
+        and int(_first(sc_grp, "tasks") or 0) == 19
+        and int(_first(sc_grp, "milestones") or 0) == 79
+        and int(_first(sc_grp, "attachments") or 0) == 50,
+        f"rows={sc_grp.get('row_count')} 首组={_first(sc_grp, 'bucket')}",
+    )
+    # totals 与 completeness 是两个问题：「多少个里程碑」问子表行数（294），
+    # 「多少任务有里程碑」问任务数（80）。拿一个答另一个必错。
+    sc_full = await _call(registry, "weekly_scale", by="board", mode="completeness")
+    cb = {str(r.get("bucket")): r for r in sc_full.get("rows") or []}
+    ctech = cb.get("技术组重点任务进展") or {}
+    check(
+        "K6-03 技术组完备度 82 个任务中 77 有目标 / 80 有里程碑 / 73 有进展",
+        int(ctech.get("tasks") or 0) == 82
+        and int(ctech.get("has_goal") or 0) == 77
+        and int(ctech.get("has_milestone") or 0) == 80
+        and int(ctech.get("has_progress") or 0) == 73,
+        str(ctech),
+    )
+    check(
+        "K6-03 completeness 口径点明 has_* 是任务数不是子表条数",
+        "不是子表条数" in str(sc_full.get("caliber", "")),
+        str(sc_full.get("caliber"))[:160],
+    )
+    # 集团看板一条已发布进展都没有；intensity 的分母必须留住这批零期任务，
+    # 换 INNER JOIN 会让这一行整行消失，均值也就被抬高了。
+    sc_int = await _call(registry, "weekly_scale", by="project_group", mode="intensity")
+    check(
+        "K2-04 进展密度首位 关键技术攻关组 10 任务 / 99 行 / 9.90",
+        str(_first(sc_int, "bucket")) == "关键技术攻关组"
+        and int(_first(sc_int, "tasks") or 0) == 10
+        and int(_first(sc_int, "progress_rows") or 0) == 99
+        and str(_first(sc_int, "rows_per_task")) == "9.90",
+        f"首行={_first(sc_int, 'bucket')} {_first(sc_int, 'rows_per_task')}",
+    )
+    sc_int_b = await _call(registry, "weekly_scale", by="board", mode="intensity")
+    zero_row = next(
+        (r for r in sc_int_b.get("rows") or [] if str(r.get("bucket")) == "集团重点任务调度"),
+        {},
+    )
+    check(
+        "K2-04 零进展看板仍在分母里（LEFT JOIN 保留，46 任务 / 0 行）",
+        int(zero_row.get("tasks") or 0) == 46 and int(zero_row.get("progress_rows", -1)) == 0,
+        str(zero_row),
+    )
+    bad_axis = await _call(registry, "weekly_scale", by="owner")
+    check(
+        "weekly_scale 未知分组轴报错并列出支持值",
+        bad_axis.get("ok") is False
+        and bad_axis.get("error", {}).get("code") == "unsupported_by"
+        and "project_group" in str(bad_axis.get("error", {}).get("message", "")),
+        f"err={bad_axis.get('error')}",
+    )
+    bad_smode = await _call(registry, "weekly_scale", by="board", mode="coverage")
+    check(
+        "weekly_scale 未知口径报错并列出三档",
+        bad_smode.get("ok") is False and bad_smode.get("error", {}).get("code") == "unsupported_mode",
+        f"err={bad_smode.get('error')}",
+    )
+
+    # I 类。O2OA 三个外部标识填充率互不相同：process_id/work_id 各 460，
+    # task_id 只有 60。拿一列代答另一列会把缺失率答反。
+    ext = await _call(registry, "weekly_submission_query", scope="external_ids")
+    erow = (ext.get("rows") or [{}])[0]
+    check(
+        "I9-01 提交单外部标识 462 总 / 460 / 460 / 60，缺 task_id 402 占 87.0%",
+        int(erow.get("total") or 0) == 462
+        and int(erow.get("has_process_id") or 0) == 460
+        and int(erow.get("has_work_id") or 0) == 460
+        and int(erow.get("has_task_id") or 0) == 60
+        and int(erow.get("missing_task_id") or 0) == 402
+        and str(erow.get("missing_task_id_pct")) == "87.0",
+        str(erow),
+    )
+    check(
+        "I9-01 口径点明三列填充率不同，不可互相代答",
+        "不要用其中一列代答另一列" in str(ext.get("caliber", "")),
+        str(ext.get("caliber"))[:160],
+    )
+    # 「在途」必须枚举成员：status <> 'published' 会把 cancelled 那 1 张算进来，
+    # 答成 60 而不是 59（negation_includes_cancelled）。
+    infl = await _call(registry, "weekly_submission_query", scope="inflight_external")
+    irow = (infl.get("rows") or [{}])[0]
+    check(
+        "I9-02 在途且有流程号 59 张（取反会算成 60）",
+        int(irow.get("inflight_with_process_id") or 0) == 59,
+        str(irow),
+    )
+    check(
+        "I9-02 口径说明在途按成员枚举、cancelled 不算在途",
+        "cancelled" in str(infl.get("caliber", ""))
+        and "不用 status <> 'published' 取反" in str(infl.get("caliber", "")),
+        str(infl.get("caliber"))[:180],
+    )
+    bad_sub = await _call(registry, "weekly_submission_query", scope="payload")
+    check(
+        "weekly_submission_query 未知口径报错而非退回默认列表",
+        bad_sub.get("ok") is False and bad_sub.get("error", {}).get("code") == "unsupported_scope",
+        f"err={bad_sub.get('error')}",
+    )
+
+    # I8-01. 提交单已发布、进展行仍未发布：两套码值各判一次。期数按 version_no
+    # 去重，否则「几期」会答成「几行」。
+    unpub = await _call(registry, "weekly_progress_coverage", scope="unpublished_by_task", limit=10)
+    check(
+        "I8-01 按任务列未发布期数 共 72 个任务，首两位 4 期",
+        unpub.get("total_count") == 72
+        and unpub.get("row_count") == 10
+        and unpub.get("has_more") is True
+        and int(_first(unpub, "unpublished_rounds") or 0) == 4,
+        f"total={unpub.get('total_count')} rows={unpub.get('row_count')}",
+    )
+    check(
+        "I8-01 口径说明按 version_no 去重、是期数不是行数",
+        "是「期数」不是「行数」" in str(unpub.get("caliber", "")),
+        str(unpub.get("caliber"))[:180],
+    )
+
+    # F4-04. 问的是「标识」不是「任务」：同一个标识挂 3 个任务只算一个标识。
+    # 不去重会返回 128 行、同一个 id 重复三次，也就数不出有几个并列最长。
+    longest = await _call(registry, "weekly_person_stats", scope="id_longest", top=6)
+    lrows = longest.get("rows") or []
+    top_ids = [str(r.get("owner_user_id")) for r in lrows if int(r.get("id_length") or 0) == 11]
+    check(
+        "F4-04 最长标识去重后 4 个 11 位 NDG 账号并列，且带 task_count",
+        len(top_ids) == 4 and len(set(top_ids)) == 4 and all("task_count" in r for r in lrows),
+        f"ids={top_ids}",
+    )
+    check(
+        "F4-04 口径说明一行一个去重标识、并列要一起陈述",
+        "一行一个去重后的标识" in str(longest.get("caliber", "")),
+        str(longest.get("caliber"))[:160],
+    )
+
+    # R7-01. changed_tasks 是批次自己声明的数字。要判断「对不上」必须反查实际
+    # 落库；LEFT JOIN 不可换 INNER，第 20 批声明 43、实落 0，正是最极端那条。
+    rec = await _call(registry, "weekly_import_audit", reconcile_rows=True)
+    b20 = next((r for r in rec.get("rows") or [] if int(r.get("id") or 0) == 20), {})
+    check(
+        "R7-01 第 20 批声明 43 实落 0（INNER JOIN 会丢掉这行）",
+        int(b20.get("declared_tasks") or 0) == 43
+        and int(b20.get("actual_tasks", -1)) == 0
+        and int(b20.get("task_diff") or 0) == -43,
+        str(b20),
+    )
+    check(
+        "Q5-02 全部 20 个批次声明与实落都不等，由服务端给出 mismatched_batches",
+        rec.get("mismatched_batches") == 20 and rec.get("row_count") == 20,
+        f"mismatched={rec.get('mismatched_batches')} rows={rec.get('row_count')}",
+    )
+    plain = await _call(registry, "weekly_import_audit")
+    check(
+        "不核对时口径主动声明 changed_tasks 只是声明值",
+        "未与实际落库行核对" in str(plain.get("caliber", "")),
+        str(plain.get("caliber"))[:180],
+    )
+
+    # Q4-02. 「某看板哪些任务没设目标」要在服务端按看板过滤，否则拿全库行自己
+    # 筛会把 total_count 一起丢掉。
+    gmiss = await _call(registry, "weekly_year_goal_stats", scope="missing", year=2026, board="group", top=20)
+    check(
+        "Q4-02 集团看板 2026 无目标 6 个任务，口径回显看板过滤",
+        gmiss.get("row_count") == 6 and gmiss.get("total_count") == 6 and "仅看板" in str(gmiss.get("caliber", "")),
+        f"rows={gmiss.get('row_count')} total={gmiss.get('total_count')}",
+    )
+    bad_board = await _call(registry, "weekly_year_goal_stats", scope="missing", year=2026, board="nope")
+    check(
+        "年度目标未匹配看板显式报错",
+        bad_board.get("ok") is False and bad_board.get("error", {}).get("code") == "board_not_found",
+        f"err={bad_board.get('error')}",
+    )
+
+    # Q2-03. 「集团看板每个任务各有几个附件」问的是整整 46 行；不带 board 时
+    # 全库任务在抢名次，集团的任务一个都排不上来。total_count 与 row_count
+    # 相等才说明列全了。
+    q23 = await _call(registry, "weekly_rank", metric="attachments", board="group", ascending=True, top=60)
+    check(
+        "Q2-03 集团看板逐任务附件 46 行，total_count 与 row_count 相等",
+        q23.get("row_count") == 46 and q23.get("total_count") == 46 and q23.get("has_more") is False,
+        f"rows={q23.get('row_count')} total={q23.get('total_count')}",
+    )
+    check(
+        "Q2-03 口径回显看板过滤，并说明 total_count 应与 row_count 相等",
+        "仅看板" in str(q23.get("caliber", "")) and "不等即未列全" in str(q23.get("caliber", "")),
+        str(q23.get("caliber"))[:200],
+    )
+    short = await _call(registry, "weekly_rank", metric="attachments", board="group", ascending=True, top=5)
+    check(
+        "Q2-03 top 给小了时 total_count 仍报 46，据此可判断没列全",
+        short.get("row_count") == 5 and short.get("total_count") == 46,
+        f"rows={short.get('row_count')} total={short.get('total_count')}",
+    )
+    bad_rboard = await _call(registry, "weekly_rank", metric="attachments", board="nope")
+    check(
+        "weekly_rank 未匹配看板显式报错而非静默全库排名",
+        bad_rboard.get("ok") is False and bad_rboard.get("error", {}).get("code") == "board_not_found",
+        f"err={bad_rboard.get('error')}",
     )
 
     return report()

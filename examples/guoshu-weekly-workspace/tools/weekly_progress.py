@@ -261,6 +261,7 @@ async def weekly_submission_query(
     status: str = "",
     exclude_status: str = "",
     status_mismatch: bool = False,
+    scope: str = "",
     limit: int = 200,
 ) -> str:
     """Query approval submission forms: round_no, status, reporter, signer.
@@ -282,6 +283,13 @@ async def weekly_submission_query(
             with their newest submission's status. Deliberately drops the
             published gate -- a published task whose latest form is still in
             flight is exactly what this asks for.
+        scope: Empty for the normal listing. "external_ids" reports how many
+            forms carry each O2OA identifier (o2_process_id / o2_work_id /
+            o2_task_id) -- the three fill rates differ, so one cannot stand in
+            for another. "inflight_external" counts the in-flight forms that
+            have a process id, with 在途 enumerated member by member rather than
+            negated: status <> 'published' also picks up the cancelled form,
+            which is neither published nor in flight.
         limit: Max rows to return, capped at 200.
     """
     try:
@@ -296,6 +304,7 @@ async def weekly_submission_query(
             "status": status,
             "exclude_status": exclude_status,
             "status_mismatch": bool(status_mismatch),
+            "scope": scope,
             "limit": bounded,
         },
     )
@@ -352,6 +361,9 @@ async def weekly_progress_coverage(scope: str = "summary", limit: int = 200) -> 
     Args:
         scope: summary (depth totals) / unpublished (未发布进展按自身审批码值分档,
             0 草稿 / 1 待审核 / 2 驳回 / 3 通过 -- not the task's workflow_status) /
+            unpublished_by_task (tasks whose submission form IS published while
+            progress rows are still unpublished, counted per task in PERIODS:
+            version_no is de-duplicated, so this is "几期" and not "几行") /
             version_gaps (tasks whose max version_no exceeds their actual row
             count, i.e. missing periods).
         limit: Max rows for the listing scopes, capped at 200.
@@ -388,6 +400,7 @@ async def weekly_rank(
     top: int = 5,
     ascending: bool = False,
     group_by: str = "",
+    board: str = "",
 ) -> str:
     """Rank formal tasks with the tie rule decided on the server: cut / keep_ties / per_group.
 
@@ -414,6 +427,12 @@ async def weekly_rank(
         ascending: True ranks from the bottom ("期数最少的 5 个").
         group_by: Required for per_group: project_group / board /
             primary_category / status.
+        board: Optional board code or name to scope the ranking to one board.
+            Needed for "某看板的每个任务各有几个" -- without it the whole library
+            competes for the top slots and the board's own tasks never surface.
+            In cut mode the reply carries total_count, the task count under the
+            caliber: when the question is "每个任务各多少", raise top until
+            total_count equals row_count, otherwise the list is short.
     """
     try:
         bounded = max(1, min(200, int(top)))
@@ -427,6 +446,7 @@ async def weekly_rank(
             "top": bounded,
             "ascending": bool(ascending),
             "group_by": group_by,
+            "board": board,
         },
     )
 

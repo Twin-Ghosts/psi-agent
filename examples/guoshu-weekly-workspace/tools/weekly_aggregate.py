@@ -62,7 +62,7 @@ async def weekly_freshness() -> str:
     return await _call("weekly_freshness", {})
 
 
-async def weekly_import_audit(limit: int = 200) -> str:
+async def weekly_import_audit(limit: int = 200, reconcile_rows: bool = False) -> str:
     """Reconcile Excel import batches against distinct snapshot dates (R-09/R-10).
 
     Compare batch_count with distinct_dates and distinct_import_times to tell a
@@ -70,9 +70,45 @@ async def weekly_import_audit(limit: int = 200) -> str:
 
     Args:
         limit: Max batch rows to return, capped at 200.
+        reconcile_rows: When True, also look up what each batch actually landed
+            (via task_progress.import_id) and compare it against the batch's own
+            changed_tasks. Required for "声明与实际对不上" questions -- the
+            default path reports the declared number only and cannot tell you
+            whether it is true.
     """
     try:
         bounded = max(1, min(200, int(limit)))
     except TypeError, ValueError:
         return _invalid("limit must be an integer")
-    return await _call("weekly_import_audit", {"limit": bounded})
+    return await _call(
+        "weekly_import_audit",
+        {"limit": bounded, "reconcile_rows": bool(reconcile_rows)},
+    )
+
+
+async def weekly_scale(by: str = "board", mode: str = "totals", year: int = 2026) -> str:
+    """Cross-section formal tasks over several child tables at once, de-duplicated.
+
+    Use this instead of calling weekly_aggregate once per dimension: joining the
+    child tables separately and pasting the numbers together is where fan-out
+    creeps in. Every child count here is COUNT(DISTINCT ...), so per-group
+    milestones sum to the whole-library milestone total -- if your numbers sum to
+    more than that, they were multiplied by another JOIN.
+
+    totals and completeness answer different questions: totals gives child-row
+    counts (how many milestones), completeness gives task counts (how many tasks
+    have at least one milestone). Do not use one to answer the other.
+
+    Args:
+        by: Grouping axis: board / project_group / primary_category.
+        mode: "totals" tasks plus milestone / attachment / annual-goal counts.
+            "completeness" how many tasks have a goal / milestone / progress.
+            "intensity" published progress rows and rows per task, with
+            zero-period tasks kept in the denominator.
+        year: Which year the annual-goal column looks at. Ignored by intensity.
+    """
+    try:
+        yr = int(year)
+    except TypeError, ValueError:
+        return _invalid("year must be an integer")
+    return await _call("weekly_scale", {"by": by, "mode": mode, "year": yr})

@@ -89,15 +89,15 @@ guoshu-weekly-workspace/
 ├── mock-mcp/                  # 仅 demo 用，不属于交付物
 │   ├── _db.py                 # MySQL 连接（只读用户，密码不进日志）
 │   ├── _store.py              # 只读查询层 + 口径规则 + 字段管控
-│   └── server.py              # 30 个语义化取数工具（Streamable HTTP MCP）
+│   └── server.py              # 31 个语义化取数工具（Streamable HTTP MCP）
 └── tests/
-    ├── smoke_test.py          # 179 条契约断言，不花模型 token
+    ├── smoke_test.py          # 207 条契约断言，不花模型 token
     └── baseline.py            # 396 题准确率基线（LLM 判定）
 ```
 
 ## 取数契约
 
-30 个语义化工具，SQL 与口径规则固化在服务端，agent 侧不产 SQL：
+31 个语义化工具，SQL 与口径规则固化在服务端，agent 侧不产 SQL：
 
 | 工具 | 用途 |
 |------|------|
@@ -107,17 +107,18 @@ guoshu-weekly-workspace/
 | `weekly_progress_history` | 进展版本回溯，`version_no` 倒序 |
 | `weekly_progress_coverage` | 进展历史覆盖度（行数/任务数/起止/最大版本）、未发布进展分档、期号缺号 |
 | `weekly_aggregate` | 按 board/category/**primary_category**/status/project_group/owner 聚合，`top` 硬切前 N 组 |
+| `weekly_scale` | 多子表一次成表：规模（里程碑/附件/年度目标，**全部 `COUNT(DISTINCT)` 防 JOIN 放大**）/ 完备度（有该项的任务数）/ 进展密度（分母含零期任务） |
 | `weekly_field_completeness` | 字段填报完整度（R-07/R-19），字段走白名单 |
 | `weekly_task_ranking` | 按子表计数排名（附件/进展/里程碑/提交单） |
-| `weekly_rank` | 排名并列口径三选一：硬切 N 条 / 保留并列 / 每组各自第一 |
+| `weekly_rank` | 排名并列口径三选一：硬切 N 条 / 保留并列 / 每组各自第一，可限定看板并回显 `total_count` |
 | `weekly_milestone_query` | 里程碑清单（已复核正式任务口径），单任务按 `sort_order` 编排 |
 | `weekly_workflow_query` | 审批动作流水（谁在哪个环节做了什么），可按 action/看板过滤、按任务聚合次数 |
-| `weekly_submission_query` | 审批提交单（`round_no` / `status` / 填报人），可查任务状态与最新单状态不一致 |
+| `weekly_submission_query` | 审批提交单（`round_no` / `status` / 填报人），可查任务状态与最新单状态不一致；O2OA 外部标识填充率、在途单（按成员枚举而非取反） |
 | `weekly_owner_roles` | 按角色分别计数（as_owner / as_lead / any_role） |
 | `weekly_person_stats` | 人员统计（任务量/人均/独苗/跨组/双角色/标识写法/填报人/审核人/自审） |
 | `weekly_attachment_stats` | 附件统计（容量/类型/最大/上传人/挂载去向/在途提交单/逐月/软删/孤儿） |
 | `weekly_attachment_query` | 附件清单（不含 `storage_path`） |
-| `weekly_import_audit` | 导入批次对账 |
+| `weekly_import_audit` | 导入批次对账，`reconcile_rows` 反查实际落库行核对声明值 |
 | `weekly_freshness` | 各看板最新进展时间 |
 | `weekly_health` | 连通性自检与各表行数 |
 | `weekly_progress_range` | 时间窗内的进展（全表跨任务，可按月/季/任务分组计数），`peak` 直接给峰值组 |
@@ -172,6 +173,14 @@ agent 据此给出依据、也据此判断不可答。
 | 附件挂载一条只进一档 | 优先级 进展 > 提交单 > 任务本体，各档相加等于总数；「在途」按提交单自己的 `status <> 'published'` 判 |
 | 孤儿行必须走 NOT EXISTS | 附件 `task_id` 对不上任务表的有 3 条，用 JOIN 查会恒等于 0 |
 | 软删审计不加任务闸门 | 问的是表本身（543 行中 33 条已删），按任务过滤会少算 |
+| 多子表同查必须逐项去重 | `weekly_scale` 三张子表一次 JOIN，每个计数都是 `COUNT(DISTINCT ...)`：不去重时技术组 294 个里程碑会被附件行数乘成 1363；口径同时给出自检法——各组里程碑相加应等于全库总数 474 |
+| 子表条数≠有该项的任务数 | `mode=totals` 答「多少个里程碑」（294），`mode=completeness` 答「多少任务有里程碑」（80），拿一个答另一个必错 |
+| 「在途」按成员枚举不用取反 | `status <> 'published'` 会把 `cancelled` 那 1 张算进来（60 vs 59）：它既未发布也不在途 |
+| 外部标识三列填充率不同 | `o2_process_id` / `o2_work_id` 各 460 而 `o2_task_id` 只有 60，拿一列代答另一列会把缺失率答反 |
+| 期数按 `version_no` 去重 | 一期可能有多行，`COUNT(*)` 会把「几期」答成「几行」 |
+| 声明值必须反查才算对账 | `changed_tasks` 是批次自己声明的数字，`reconcile_rows=True` 才反查实际落库；`LEFT JOIN` 不可换 `JOIN`——声明 43 实落 0 那批正是最极端的对不上 |
+| 「最长的标识」问标识不问任务 | 同一个标识挂 3 个任务只算一个标识，不去重会返回 128 行、并列几个也数不出来 |
+| 逐任务清单看 `total_count` | 问「每个任务各多少」时 `top` 只是页大小，`total_count` 与 `row_count` 相等才说明列全了 |
 
 ### 相对时间窗以快照日为基准
 
@@ -207,7 +216,7 @@ R-04/R-14 要的是「按权限返回」。一律遮蔽同样不满足需求—�
 | 数据权限 | 敏感字段按 token 两档分级 | 按 OA 真实身份做行级权限 |
 | 前端 | 无（经 psi-agent 既有接口） | 专建对话应用 + BFF（方案第六章） |
 | 材料生成 | 无 | 报告下载与图表（P1，第 5 期） |
-| 评测 | 179 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
+| 评测 | 207 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
 
 ### mock 数据层的两处不可外推
 

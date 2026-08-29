@@ -18,7 +18,7 @@ import anyio
 from psi_agent._yaml import parse_yaml_header
 
 TOOL_GUIDE = """\
-## 取数工具（共 30 个，按用途分组）
+## 取数工具（共 31 个，按用途分组）
 
 清单即全集：这里没有的工具就是没有。聚合、统计、覆盖率、排名类问题优先找下面的
 统计类工具，别用清单类工具拉明细再自己数——服务端算的才是口径内的数。
@@ -35,7 +35,8 @@ TOOL_GUIDE = """\
 - weekly_task_ranking：按子记录数（附件/进展/里程碑）给任务排名，普通「前 N 名」用它。
 - weekly_rank：并列口径三选一的排名。问句涉及并列、分组第一或「最少的几个」时用它，
   mode=cut 硬切 N 条 / keep_ties 把第 N 名的并列全列出 / per_group 每组各取第一，
-  ascending=True 取最少那一端（期数为 0 的任务会保留）。
+  ascending=True 取最少那一端（期数为 0 的任务会保留）。要「某看板每个任务各有几个」传
+  board 限定看板，并把 top 提到 total_count 那么大——total_count 与 row_count 相等才算列全。
 - weekly_task_lifecycle：任务创建时间与创建到发布的耗时。
 
 聚合与完整性
@@ -43,6 +44,12 @@ TOOL_GUIDE = """\
   空分组会保留；group_by=project_group 还直接给出各组的牵头人数与责任人数（已去重）。
   问「一级分类」用 primary_category，问「分类」若指二级才用 category——任务只挂二级分类，
   两者档数不同（技术组 6 档 vs 全库 47 档）。要「前 N 个分类」就带 top，服务端硬切并回显总组数。
+- weekly_scale：一次给出各看板/专项组/一级分类的任务数、里程碑数、附件数、年度目标数。
+  凡是「某维度有多少任务、多少里程碑、多少附件」这类多指标同问，只调这一次，不要按维度
+  分别调 weekly_aggregate 再把数字拼起来——拼起来的那条路正是 JOIN 放大的来源。
+  mode=totals 给子表条数（技术组 294 个里程碑）/ mode=completeness 给「有该项的任务数」
+  （技术组 80 个任务有里程碑）/ mode=intensity 给已发布进展行数与人均期数（分母含零期任务）。
+  totals 与 completeness 是两个不同的问题，不要拿一个答另一个。
 - weekly_field_completeness：某字段填了多少、缺多少（R-07/R-19）；list_missing=True 直接给缺项清单。
   问「谁没指定负责人」要查 ID 列（project_owner_id），姓名列 128 条全满、ID 列只有 119 条，
   只看姓名列会答成「无缺失」。
@@ -55,7 +62,8 @@ TOOL_GUIDE = """\
   带 peak=True，服务端直接给峰值那一组，不要自己在各组计数间比大小。
 - weekly_progress_coverage：进展覆盖范围与回溯深度汇总；scope=unpublished 给未发布进展
   按自身审批码值分档（0 草稿/1 待审核/2 驳回/3 通过，与任务的 workflow_status 是两套词汇），
-  scope=version_gaps 给期号有缺的任务。
+  scope=unpublished_by_task 给「提交单已发布、进展却还挂着未发布」的任务及各自期数
+  （已按 version_no 去重，是期数不是行数），scope=version_gaps 给期号有缺的任务。
 - weekly_freshness_distribution：按进展陈旧程度分档（30/90/180 天/从未）。
   要「哪些任务很久没上报」用 stale_days（只算在办，含从未上报），
   要「最近哪些任务上报了」用 recent_days（不限状态）。
@@ -64,6 +72,7 @@ TOOL_GUIDE = """\
 - weekly_year_goal_query：年度目标与里程碑摘要清单。
 - weekly_year_goal_stats：年度目标覆盖率、哪些任务缺目标、跨年度分布。
   问「在办任务还没定目标」带 in_progress_only=True，已完成/已暂停的缺目标不算缺口。
+  只问某个看板就传 board，不要拉全库清单自己筛——自己筛会把 total_count 一起丢掉。
 - weekly_milestone_query：里程碑清单，已复核正式任务口径。问单个任务的里程碑必须传 task，
   不传会返回全看板首页——那是一个完整、像样、但属于另一个问题的答案。
 - weekly_milestone_stats：里程碑完成率的各维度聚合（清单类问题才用上一个）。
@@ -74,11 +83,15 @@ TOOL_GUIDE = """\
   动作次数（是次数，不是任务数）。
 - weekly_submission_query：审批提交单（按 task_id + round_no），带状态分档与状态值域。
   问「任务状态与审批单状态对不上的有哪些」用 status_mismatch=True，别跨两次调用用眼比对。
+  问 O2OA 外部标识（流程号/工作号/任务号）的填充或缺失用 scope=external_ids，三列填充率
+  互不相同，不要拿一列代答另一列；问「在途单里有多少带流程号」用 scope=inflight_external。
 - weekly_approval_turnaround：审批耗时（整体/按看板/最慢/在办积压）。
 - weekly_attachment_query：附件清单，不含 storage_path；file_size 单位是字节。
 - weekly_attachment_stats：附件聚合——总容量/按类型/最大文件/按上传人/上传人数/挂载去向/
   在途提交单上的附件/逐月趋势/软删审计/孤儿行。清单工具封顶 200 条，求和计数一律用这个。
-- weekly_import_audit：导入批次对账（批次数 vs 去重快照日期数）。
+- weekly_import_audit：导入批次对账（批次数 vs 去重快照日期数）。默认只报批次自己声明的
+  changed_tasks；问「声明与实际对不上」必须带 reconcile_rows=True，服务端反查实际落库并
+  直接给出 mismatched_batches。
 
 专项组看板（有自己的表，不要拿通用工具查）
 - weekly_group_detail_query：专项组明细表（目标/措施/负责人/完成情况文本）。
@@ -122,6 +135,20 @@ CALIBER_RULES = """\
     提交单的 status 是三套词汇。拿错一套会答出一份看着合理的错数。
 15. 单个对象的问题必须把该对象作为参数传下去（任务里程碑传 task 等）。
     不传得到的是全量首页——行数、字段、格式都对，只是回答的不是这个问题。
+16. 多个子表同时统计时，服务端已按主键逐项去重（COUNT(DISTINCT)），照抄即可。
+    不要把分几次取的子表数字拼成一行——里程碑会被附件的行数乘一遍（技术组真值
+    294，拼出来是 1363）。自检法：各组里程碑相加应等于全库总数，比总数大就是被放大了。
+17. 子表条数与「有该项的任务数」是两个问题。「有多少个里程碑」答子表条数，
+    「多少任务有里程碑」答任务数（294 vs 80）。看 caliber 说的是哪一个，别互换。
+18. 集合成员要枚举，不要用取反代替。「在途」是 pending_fill / signing /
+    pending_audit / pending_leader / rejected 这五档，写成 status <> 'published'
+    会把 cancelled 那张单算进来（60 vs 59）——它既未发布也不在途。
+19. 同名的多个外部标识列填充率各不相同（流程号/工作号各 460，任务号只有 60），
+    一列的结论不能代答另一列，缺失率按 caliber 指定的那一列报。
+20. 「几期」按期号去重，「几行」是另一回事；库里声明的数字（如批次 changed_tasks）
+    未经反查不算已核对，要判断「对不上」必须用带反查的口径。
+21. 逐个列举类问题看 total_count：它是口径下的对象总数，top 只是页大小。
+    total_count 与 row_count 相等才算列全，不等就把 top 提上去重取，别就地作答。
 
 ## 判为不可答
 

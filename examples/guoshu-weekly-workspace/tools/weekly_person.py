@@ -31,7 +31,10 @@ async def weekly_person_stats(scope: str = "workload", role: str = "lead_owner",
             group list) / dual_role (people who are both 牵头人 and 项目负责人) /
             id_format (owner_user_id written as 纯数字工号 / u 前缀 / NDG 域账号) /
             id_variants (same name carrying more than one id; 0 rows means none
-            exist) / id_longest (identifiers by character length, ties kept) /
+            exist) / id_longest (one row per DISTINCT identifier ordered by
+            character length, with task_count beside it; the question asks which
+            identifier is longest, so an id held by 3 tasks still counts once,
+            and equal lengths are genuine ties to be stated together) /
             reporters (progress rounds filed per person) / reporter_count (distinct
             filers) / reviewers (progress rows reviewed per person) / self_review
             (rows where filer and reviewer are the same id).

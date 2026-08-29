@@ -46,6 +46,7 @@ async def weekly_year_goal_stats(
     year_to: int = 0,
     min_years: int = 3,
     in_progress_only: bool = False,
+    board: str = "",
     top: int = 8,
 ) -> str:
     """Aggregate annual-goal coverage: which years are set, and who lacks a goal.
@@ -65,6 +66,9 @@ async def weekly_year_goal_stats(
         in_progress_only: For missing, keep only 在办任务 (status 0 未开始 and
             1 进行中). "在办任务还没定目标" asks about that subset -- 已完成 or
             已暂停 tasks without a goal are not a gap and inflate the row set.
+        board: Optional board code or name; scopes every scope to one board.
+            Use it for "某看板哪些任务没设目标" rather than filtering the
+            whole-library rows by eye, which silently drops the total_count.
         top: Row cap for the listing scopes.
     """
     try:
@@ -82,6 +86,7 @@ async def weekly_year_goal_stats(
             "year_to": yr2,
             "min_years": span,
             "in_progress_only": bool(in_progress_only),
+            "board": board,
             "top": bounded,
         },
     )
