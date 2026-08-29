@@ -6,6 +6,8 @@ import anyio
 import pytest
 
 from psi_agent.gateway._defaults import (
+    DEFAULT_AGENT_REPO_CANDIDATE,
+    DEFAULT_AGENT_SHORT_NAME_ROOT,
     DEFAULT_USER_WORKSPACE_NAME,
     appdata_history_path,
     ensure_workspace_dir,
@@ -56,6 +58,34 @@ async def test_resolve_default_agent_soft_haitun_workspace(tmp_path: Path, monke
     agent = tmp_path / "agents" / "feishu"
     await anyio.Path(agent).mkdir(parents=True)
     assert await resolve_default_agent("") == str(await anyio.Path(agent).resolve())
+
+
+@pytest.mark.anyio
+async def test_resolve_default_agent_short_name_under_agents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--default-agent desktop`` selects ``agents/desktop``, not ``./desktop``."""
+    monkeypatch.chdir(tmp_path)
+    agent = tmp_path / "agents" / "desktop"
+    await anyio.Path(agent).mkdir(parents=True)
+    assert await resolve_default_agent("desktop") == str(await anyio.Path(agent).resolve())
+
+
+@pytest.mark.anyio
+async def test_resolve_default_agent_unknown_short_name_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Was the silent bug: an unknown value used to resolve to ``{cwd}/{value}``."""
+    monkeypatch.chdir(tmp_path)
+    await anyio.Path(tmp_path / "agents" / "feishu").mkdir(parents=True)
+    with pytest.raises(FileNotFoundError, match="feishu"):
+        await resolve_default_agent("desktop")
+
+
+@pytest.mark.anyio
+async def test_short_name_root_matches_repo_candidate_parent() -> None:
+    """The two constants must agree, or soft default and short names diverge."""
+    assert DEFAULT_AGENT_REPO_CANDIDATE.startswith(f"{DEFAULT_AGENT_SHORT_NAME_ROOT}/")
 
 
 @pytest.mark.anyio
