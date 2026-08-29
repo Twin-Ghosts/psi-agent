@@ -3,7 +3,7 @@
 Shared by Session-spawning runtime code (``SessionManager``) and by Gateway's
 ``GET /defaults``. Lives outside ``psi_agent.gateway`` for the same reason
 ``_appdata.py`` does: the managers that create Sessions must not import a
-product-line package.
+product package.
 
 **This module knows no product concepts** — no tray, no webview, no Windows
 drive letters, no desktop login, and in particular no brand folder names. The

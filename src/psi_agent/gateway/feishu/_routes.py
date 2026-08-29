@@ -7,7 +7,7 @@ A7: 与 ``desktop/_routes.py`` 同一个原因搬过来 —— 装配函数留�
 ``/oauth/*`` 两条也在这里: 取件方(实测)全在 ``agents/feishu/tools/`` 一侧, ToC 的登录走
 手机号 + 验证码不经过 OAuth 跳转 —— 理由详见 ``_oauth_manager`` 模块头。
 
-但它们由**独立的** ``register_oauth_routes()`` 注册, 不跟着 ``--product-line`` 走: 归属
+但它们由**独立的** ``register_oauth_routes()`` 注册, 不跟着 ``--gateway`` 走: 归属
 (代码住哪)与可达性(哪个进程有这两条)是两件事。回调地址 ``PSI_OAUTH_CALLBACK_BASE``
 要提前登记到第三方应用后台, 一个进程组合少贴这两条, 表现是用户点完授权拿到 404 ——
 而不是某个功能没开。``register_feishu_routes()`` 在原位置调它, 只挂 ToC 的进程由
@@ -148,9 +148,9 @@ async def _oauth_take_code(request: web.Request) -> web.Response:
 def register_oauth_routes(app: web.Application) -> web.Application:
     """``/oauth/callback`` + ``/oauth/code`` 与它们共用的 ``OAuthRelay`` 信箱。
 
-    **与产品线正交, 每种 ``--product-line`` 组合都要贴。** 单独成函数正是为此: 只挂 ToC
-    的进程也得有这两条, 否则 ``PSI_OAUTH_CALLBACK_BASE`` 指过来的授权回调落到 404 ——
-    那个地址登记在第三方应用后台, 不随本进程挂了哪条产品线而变。
+    **与挂了哪些 gateway 正交, 每种 ``--gateway`` 组合都要贴。** 单独成函数正是为此: 只挂
+    ToC 的进程也得有这两条, 否则 ``PSI_OAUTH_CALLBACK_BASE`` 指过来的授权回调落到 404 ——
+    那个地址登记在第三方应用后台, 不随本进程挂了哪些 gateway 而变。
 
     代码仍住 ``feishu/``, 按的是存在性判据: 取件方(实测)全在 ``agents/feishu/tools/``。
     归属与可达性是两件事, 后者由调用点保证 (``register_feishu_routes`` 或 ``Gateway.run``,

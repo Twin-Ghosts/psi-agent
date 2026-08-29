@@ -83,7 +83,7 @@ A5 把模块文件搬进两个子包后，这条曾**不成立**：两个 `regis
 | `_openapi.py` | `GET /openapi.json` schema 装配 — `build_openapi_spec(desktop=, feishu=, oauth=)` 把下面四份片段按开关拼起来；`OPENAPI_SPEC` 是「全都要」的那份（path key 集合与拆分前一致）。**按 path key 分份、不按当前谁在调用**：路由注册分开后各线只贴自己那份。`render_openapi(...)` 由 handler 按 `app["openapi_desktop"]` / `app["openapi_feishu"]` / `app["openapi_oauth"]` 三面旗子传参（旗子由各 `register_*_routes` 立），所以 spec 报的就是本进程真注册了的那批 path |
 | `_openapi_core.py` | 两条线都注册的 16 个 path（`/ais` `/routers` `/sessions*` `/titles*` `/summaries*` `/defaults`）+ 公共 schema 与 `responses.Error`。`/oauth/*` 曾在这里，已随 `OAuthRelay` 挪去 `feishu/_openapi.py` |
 | `desktop/_openapi.py` | ToC 专属 6 个 path（`/ui/attention` `/ui/prefs/survey` `/workspace/*`）；背后 `AttentionHub` / `UIPrefs` / `WorkspaceManager` 都认识桌面概念。无专属 schema |
-| `feishu/_openapi.py` | ToB 专属 `FEISHU_PATHS` 2 个 path（`/feishu/route` `/feishu/routes`）+ 三个 `FeishuRoute*` schema；另有 `OAUTH_PATHS` 2 个（`/oauth/callback` `/oauth/code`）——代码归本包但**与产品线正交**，由独立开关控制，每种 `--product-line` 组合都报（路由侧同理，见 [OAuthRelay](#oauthrelay)） |
+| `feishu/_openapi.py` | ToB 专属 `FEISHU_PATHS` 2 个 path（`/feishu/route` `/feishu/routes`）+ 三个 `FeishuRoute*` schema；另有 `OAUTH_PATHS` 2 个（`/oauth/callback` `/oauth/code`）——代码归本包但**与挂了哪些 gateway 正交**，由独立开关控制，每种 `--gateway` 组合都报（路由侧同理，见 [OAuthRelay](#oauthrelay)） |
 
 ## Gateway 启动流程
 
@@ -99,11 +99,11 @@ A5 把模块文件搬进两个子包后，这条曾**不成立**：两个 `regis
 7. 恢复 AI / Router / Session（Session 恢复时带 `agent`，缺省用 Gateway default）/ titles / summaries
 8. 创建 SchedulerManager（`--scheduler-ai-id`，空则回落 `--feishu-ai-id`）
 9. await create_core_app(aim, sm, tm, rm=..., default_agent=..., default_workspace=..., appdata=..., schedm=...)  — 骨架（`server.py`）：内核 manager + 两条线都要的路由（含 `GET /defaults`）
-9b. await register_desktop_routes(app, favicon_path=..., app_name=..., attention=..., authm=...)  — ToC（`desktop/_routes.py`）：SPA 静态 + `/ui/*` + `/workspace/*`（`authm` 非 None 才注册 `/auth/*`）。**仅当 `--product-line` 为 `both`/`desktop`**
-9c. register_feishu_routes(app, feishu_ai_id=..., feishu_workspace_root=...)  — ToB（`feishu/_routes.py`）：`FeishuManager` + `/feishu/*` + `/feishu-web/`。**仅当 `--product-line` 为 `both`/`feishu`**；只挂 ToB 时另注册 `GET /` → 302 `/feishu-web/index.html`
-9d. register_oauth_routes(app) — `/oauth/callback` + `/oauth/code`。**与产品线正交，每种组合都贴**：`both`/`feishu` 由 9c 内部调用，只挂 ToC 时由 `Gateway.run` 自己调，恰好一处调到
-   - **默认 `both` = 两条线都贴，与加参数前逐条相同**（生产上飞书容器起的也是 `psi-agent gateway`，云端 `launch-gateway.sh` 不带此参数）。默认值一动就是静默的生产回归：少挂一条不报错，只是某个前端 404
-   - `--product-line` 只决定挂哪套 HTTP 面；agent 包选哪个是**独立的一维**，走 `--default-agent`（见 [路径默认值](#路径默认值)），不另造一套
+9b. await register_desktop_routes(app, favicon_path=..., app_name=..., attention=..., authm=...)  — ToC（`desktop/_routes.py`）：SPA 静态 + `/ui/*` + `/workspace/*`（`authm` 非 None 才注册 `/auth/*`）。**仅当 `--gateway` 含 `desktop`**
+9c. register_feishu_routes(app, feishu_ai_id=..., feishu_workspace_root=...)  — ToB（`feishu/_routes.py`）：`FeishuManager` + `/feishu/*` + `/feishu-web/`。**仅当 `--gateway` 含 `feishu`**；只挂 ToB 时另注册 `GET /` → 302 `/feishu-web/index.html`
+9d. register_oauth_routes(app) — `/oauth/callback` + `/oauth/code`。**与挂了哪些 gateway 正交，每种组合都贴**：含 `feishu` 时由 9c 内部调用，只挂 ToC 时由 `Gateway.run` 自己调，恰好一处调到
+   - **默认全集 `desktop feishu` = 两面都贴，与加参数前逐条相同**（生产上飞书容器起的也是 `psi-agent gateway`，云端 `launch-gateway.sh` 不带此参数）。默认值一动就是静默的生产回归：少挂一面不报错，只是某个前端 404
+   - `--gateway` 只决定挂哪些 HTTP 面；agent 包选哪个是**独立的一维**，走 `--default-agent`（见 [路径默认值](#路径默认值)），不另造一套。两维可自由组合，见 [gateway 与 agent 是两个独立维度](#gateway-与-agent-是两个独立维度)
 10. 为每个已恢复 Session 的 workspace `schedm.ensure(...)` — 按需拉起调度 Session（无 `schedules/` 则跳过）
 11. 创建 _do_persist 闭包（快照 managers → state.save，sessions 含 `agent`；`list_all()` 默认已排除调度 Session）
 12. 注入 _persist + 初始全量持久化
@@ -450,7 +450,7 @@ OAuth 回调中继（`feishu/_oauth_manager.py`，路由与 handler 在 `feishu/
 
 **为什么在 `feishu/` 而不是骨架层**：〔实测〕取件方全在 ToB 一侧（`agents/feishu/tools/` 下 `_oauth_receiver` / `_oauth_setup` / `feishu_auth` / `_feishu/auth`），`desktop/_auth_manager.py` 那两处只是注释、零调用——ToC 登录走手机号 + 验证码，不经过 OAuth 跳转。这段代码本身零飞书字样，所以按「认识哪些概念」会判它留骨架；两条判据冲突时按**先问存在性**走。
 
-**归属（代码住哪）与可达性（哪个进程有这两条）是两件事。** 加 `--product-line` 之前这两件事被「唯一入口两条线都贴」这个前提粘在一起；参数一加，那个前提就不成立了。现在由独立的 `register_oauth_routes()` 保证可达性——`both`/`feishu` 由 `register_feishu_routes` 内部调，只挂 ToC 时由 `Gateway.run` 自己调，**每种组合恰好一次**。少这两条的表现是用户点完授权拿 404（回调地址登记在第三方应用后台，不随本进程挂了哪条线而变），不是某个功能没开。spec 侧同理自成 `OAUTH_PATHS`，挂在 feishu 开关上会出现「路由在、spec 里没有」的错报。
+**归属（代码住哪）与可达性（哪个进程有这两条）是两件事。** 加 `--gateway` 之前这两件事被「唯一入口两面都贴」这个前提粘在一起；参数一加，那个前提就不成立了。现在由独立的 `register_oauth_routes()` 保证可达性——含 `feishu` 的组合由 `register_feishu_routes` 内部调，只挂 ToC 时由 `Gateway.run` 自己调，**每种组合恰好一次**。少这两条的表现是用户点完授权拿 404（回调地址登记在第三方应用后台，不随本进程挂了哪些 gateway 而变），不是某个功能没开。spec 侧同理自成 `OAUTH_PATHS`，挂在 feishu 开关上会出现「路由在、spec 里没有」的错报。
 
 **刻意不做的事**：Gateway 不碰 token 交换——不知道 app_secret、不知道 PKCE verifier、不知道是哪个飞书用户。那些都留在发起方（workspace 工具），中继只搬运一次性 code，故本模块**零持久化、无跨用户鉴权**（`state` 是发起方生成的高熵随机串，本身即取件码）。
 
@@ -559,7 +559,7 @@ OAuth 回调中继（`feishu/_oauth_manager.py`，路由与 handler 在 `feishu/
 | POST | `/ui/attention` | 会话在后台完成时闪烁托盘/webview（best-effort，需 `--tray` / `--webview`） |
 | GET | `/ui/prefs/survey` | 问卷弹窗是否已关闭过 → `{"done": bool}`（按机器，落 `{appdata}/ui-prefs.json`） |
 | POST | `/ui/prefs/survey` | 记录问卷弹窗已关闭；body `{"done": bool}`，缺省/非 bool 视作 `true`（唯一调用方是"关闭"动作） |
-| GET | `/openapi.json` | OpenAPI schema。只含本进程真注册了的产品线片段（默认 `--product-line both` 两条都贴，故与拆分前一致；单挂一条时另一条的 path 不再出现，`/oauth/*` 每种组合都在） |
+| GET | `/openapi.json` | OpenAPI schema。只含本进程真注册了的那些面的片段（默认 `--gateway desktop feishu` 两面都贴，故与拆分前一致；单挂一面时另一面的 path 不再出现，`/oauth/*` 每种组合都在） |
 | GET | `/favicon.ico` | 托盘图标（仅当 `--icon` 设置时注册，返回该图标文件） |
 
 AI 和 Session 的 `id` 字段可选，不传自动生成 UUID。
@@ -841,34 +841,49 @@ AI 创建对话框支持从 provider 的 `/models` API 实时拉取可用模型�
 ## CLI 集成
 
 ```
-psi-agent gateway [--listen http://127.0.0.1:PORT] [--socket-path psi] [--product-line both|desktop|feishu] [--icon PATH] [--app-name NAME] [--browser/--no-browser] [--webview/--no-webview] [--tray/--no-tray] [--feishu-ai-id ID] [--feishu-workspace-root DIR] [--default-agent DIR] [--default-workspace DIR] [--appdata DIR] [--auth-endpoint URL] [--verbose]
+psi-agent gateway [--listen http://127.0.0.1:PORT] [--socket-path psi] [--gateway desktop feishu] [--icon PATH] [--app-name NAME] [--browser/--no-browser] [--webview/--no-webview] [--tray/--no-tray] [--feishu-ai-id ID] [--feishu-workspace-root DIR] [--default-agent DIR] [--default-workspace DIR] [--appdata DIR] [--auth-endpoint URL] [--verbose]
 ```
 
 默认 listen 为空，会自动绑定 127.0.0.1 随机高端口。`--browser` 开启自动打开浏览器。
 
 `--listen` **必须带 scheme**〔实测〕：`_sockets.create_site()` 把非 `http://` 非 pipe 的地址当 Unix socket，Windows 上直接抛 `ValueError: Unix-socket transport is not supported on Windows`。`--listen 127.0.0.1:18080` 报这个错，`--listen http://127.0.0.1:18080` 才对。
 
-### `--product-line` —— 挂哪条产品线
+### `--gateway` —— 挂哪些 gateway 的 HTTP 面
+
+**可组合的列表，空格分隔**，取值来自 `ALL_GATEWAYS`（`gateway/__init__.py`）。tyro 渲染成 `--gateway [{desktop,feishu} [{desktop,feishu} ...]]`。
 
 | 取值 | 挂载的面 | `GET /` |
 | --- | --- | --- |
-| `both`（默认） | ToC（`/spa/` `/spa-v2/` `/ui/*` `/workspace/*` `/auth/*`）+ ToB（`/feishu/*` `/feishu-web/`） | ToC 降级链：spa-v2 → spa |
+| `desktop feishu`（默认） | ToC（`/spa/` `/spa-v2/` `/ui/*` `/workspace/*` `/auth/*`）+ ToB（`/feishu/*` `/feishu-web/`） | ToC 降级链：spa-v2 → spa |
 | `desktop` | 只 ToC。`/feishu/*` `/feishu-web/` 不注册（404） | 同上 |
 | `feishu` | 只 ToB。`/spa*` `/ui/*` `/workspace/*` `/auth/*` 不注册（404） | 302 → `/feishu-web/index.html` |
 
-开发时用它单挂一条线，省掉另一条的前端与 manager。三点值得记：
+开发时只写一个值单挂一面，省掉另一面的前端与 manager。值得记的几点：
 
-- **默认必须是 `both`**：云端 `launch-gateway.sh` 不带这个参数，默认值一改就等于改了生产行为，而且是静默的（少挂一条不报错，只是某个前端 404）。判据在 `tests/psi_agent/gateway/test_product_line.py`
-- **枚举而非两个布尔**：布尔组合允许「都关」，那是个起了服务但没有任何前端的无意义状态
-- **`GET /` 指向 `index.html` 而非目录**〔实测〕：`add_static(..., show_index=False)` 对 `/feishu-web/` 这个裸目录回 **403**（ToC 侧靠在 `add_static` 之前另注册三条 `→ index.html` 的 handler 绕过）。跳目录会让 ToB 单挂时的首页变成 403；直接跳文件即可，不给飞书侧补那三条——补了会改动 `both` 的路由集合，而那一条要求逐条不变
+- **默认必须是全集 `desktop feishu`**：云端 `launch-gateway.sh` 不带这个参数，默认值一改就等于改了生产行为，而且是静默的（少挂一面不报错，只是某个前端 404）。判据在 `tests/psi_agent/gateway/test_gateway_selection.py`
+- **列表而非枚举**：「有哪些 gateway」将来会变，而 `both` 这种词只在恰好两个时成立，加第三个就得改枚举。上一版是个三选一枚举（`{both,desktop,feishu}`），改掉的正是这个
+- **两个边界 tyro 都不管，代码自己拦**〔实测〕：`--gateway` 后不跟值得到 `[]`（起了服务但一个前端都没有）→ `resolve_gateways()` 抛 `ValueError` 退出，**不**悄悄回落到默认值；`--gateway feishu feishu` 重复值照收不报错 → 去重保序（意图无歧义，但注册两次会叠同名路由）。校验点与 `--browser` / `--webview` 互斥那条并列，都在建 socket / 恢复 state 之前失败
+- **逗号形式不支持**〔实测〕：`--gateway desktop,feishu` 报错，只认空格分隔
+- **`GET /` 指向 `index.html` 而非目录**〔实测〕：`add_static(..., show_index=False)` 对 `/feishu-web/` 这个裸目录回 **403**（ToC 侧靠在 `add_static` 之前另注册三条 `→ index.html` 的 handler 绕过）。跳目录会让 ToB 单挂时的首页变成 403；直接跳文件即可，不给飞书侧补那三条——补了会改动默认组合的路由集合，而那一条要求逐条不变
 
-骨架 REST（`/ais` `/sessions` …）与 `/oauth/*` 在**每种取值下都在**：前者是两条线共用的内核面，后者的回调地址登记在第三方应用后台，不随本进程挂了哪条线而变（见装配步骤 9d）。
+骨架 REST（`/ais` `/sessions` …）与 `/oauth/*` 在**每种组合下都在**：前者是各面共用的内核面，后者的回调地址登记在第三方应用后台，不随本进程挂了哪些 gateway 而变（见装配步骤 9d）。
+
+#### gateway 与 agent 是两个独立维度
+
+**内核里没有「产品线」这个概念**——产品线是人为划分，不该进内核词汇表。架构上 gateway 与 agent 可**自由组合**，这两维之间没有绑定关系：
+
+- `--gateway` 只决定挂哪些 **HTTP 面**（路由 + 前端 + 该面的 manager）。
+- `--default-agent` 只决定新 Session 用哪个 **agent 包**（tools / skills / system），见[路径默认值](#路径默认值)。
+
+所以交叉组合是合法的，不予阻止。例如 `psi-agent gateway --gateway desktop --default-agent <ToB 的 agent 包>`：挂 ToC 的桌面前端，但会话跑 ToB 那套能力包——调试 ToB 工具时不必起飞书那一整套。反向同理。
+
+这也是**为什么这个参数不按产品线命名**：那种名字暗示 gateway 与 agent 是绑定的（实际从来没有），还把 `both` 这种只在恰好两个时成立的词固化进了枚举。`psi-agent gateway --gateway feishu` 读起来有重复感，是已知且认可的取舍，不为此再改名。
 
 ### 两个 Gateway 同时跑
 
 要么给不同 `--socket-path`，要么给不同 `--default-workspace`。冲突不来自共享前缀，而是**同一个完整管道名**〔实测〕：同 workspace 的调度 Session id 由 workspace 路径的 sha256 确定性派生（`runtime/_scheduler_manager.py`），两个进程必然算出同一个名字；`_session_manager` 的去重只在进程内，抓不到跨进程重名。Windows 上表现为 `PermissionError(13, ...)` / `[WinError 5] 拒绝访问`。
 
-〔实测记录〕`--product-line feishu --socket-path pl-feishu --default-workspace A`（:18081）与 `--product-line desktop --socket-path pl-desktop --default-workspace B`（:18082）并存，两侧 `GET /defaults` 均 200，两份日志 0 处 `PermissionError` / `WinError 5`。
+〔实测记录〕`--gateway feishu --socket-path gw-feishu --default-workspace A`（:18081）与 `--gateway desktop --socket-path gw-desktop --default-workspace B`（:18082）并存，两侧 `GET /defaults` 均 200，两份日志 0 处 `PermissionError` / `WinError 5`。
 
 `--icon PATH` 指定图标文件路径（png/jpg/ico 等）。设置后该图标会作为 Web Console 的 favicon（`GET /favicon.ico`）。
 
