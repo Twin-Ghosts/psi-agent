@@ -158,6 +158,7 @@ service tools:
 | `profile_update` | Manually update the workspace-local topic-aware learner profile; successful `finish_reason="stop"` turns are aggregated automatically by `system_after_turn`. Only per-topic dimensions and statistics are persisted, not raw transcripts. This profile is keyed by workspace, not by channel user identity. |
 | `bash` | Shell commands (anyio, Windows-aware bash detection). On Windows the installer bundles MSYS2 at `{app}\msys64`, added to PATH by the launcher, so bash works out-of-the-box. **cwd = workspace**. |
 | `powershell` | Windows-native shell. **默认 cwd = workspace**. |
+| `background_start` / `background_output` / `background_list` / `background_stop` | 起一个**脱离**的后台进程并读它的输出。**长耗时的活（尤其是分页拉接口）走这条路，不要在 `bash` 里同步跑完**：前台调用一到上限就被杀，什么也留不下——真实会话里同一个翻文档块的脚本被以 180/120/100/60/90s 连试五次，全灭，五次之间没多出任何信息。用法是 `background_start(command)` 拿 `process_id`，之后 `background_output(process_id)` 轮询（`alive=true` 说明还在跑、再读会更多；进程结束后**日志仍可读**，所以「跑完了产出啥」也问它）。输出合并 stdout+stderr 落 `<workspace>/.psi/background/<id>.log`，**用文件而非管道**——没人抽的管道约 64KB 就把子进程写死，那在长任务上看起来和卡住一模一样。默认只回最后 200 行（`tail_lines` / `max_chars` 可调，末尾才是活儿停在哪儿）。`process_id` 会变成文件名，故**校验而不改写**：含 `/`、`\`、空格或 `..` 一律拒绝，免得两个 id 悄悄落到同一个日志、或者写出目录。秒退的命令也留下原因（此前 `stdout=DEVNULL` 把它丢了）。|
 | `read` / `write` / `edit` | Async file ops；相对路径相对 **workspace**. |
 | `list_dir` / `find_files` | List one directory level; recursively find files by glob (`**/*.py`), sorted newest-first；默认根为 **workspace**. |
 | `write_excel` | Build a real `.xlsx` from a 2D array (bold header, column-width fitting). |
