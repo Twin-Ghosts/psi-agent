@@ -98,14 +98,16 @@ class Gateway:
     listen: str = ""
     """Listen address. Empty = random high port on 127.0.0.1."""
 
+    # **两个 Gateway 同时跑时必须给不同值** (或改 ``--default-workspace``, 见下)。冲突不来自
+    # 共享前缀, 而是**同一个完整管道名**: 同 workspace 的调度 Session id 由 workspace 路径的
+    # sha256 确定性派生 (``runtime/_scheduler_manager.py``), 两个进程必然算出同一个名字;
+    # ``_session_manager`` 的去重只在进程内, 抓不到跨进程重名。Windows 上表现为
+    # ``PermissionError(13, ...)`` / ``[WinError 5] 拒绝访问``。
     socket_path: str = "psi"
     """Prefix for AI/Session socket paths (Unix sockets on POSIX, Named Pipes on Windows).
 
-    **两个 Gateway 同时跑时必须给不同值** (或改 ``--default-workspace``, 见下)。冲突不来自
-    共享前缀, 而是**同一个完整管道名**: 同 workspace 的调度 Session id 由 workspace 路径的
-    sha256 确定性派生 (``runtime/_scheduler_manager.py``), 两个进程必然算出同一个名字;
-    ``_session_manager`` 的去重只在进程内, 抓不到跨进程重名。Windows 上表现为
-    ``PermissionError(13, ...)`` / ``[WinError 5] 拒绝访问``。
+    Give two concurrent Gateways different values, or their scheduler Sessions
+    collide on one pipe name.
     """
 
     # 本字段的 docstring 是**用户可见的帮助文本**, 刻意写短: tyro 把它整段渲进「缺必填参数」
@@ -136,14 +138,14 @@ class Gateway:
     #   ``default_factory`` 才是 ``dataclasses.MISSING``。判「有没有默认值」得认前者。
     # - 必填**不覆盖**空列表那条: ``--gateway`` 后不跟任何值仍给 ``[]`` 且退出码 0 —— tyro
     #   认为参数「给过了」。那一步的拦截仍归 ``resolve_gateways``, 别以为必填替掉了它。
+    #
+    # 各值挂哪些路由: ``desktop`` = ToC 那面 (``/spa/`` ``/spa-v2/`` ``/ui/*``
+    # ``/workspace/*`` ``/auth/*``); ``feishu`` = ToB 那面 (``/feishu/*``
+    # ``/feishu-web/``, 单挂时 ``GET /`` 302 到 ``/feishu-web/index.html``)。两个都写则
+    # 两面全挂; 只写一个, 另一面的路由不注册 (404)。逗号形式不支持。与 ``--default-agent``
+    # 是两个独立维度, 可自由组合。
     gateway: list[GatewayName] = tyro.MISSING
-    """挂哪些 gateway 的 HTTP 面 (必填, 可组合, 空格分隔)。
-
-    ``desktop`` = ToC 那面 (``/spa/`` ``/spa-v2/`` ``/ui/*`` ``/workspace/*`` ``/auth/*``);
-    ``feishu`` = ToB 那面 (``/feishu/*`` ``/feishu-web/``, 单挂时 ``GET /`` 302 到
-    ``/feishu-web/index.html``)。两个都写则两面全挂; 只写一个, 另一面的路由不注册 (404)。
-    逗号形式不支持。与 ``--default-agent`` 是两个独立维度, 可自由组合。
-    """
+    """Which gateway HTTP surfaces to mount (required, space-separated, combinable)."""
 
     icon: str | None = None
     """Path to icon image file (png/jpg/ico). Used as favicon, tray icon (--tray), and webview icon (--webview)."""
@@ -160,30 +162,39 @@ class Gateway:
     tray: bool = False
     """Show a system tray icon (requires --icon)."""
 
+    # 飞书 channel 经 ``POST /feishu/route`` 按需为每个飞书用户/群 spawn 独立 Session 时用它
+    # 作缺省 AI (请求体也可逐次覆盖 ``ai_id``)。空 = 未配, 此时若请求也不带 ``ai_id`` 则
+    # ``/feishu/route`` 返回 400。
     feishu_ai_id: str = ""
-    """飞书 Session 默认挂载的 AI 实例 id。飞书 channel 经 ``POST /feishu/route`` 按需为每个
-    飞书用户/群 spawn 独立 Session 时用它作缺省 AI (请求体也可逐次覆盖 ``ai_id``)。空 = 未配,
-    此时若请求也不带 ``ai_id`` 则 ``/feishu/route`` 返回 400。"""
+    """Default AI instance id for Feishu Sessions. Empty = unset (requests must carry ai_id)."""
 
+    # 私聊每个 open_id 得到 ``<root>/<open_id>`` 子目录, 群聊每个 chat_id 得到
+    # ``<root>/chat-<chat_id>``, 文件/历史互相隔离。
     feishu_workspace_root: str = ""
-    """飞书各会话独立 workspace 的父目录。私聊每个 open_id 得到 ``<root>/<open_id>`` 子目录,
-    群聊每个 chat_id 得到 ``<root>/chat-<chat_id>``, 文件/历史互相隔离。空 = 以 Gateway 进程
-    cwd 为父目录。"""
+    """Parent dir for per-conversation Feishu workspaces. Empty = Gateway process cwd."""
 
+    # 非空值两形解析 (见 ``_defaults.resolve_default_agent``): 先试值本身是目录, 再试
+    # ``agents/<值>``, 都不是则**报错退出**。原先第一档不查存在性, ``--default-agent desktop``
+    # 静默指向 ``{cwd}/desktop`` —— 启动期不碰这个路径, 日志干净端口正常, 错要等建 Session
+    # 才暴露成「这个 Session 没有 tools/skills」。
+    #
+    # 空值是有意义的第三态, 不报错: 软默认 ``agents/feishu`` → cwd 像装机布局 (``tools/`` +
+    # ``skills/``) → Session 单根兼容 (``agent=""`` 即等于 workspace)。
     default_agent: str = ""
-    """CLI: default agent package for new Sessions / GET /defaults.
+    """Default agent package for new Sessions / GET /defaults.
 
-    Empty → soft-default ``agents/feishu`` under cwd when present;
-    else cwd when it looks like an install layout (``tools/`` + ``skills/``);
-    else Session keeps single-root compat (``agent=\"\"`` → same as workspace).
+    A short name selects ``agents/<name>``; a path is used as given. Unknown
+    values exit with the available names. Empty = soft default.
     """
 
+    # 空值 → 软默认 ``{Desktop}/haitun交付``, 且**只公告路径不建目录**: 目录在第一次建
+    # Session / 开对话时才建, 开一下 Haitun 不该在桌面留个空文件夹。
+    #
+    # 这里不是 AppData: todos / history / Gateway state 都在 ``--appdata`` 下。
     default_workspace: str = ""
-    """Step 2 CLI: default user workspace for new Sessions / GET /defaults.
+    """Default user workspace for new Sessions / GET /defaults.
 
-    Empty → soft-default ``{Desktop}/haitun交付`` (path announced only; directory
-    created on first Session / conversation, not on Gateway boot).
-    Not AppData; todos/history/Gateway state live under ``--appdata``.
+    Empty = soft default under the OS Desktop. Not the AppData root (see --appdata).
     """
 
     appdata: str = ""
@@ -195,25 +206,29 @@ class Gateway:
     Step 4D: Gateway ``state/`` under ``{appdata}/state/`` (legacy cwd dual-read).
     """
 
+    # 每个 workspace 会得到一个专用调度 Session (对 SPA / state 隐藏), 以
+    # ``active_schedules=("*",)`` 激活该 workspace 下的全部定时任务 —— 定时任务从 workspace
+    # 加载, 但**触发权是 (session x schedule) 逐条的**, 一条必须恰好被一个 Session 激活,
+    # 否则飞书多用户下一条提醒会被在线会话数乘一遍。
     scheduler_ai_id: str = ""
-    """调度 Session 挂载的 AI 实例 id。每个 workspace 会得到一个专用调度 Session
-    (对 SPA / state 隐藏), 以 ``active_schedules=("*",)`` 激活该 workspace 下的全部
-    定时任务 —— 定时任务从 workspace 加载, 但**触发权是 (session x schedule) 逐条的**,
-    一条必须恰好被一个 Session 激活, 否则飞书多用户下一条提醒会被在线会话数乘一遍。
+    """AI instance id for the per-workspace scheduler Session.
 
-    空 = 回落 ``--feishu-ai-id``; 两者都空则不启动调度 Session (记 warning)。
+    Empty = fall back to --feishu-ai-id; both empty = no scheduler Session (warns).
     """
 
+    # 留空取的内置默认值是**账号服务的正式地址**。
+    #
+    # **空 ≠ 关闭**: 装了包的用户起 Gateway 就该能登录, 要求他先知道并手填一个域名, 等于把
+    # 部署细节转嫁给使用者。要**关掉**认证 (纯本地单用户, 不注册 ``/auth/*``、不读写本机凭证)
+    # 请显式设 ``PSI_AUTH_ENDPOINT=""``。
+    #
+    # 启用时客户端只做转发与本机凭证管理: 不持任何供应商密钥 (安装包里放阿里云 AK/SK 或
+    # Resend key 等于公开发布), 授权判定全在云端 (用户本人即机器管理员, 客户端侧校验可被
+    # 绕过)。见 ``_auth_manager.resolve_endpoint``。
     auth_endpoint: str = ""
-    """云端认证服务地址。**留空即取内置默认值** (账号服务的正式地址)。
+    """Cloud auth service address. Empty = built-in default (not disabled).
 
-    空 ≠ 关闭: 装了包的用户起 Gateway 就该能登录, 要求他先知道并
-    手填一个域名, 等于把部署细节转嫁给使用者。要**关掉**认证 (纯本地单用户, 不注册
-    ``/auth/*``、不读写本机凭证) 请显式设 ``PSI_AUTH_ENDPOINT=""``。
-
-    启用时客户端只做转发与本机凭证管理: 不持任何供应商密钥 (安装包里放阿里云
-    AK/SK 或 Resend key 等于公开发布), 授权判定全在云端 (用户本人即机器管理员,
-    客户端侧校验可被绕过)。见 ``_auth_manager.resolve_endpoint``。
+    Set PSI_AUTH_ENDPOINT="" to turn auth off entirely.
     """
 
     verbose: bool = False

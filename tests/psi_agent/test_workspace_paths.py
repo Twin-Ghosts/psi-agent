@@ -83,6 +83,79 @@ async def test_resolve_agent_package_empty_without_candidate_or_layout(
     assert await resolve_agent_package("") == ""
 
 
+@pytest.mark.anyio
+async def test_resolve_agent_package_short_name_under_caller_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare short name resolves under the caller's search root."""
+    monkeypatch.chdir(tmp_path)
+    agent = tmp_path / "pkgs" / "demo-agent"
+    await anyio.Path(agent).mkdir(parents=True)
+    got = await resolve_agent_package("demo-agent", short_name_root="pkgs")
+    assert got == str(await anyio.Path(agent).resolve())
+
+
+@pytest.mark.anyio
+async def test_resolve_agent_package_explicit_dir_wins_over_short_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rule 1 before rule 2: an existing ./<value> is not shadowed by <root>/<value>.
+
+    Both shapes exist here, so a wrong precedence would silently relocate the
+    two spellings that worked before short names were added.
+    """
+    monkeypatch.chdir(tmp_path)
+    direct = tmp_path / "demo-agent"
+    await anyio.Path(direct).mkdir()
+    await anyio.Path(tmp_path / "pkgs" / "demo-agent").mkdir(parents=True)
+    got = await resolve_agent_package("demo-agent", short_name_root="pkgs")
+    assert got == str(await anyio.Path(direct).resolve())
+
+
+@pytest.mark.anyio
+async def test_resolve_agent_package_relative_and_absolute_still_resolve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard for the two pre-existing spellings."""
+    monkeypatch.chdir(tmp_path)
+    agent = tmp_path / "pkgs" / "demo-agent"
+    await anyio.Path(agent).mkdir(parents=True)
+    expected = str(await anyio.Path(agent).resolve())
+    assert await resolve_agent_package("pkgs/demo-agent", short_name_root="pkgs") == expected
+    assert await resolve_agent_package(str(agent), short_name_root="pkgs") == expected
+
+
+@pytest.mark.anyio
+async def test_resolve_agent_package_unresolvable_raises_with_choices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never silently point at a missing dir; the error must be actionable."""
+    monkeypatch.chdir(tmp_path)
+    await anyio.Path(tmp_path / "pkgs" / "demo-agent").mkdir(parents=True)
+    await anyio.Path(tmp_path / "pkgs" / ".hidden").mkdir()
+    await anyio.Path(tmp_path / "pkgs" / "__pycache__").mkdir()
+    with pytest.raises(FileNotFoundError) as excinfo:
+        await resolve_agent_package("typo", short_name_root="pkgs")
+    message = str(excinfo.value)
+    assert "typo" in message
+    # Both candidates tried are named, so the reader sees where it looked.
+    assert "pkgs" in message
+    assert "demo-agent" in message
+    # Dotted / underscored entries are not selectable, so they are not offered.
+    assert ".hidden" not in message
+    assert "__pycache__" not in message
+
+
+@pytest.mark.anyio
+async def test_resolve_agent_package_unresolvable_raises_without_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No search root configured still beats a silent bad path."""
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(FileNotFoundError):
+        await resolve_agent_package("typo")
+
+
 def test_module_carries_no_product_literals() -> None:
     """Guard for 3.2: the neutral layer must not learn a ToC concept."""
     # Resolve via the imported module, not cwd — other tests chdir into tmp_path.
