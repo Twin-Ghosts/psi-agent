@@ -38,7 +38,7 @@ Gateway 进程
 
 **目录分三层**（A5 落位，A7 收口）：骨架层（本目录顶层）只有 `server.py` 骨架 + `_defaults` / `_state` / `_openapi*` 装配（**6 个 `.py`**）；`desktop/` 与 `feishu/` 各自持产品专属模块**以及各自的路由装配函数**（`desktop/_routes.py` / `feishu/_routes.py`）。判据是「这段代码认识哪些概念」而不是「当前谁在调用」——`WorkspaceManager` 认识 Windows 盘符、`_tray` 认识 pystray，飞书容器里一个都用不上。
 
-**判据还有第二条：先问存在性。** `_oauth_manager` 是个反例——它 69 行里零飞书字样，按「认识哪些概念」该留骨架，但〔实测〕取件方全在 `workspace/tob/tools/` 一侧（`_oauth_receiver` / `_oauth_setup` / `feishu_auth` / `_feishu/auth`），ToC 那两处只是注释、零调用（ToC 登录走手机号 + 验证码，不经过 OAuth 跳转）。两条判据冲突时按存在性走：**当前只有一个消费者就跟着那个消费者放**，等第二条线真要用再往上提。
+**判据还有第二条：先问存在性。** `_oauth_manager` 是个反例——它 69 行里零飞书字样，按「认识哪些概念」该留骨架，但〔实测〕取件方全在 `agents/feishu/tools/` 一侧（`_oauth_receiver` / `_oauth_setup` / `feishu_auth` / `_feishu/auth`），ToC 那两处只是注释、零调用（ToC 登录走手机号 + 验证码，不经过 OAuth 跳转）。两条判据冲突时按存在性走：**当前只有一个消费者就跟着那个消费者放**，等第二条线真要用再往上提。
 
 ### 依赖方向
 
@@ -62,9 +62,9 @@ A5 把模块文件搬进两个子包后，这条曾**不成立**：两个 `regis
 | 文件 | 职责 |
 |------|------|
 | `__init__.py` | `Gateway` dataclass + `run()` 入口 |
-| `_defaults.py` | **只持 ToC 品牌字面量**（`haitun交付` / `workspace/tob`）+ 两个薄包装 `resolve_default_agent` / `resolve_default_workspace` — CLI / `GET /defaults` 用；机制在包外 ``psi_agent._workspace_paths``（见下方[工作区路径的机制与字面量分家](#工作区路径的机制与字面量分家)）。再导出 ``psi_agent._appdata`` 路径助手与 ``ensure_workspace_dir``（老调用方不破） |
+| `_defaults.py` | **只持 ToC 品牌字面量**（`haitun交付` / `agents/feishu`）+ 两个薄包装 `resolve_default_agent` / `resolve_default_workspace` — CLI / `GET /defaults` 用；机制在包外 ``psi_agent._workspace_paths``（见下方[工作区路径的机制与字面量分家](#工作区路径的机制与字面量分家)）。再导出 ``psi_agent._appdata`` 路径助手与 ``ensure_workspace_dir``（老调用方不破） |
 | `feishu/_feishu_manager.py` | `FeishuManager` — 飞书会话 → Session 路由表（私聊按 `open_id`、群聊按 `chat_id`；复用 SessionManager 按需 spawn）+ FeishuRoute |
-| `feishu/_oauth_manager.py` | `OAuthRelay` — OAuth 回调中继（`state → code` 一次性信箱，带 TTL；供 `GET /oauth/callback` + `GET /oauth/code`），让授权码免用户手工复制。**住 `feishu/` 是按存在性判据**：取件方〔实测〕全在 `workspace/tob/tools/` 一侧，ToC 登录走手机号 + 验证码不经过 OAuth 跳转（模块头有实测清单） |
+| `feishu/_oauth_manager.py` | `OAuthRelay` — OAuth 回调中继（`state → code` 一次性信箱，带 TTL；供 `GET /oauth/callback` + `GET /oauth/code`），让授权码免用户手工复制。**住 `feishu/` 是按存在性判据**：取件方〔实测〕全在 `agents/feishu/tools/` 一侧，ToC 登录走手机号 + 验证码不经过 OAuth 跳转（模块头有实测清单） |
 | `desktop/_auth_manager.py` | `AuthManager` — 云端账号服务的**转发层** + 登录态持有者；不持供应商密钥、不做授权判定（发码与鉴权全在云端）。两段式注册的 `tempToken` 扣在进程内不下发给页面，改回 `registrationRequired: true`；把云端 `Retry-After` 响应头抄进 body 供倒计时用；云端 `GET /sessions` 回**裸数组**，`_call` 装 `items` 信封、`list_devices` 统一成 `{"devices": [...]}`。`resolve_endpoint()` 定地址（显式参数 > `PSI_AUTH_ENDPOINT` > 内置默认；显式空串=关闭）。`bearer_token()` 是 token 的**唯一进程内取值口**，只给免费模型换算力用，不接任何下行响应（见 [免费模型的 key 替换](#免费模型的-key-替换)）。连接池 / 预热 / 重试边界见 [AuthManager 连接复用](#authmanager-连接复用) |
 | `desktop/_auth_store.py` | 本机凭证落盘 `{appdata}/auth.enc.json`（0600）+ `device_key`；密钥存 OS 钥匙串，钥匙串不可用则降级明文并记 warning、`credentialEncrypted: false` 如实上报。`load_token()` 读到明文且钥匙串此时可用会**就地重新加密**（用户装上 keyring 重启后凭证真的转密文，而不只是黄条消失）；`credentialEncrypted` 报的是**盘上真实形态**，没碰过盘时才退回“钥匙串可用性”做预测 |
 | `_state.py` | `GatewayState` — `{appdata}/state/latest.json` + 时间戳快照；缺则双读 cwd `state/latest.json` |
@@ -134,7 +134,7 @@ Gateway state → `{appdata}/state/`（双读旧 cwd `state/`）          ← �
 schedules → `{workspace}/schedules/`（归 workspace，非 agent 包 / 非 AppData）
 ```
 
-路径助手：``psi_agent._appdata``（Session / Gateway / haitun 共用；**刻意**放在 gateway 包外以免循环导入）。``gateway._defaults`` 再导出同名助手（`_todo_manager` 已直接从 ``_appdata`` 取，再导出只为包外工具 `workspace/tob/tools/_todo_store.py:23` 留着）。Gateway 启动把解析后的根写入 ``PSI_APPDATA``，**同进程**工具与 ``GET /defaults.appdata`` 一致。**注意这个「同进程」是硬限制**：``os.environ`` 只对本进程及其之后 fork 的子进程有效，而飞书 channel 通常是**兄弟进程**（各自 `psi-agent gateway` / `psi-agent channel feishu`），继承不到这个 env。因此需要共享 AppData 的兄弟进程必须**要么**由启动脚本给**每一个**进程都传 `--appdata`/设 `PSI_APPDATA`，**要么**像 channel 那样经 ``GET /defaults`` 现问（见 `channel/AGENTS.md`「AppData 根向 Gateway 现问」）——`GET /defaults` 由此不只服务「建 Session 的调用方」，也是**跨进程 AppData 根的唯一权威**。**禁止**把 AppData 根塞进 Session ContextVar。
+路径助手：``psi_agent._appdata``（Session / Gateway / haitun 共用；**刻意**放在 gateway 包外以免循环导入）。``gateway._defaults`` 再导出同名助手（`_todo_manager` 已直接从 ``_appdata`` 取，再导出只为包外工具 `agents/feishu/tools/_todo_store.py:23` 留着）。Gateway 启动把解析后的根写入 ``PSI_APPDATA``，**同进程**工具与 ``GET /defaults.appdata`` 一致。**注意这个「同进程」是硬限制**：``os.environ`` 只对本进程及其之后 fork 的子进程有效，而飞书 channel 通常是**兄弟进程**（各自 `psi-agent gateway` / `psi-agent channel feishu`），继承不到这个 env。因此需要共享 AppData 的兄弟进程必须**要么**由启动脚本给**每一个**进程都传 `--appdata`/设 `PSI_APPDATA`，**要么**像 channel 那样经 ``GET /defaults`` 现问（见 `channel/AGENTS.md`「AppData 根向 Gateway 现问」）——`GET /defaults` 由此不只服务「建 Session 的调用方」，也是**跨进程 AppData 根的唯一权威**。**禁止**把 AppData 根塞进 Session ContextVar。
 
 | 已合 | 内容 |
 |------|------|
@@ -150,7 +150,7 @@ schedules → `{workspace}/schedules/`（归 workspace，非 agent 包 / 非 App
 
 | CLI | 含义 |
 |-----|------|
-| `--default-agent` | 新建 Session 的 Agent 包目录；空则软默认：① `cwd/workspace/tob`（仓库开发）；② cwd 自身含 `tools/`+`skills/`（Inno 安装布局 `{app}` 即能力包）；仍空则 Session `agent=""`（与 workspace 同根兼容）。Windows 安装包 `haitun.exe` **显式**传 `--default-agent {app}` |
+| `--default-agent` | 新建 Session 的 Agent 包目录；空则软默认：① `cwd/agents/feishu`（仓库开发）；② cwd 自身含 `tools/`+`skills/`（Inno 安装布局 `{app}` 即能力包）；仍空则 Session `agent=""`（与 workspace 同根兼容）。Windows 安装包 `haitun.exe` **显式**传 `--default-agent {app}` |
 | `--default-workspace` | 新建 Session / `GET /defaults` 的用户工作区；空 → 软默认 `{Desktop}/haitun交付`（**只宣布路径**；目录在 `SessionManager.create` / 开始对话时才 mkdir。`platformdirs.user_desktop_dir`）。安装包 `haitun.exe` **显式**传该路径（运行时解析桌面，不写死用户名） |
 | `--appdata` | AppData 记忆区根；空 → `PSI_APPDATA` → `platformdirs`（**禁止**手写死 `%AppData%`） |
 | `--scheduler-ai-id` | 调度 Session 挂载的 AI 实例；空 → 回落 `--feishu-ai-id`；两者都空则有 `schedules/` 的 workspace 只记 warning 不启动调度 |
@@ -165,7 +165,7 @@ schedules → `{workspace}/schedules/`（归 workspace，非 agent 包 / 非 App
 | 层 | 位置 | 内容 |
 |----|------|------|
 | 机制 | ``psi_agent/_workspace_paths.py``（**gateway 包外**） | `resolve_user_workspace(explicit, *, default_name)` / `ensure_workspace_dir(path)` / `resolve_agent_package(explicit, *, repo_candidate="")`。桌面路径运算、mkdir、`tools/`+`skills/` 探测 |
-| 字面量 | `gateway/_defaults.py` | `DEFAULT_USER_WORKSPACE_NAME = "haitun交付"`、`DEFAULT_AGENT_REPO_CANDIDATE = "workspace/tob"`，以及两个薄包装 `resolve_default_workspace` / `resolve_default_agent` |
+| 字面量 | `gateway/_defaults.py` | `DEFAULT_USER_WORKSPACE_NAME = "haitun交付"`、`DEFAULT_AGENT_REPO_CANDIDATE = "agents/feishu"`，以及两个薄包装 `resolve_default_workspace` / `resolve_default_agent` |
 
 判据是**这段代码认识谁**：`_workspace_paths` 不认识托盘、webview、Windows 盘符、桌面登录，也**不认识任何品牌名** —— 缺省文件夹名由调用方作为关键字参数传入，该模块自己没有缺省值。代价是多两个关键字参数；换来的是 workspace 改名只碰 `gateway/`。
 
@@ -438,7 +438,7 @@ Gateway：``list_segments`` / ``get_segment`` 只读；``set_segment_label`` 允
 
 **list_routes() → list[FeishuRoute]**：`[{open_id, chat_id, session_id}]`，供观测（`GET /feishu/routes`）。群聊记录填 `chat_id` 而 `open_id` 留空，私聊反之——一条记录只有一个键有值。
 
-**未定义（已知留白）**：群 Session 的 workspace 只有一份，而 `user_access_token`（UAT）按发送者 `open_id` 存。群里多人时「以谁的身份写文档」由 workspace 侧工具按每条消息的 `sender_open_id` 决定（见 `workspace/tob/TOOLS.md`），Gateway 不做约定。
+**未定义（已知留白）**：群 Session 的 workspace 只有一份，而 `user_access_token`（UAT）按发送者 `open_id` 存。群里多人时「以谁的身份写文档」由 workspace 侧工具按每条消息的 `sender_open_id` 决定（见 `agents/feishu/TOOLS.md`），Gateway 不做约定。
 
 ## OAuthRelay
 
@@ -446,7 +446,7 @@ OAuth 回调中继（`feishu/_oauth_manager.py`，路由与 handler 在 `feishu/
 
 **为什么在 Gateway**：授权码流程里第三方只把 `code` 拼在 `redirect_uri` 上跳一次浏览器；若没人监听那个地址，用户只能自己抄 code。Gateway 本就是 HTTP 服务且用户浏览器可达（配 `PSI_OAUTH_CALLBACK_BASE` 后连手机端也可达），是回调的天然落点——这也是飞书多用户部署唯一可行的一条通道（浏览器与 agent 不同机）。
 
-**为什么在 `feishu/` 而不是骨架层**：〔实测〕取件方全在 ToB 一侧（`workspace/tob/tools/` 下 `_oauth_receiver` / `_oauth_setup` / `feishu_auth` / `_feishu/auth`），`desktop/_auth_manager.py` 那两处只是注释、零调用——ToC 登录走手机号 + 验证码，不经过 OAuth 跳转。这段代码本身零飞书字样，所以按「认识哪些概念」会判它留骨架；两条判据冲突时按**先问存在性**走。生产进程照样有这两条路由（唯一入口 `__init__.py` 两条线都贴），所以搬家不改变任何运行时行为。
+**为什么在 `feishu/` 而不是骨架层**：〔实测〕取件方全在 ToB 一侧（`agents/feishu/tools/` 下 `_oauth_receiver` / `_oauth_setup` / `feishu_auth` / `_feishu/auth`），`desktop/_auth_manager.py` 那两处只是注释、零调用——ToC 登录走手机号 + 验证码，不经过 OAuth 跳转。这段代码本身零飞书字样，所以按「认识哪些概念」会判它留骨架；两条判据冲突时按**先问存在性**走。生产进程照样有这两条路由（唯一入口 `__init__.py` 两条线都贴），所以搬家不改变任何运行时行为。
 
 **刻意不做的事**：Gateway 不碰 token 交换——不知道 app_secret、不知道 PKCE verifier、不知道是哪个飞书用户。那些都留在发起方（workspace 工具），中继只搬运一次性 code，故本模块**零持久化、无跨用户鉴权**（`state` 是发起方生成的高熵随机串，本身即取件码）。
 
@@ -854,7 +854,7 @@ psi-agent gateway [--listen http://127.0.0.1:PORT] [--socket-path psi] [--icon P
 
 ### Windows 安装包 launcher（`haitun.exe`）
 
-Inno 安装后 `{app}` **就是** tob workspace（`tools/` / `skills/` / `systems/` 在根下），不是仓库的 `workspace/tob` 嵌套布局。`.github/inno-setup/haitun.c` 编译的 `haitun.exe` 必须显式传：
+Inno 安装后 `{app}` **就是** tob workspace（`tools/` / `skills/` / `systems/` 在根下），不是仓库的 `agents/feishu` 嵌套布局。`.github/inno-setup/haitun.c` 编译的 `haitun.exe` 必须显式传：
 
 ```text
 psi-agent.exe gateway --tray --browser --icon haitun.ico --verbose

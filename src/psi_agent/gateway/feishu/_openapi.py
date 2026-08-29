@@ -2,7 +2,7 @@
 
 ``/feishu/*`` 与三个 ``FeishuRoute*`` schema 只有飞书这条线用得到; ToC 不注册。
 
-``/oauth/*`` 两条从 ``_openapi_core`` 挪来: 取件方(实测)全在 ``workspace/tob/tools/``,
+``/oauth/*`` 两条从 ``_openapi_core`` 挪来: 取件方(实测)全在 ``agents/feishu/tools/``,
 ToC 的登录走手机号 + 验证码不经过 OAuth 跳转 —— 详见 ``_oauth_manager`` 模块头。
 """
 

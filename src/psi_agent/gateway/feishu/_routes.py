@@ -4,7 +4,7 @@ A7: 与 ``desktop/_routes.py`` 同一个原因搬过来 —— 装配函数留�
 骨架为了给它备料必须 ``from psi_agent.gateway.feishu._feishu_manager import FeishuManager``,
 于是「骨架不认识产品线」这条只靠纪律维持。现在骨架对本包一无所知。
 
-``/oauth/*`` 两条也在这里: 取件方(实测)全在 ``workspace/tob/tools/`` 一侧, ToC 的登录走
+``/oauth/*`` 两条也在这里: 取件方(实测)全在 ``agents/feishu/tools/`` 一侧, ToC 的登录走
 手机号 + 验证码不经过 OAuth 跳转 —— 理由详见 ``_oauth_manager`` 模块头。
 
 ``_json`` / ``_error`` 从骨架 import: 方向是产品 → 骨架, 正是允许的那一向。

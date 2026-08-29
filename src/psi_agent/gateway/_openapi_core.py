@@ -622,7 +622,7 @@ CORE_SCHEMAS: dict[str, Any] = {
                 "type": "string",
                 "description": (
                     "Agent package path. Empty → Gateway default "
-                    "(workspace/tob when present), else Session uses workspace"
+                    "(agents/feishu when present), else Session uses workspace"
                 ),
             },
         },
