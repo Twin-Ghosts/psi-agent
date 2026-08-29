@@ -132,6 +132,8 @@ class FeishuAuth:
         except (ClientError, TimeoutError, ValueError) as e:
             raise AuthError(f"Feishu user_info request failed: {e}") from e
         data = self._unwrap(payload, what="user_info").get("data") or {}
+        if not isinstance(data, dict):
+            raise AuthError("Feishu user_info response data is not a JSON object")
         open_id = str(data.get("open_id") or "")
         if not open_id:
             # 上游说成功却没给 open_id: 宁可当失败, 也不让空身份流进归属判定。
