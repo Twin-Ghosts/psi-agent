@@ -140,10 +140,14 @@ async def weekly_group_stats(scope: str = "owners", top: int = 8, min_rounds: in
     exact and cost one call.
 
     Args:
-        scope: owners (multi vs single lead, distinct leads) / completion_time
-            (ISO vs free text vs blank) / field_lengths (target_result char stats)
-            / attachments (per-task counts, zero-attachment tasks kept) /
-            history_rounds (published periods per task).
+        scope: owners (multi vs single lead, distinct leads) / separators (how the
+            multi-value owner column is delimited -- comma, ideographic comma,
+            both, or a single person with no delimiter at all) / owner_widths
+            (how many people share one owner cell, widest first) /
+            completion_time (ISO vs free text vs blank) / field_lengths
+            (target_result char stats) / attachments (per-task counts,
+            zero-attachment tasks kept) / history_rounds (published periods
+            per task).
         top: Row cap for the listing scopes.
         min_rounds: For history_rounds, also count tasks with at least this many
             periods. Inclusive: "at least 5" means 5 or more.

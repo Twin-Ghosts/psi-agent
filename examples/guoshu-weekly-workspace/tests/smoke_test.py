@@ -112,10 +112,12 @@ async def run() -> int:
         "weekly_milestone_stats",
         "weekly_freshness",
         "weekly_health",
+        "weekly_person_stats",
+        "weekly_attachment_stats",
     }
     loaded = set(registry.tools)
     check(
-        "所有 27 个工具注册，且无 helper 泄漏为工具",
+        "所有 29 个工具注册，且无 helper 泄漏为工具",
         loaded == expected_tools,
         f"缺 {sorted(expected_tools - loaded)}；多 {sorted(loaded - expected_tools)}",
     )
@@ -403,6 +405,318 @@ async def run() -> int:
     check(
         "其他聚合维度不受影响，仍只返回 group_name/cnt",
         other_agg.get("ok") is True and "lead_owner_count" not in (other_agg.get("rows") or [{}])[0],
+    )
+
+    # --- A2: F 类负责人与组织 ------------------------------------------------
+    # F3-01/02/04. 姓名列 128 条全满、ID 列只有 119 条：只暴露姓名列时模型会
+    # 如实报「无缺失」，与 gold 的 9 条直接矛盾。缺口只能从 ID 列看见。
+    owner_id_comp = await _call(registry, "weekly_field_completeness", field="project_owner_id")
+    comp_id_row = (owner_id_comp.get("rows") or [{}])[0]
+    check(
+        "F3-04 project_owner_id 完整度 128/119/9",
+        [str(comp_id_row.get(k)) for k in ("total", "filled", "missing")] == ["128", "119", "9"],
+        f"row={comp_id_row}",
+    )
+    missing_owners = await _call(registry, "weekly_field_completeness", field="project_owner_id", list_missing=True)
+    check(
+        "F3-01 缺责任人 ID 的 9 条任务可逐条列出，id 与 gold 一致",
+        missing_owners.get("total_count") == 9
+        and [r.get("id") for r in missing_owners.get("rows", [])] == [21, 27, 29, 33, 73, 99, 125, 149, 150],
+        f"ids={[r.get('id') for r in missing_owners.get('rows', [])]}",
+    )
+    check(
+        "F3-01 缺项清单带姓名列，便于说明「有名字但没 ID」",
+        bool(missing_owners.get("rows"))
+        and {"task_name", "project_owner_name", "lead_owner_name"} <= set(missing_owners["rows"][0]),
+        f"keys={sorted(missing_owners.get('rows', [{}])[0])}",
+    )
+
+    # F2-02/03/04. 牵头人任务量此前靠模型翻明细自己数，首位被答成 6 条。
+    workload = await _call(registry, "weekly_person_stats", scope="workload", top=3)
+    check(
+        "F2-02 牵头人任务量榜首 吴晓东 14 条（并列按姓名定序）",
+        (workload.get("rows") or [{}])[0].get("person") == "吴晓东"
+        and int((workload.get("rows") or [{}])[0].get("task_count", 0)) == 14,
+        f"top={workload.get('rows')}",
+    )
+    wl_summary = await _call(registry, "weekly_person_stats", scope="workload_summary")
+    wl_row = (wl_summary.get("rows") or [{}])[0]
+    check(
+        "F2-03 人均任务数 8.00 由服务端算（128 任务 / 16 人）",
+        str(wl_row.get("avg_tasks_per_person")) == "8.00"
+        and int(wl_row.get("tasks", 0)) == 128
+        and int(wl_row.get("people", 0)) == 16,
+        f"row={wl_row}",
+    )
+    single = await _call(registry, "weekly_person_stats", scope="single_task")
+    check(
+        "F2-04 只带一条任务的 4 位牵头人由 HAVING 判定",
+        [r.get("person") for r in single.get("rows", [])]
+        == ["project_lead_a", "project_lead_b", "project_lead_c", "余承志"],
+        f"rows={[r.get('person') for r in single.get('rows', [])]}",
+    )
+
+    # F4-01/02/03/04. 标识写法异构：三档相加 128 但空标识不进任何档。
+    id_fmt = await _call(registry, "weekly_person_stats", scope="id_format")
+    check(
+        "F4-01/02 标识格式分档 纯数字 69 / u 前缀 50 / NDG 域账号 9",
+        [(r.get("id_format"), int(r.get("task_count", 0))) for r in id_fmt.get("rows", [])]
+        == [("纯数字工号", 69), ("u 前缀账号", 50), ("NDG 域账号", 9)],
+        f"rows={id_fmt.get('rows')}",
+    )
+    check(
+        "F4-01 口径提醒各档相加不等于任务总数（空标识不进档）",
+        "各档相加不等于任务总数" in str(id_fmt.get("caliber", "")),
+    )
+    variants = await _call(registry, "weekly_person_stats", scope="id_variants")
+    check(
+        "F4-03 同名多标识为 0 行，且口径说明 0 行即不存在",
+        variants.get("row_count") == 0 and "不存在这种人" in str(variants.get("caliber", "")),
+        f"rows={variants.get('row_count')}",
+    )
+    longest = await _call(registry, "weekly_person_stats", scope="id_longest", top=4)
+    check(
+        "F4-04 最长标识 11 字符且口径点明存在并列",
+        int((longest.get("rows") or [{}])[0].get("id_length", 0)) == 11 and "并列" in str(longest.get("caliber", "")),
+        f"top={longest.get('rows')}",
+    )
+
+    # F6-01/02/03/04. 填报在 task_progress 上，任务闸门之外还有行级 is_published。
+    reporters = await _call(registry, "weekly_person_stats", scope="reporters", top=3)
+    check(
+        "F6-01 填报最多 10515 共 63 轮 / 4 个任务",
+        [(r.get("reporter_id"), int(r.get("reported_rounds", 0))) for r in reporters.get("rows", [])]
+        == [("10515", 63), ("10445", 57), ("10564", 50)],
+        f"rows={reporters.get('rows')}",
+    )
+    check(
+        "F6-01 口径写明任务闸门与进展行发布闸门是两道",
+        "p.is_published = 1" in str(reporters.get("caliber", "")),
+    )
+    rep_count = await _call(registry, "weekly_person_stats", scope="reporter_count")
+    check(
+        "F6-02 去重填报人 43 位由服务端算",
+        int((rep_count.get("rows") or [{}])[0].get("reporter_count", 0)) == 43,
+        f"row={rep_count.get('rows')}",
+    )
+    reviewers = await _call(registry, "weekly_person_stats", scope="reviewers", top=3)
+    check(
+        "F6-03 审核口径不加 is_published，首位 10277/10291 各 119 条",
+        [(r.get("reviewer_id"), int(r.get("reviewed", 0))) for r in reviewers.get("rows", [])]
+        == [("10277", 119), ("10291", 119), ("10270", 116)],
+        f"rows={reviewers.get('rows')}",
+    )
+    check(
+        "F6-03 口径解释为何审核不加发布闸门",
+        "审过但未发布的进展同样算审过" in str(reviewers.get("caliber", "")),
+    )
+    self_rev = await _call(registry, "weekly_person_stats", scope="self_review")
+    check(
+        "F6-04 自审 7 条，按 ID 相等判定而非姓名",
+        self_rev.get("row_count") == 7 and "不按姓名" in str(self_rev.get("caliber", "")),
+        f"row_count={self_rev.get('row_count')}",
+    )
+
+    # F7-02/04. 跨组与双角色此前被答成 4 组、人名也不对。
+    cross = await _call(registry, "weekly_person_stats", scope="cross_group", top=3)
+    check(
+        "F7-02 跨组榜首 吴晓东 跨 8 组，group_count 已去重",
+        (cross.get("rows") or [{}])[0].get("person") == "吴晓东"
+        and int((cross.get("rows") or [{}])[0].get("group_count", 0)) == 8,
+        f"top={cross.get('rows')}",
+    )
+    dual = await _call(registry, "weekly_person_stats", scope="dual_role")
+    check(
+        "F7-04 双角色 6 人，两列各自计数不可相加",
+        [(r.get("person"), int(r.get("as_lead", 0)), int(r.get("as_project_owner", 0))) for r in dual.get("rows", [])]
+        == [
+            ("吴晓东", 14, 1),
+            ("孙立群", 12, 2),
+            ("马跃进", 11, 2),
+            ("周文斌", 9, 4),
+            ("胡建国", 8, 1),
+            ("余承志", 1, 7),
+        ],
+        f"rows={dual.get('rows')}",
+    )
+    check(
+        "F7-04 口径提醒不要把两个角色的计数相加",
+        "别把两列相加" in str(dual.get("caliber", "")),
+    )
+
+    # F5-02/04. 多值负责人栏的分隔符是混填的，「单人」必须是独立一档。
+    seps = await _call(registry, "weekly_group_stats", scope="separators")
+    check(
+        "F5-02 分隔符分档 半角逗号 26 / 单人 18 / 全角顿号 2",
+        [(r.get("separator_kind"), int(r.get("n", 0))) for r in seps.get("rows", [])]
+        == [("半角逗号", 26), ("单人无分隔符", 18), ("全角顿号", 2)],
+        f"rows={seps.get('rows')}",
+    )
+    check(
+        "F5-02 口径说明「单人无分隔符」是一档而非缺失",
+        "是独立一档不是缺失" in str(seps.get("caliber", "")),
+    )
+    widths = await _call(registry, "weekly_group_stats", scope="owner_widths", top=3)
+    top_width = (widths.get("rows") or [{}])[0]
+    check(
+        "F5-04 责任人最多的一条是 数据资产入表试点推进（3 人）",
+        top_width.get("task_name") == "数据资产入表试点推进"
+        and top_width.get("project_owner_names") == "胡建国,方永康,邓少华"
+        and int(top_width.get("owner_count", 0)) == 3,
+        f"top={top_width}",
+    )
+
+    # F5-01. 牵头人与责任人要同表并列取出，还得带专项组。
+    # task_name 由服务端固定带上，不在 fields 白名单里，写进去会报 unsupported_field。
+    group_owners = await _call(
+        registry,
+        "weekly_group_detail_query",
+        fields="lead_owner_names,project_owner_names,project_group",
+        limit=8,
+    )
+    check(
+        "F5-01 三列可一次取全并带 project_owner_names 的原始多值形态",
+        bool(group_owners.get("rows"))
+        and {"task_name", "lead_owner_names", "project_owner_names", "project_group"} <= set(group_owners["rows"][0]),
+        f"keys={sorted(group_owners.get('rows', [{}])[0])}",
+    )
+    check(
+        "F5-01 前 8 条按任务 id 定序，首条与 gold 一致",
+        [r.get("task_name") for r in group_owners.get("rows", [])][:2]
+        == ["数据资产入表试点推进", "公共数据授权运营模式创新"]
+        and group_owners["rows"][0].get("project_owner_names") == "胡建国,方永康,邓少华",
+        f"first={group_owners.get('rows', [{}])[0]}",
+    )
+
+    # --- A3: J 类附件 -------------------------------------------------------
+    # J2-01/02/03. 明细上限 200 条，靠翻行求和必然少算（真实 454 条）。
+    att_sum = await _call(registry, "weekly_attachment_stats", scope="summary")
+    sum_row = (att_sum.get("rows") or [{}])[0]
+    check(
+        "J2-01 附件 454 条 / 1863.8MB / 均值 4203.9KB，字节为权威值",
+        int(sum_row.get("attachment_count", 0)) == 454
+        and str(sum_row.get("total_bytes")) == "1954375767"
+        and str(sum_row.get("total_mb")) == "1863.8"
+        and str(sum_row.get("avg_kb")) == "4203.9",
+        f"row={sum_row}",
+    )
+    by_ext = await _call(registry, "weekly_attachment_stats", scope="by_ext")
+    check(
+        "J2-02 类型分布 pptx 130 / xlsx 116 / pdf 107 / docx 101",
+        [(r.get("ext"), int(r.get("n", 0))) for r in by_ext.get("rows", [])]
+        == [("pptx", 130), ("xlsx", 116), ("pdf", 107), ("docx", 101)],
+        f"rows={by_ext.get('rows')}",
+    )
+    largest = await _call(registry, "weekly_attachment_stats", scope="largest", top=2)
+    big = (largest.get("rows") or [{}])[0]
+    check(
+        "J2-03 最大附件 行业数据标注基地能力建设-会议纪要.pdf（7.99MB / 8379724 字节）",
+        big.get("file_name") == "行业数据标注基地能力建设-会议纪要.pdf"
+        and str(big.get("file_size")) == "8379724"
+        and str(big.get("size_mb")) == "7.99",
+        f"top={big}",
+    )
+
+    # J3-01/02/03/04. 挂载归属四问，一条附件只进一档；孤儿行必须走 NOT EXISTS。
+    by_link = await _call(registry, "weekly_attachment_stats", scope="by_link")
+    check(
+        "J3-01 挂载分布 进展 315 / 任务本体 81 / 提交单 58，合计等于 454",
+        [(r.get("link_type"), int(r.get("n", 0))) for r in by_link.get("rows", [])]
+        == [("挂在进展", 315), ("挂在任务本体", 81), ("挂在提交单", 58)]
+        and sum(int(r.get("n", 0)) for r in by_link.get("rows", [])) == 454,
+        f"rows={by_link.get('rows')}",
+    )
+    open_sub = await _call(registry, "weekly_attachment_stats", scope="on_open_submission")
+    check(
+        "J3-02 在途提交单附件 58 个（按提交单自己的码值判，不用 workflow_status）",
+        int((open_sub.get("rows") or [{}])[0].get("attachment_count", 0)) == 58
+        and "s.status <> 'published'" in str(open_sub.get("caliber", "")),
+        f"row={open_sub.get('rows')}",
+    )
+    by_prog = await _call(registry, "weekly_attachment_stats", scope="by_progress", top=8)
+    check(
+        "J3-03 已发布进展带附件 Top8 首两条各 3 个，且按任务 id/期号定序",
+        [
+            (r.get("task_name"), int(r.get("version_no", 0)), int(r.get("attachment_count", 0)))
+            for r in by_prog.get("rows", [])
+        ][:3]
+        == [
+            ("数据要素标准国际对标", 15, 3),
+            ("数据交易平台功能迭代（2期）", 2, 3),
+            ("全国一体化算力网调度平台建设", 10, 2),
+        ],
+        f"rows={by_prog.get('rows')}",
+    )
+    orphan = await _call(registry, "weekly_attachment_stats", scope="orphan")
+    check(
+        "J3-04 孤儿附件 3 条，口径点明 JOIN 会恒等于 0",
+        int((orphan.get("rows") or [{}])[0].get("orphan_count", 0)) == 3
+        and "NOT EXISTS" in str(orphan.get("caliber", "")),
+        f"row={orphan.get('rows')}",
+    )
+
+    # J4-02/03. 软删审计问的是表本身，加任务闸门会少算。
+    deleted = await _call(registry, "weekly_attachment_stats", scope="deleted")
+    del_row = (deleted.get("rows") or [{}])[0]
+    check(
+        "J4-03 已删附件 33 条 / 116.4MB，全表 543 行",
+        int(del_row.get("deleted", 0)) == 33
+        and str(del_row.get("deleted_mb")) == "116.4"
+        and int(del_row.get("total_rows", 0)) == 543,
+        f"row={del_row}",
+    )
+    check(
+        "J4-03 口径说明这是全表口径不加任务闸门",
+        "不加任务闸门" in str(deleted.get("caliber", "")),
+    )
+    del_link = await _call(registry, "weekly_attachment_stats", scope="deleted_by_link")
+    check(
+        "J4-02 已删附件挂载分布 进展 20 / 提交单 7 / 任务本体 6",
+        [(r.get("link_type"), int(r.get("n", 0))) for r in del_link.get("rows", [])]
+        == [("挂在进展", 20), ("挂在提交单", 7), ("挂在任务本体", 6)],
+        f"rows={del_link.get('rows')}",
+    )
+
+    # J5-01/02/03. 上传人维度此前被当成任务维度答，月度也漏了起始月过滤。
+    uploaders = await _call(registry, "weekly_attachment_stats", scope="by_uploader", top=3)
+    check(
+        "J5-01 上传最多 10354 共 26 个 / 98.2MB",
+        [(r.get("uploader_id"), int(r.get("upload_count", 0))) for r in uploaders.get("rows", [])]
+        == [("10354", 26), ("10515", 24), ("10438", 23)],
+        f"rows={uploaders.get('rows')}",
+    )
+    up_count = await _call(registry, "weekly_attachment_stats", scope="uploader_count")
+    check(
+        "J5-02 上传过附件的 46 人由服务端去重",
+        int((up_count.get("rows") or [{}])[0].get("uploader_count", 0)) == 46,
+        f"row={up_count.get('rows')}",
+    )
+    by_month = await _call(registry, "weekly_attachment_stats", scope="by_month", date_from="2026-01-01")
+    check(
+        "J5-03 2026 年逐月 23/26/32/31/28/16/18/3 且未截断",
+        [int(r.get("n", 0)) for r in by_month.get("rows", [])] == [23, 26, 32, 31, 28, 16, 18, 3]
+        and by_month.get("has_more") is False,
+        f"rows={[(r.get('ym'), r.get('n')) for r in by_month.get('rows', [])]}",
+    )
+    check(
+        "J5-03 口径回显起始月，未限月时明说含全部历史",
+        "仅 2026-01-01 起" in str(by_month.get("caliber", "")),
+    )
+
+    # 未知口径必须报错并列出支持值，而不是静默退回默认档。
+    bad_scope = await _call(registry, "weekly_attachment_stats", scope="by_weekday")
+    check(
+        "附件统计不支持的口径显式报错并列出支持值",
+        bad_scope.get("ok") is False
+        and bad_scope.get("error", {}).get("code") == "unsupported_scope"
+        and "by_progress" in str(bad_scope.get("error", {}).get("message", "")),
+        f"err={bad_scope.get('error')}",
+    )
+    bad_person = await _call(registry, "weekly_person_stats", scope="salary")
+    check(
+        "人员统计不支持的口径显式报错",
+        bad_person.get("ok") is False and bad_person.get("error", {}).get("code") == "unsupported_scope",
+        f"err={bad_person.get('error')}",
     )
 
     # --- role-split counting (weekly_task_query ORs the owner columns) ------

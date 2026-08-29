@@ -21,7 +21,7 @@ export GUOSHU_WEEKLY_MCP_TOKEN=demo-token
 python tests/smoke_test.py
 ```
 
-预期 `113/113 passed`。
+预期 `153/153 passed`。
 
 ## 数据层准备
 
@@ -89,15 +89,15 @@ guoshu-weekly-workspace/
 ├── mock-mcp/                  # 仅 demo 用，不属于交付物
 │   ├── _db.py                 # MySQL 连接（只读用户，密码不进日志）
 │   ├── _store.py              # 只读查询层 + 口径规则 + 字段管控
-│   └── server.py              # 27 个语义化取数工具（Streamable HTTP MCP）
+│   └── server.py              # 29 个语义化取数工具（Streamable HTTP MCP）
 └── tests/
-    ├── smoke_test.py          # 113 条契约断言，不花模型 token
+    ├── smoke_test.py          # 153 条契约断言，不花模型 token
     └── baseline.py            # 396 题准确率基线（LLM 判定）
 ```
 
 ## 取数契约
 
-27 个语义化工具，SQL 与口径规则固化在服务端，agent 侧不产 SQL：
+29 个语义化工具，SQL 与口径规则固化在服务端，agent 侧不产 SQL：
 
 | 工具 | 用途 |
 |------|------|
@@ -113,6 +113,8 @@ guoshu-weekly-workspace/
 | `weekly_workflow_query` | 审批动作流水（谁在哪个环节做了什么） |
 | `weekly_submission_query` | 审批提交单（`round_no` / `status` / 填报人） |
 | `weekly_owner_roles` | 按角色分别计数（as_owner / as_lead / any_role） |
+| `weekly_person_stats` | 人员统计（任务量/人均/独苗/跨组/双角色/标识写法/填报人/审核人/自审） |
+| `weekly_attachment_stats` | 附件统计（容量/类型/最大/上传人/挂载去向/在途提交单/逐月/软删/孤儿） |
 | `weekly_attachment_query` | 附件清单（不含 `storage_path`） |
 | `weekly_import_audit` | 导入批次对账 |
 | `weekly_freshness` | 各看板最新进展时间 |
@@ -124,7 +126,7 @@ guoshu-weekly-workspace/
 | `weekly_group_detail_query` | 集团组明细（目标成果/实施举措/进度成效/完成时间文本） |
 | `weekly_group_owner_query` | 集团组按牵头人或项目负责人查任务（多值精确匹配） |
 | `weekly_group_history` | 集团组历史进展（专表，可按年/月/季/任务/填报人分组） |
-| `weekly_group_stats` | 集团组统计（负责人构成/完成时间格式/字数/附件/期数） |
+| `weekly_group_stats` | 集团组统计（负责人构成/分隔符写法/一栏几人/完成时间格式/字数/附件/期数） |
 | `weekly_year_goal_query` | 年度目标条目（按任务/年份，带里程碑摘要） |
 | `weekly_year_goal_stats` | 年度目标统计（分年/覆盖率/缺口/缺口分组/跨年跨度/连续设标） |
 | `weekly_milestone_stats` | 里程碑统计（完成率/多维分解/软删审计/每任务分布/任务与里程碑错配） |
@@ -163,6 +165,12 @@ agent 据此给出依据、也据此判断不可答。
 | 提交单状态另有一套码值 | 已发布叫 `published` 不叫 `approved`；给值域外的词过滤会静默失效，工具随结果回 `status_domain` 并点名该条件未生效 |
 | 附件大小是字节不换算 | `file_size` 原样报出，换成「约 3.8MB」即与精确值不一致 |
 | 组内人数由服务端去重 | `group_by=project_group` 直接给 `lead_owner_count` / `project_owner_count`，让模型数人名会数错 |
+| 姓名列填满≠ID 列填满 | `project_owner_name` 128 条全满而 `project_owner_id` 只有 119 条；只看姓名列会如实答「无缺失」，与真值 9 条相反 |
+| 填报闸门与审核闸门不同 | 填报统计加 `p.is_published = 1`，审核统计**不加**——审过但未发布的进展同样算审过 |
+| 多值负责人栏「单人」是一档 | 分隔符统计里 `单人无分隔符` 与逗号、顿号并列成档，不是缺失 |
+| 附件挂载一条只进一档 | 优先级 进展 > 提交单 > 任务本体，各档相加等于总数；「在途」按提交单自己的 `status <> 'published'` 判 |
+| 孤儿行必须走 NOT EXISTS | 附件 `task_id` 对不上任务表的有 3 条，用 JOIN 查会恒等于 0 |
+| 软删审计不加任务闸门 | 问的是表本身（543 行中 33 条已删），按任务过滤会少算 |
 
 ### 相对时间窗以快照日为基准
 
@@ -198,7 +206,7 @@ R-04/R-14 要的是「按权限返回」。一律遮蔽同样不满足需求—�
 | 数据权限 | 敏感字段按 token 两档分级 | 按 OA 真实身份做行级权限 |
 | 前端 | 无（经 psi-agent 既有接口） | 专建对话应用 + BFF（方案第六章） |
 | 材料生成 | 无 | 报告下载与图表（P1，第 5 期） |
-| 评测 | 113 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
+| 评测 | 153 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
 
 ### mock 数据层的两处不可外推
 

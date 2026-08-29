@@ -18,7 +18,7 @@ import anyio
 from psi_agent._yaml import parse_yaml_header
 
 TOOL_GUIDE = """\
-## 取数工具（共 27 个，按用途分组）
+## 取数工具（共 29 个，按用途分组）
 
 清单即全集：这里没有的工具就是没有。聚合、统计、覆盖率、排名类问题优先找下面的
 统计类工具，别用清单类工具拉明细再自己数——服务端算的才是口径内的数。
@@ -38,7 +38,11 @@ TOOL_GUIDE = """\
 聚合与完整性
 - weekly_aggregate：按 board/category/status/project_group/owner 聚合计数，空分组会保留；
   group_by=project_group 还直接给出各组的牵头人数与责任人数（已去重）。
-- weekly_field_completeness：某字段填了多少、缺多少（R-07/R-19）。
+- weekly_field_completeness：某字段填了多少、缺多少（R-07/R-19）；list_missing=True 直接给缺项清单。
+  问「谁没指定负责人」要查 ID 列（project_owner_id），姓名列 128 条全满、ID 列只有 119 条，
+  只看姓名列会答成「无缺失」。
+- weekly_person_stats：人员维度统计——任务量排名/人均/只带一条的人/跨专项组/同时兼两个角色/
+  标识写法分档/同名多标识/最长标识，以及填报人、审核人、自审记录。人数与条数都已服务端算好。
 
 进展与时效
 - weekly_progress_history：单任务的进展版本，version_no 倒序，第一条即当期。
@@ -57,13 +61,16 @@ TOOL_GUIDE = """\
 - weekly_submission_query：审批提交单（按 task_id + round_no），带状态分档与状态值域。
 - weekly_approval_turnaround：审批耗时（整体/按看板/最慢/在办积压）。
 - weekly_attachment_query：附件清单，不含 storage_path；file_size 单位是字节。
+- weekly_attachment_stats：附件聚合——总容量/按类型/最大文件/按上传人/上传人数/挂载去向/
+  在途提交单上的附件/逐月趋势/软删审计/孤儿行。清单工具封顶 200 条，求和计数一律用这个。
 - weekly_import_audit：导入批次对账（批次数 vs 去重快照日期数）。
 
 专项组看板（有自己的表，不要拿通用工具查）
 - weekly_group_detail_query：专项组明细表（目标/措施/负责人/完成情况文本）。
 - weekly_group_owner_query：按负责人查专项组任务，或列出该看板的负责人字段。
 - weekly_group_history：专项组进展历史（独立表，非 task_progress）。
-- weekly_group_stats：专项组看板的聚合统计。
+- weekly_group_stats：专项组看板的聚合统计，含多值负责人栏的分隔符写法（separators）
+  与一栏里几个人（owner_widths）。
 """
 
 CALIBER_RULES = """\
@@ -81,6 +88,13 @@ CALIBER_RULES = """\
    返回「[按权限不展示]」时，说明按权限不展示，不要推测内容、不要换工具绕路取。
 7. 附件 storage_path 禁止外泄，工具不返回，也不要拼装下载链接。
 8. 相对时间（本周/最近）以 weekly_freshness 的快照时间锚定，不用机器当前时间。
+9. 姓名列填满不等于 ID 列填满。问「谁没指定负责人」要看 ID 列：
+   project_owner_name 全满而 project_owner_id 有缺，只看姓名列会得出相反结论。
+10. 同一张表上不同问题的闸门可能不同——填报统计加进展行发布闸门，审核统计不加
+    （审过但未发布的进展同样算审过）；软删审计问的是表本身，不加任务闸门。
+    照抄 caliber，不要把两道口径混着说。
+11. 返回 0 行时先看 caliber 怎么说：写明「0 行即不存在」的，就如实答不存在；
+    没有这句的，先确认是否过滤条件本身没生效，再下结论。
 
 ## 判为不可答
 

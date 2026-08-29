@@ -509,6 +509,217 @@ def weekly_attachment_query(task: str = "", limit: int = 200) -> str:
     return _guard("weekly_attachment_query", work)
 
 
+# 附件的聚合口径。deleted / orphan 两档故意不加任务闸门：问的是表本身。
+_ATTACHMENT_STATS_SCOPES = (
+    "summary",
+    "by_ext",
+    "largest",
+    "by_uploader",
+    "uploader_count",
+    "by_link",
+    "by_progress",
+    "on_open_submission",
+    "by_month",
+    "deleted",
+    "deleted_by_link",
+    "orphan",
+)
+
+
+@mcp.tool()
+def weekly_attachment_stats(
+    scope: str = "summary",
+    date_from: str = "",
+    top: int = 200,
+) -> str:
+    """Aggregate attachments: size totals, file types, uploaders, soft-delete audit.
+
+    weekly_attachment_query lists rows and caps at 200, so counting or summing by
+    reading rows back understates every total -- there are 454 live attachments on
+    formal tasks.  Sizes are returned in bytes AND in MB: the byte figure is the
+    authoritative one.
+
+    Args:
+        scope: summary (count, total bytes/MB, average) / by_ext (per file
+            extension) / largest (biggest files first) / by_uploader (per uploader,
+            with size) / uploader_count (distinct uploaders) / by_link (attached to
+            progress vs submission vs the task itself) / by_progress (per published
+            progress round, attachment-heavy first) / on_open_submission (count on
+            submissions that are not yet published) / by_month (uploads per month) /
+            deleted (soft-delete audit, whole table) / deleted_by_link (deleted rows
+            by attach point) / orphan (rows whose task_id has no task).
+        date_from: For by_month, inclusive lower bound YYYY-MM-DD.
+        top: Row cap for the listing scopes.
+    """
+
+    def work() -> dict[str, Any]:
+        key = (scope or "summary").strip().lower()
+        if key not in _ATTACHMENT_STATS_SCOPES:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported_scope",
+                    "message": f"不支持的口径：{scope}；支持 {', '.join(_ATTACHMENT_STATS_SCOPES)}",
+                },
+            }
+        bounded = max(1, min(store.MAX_ROWS, int(top)))
+        # 活跃附件的口径：任务侧 R-01 + 附件行自身的软删标记，两道都要。
+        live = (
+            "FROM task_attachment a JOIN task t ON t.id = a.task_id "
+            f"WHERE {store.formal_task_clause()} AND a.is_deleted = 0"
+        )
+        live_caliber = f"{store.FORMAL_TASK_CALIBER} 且 a.is_deleted = 0（任务闸门 + 附件行软删两道）"
+        size_note = "file_size 单位是字节，bytes 列为权威值，MB 列由服务端换算仅供参考"
+        # 关联去向的分档表达式，三处口径必须一致，抽出来共用。
+        link_case = (
+            "CASE WHEN a.progress_id IS NOT NULL THEN '挂在进展' "
+            "WHEN a.workflow_submission_id IS NOT NULL THEN '挂在提交单' "
+            "ELSE '挂在任务本体' END"
+        )
+
+        if key == "summary":
+            return store.fetch(
+                "SELECT COUNT(*) AS attachment_count, SUM(a.file_size) AS total_bytes, "
+                "ROUND(SUM(a.file_size) / 1024 / 1024, 1) AS total_mb, "
+                "ROUND(AVG(a.file_size) / 1024, 1) AS avg_kb, "
+                f"COUNT(DISTINCT a.task_id) AS tasks_with_attachment {live}",
+                caliber=f"{live_caliber}；{size_note}",
+                limit=1,
+            )
+
+        if key == "by_ext":
+            return store.fetch(
+                "SELECT LOWER(SUBSTRING_INDEX(a.file_name, '.', -1)) AS ext, COUNT(*) AS n, "
+                "SUM(a.file_size) AS total_bytes, "
+                f"ROUND(SUM(a.file_size) / 1024 / 1024, 1) AS total_mb {live} "
+                "GROUP BY ext ORDER BY n DESC, ext",
+                caliber=f"{live_caliber}；按扩展名分档，取文件名最后一段；{size_note}",
+                limit=bounded,
+            )
+
+        if key == "largest":
+            return store.fetch(
+                "SELECT a.file_name, a.file_size, "
+                "ROUND(a.file_size / 1024 / 1024, 2) AS size_mb, t.task_name "
+                f"{live} ORDER BY a.file_size DESC, a.id",
+                caliber=f"{live_caliber}；按字节倒序，最大的一条即首行；{size_note}",
+                limit=bounded,
+            )
+
+        if key == "by_uploader":
+            return store.fetch(
+                "SELECT a.uploader_id, COUNT(*) AS upload_count, SUM(a.file_size) AS total_bytes, "
+                f"ROUND(SUM(a.file_size) / 1024 / 1024, 1) AS total_mb {live} "
+                "GROUP BY a.uploader_id ORDER BY upload_count DESC, a.uploader_id",
+                caliber=(f"{live_caliber}；按 uploader_id 分组，不是按任务或看板；并列按 ID 定序；{size_note}"),
+                limit=bounded,
+            )
+
+        if key == "uploader_count":
+            return store.fetch(
+                f"SELECT COUNT(DISTINCT a.uploader_id) AS uploader_count {live}",
+                caliber=f"{live_caliber}；去重上传人数由服务端算，别数返回行",
+                limit=1,
+            )
+
+        if key == "by_link":
+            # 优先级是 progress → submission → 任务本体，一条附件只进一档。
+            return store.fetch(
+                f"SELECT {link_case} AS link_type, COUNT(*) AS n {live} GROUP BY link_type ORDER BY n DESC, link_type",
+                caliber=(
+                    f"{live_caliber}；按挂载去向分档，优先级 进展 > 提交单 > 任务本体，"
+                    "一条附件只进一档，各档相加等于总数"
+                ),
+                limit=bounded,
+            )
+
+        if key == "by_progress":
+            # 「哪些已发布进展带了附件」：闸门在 progress 行上（p.is_published = 1），
+            # 与任务闸门是两道。按 (任务, 期号) 聚合，附件多的在前。
+            return store.fetch(
+                "SELECT t.task_name, p.version_no, COUNT(*) AS attachment_count "
+                "FROM task_attachment a JOIN task_progress p ON p.id = a.progress_id "
+                "AND p.is_published = 1 JOIN task t ON t.id = a.task_id "
+                f"WHERE {store.formal_task_clause()} AND a.is_deleted = 0 "
+                "GROUP BY t.id, t.task_name, p.version_no "
+                "ORDER BY attachment_count DESC, t.id, p.version_no",
+                caliber=(
+                    f"{live_caliber} 且 p.is_published = 1（进展行发布闸门，与任务闸门是两道）；"
+                    "按任务+期号聚合，同一任务可出现多期；并列按任务 id、期号定序"
+                ),
+                limit=bounded,
+            )
+
+        if key == "on_open_submission":
+            # 「在途」= 提交单状态不是 published。提交单状态另有码值，
+            # 不能拿任务的 workflow_status 来判。
+            return store.fetch(
+                "SELECT COUNT(*) AS attachment_count "
+                "FROM task_attachment a "
+                "JOIN task_workflow_submission s ON s.id = a.workflow_submission_id "
+                f"JOIN task t ON t.id = a.task_id WHERE {store.formal_task_clause()} "
+                "AND a.is_deleted = 0 AND s.status <> 'published'",
+                caliber=(
+                    f"{live_caliber} 且 s.status <> 'published'（在途提交单）；"
+                    "提交单状态是自己的一套码值，已发布叫 published，不要拿任务的 workflow_status 判"
+                ),
+                limit=1,
+            )
+
+        if key == "by_month":
+            params: dict[str, Any] = {}
+            extra = ""
+            if date_from.strip():
+                params["df"] = date_from.strip()
+                extra = " AND a.upload_time >= %(df)s"
+            return store.fetch(
+                "SELECT DATE_FORMAT(a.upload_time, '%%Y-%%m') AS ym, COUNT(*) AS n, "
+                f"ROUND(SUM(a.file_size) / 1024 / 1024, 1) AS total_mb {live}{extra} "
+                "GROUP BY ym ORDER BY ym",
+                params,
+                caliber=(
+                    f"{live_caliber}；按 upload_time 的年月分组，升序；"
+                    + (f"仅 {date_from.strip()} 起" if date_from.strip() else "未限起始月，含全部历史")
+                ),
+                limit=bounded,
+            )
+
+        if key == "deleted":
+            # 软删审计问的是表本身，加任务闸门会少算。
+            return store.fetch(
+                "SELECT SUM(a.is_deleted = 0) AS active, SUM(a.is_deleted = 1) AS deleted, "
+                "COUNT(*) AS total_rows, "
+                "SUM(CASE WHEN a.is_deleted = 1 THEN a.file_size ELSE 0 END) AS deleted_bytes, "
+                "ROUND(SUM(CASE WHEN a.is_deleted = 1 THEN a.file_size ELSE 0 END) / 1024 / 1024, 1) "
+                "AS deleted_mb FROM task_attachment a",
+                caliber=f"全表口径（不加任务闸门）：这是关于表的问题，按任务过滤会少算；{size_note}",
+                limit=1,
+            )
+
+        if key == "deleted_by_link":
+            return store.fetch(
+                f"SELECT {link_case} AS link_type, COUNT(*) AS n, "
+                "ROUND(SUM(a.file_size) / 1024 / 1024, 1) AS total_mb "
+                "FROM task_attachment a WHERE a.is_deleted = 1 "
+                "GROUP BY link_type ORDER BY n DESC, link_type",
+                caliber=f"仅已软删附件（a.is_deleted = 1），全表口径不加任务闸门；{size_note}",
+                limit=bounded,
+            )
+
+        # orphan: task_id 指向不存在的任务。NOT EXISTS 而非 JOIN，否则孤儿行整批消失。
+        return store.fetch(
+            "SELECT COUNT(*) AS orphan_count FROM task_attachment a WHERE a.is_deleted = 0 "
+            "AND NOT EXISTS (SELECT 1 FROM task t WHERE t.id = a.task_id)",
+            caliber=(
+                "a.is_deleted = 0 且 task_id 在 task 表中无对应行；"
+                "走 NOT EXISTS，用 JOIN 会把孤儿行全部丢掉从而恒等于 0"
+            ),
+            limit=1,
+        )
+
+    return _guard("weekly_attachment_stats", work)
+
+
 @mcp.tool()
 def weekly_submission_query(
     task: str = "",
@@ -645,6 +856,221 @@ def weekly_owner_roles(person: str) -> str:
     return _guard("weekly_owner_roles", work)
 
 
+# 人员维度的聚合口径。每一项都对应一类「让模型自己数人」会数错的问题。
+_PERSON_STATS_SCOPES = (
+    "workload",
+    "workload_summary",
+    "single_task",
+    "cross_group",
+    "dual_role",
+    "id_format",
+    "id_variants",
+    "id_longest",
+    "reporters",
+    "reporter_count",
+    "reviewers",
+    "self_review",
+)
+
+# 人员所在的列。姓名列与 ID 列口径不同，必须分开问。
+_PERSON_ROLE_COLUMNS: dict[str, tuple[str, str]] = {
+    "lead_owner": ("lead_owner_name", "分管领导（牵头人）"),
+    "project_owner": ("project_owner_name", "项目负责人"),
+}
+
+
+@mcp.tool()
+def weekly_person_stats(scope: str = "workload", role: str = "lead_owner", top: int = 200) -> str:
+    """Aggregate formal tasks by person: workload, cross-group spread, id formats.
+
+    weekly_owner_roles answers "how many does THIS person have"; this answers the
+    population-level questions -- who carries the most, how many carry exactly
+    one, how many distinct people there are, and whether the id column is
+    internally consistent.  Counting people by reading rows back is the single
+    biggest source of wrong answers in the F class, so every count here is
+    computed server-side.
+
+    Args:
+        scope: One of workload / workload_summary / single_task / cross_group /
+            dual_role / id_format / id_variants / id_longest / reporters /
+            reporter_count / reviewers / self_review.
+        role: Which person column to group by: lead_owner or project_owner.
+        top: Row cap for the listing scopes.
+    """
+
+    def work() -> dict[str, Any]:
+        key = (scope or "workload").strip().lower()
+        if key not in _PERSON_STATS_SCOPES:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported_scope",
+                    "message": f"不支持的口径：{scope}；支持 {', '.join(_PERSON_STATS_SCOPES)}",
+                },
+            }
+        role_key = (role or "lead_owner").strip().lower()
+        if role_key not in _PERSON_ROLE_COLUMNS:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported_role",
+                    "message": f"不支持的角色：{role}；支持 {', '.join(sorted(_PERSON_ROLE_COLUMNS))}",
+                },
+            }
+        column, role_label = _PERSON_ROLE_COLUMNS[role_key]
+        bounded = max(1, min(store.MAX_ROWS, int(top)))
+        clause = store.formal_task_clause()
+        # 姓名为空的行不是「一个叫空的人」，计人头时必须排除，否则人数会多 1。
+        named = f"{clause} AND t.{column} IS NOT NULL AND t.{column} <> ''"
+        base = f"{store.FORMAL_TASK_CALIBER}；按「{role_label}」分组，姓名为空的行不计入人头"
+
+        if key == "workload":
+            return store.fetch(
+                f"SELECT t.{column} AS person, COUNT(*) AS task_count "
+                f"FROM task t WHERE {named} "
+                f"GROUP BY t.{column} ORDER BY task_count DESC, person",
+                caliber=f"{base}；并列按姓名定序，取「最多」时留意并列",
+                limit=bounded,
+            )
+
+        if key == "workload_summary":
+            # 平均值必须一次算完：分组后让模型自己求平均，它会拿组内均值当全局均值。
+            return store.fetch(
+                "SELECT COUNT(*) AS tasks, "
+                f"COUNT(DISTINCT t.{column}) AS people, "
+                f"ROUND(COUNT(*) / COUNT(DISTINCT t.{column}), 2) AS avg_tasks_per_person, "
+                f"MAX(c.task_count) AS max_tasks, MIN(c.task_count) AS min_tasks "
+                f"FROM task t JOIN (SELECT t2.{column} AS person, COUNT(*) AS task_count "
+                f"FROM task t2 WHERE {named.replace('t.', 't2.')} GROUP BY t2.{column}) c "
+                f"ON c.person = t.{column} WHERE {named}",
+                caliber=f"{base}；avg_tasks_per_person = 任务数 / 去重人数，为全局均值而非组内均值",
+                limit=1,
+            )
+
+        if key == "single_task":
+            return store.fetch(
+                f"SELECT t.{column} AS person, COUNT(*) AS task_count "
+                f"FROM task t WHERE {named} "
+                f"GROUP BY t.{column} HAVING task_count = 1 ORDER BY person",
+                caliber=f"{base}；只带 1 个任务的人，HAVING 由服务端判定",
+                limit=bounded,
+            )
+
+        if key == "cross_group":
+            return store.fetch(
+                f"SELECT t.{column} AS person, COUNT(DISTINCT t.project_group) AS group_count, "
+                "GROUP_CONCAT(DISTINCT t.project_group ORDER BY t.project_group) AS group_list, "
+                "COUNT(*) AS task_count "
+                f"FROM task t WHERE {named} AND t.project_group IS NOT NULL "
+                f"GROUP BY t.{column} HAVING group_count > 1 "
+                "ORDER BY group_count DESC, person",
+                caliber=f"{base}；跨组人员，group_count 已按专项组去重；仅列跨 2 组以上者",
+                limit=bounded,
+            )
+
+        if key == "dual_role":
+            # 同一个人既牵头又当项目负责人。两个角色各自的计数都由服务端算。
+            return store.fetch(
+                "SELECT x.person, x.as_lead, x.as_project_owner FROM ("
+                "SELECT t.lead_owner_name AS person, COUNT(*) AS as_lead, "
+                "(SELECT COUNT(*) FROM task t2 "
+                f"WHERE {clause.replace('t.', 't2.')} "
+                "AND t2.project_owner_name = t.lead_owner_name) AS as_project_owner "
+                f"FROM task t WHERE {clause} AND t.lead_owner_name IS NOT NULL "
+                "GROUP BY t.lead_owner_name) x "
+                "WHERE x.as_project_owner > 0 ORDER BY x.as_lead DESC, x.person",
+                caliber=(
+                    f"{store.FORMAL_TASK_CALIBER}；同时担任牵头人与项目负责人的人；"
+                    "两个角色各自计数均按正式任务口径，别把两列相加"
+                ),
+                limit=bounded,
+            )
+
+        if key == "id_format":
+            # 用户标识是异构的：纯数字工号、u 前缀、NDG 域账号。分档必须落在服务端，
+            # 模型按返回行自己分类会把 128 行都算进去而不是有 ID 的那些。
+            return store.fetch(
+                "SELECT CASE WHEN t.owner_user_id REGEXP '^[0-9]+$' THEN '纯数字工号' "
+                "WHEN t.owner_user_id LIKE 'u%%' THEN 'u 前缀账号' "
+                "WHEN t.owner_user_id LIKE 'NDG%%' THEN 'NDG 域账号' ELSE '其他' END AS id_format, "
+                "COUNT(*) AS task_count FROM task t "
+                f"WHERE {clause} AND t.owner_user_id IS NOT NULL AND t.owner_user_id <> '' "
+                "GROUP BY id_format ORDER BY task_count DESC, id_format",
+                caliber=(
+                    f"{store.FORMAL_TASK_CALIBER}；按 owner_user_id 的写法分档；"
+                    "仅统计有标识的任务，空标识不进任何档，各档相加不等于任务总数"
+                ),
+                limit=bounded,
+            )
+
+        if key == "id_variants":
+            # 「同一个人在不同任务里会不会是不同格式的标识」——空集就是答案，
+            # 空集说明不存在，不能反过来说「会」。
+            return store.fetch(
+                f"SELECT t.{column} AS person, COUNT(DISTINCT t.{column.replace('_name', '_id')}) AS id_variants, "
+                f"GROUP_CONCAT(DISTINCT t.{column.replace('_name', '_id')} "
+                f"ORDER BY t.{column.replace('_name', '_id')}) AS ids "
+                f"FROM task t WHERE {named} "
+                f"GROUP BY t.{column} HAVING id_variants > 1 ORDER BY id_variants DESC, person",
+                caliber=(f"{base}；同名多标识检查；返回 0 行即该口径下不存在这种人，不要据此说「会出现」"),
+                limit=bounded,
+            )
+
+        if key in {"reporters", "reporter_count", "reviewers", "self_review"}:
+            # 填报人/审核人在 task_progress 上而不在 task 上：任务侧 R-01 之外
+            # 还有行级 is_published = 1 这道闸门，两道口径不能混。
+            hist = f"FROM task_progress p JOIN task t ON t.id = p.task_id WHERE {clause}"
+            gate = f"{store.FORMAL_TASK_CALIBER} 且 p.is_published = 1（任务闸门 + 进展行发布闸门）"
+
+            if key == "reporters":
+                return store.fetch(
+                    "SELECT p.reporter_id, COUNT(*) AS reported_rounds, "
+                    f"COUNT(DISTINCT p.task_id) AS tasks {hist} AND p.is_published = 1 "
+                    "GROUP BY p.reporter_id ORDER BY reported_rounds DESC, p.reporter_id",
+                    caliber=f"{gate}；按填报人分组，并列按 ID 定序",
+                    limit=bounded,
+                )
+            if key == "reporter_count":
+                return store.fetch(
+                    f"SELECT COUNT(DISTINCT p.reporter_id) AS reporter_count {hist} AND p.is_published = 1",
+                    caliber=f"{gate}；去重填报人数由服务端算，别数返回行",
+                    limit=1,
+                )
+            if key == "reviewers":
+                # 审核口径故意不加 is_published：审过但未发布的进展也是审过的。
+                return store.fetch(
+                    f"SELECT p.reviewer_id, COUNT(*) AS reviewed {hist} AND p.reviewer_id IS NOT NULL "
+                    "GROUP BY p.reviewer_id ORDER BY reviewed DESC, p.reviewer_id",
+                    caliber=(
+                        f"{store.FORMAL_TASK_CALIBER} 且 p.reviewer_id 非空；"
+                        "审核口径不加 p.is_published：审过但未发布的进展同样算审过"
+                    ),
+                    limit=bounded,
+                )
+            return store.fetch(
+                "SELECT t.task_name, p.version_no, p.reporter_id, p.reviewer_id "
+                f"{hist} AND p.reviewer_id IS NOT NULL AND p.reporter_id = p.reviewer_id "
+                "ORDER BY t.id, p.version_no",
+                caliber=(
+                    f"{store.FORMAL_TASK_CALIBER} 且填报人与审核人为同一 ID；"
+                    "按 ID 相等判定，不按姓名；此清单即全部自审记录"
+                ),
+                limit=bounded,
+            )
+
+        return store.fetch(
+            "SELECT t.owner_user_id, CHAR_LENGTH(t.owner_user_id) AS id_length "
+            f"FROM task t WHERE {clause} AND t.owner_user_id IS NOT NULL AND t.owner_user_id <> '' "
+            "ORDER BY id_length DESC, t.owner_user_id",
+            caliber=(
+                f"{store.FORMAL_TASK_CALIBER}；按标识字符长度倒序；长度相同的多个标识属并列，取「最长」时按并列陈述"
+            ),
+            limit=bounded,
+        )
+
+    return _guard("weekly_person_stats", work)
+
+
 # Fields whose fill-in rate can be asked about (R-07 / R-19). Whitelisted rather
 # than interpolated from the argument: the column name reaches SQL as an
 # identifier, which no placeholder can bind.
@@ -654,6 +1080,11 @@ _COMPLETENESS_FIELDS: dict[str, tuple[str, str]] = {
     "project_owner_name": ("task", "项目负责人"),
     "lead_owner_name": ("task", "分管领导"),
     "project_group": ("task", "项目组"),
+    # 姓名列和 ID 列的完整度不是一回事：project_owner_name 128 条全满，
+    # project_owner_id 只有 119 条，缺的那 9 条只能从 ID 列看出来。
+    "owner_user_id": ("task", "责任人 ID"),
+    "project_owner_id": ("task", "项目负责人 ID"),
+    "lead_owner_id": ("task", "分管领导 ID"),
     "target_result": ("task_group_detail", "目标成果"),
     "implementation_measure": ("task_group_detail", "实施举措"),
     "progress_effect": ("task_group_detail", "进度成效"),
@@ -713,6 +1144,8 @@ _GROUP_STATS_SCOPES = (
     "field_lengths",
     "attachments",
     "history_rounds",
+    "separators",
+    "owner_widths",
 )
 
 # Buckets over task_group_progress_history.report_time -- the group board keeps
@@ -744,7 +1177,7 @@ _MILESTONE_MISMATCH_KINDS = ("task_done_milestones_open", "milestones_done_task_
 
 
 @mcp.tool()
-def weekly_field_completeness(field: str = "") -> str:
+def weekly_field_completeness(field: str = "", list_missing: bool = False, limit: int = 200) -> str:
     """Count how many formal tasks have a given field filled in (R-07 / R-19).
 
     Answers "how many tasks have an overall goal / a named project owner" with one
@@ -753,6 +1186,8 @@ def weekly_field_completeness(field: str = "") -> str:
 
     Args:
         field: Column to measure; empty lists the supported columns.
+        list_missing: Return the rows that are missing the field, not just counts.
+        limit: Row cap for ``list_missing``.
     """
 
     def work() -> dict[str, Any]:
@@ -777,6 +1212,29 @@ def weekly_field_completeness(field: str = "") -> str:
             }
         table, label = _COMPLETENESS_FIELDS[token]
         clause = store.formal_task_clause()
+
+        if list_missing:
+            # 「哪些任务没填」需要的是清单，不是占比。计数问不出是哪 9 条。
+            # LEFT JOIN 保留无明细行的任务，它们也算缺项（R-08）。
+            join = "" if table == "task" else f"LEFT JOIN {table} d ON d.task_id = t.id "
+            col = f"t.{token}" if table == "task" else f"d.{token}"
+            gap = f"({col} IS NULL OR {col} = '')"
+            missing_rows = store.fetch(
+                "SELECT t.id, t.task_name, t.owner_user_id, t.project_owner_id, "
+                "t.project_owner_name, t.lead_owner_name "
+                f"FROM task t {join}WHERE {clause} AND {gap} ORDER BY t.id",
+                caliber=(
+                    f"{store.FORMAL_TASK_CALIBER}；列出「{label}」为空的正式任务（R-07/R-19）；"
+                    "空字符串按未填计入；此清单即全部缺项，按 total_count 逐条列全"
+                ),
+                limit=limit,
+            )
+            total = store.scalar(f"SELECT COUNT(*) AS n FROM task t {join}WHERE {clause} AND {gap}")
+            missing_rows["total_count"] = total.get("value")
+            missing_rows["field"] = token
+            missing_rows["field_label"] = label
+            return missing_rows
+
         if table == "task":
             sql = (
                 f"SELECT COUNT(*) AS total, SUM(t.{token} IS NOT NULL AND t.{token} <> '') AS filled, "
@@ -1885,6 +2343,9 @@ def weekly_group_stats(scope: str = "owners", top: int = 8, min_rounds: int = 0)
 
     Args:
         scope: ``owners`` (multi vs single lead, distinct leads),
+            ``separators`` (how project_owner_names is delimited, single-person
+            cells counted as their own bucket),
+            ``owner_widths`` (people per project_owner_names cell, widest first),
             ``completion_time`` (ISO vs free text vs blank),
             ``field_lengths`` (target_result char stats),
             ``attachments`` (per-task counts, zero kept),
@@ -1932,6 +2393,41 @@ def weekly_group_stats(scope: str = "owners", top: int = 8, min_rounds: int = 0)
             )
             summary["distinct_leads"] = distinct["value"]
             return summary
+
+        if key == "separators":
+            # 多值负责人栏的分隔符是混着填的：半角逗号、顿号、两者并存、以及
+            # 只有一个人因此看不出分隔符。分档必须落在服务端，模型按返回行
+            # 自己数会把「只有一个人」误判成某种分隔符。
+            return store.fetch(
+                "SELECT CASE "
+                "WHEN d.project_owner_names LIKE '%%、%%' AND d.project_owner_names LIKE '%%,%%' "
+                "  THEN '两种并存' "
+                "WHEN d.project_owner_names LIKE '%%、%%' THEN '全角顿号' "
+                "WHEN d.project_owner_names LIKE '%%,%%' THEN '半角逗号' "
+                "ELSE '单人无分隔符' END AS separator_kind, COUNT(*) AS n "
+                f"FROM task_group_detail d JOIN task t ON t.id = d.task_id {join} "
+                f"WHERE {clause} AND d.project_owner_names IS NOT NULL AND d.project_owner_names <> '' "
+                "GROUP BY separator_kind ORDER BY n DESC, separator_kind",
+                caliber=(
+                    f"{base}；按 project_owner_names 里出现的分隔符分档；"
+                    "「单人无分隔符」是独立一档不是缺失；仅统计该栏非空的任务"
+                ),
+                limit=bounded,
+            )
+
+        if key == "owner_widths":
+            # 人数 = 分隔符个数 + 1，两种分隔符都要扣掉再算，否则顿号那两行会少算。
+            return store.fetch(
+                "SELECT t.task_name, d.project_owner_names, "
+                "CHAR_LENGTH(d.project_owner_names) "
+                "- CHAR_LENGTH(REPLACE(REPLACE(d.project_owner_names, '、', ''), ',', '')) "
+                "+ 1 AS owner_count "
+                f"FROM task_group_detail d JOIN task t ON t.id = d.task_id {join} "
+                f"WHERE {clause} AND d.project_owner_names IS NOT NULL AND d.project_owner_names <> '' "
+                "ORDER BY owner_count DESC, t.id",
+                caliber=(f"{base}；owner_count = 分隔符个数 + 1，顿号与逗号都计入；按人数倒序，最多的一条即首行"),
+                limit=bounded,
+            )
 
         if key == "completion_time":
             return store.fetch(

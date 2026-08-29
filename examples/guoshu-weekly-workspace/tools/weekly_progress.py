@@ -242,17 +242,31 @@ async def weekly_owner_roles(person: str) -> str:
     return await _call("weekly_owner_roles", {"person": person})
 
 
-async def weekly_field_completeness(field: str = "") -> str:
+async def weekly_field_completeness(field: str = "", list_missing: bool = False, limit: int = 200) -> str:
     """Count how many formal tasks have a given field filled in (R-07 / R-19).
 
     Use this for "how many tasks have an overall goal / a named owner" instead of
     listing every task and counting by hand. Call with an empty field to see which
     columns are supported. Empty strings count as missing, not filled.
 
+    Name columns and id columns are different questions: project_owner_name is
+    filled on all 128 formal tasks while project_owner_id is filled on 119, so
+    "which tasks have no project owner" must be asked against the id column.
+    Set list_missing to get those rows rather than a percentage.
+
     Args:
         field: Column to measure; empty lists the supported columns.
+        list_missing: Return the tasks missing the field instead of counts.
+        limit: Row cap for list_missing, capped at 200.
     """
-    return await _call("weekly_field_completeness", {"field": field})
+    try:
+        bounded = max(1, min(200, int(limit)))
+    except TypeError, ValueError:
+        return _invalid("limit must be an integer")
+    return await _call(
+        "weekly_field_completeness",
+        {"field": field, "list_missing": bool(list_missing), "limit": bounded},
+    )
 
 
 async def weekly_progress_coverage() -> str:
@@ -290,6 +304,35 @@ async def weekly_attachment_query(task: str = "", limit: int = 200) -> str:
     except TypeError, ValueError:
         return _invalid("limit must be an integer")
     return await _call("weekly_attachment_query", {"task": task, "limit": bounded})
+
+
+async def weekly_attachment_stats(scope: str = "summary", date_from: str = "", top: int = 200) -> str:
+    """Aggregate attachments: size totals, file types, uploaders, soft-delete audit.
+
+    weekly_attachment_query caps at 200 rows, so counting or summing by reading
+    rows back understates every total -- there are 454 live attachments on formal
+    tasks. Sizes come back in bytes and in MB; the byte figure is authoritative.
+
+    Args:
+        scope: summary (count, total bytes/MB, average) / by_ext (per file
+            extension) / largest (biggest first) / by_uploader (per uploader with
+            size) / uploader_count (distinct uploaders) / by_link (attached to
+            progress vs submission vs the task itself) / by_progress (per published
+            progress round, attachment-heavy first) / on_open_submission (how many
+            hang off submissions that are not yet published) / by_month (uploads per
+            month) / deleted (soft-delete audit over the whole table) /
+            deleted_by_link / orphan (rows whose task_id matches no task).
+        date_from: For by_month, inclusive lower bound YYYY-MM-DD.
+        top: Row cap, capped at 200.
+    """
+    try:
+        bounded = max(1, min(200, int(top)))
+    except TypeError, ValueError:
+        return _invalid("top must be an integer")
+    return await _call(
+        "weekly_attachment_stats",
+        {"scope": scope, "date_from": date_from, "top": bounded},
+    )
 
 
 async def weekly_health() -> str:
