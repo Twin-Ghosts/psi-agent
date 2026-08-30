@@ -33,7 +33,10 @@ TOOL_GUIDE = """\
   专项组是任务上独立一列，传 project_group 精确筛，别塞进 category 或 keyword。但问「某组的
   人都有谁」优先用 weekly_person_stats scope=group_roster：任务清单里同一个人按任务重复出现，
   标准安全组 19 条任务只有 9 位牵头人，拿 19 行去数人会多算。
-- weekly_task_detail：单任务详情（明细 + 近期进展 + 年度目标）。
+- weekly_task_detail：单任务详情（明细 + 近期进展 + 年度目标）。传的 id 存在但不属
+  正式任务时报 task_not_formal 并写明卡在哪个 workflow_status，同时指出提交单/审批动作/
+  附件三个工具按同一 id 仍可查（见第 50 条）；库里没这行才报 task_not_found。
+  两种情况都不要改用按名字搜——同名系列的（N期）是另外几条任务。
 - weekly_owner_roles：一个人分角色（责任人/牵头/分管）各带多少任务。
 - weekly_task_ranking：按子记录数（附件/进展/里程碑）给任务排名，普通「前 N 名」用它。
 - weekly_rank：并列口径三选一的排名。问句涉及并列、分组第一或「最少的几个」时用它，
@@ -390,6 +393,18 @@ CALIBER_RULES = """\
     二级分类（weekly_aggregate group_by=top_sub_per_primary，11 行），
     「每个一级分类下进展最多的任务」数的是任务（weekly_rank per_group group_by=primary_category）。
     两者都是「每组第一」，但胜出者一个是分类、一个是任务，互相代答就答错了对象。
+50. 「不属正式任务」不等于「查不到」，也不等于该换成按名字搜。报 task_not_formal 时
+    错误里会写明是哪一条、卡在哪个 workflow_status（如任务 2 是 'rejected'，未过 R-01）；
+    它的提交单、审批动作、附件挂在 task_id 外键上，用 weekly_submission_query /
+    weekly_workflow_query / weekly_attachment_query 传同一个 id 照样查得到，
+    「审批流走到哪一步」正是这么答的。此时改用名字搜是错路：同名系列的（N期）是另外
+    几条正式任务，它们的流水与这一条无关，三方信号互相矛盾只会把轮次耗光。
+    库里确实没有该 id 时报的是 task_not_found，两种错误不要混为一谈。
+51. 过滤词不在值域内，等于没过滤。提交单状态只有 cancelled / pending_audit /
+    pending_fill / pending_leader / published / rejected / signing 七个值，没有
+    approved（那是审批动作的词）。传了域外值时返回的 caliber 会写明「该过滤条件未筛掉
+    任何行」，此时结果是全量，不能说成「已排除」——问「我提交但还没发布的」应当
+    exclude_status=published（得 4 条），拿 approved 去排会把 25 条已发布的一并列出来。
 
 ## 判为不可答
 

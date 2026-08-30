@@ -1284,6 +1284,69 @@ async def run() -> int:
         missing.get("ok") is False and missing["error"]["code"] == "task_not_found",
         str(missing.get("error"))[:100],
     )
+    # M2-01. 「不属正式任务」和「库里没这行」是两种错，混成一句话就是死路：
+    # 任务 2 存在且有完整审批流水，只是 workflow_status='rejected' 没过 R-01。
+    not_formal = await _call(registry, "weekly_task_detail", task="2")
+    nf_msg = str((not_formal.get("error") or {}).get("message", ""))
+    check(
+        "M2-01 存在但非正式的任务报 task_not_formal 并写明卡在哪个 workflow_status",
+        not_formal.get("ok") is False
+        and (not_formal.get("error") or {}).get("code") == "task_not_formal"
+        and "rejected" in nf_msg
+        and "R-01" in nf_msg,
+        nf_msg[:160],
+    )
+    check(
+        "M2-01 报错同时指路三个外键工具，并明确警告不要改用按名字搜",
+        all(name in nf_msg for name in ("weekly_submission_query", "weekly_workflow_query", "weekly_attachment_query"))
+        and "不要改用按名字搜" in nf_msg,
+        nf_msg[:200],
+    )
+    absent = await _call(registry, "weekly_task_detail", task="9999")
+    check(
+        "M2-01 库里真没这行时报 task_not_found，与非正式任务区分开",
+        absent.get("ok") is False
+        and (absent.get("error") or {}).get("code") == "task_not_found"
+        and "确实没有这行" in str((absent.get("error") or {}).get("message", "")),
+        str(absent.get("error"))[:120],
+    )
+    # 指路的三个工具必须真能答出任务 2 的审批流，否则上面那句指路是空头承诺。
+    flow2 = await _call(registry, "weekly_workflow_query", task="2")
+    check(
+        "M2-01 非正式任务的审批流水仍按 task_id 外键查得到，5 条到 rejected 为止",
+        [(r.get("node_type"), r.get("action")) for r in (flow2.get("rows") or [])]
+        == [
+            ("admin", "created"),
+            ("fill", "submitted"),
+            ("sign", "approved"),
+            ("audit", "rejected"),
+            ("audit", "rejected"),
+        ],
+        f"rows={[(r.get('node_type'), r.get('action')) for r in (flow2.get('rows') or [])]}",
+    )
+    # M2-03. 意见原文属敏感字段，用户自称审批人不能放宽——遮蔽是设计内行为。
+    check(
+        "M2-03 demo 凭证下 opinion 一律遮蔽，且 caliber 说明是按权限而非无数据",
+        all(r.get("opinion") == "[按权限不展示]" for r in (flow2.get("rows") or []))
+        and "按权限展示" in str(flow2.get("caliber", "")),
+        str(flow2.get("caliber"))[:120],
+    )
+    # M3-03. 域外过滤词等于没过滤：approved 不在提交单状态值域里（那是审批动作的词）。
+    excl_pub = await _call(registry, "weekly_submission_query", reporter="u3208", exclude_status="published")
+    check(
+        "M3-03 「提交但还没发布」用 exclude_status=published 得 4 条",
+        [(r.get("task_id"), r.get("round_no"), r.get("status")) for r in (excl_pub.get("rows") or [])]
+        == [(67, 1, "pending_fill"), (90, 3, "rejected"), (111, 3, "rejected"), (122, 1, "pending_audit")],
+        f"rows={[(r.get('task_id'), r.get('status')) for r in (excl_pub.get('rows') or [])]}",
+    )
+    excl_appr = await _call(registry, "weekly_submission_query", reporter="u3208", exclude_status="approved")
+    check(
+        "M3-03 拿域外词 approved 去排等于没排：29 条全量，caliber 点明不能说成已排除",
+        excl_appr.get("total_count") == 29
+        and "不在提交单状态值域" in str(excl_appr.get("caliber", ""))
+        and "不要说成「已排除」" in str(excl_appr.get("caliber", "")),
+        f"total={excl_appr.get('total_count')}",
+    )
     bad_group = await _call(registry, "weekly_aggregate", group_by="不支持的维度")
     check(
         "不支持的聚合维度明确报错",

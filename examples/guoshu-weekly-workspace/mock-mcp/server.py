@@ -54,6 +54,45 @@ def _caller_may_read_sensitive(ctx: Context | None) -> bool:
     return bool(token) and token == SENSITIVE_TOKEN
 
 
+def _task_miss(task: str) -> dict[str, Any]:
+    """Build the formal-task miss error, saying WHICH kind of miss it is.
+
+    The bare 「未匹配到正式任务」 is a dead end: it reads the same whether the id
+    does not exist or exists outside the formal set, and it does not say that
+    other tools still answer. Both cost rounds -- M2-01 burned its whole budget
+    arbitrating between this error, a name search that landed on the later-phase
+    siblings, and the submission tools that answered about the task fine.
+    """
+    reason = store.task_miss_reason(task)
+    if reason.get("kind") == "not_formal":
+        deleted = int(reason.get("is_deleted") or 0)
+        cause = "已删除（is_deleted = 1）" if deleted else f"workflow_status = '{reason.get('workflow_status')}'"
+        return {
+            "ok": False,
+            "error": {
+                "code": "task_not_formal",
+                "message": (
+                    f"任务 {reason.get('task_id')}「{reason.get('task_name')}」存在但不属正式任务："
+                    f"{cause}，未过 R-01（is_deleted = 0 AND workflow_status = 'published'）。"
+                    "本工具按正式任务口径取数，故不返回它；"
+                    "它的提交单、审批动作、附件挂在 task_id 外键上，"
+                    "weekly_submission_query / weekly_workflow_query / weekly_attachment_query "
+                    "按 task 传同一个 id 仍可查到。"
+                    "不要改用按名字搜——同名系列的（N期）是另外几条任务，答的不是这一条"
+                ),
+            },
+        }
+    if reason.get("kind") == "absent":
+        return {
+            "ok": False,
+            "error": {
+                "code": "task_not_found",
+                "message": f"库中无此任务 id：{task}（不是口径过滤掉的，是确实没有这行）",
+            },
+        }
+    return {"ok": False, "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"}}
+
+
 def _dump(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, default=str)
 
@@ -243,10 +282,7 @@ def weekly_task_detail(task: str, ctx: Context | None = None) -> str:
     def work() -> dict[str, Any]:
         found = store.resolve_task(task)
         if found is None:
-            return {
-                "ok": False,
-                "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
-            }
+            return _task_miss(task)
         task_id = int(found["id"])
         detail = store.fetch(
             "SELECT * FROM task_group_detail WHERE task_id = %(tid)s",
@@ -308,10 +344,7 @@ def weekly_progress_history(
     def work() -> dict[str, Any]:
         task_id = store.resolve_task_id(task)
         if task_id is None:
-            return {
-                "ok": False,
-                "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
-            }
+            return _task_miss(task)
         where = "task_id = %(tid)s"
         caliber = "按 version_no 倒序，越大越新"
         if published_only:
@@ -695,10 +728,7 @@ def weekly_milestone_query(task: str = "", year: str = "", status: str = "", lim
         if task.strip():
             task_id = store.resolve_task_id(task)
             if task_id is None:
-                return {
-                    "ok": False,
-                    "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
-                }
+                return _task_miss(task)
             where.append("m.task_id = %(tid)s")
             params["tid"] = task_id
             scoped = True
@@ -866,10 +896,7 @@ def weekly_workflow_query(
             if task.strip():
                 task_id = store.resolve_task_id(task)
                 if task_id is None:
-                    return {
-                        "ok": False,
-                        "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
-                    }
+                    return _task_miss(task)
                 where.append("a.task_id = %(tid)s")
                 params["tid"] = task_id
             return store.fetch(
@@ -917,10 +944,7 @@ def weekly_workflow_query(
         if task.strip():
             task_id = store.resolve_task_id(task)
             if task_id is None:
-                return {
-                    "ok": False,
-                    "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
-                }
+                return _task_miss(task)
             where.append("a.task_id = %(tid)s")
             params["tid"] = task_id
         return store.fetch(
@@ -973,10 +997,7 @@ def weekly_attachment_query(task: str = "", board: str = "", limit: int = 200) -
         if task.strip():
             task_id = store.resolve_task_id(task)
             if task_id is None:
-                return {
-                    "ok": False,
-                    "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
-                }
+                return _task_miss(task)
             where.append("att.task_id = %(tid)s")
             params["tid"] = task_id
         if board.strip():
@@ -1503,10 +1524,7 @@ def weekly_submission_query(
         if task.strip():
             task_id = store.resolve_task_id(task)
             if task_id is None:
-                return {
-                    "ok": False,
-                    "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
-                }
+                return _task_miss(task)
             where.append("s.task_id = %(tid)s")
             params["tid"] = task_id
         if reporter.strip():
@@ -3198,10 +3216,7 @@ def weekly_freshness_distribution(
         if task.strip():
             task_id = store.resolve_task_id(task)
             if task_id is None:
-                return {
-                    "ok": False,
-                    "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
-                }
+                return _task_miss(task)
             return store.fetch(
                 "SELECT t.id AS task_id, t.task_name, t.latest_progress_time, "
                 "MAX(p.report_time) AS actual_latest_report, "
@@ -3401,10 +3416,7 @@ def weekly_year_goal_query(task: str = "", year: int = 0, limit: int = 200) -> s
         if task.strip():
             task_id = store.resolve_task_id(task)
             if task_id is None:
-                return {
-                    "ok": False,
-                    "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
-                }
+                return _task_miss(task)
             params["tid"] = task_id
             where.append("g.task_id = %(tid)s")
         if year:
@@ -3911,10 +3923,7 @@ def weekly_group_detail_query(
         if task.strip():
             task_id = store.resolve_task_id(task)
             if task_id is None:
-                return {
-                    "ok": False,
-                    "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
-                }
+                return _task_miss(task)
             params["tid"] = task_id
             where.append("d.task_id = %(tid)s")
 
@@ -4145,10 +4154,7 @@ def weekly_group_history(
         if task.strip():
             task_id = store.resolve_task_id(task)
             if task_id is None:
-                return {
-                    "ok": False,
-                    "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
-                }
+                return _task_miss(task)
             params["tid"] = task_id
             where.append("h.task_id = %(tid)s")
         else:

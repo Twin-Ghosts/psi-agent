@@ -343,6 +343,45 @@ def resolve_task(task: str) -> dict[str, Any] | None:
         conn.close()
 
 
+def task_miss_reason(task: str) -> dict[str, Any]:
+    """Explain a formal-task miss: no such row, or a row that is not formal.
+
+    "no match for a formal task: 2" is true but a dead end. Task 2 exists, is not
+    deleted and carries a full approval trail -- it merely sits at workflow_status
+    'rejected', so R-01 keeps it out of the formal set. A caller told only "no
+    match" cannot tell that apart from a typo'd id, and (this is what actually
+    happened on M2-01) starts guessing: a name search lands on the 3rd/4th-phase
+    siblings, which ARE formal but are different tasks, while the submission and
+    action tools answer about task 2 quite happily. The three signals contradict
+    each other and the round budget goes to arbitration.
+
+    So say which case it is, and for the non-formal case name the tools that
+    still answer -- the foreign-key ones, which by design do not apply R-01.
+    Diagnosing is not widening: the formal-task gate stays exactly where it was.
+    """
+    token = (task or "").strip()
+    if not token or not token.isdigit():
+        return {"kind": "unknown"}
+    conn = connect()
+    try:
+        row = _one(
+            conn,
+            "SELECT id, task_name, is_deleted, workflow_status FROM task WHERE id = %(id)s",
+            {"id": int(token)},
+        )
+    finally:
+        conn.close()
+    if row is None:
+        return {"kind": "absent"}
+    return {
+        "kind": "not_formal",
+        "task_id": int(row["id"]),
+        "task_name": row["task_name"],
+        "is_deleted": int(row["is_deleted"]),
+        "workflow_status": row["workflow_status"],
+    }
+
+
 _SERIES_SUFFIX = re.compile(r"（\d+期）$")
 
 
