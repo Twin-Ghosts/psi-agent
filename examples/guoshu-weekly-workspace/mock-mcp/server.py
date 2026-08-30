@@ -671,6 +671,21 @@ def weekly_milestone_query(task: str = "", year: str = "", status: str = "", lim
             limit=limit,
         )
         rows["total_count"] = total["value"]
+        if scoped:
+            # 与进展历史同一个病根：同名系列是各自独立的任务，各有自己的里程碑。
+            # 「数据资源登记体系建设」按裸名解析到任务 3 的 5 条是对的，但只被告知
+            # 「这里有 5 条」的调用方无从知道 41/60/79 也各有一份，答「里程碑安排」
+            # 就容易把 4 条任务的 15 条铺成一张表。把兄弟任务显式回报。
+            siblings = store.name_series(params["tid"])
+            if siblings:
+                rows["same_name_series"] = siblings
+                rows["caliber"] += (
+                    f"；本次只含任务 {params['tid']} 一条的里程碑，"
+                    f"同系列另有 {len(siblings)} 条独立任务（"
+                    + "、".join(f"{s['id']} {s['task_name']}" for s in siblings)
+                    + "），各有自己的里程碑，不要合并进本任务的安排；"
+                    "要另一条就按 id 或完整名（含「（N期）」）再查一次"
+                )
         return rows
 
     return _guard("weekly_milestone_query", work)
@@ -2015,7 +2030,7 @@ _MILESTONE_DIMENSIONS: dict[str, str] = {
     "task_status": "任务状态",
 }
 
-_MILESTONE_STATS_SCOPES = ("summary", "by_dimension", "deleted", "per_task", "mismatch")
+_MILESTONE_STATS_SCOPES = ("summary", "by_dimension", "deleted", "fully_deleted", "per_task", "mismatch")
 
 _MILESTONE_MISMATCH_KINDS = ("task_done_milestones_open", "milestones_done_task_open")
 
@@ -3419,8 +3434,12 @@ def weekly_milestone_stats(
     Args:
         scope: ``summary`` (totals and finish rate) / ``by_dimension`` (grouped by
             ``by``) / ``deleted`` (soft-delete audit, the one place deleted rows
-            are counted) / ``per_task`` (counts per task, zero-milestone tasks
-            kept) / ``mismatch`` (task status vs milestone status disagreements).
+            are counted) / ``fully_deleted`` (the tasks whose milestones were ALL
+            soft-deleted -- 3 of them, judged by NOT EXISTS on the surviving rows,
+            not by "has a deleted row", which spans 23) / ``per_task`` (counts per
+            task, zero-milestone tasks kept, with ``top_tie_count`` because the
+            top bucket is a 23-way tie at 6) / ``mismatch`` (task status vs
+            milestone status disagreements).
         by: Dimension for ``by_dimension``: year / category / group_name / status
             / task_status.
         year: Restrict to one milestone year; 0 covers all.
@@ -3467,8 +3486,34 @@ def weekly_milestone_stats(
             return store.fetch(
                 "SELECT SUM(m.is_deleted = 0) AS active, SUM(m.is_deleted = 1) AS deleted, "
                 "COUNT(*) AS total_rows FROM task_milestone m",
-                caliber="全表口径（不加任务闸门）：这是关于表的问题，按任务过滤会少算",
+                caliber=(
+                    "全表口径（不加任务闸门）：这是关于表的问题，按任务过滤会少算；"
+                    "问「哪些任务的里程碑被全部删掉了」用 scope=fully_deleted，"
+                    "这三个数答不了那个问题（有删的任务共 23 条，全删的只有 3 条）"
+                ),
                 limit=1,
+            )
+
+        if key == "fully_deleted":
+            # 「有没有任务的里程碑被全部删掉了」：deleted 只给全表 566/36/602 三个数，
+            # 逐任务清单里被删的行又根本不出现（各处都带 m.is_deleted = 0），所以这
+            # 问题此前无路可走——基线答的「无法确认」是照实说，不是模型偷懒。
+            # 「全删」必须是 NOT EXISTS 未删行，而不是「有删过行」：有删的 23 条里
+            # 只有 3 条是删干净的，混起来差一个量级。
+            return store.fetch(
+                "SELECT t.id AS task_id, t.task_name, COUNT(*) AS deleted_milestones "
+                "FROM task_milestone m JOIN task t ON t.id = m.task_id "
+                f"WHERE {clause} AND m.is_deleted = 1 "
+                "AND NOT EXISTS (SELECT 1 FROM task_milestone m2 "
+                "WHERE m2.task_id = t.id AND m2.is_deleted = 0) "
+                "GROUP BY t.id, t.task_name ORDER BY t.id",
+                caliber=(
+                    f"{store.FORMAL_TASK_CALIBER}；「全部删掉」按 NOT EXISTS 未删里程碑判，"
+                    "不是「删过里程碑」——删过的任务有 23 条，删干净的只有这 3 条；"
+                    "deleted_milestones 是该任务被删的里程碑数；"
+                    "行数为 0 才是「没有任务被全删」，这是结论本身，不要换口径重算"
+                ),
+                limit=bounded,
             )
 
         if key == "summary":
@@ -3529,7 +3574,25 @@ def weekly_milestone_stats(
                 caliber=f"{store.FORMAL_TASK_CALIBER}；LEFT JOIN 保留零里程碑任务（R-08）；{status_note}",
                 limit=bounded,
             )
+            # 「里程碑最多的任务是哪条」榜首是 23 条并列（都是 6 个）。只回榜单时
+            # 模型看到前几行同为 6 就把并列全铺开，读起来成了 23 个独立答案。
+            # 并列数交给服务端数，取舍写进口径。
+            tied = store.scalar(
+                "SELECT COUNT(*) FROM (SELECT t.id, COUNT(m.id) AS n FROM task t "
+                "LEFT JOIN task_milestone m ON m.task_id = t.id AND m.is_deleted = 0 "
+                f"WHERE {clause} GROUP BY t.id) r WHERE r.n = (SELECT MAX(r2.n) FROM "
+                "(SELECT COUNT(m.id) AS n FROM task t "
+                "LEFT JOIN task_milestone m ON m.task_id = t.id AND m.is_deleted = 0 "
+                f"WHERE {clause} GROUP BY t.id) r2)",
+            )
             rows["summary"] = summary["rows"][0] if summary["rows"] else {}
+            rows["top_tie_count"] = tied["value"]
+            rows["caliber"] += (
+                "；按里程碑数降序、并列按 task id 升序（与其他榜单同一套定序键）；"
+                f"最多那档有 {tied['value']} 条任务并列（各 6 个），"
+                "问「最多的是哪条」取首行一条（任务 8 全国一体化算力网调度平台建设），"
+                "要把并列都报出来请说明是并列，不要当成几十个独立答案"
+            )
             return rows
 
         mismatch = (kind or "task_done_milestones_open").strip().lower()

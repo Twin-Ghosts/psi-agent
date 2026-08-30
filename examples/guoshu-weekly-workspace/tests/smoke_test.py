@@ -2495,6 +2495,60 @@ async def run() -> int:
         str(drift.get("caliber")),
     )
 
+    wiped = await _call(registry, "weekly_milestone_stats", scope="fully_deleted")
+    wiped_rows = wiped.get("rows") or []
+    check(
+        # 各清单口径都带 m.is_deleted = 0，被删的行在别处根本不出现，缺这一档只能答「无法确认」。
+        "H4-03 里程碑被全删的 3 条任务：63(5)/78(3)/110(2)",
+        [(r.get("task_id"), r.get("deleted_milestones")) for r in wiped_rows] == [(63, 5), (78, 3), (110, 2)],
+        str([(r.get("task_id"), r.get("deleted_milestones")) for r in wiped_rows]),
+    )
+    check(
+        # 「删过」是 23 条、「删干净」是 3 条，口径必须把这两个数摆在一起。
+        "H4-03 caliber 区分「全删 3 条」与「删过 23 条」",
+        "23" in str(wiped.get("caliber")) and "NOT EXISTS" in str(wiped.get("caliber")),
+        str(wiped.get("caliber")),
+    )
+    del_totals = await _call(registry, "weekly_milestone_stats", scope="deleted")
+    check(
+        "H4-03 全表软删档指路 fully_deleted，不让模型拿 566/36/602 硬答",
+        "fully_deleted" in str(del_totals.get("caliber")),
+        str(del_totals.get("caliber")),
+    )
+
+    per_task = await _call(registry, "weekly_milestone_stats", scope="per_task", top=3)
+    check(
+        # 前几行同为 6 个，模型看不出这是并列就把 23 条全铺开。
+        "H5-04 里程碑最多首行任务 8、6 个，并列 23 条随返回",
+        [r.get("task_id") for r in (per_task.get("rows") or [])] == [8, 24, 36]
+        and str((per_task.get("rows") or [{}])[0].get("milestones")) == "6"
+        and str(per_task.get("top_tie_count")) == "23",
+        str([(r.get("task_id"), r.get("milestones")) for r in (per_task.get("rows") or [])]),
+    )
+
+    ms_series = await _call(registry, "weekly_milestone_query", task="数据资源登记体系建设")
+    check(
+        # 本体 5 条，2/3/4 期另有 5/3/2 条，合起来 15 条答的是另一个问题。
+        "H1-02 单任务里程碑 5 条并回报同系列 41/60/79",
+        str(ms_series.get("total_count")) == "5"
+        and [s.get("id") for s in (ms_series.get("same_name_series") or [])] == [41, 60, 79]
+        and "不要合并进本任务的安排" in str(ms_series.get("caliber")),
+        str(ms_series.get("same_name_series")),
+    )
+    ms_year = await _call(registry, "weekly_milestone_query", task="全国一体化算力网调度平台建设", year="2026")
+    check(
+        "H1-04 该任务 2026 年 4 条，同系列 46/65/84 一并点明",
+        str(ms_year.get("total_count")) == "4"
+        and [s.get("id") for s in (ms_year.get("same_name_series") or [])] == [46, 65, 84],
+        f"total={ms_year.get('total_count')} series={ms_year.get('same_name_series')}",
+    )
+    ms_unique = await _call(registry, "weekly_milestone_query", task="多方安全计算性能优化")
+    check(
+        "H1-02 无同名系列时里程碑清单不挂该字段",
+        "same_name_series" not in ms_unique and str(ms_unique.get("total_count")) == "3",
+        str(sorted(ms_unique.keys())),
+    )
+
     return report()
 
 

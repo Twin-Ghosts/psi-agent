@@ -108,8 +108,16 @@ async def weekly_milestone_stats(
 
     Args:
         scope: summary (totals and finish rate) / by_dimension (grouped by `by`) /
-            deleted (soft-delete audit) / per_task (counts per task, zero-milestone
-            tasks kept) / mismatch (task status vs milestone status disagreements).
+            deleted (soft-delete audit: 566 active, 36 deleted, table-wide) /
+            fully_deleted (the 3 tasks whose milestones were ALL soft-deleted.
+            Required for "有没有任务的里程碑被全部删掉了": deleted gives only the
+            table totals, and every listing scope filters deleted rows out, so
+            without this the question has no route at all. Judged by NOT EXISTS on
+            the surviving rows -- "has a deleted milestone" spans 23 tasks, an
+            order of magnitude more) / per_task (counts per task, zero-milestone
+            tasks kept, plus top_tie_count: the top bucket is a 23-way tie at 6
+            milestones, so "里程碑最多的任务是哪条" is the first row alone) /
+            mismatch (task status vs milestone status disagreements).
         by: Dimension for by_dimension: year / category / group_name / status /
             task_status.
         year: Restrict to one milestone year; 0 covers all.

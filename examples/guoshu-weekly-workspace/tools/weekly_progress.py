@@ -224,6 +224,13 @@ async def weekly_milestone_query(task: str = "", year: str = "", status: str = "
     business sequence of that plan; board-wide browsing comes back newest year
     first.
 
+    A single-task listing covers ONE task even when the name heads a series.
+    「数据资源登记体系建设」 has 5 milestones of its own while its three 期 siblings
+    hold 5 / 3 / 2 more; the siblings arrive under same_name_series. Report the
+    resolved task's milestones as that task's arrangement and query again by id or
+    full name for another 期 -- pooling the family's 15 rows answers a different
+    question.
+
     Args:
         task: Task id or name; empty covers every formal task.
         year: Four-digit year, empty for all years.
