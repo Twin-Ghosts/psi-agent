@@ -21,7 +21,7 @@ export GUOSHU_WEEKLY_MCP_TOKEN=demo-token
 python tests/smoke_test.py
 ```
 
-预期 `396/396 passed`。
+预期 `415/415 passed`。
 
 ## 数据层准备
 
@@ -91,7 +91,7 @@ guoshu-weekly-workspace/
 │   ├── _store.py              # 只读查询层 + 口径规则 + 字段管控
 │   └── server.py              # 31 个语义化取数工具（Streamable HTTP MCP）
 └── tests/
-    ├── smoke_test.py          # 396 条契约断言，不花模型 token
+    ├── smoke_test.py          # 415 条契约断言，不花模型 token
     └── baseline.py            # 396 题准确率基线（LLM 判定）
 ```
 
@@ -275,7 +275,7 @@ R-04/R-14 要的是「按权限返回」。一律遮蔽同样不满足需求—�
 | 数据权限 | 敏感字段按 token 两档分级 | 按 OA 真实身份做行级权限 |
 | 前端 | 无（经 psi-agent 既有接口） | 专建对话应用 + BFF（方案第六章） |
 | 材料生成 | 无 | 报告下载与图表（P1，第 5 期） |
-| 评测 | 396 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
+| 评测 | 415 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
 
 ### mock 数据层的两处不可外推
 
