@@ -141,10 +141,14 @@ async def weekly_freshness_distribution(
     answer "how current is the board overall", plus task_total so the buckets can
     be checked against it -- they sum to it.
 
-    The "4 从未报进展" bucket keys off t.latest_progress_time being NULL. That is a
-    narrower question than "从来没报过进展": 46 group-board tasks carry a timestamp
-    while holding no task_progress row at all, so use
-    weekly_progress_coverage scope="never_reported" (55) for that phrasing.
+    The "4 从未报进展" bucket keys off t.latest_progress_time being NULL, which is
+    the 9 tasks that reported into NEITHER table -- the answer to "从来没报过进展的
+    任务有哪些". The other reading, "no published row in task_progress", is 55 and
+    includes all 46 group-board tasks, whose effect text lives in
+    task_group_progress_history instead. weekly_progress_coverage
+    scope="never_reported" returns both: total_count 55 and
+    never_reported_either_table 9. Pick by the question; neither supersedes the
+    other.
 
     stale_days and recent_days are the LISTINGS behind "哪些任务很久没上报" and
     "最近有哪些任务上报了". Both anchor to the snapshot date on the server.
@@ -184,9 +188,9 @@ async def weekly_freshness_distribution(
             back, and the never-reported tasks have no such figure at all --
             8 of them under this listing's 在办 gate (9 un-gated) sort first and
             fill the whole top 5, so the answer shares no rows with the intended
-            one. The reply carries never_reported_count
-            either way; "从来没报过的有哪些" is the other question, answered by
-            the default listing or weekly_progress_coverage never_reported (55).
+            one. The reply carries never_reported_count either way;
+            "从来没报过的有哪些" is the other question -- 9 tasks reported into
+            neither table, which is what this listing's NULL bucket holds.
         limit: Max rows for the listing views, capped at 200.
     """
     try:
@@ -371,7 +375,15 @@ async def weekly_submission_query(
             "inflight_count" returns the in-flight total (61) and the tasks holding
             them; "inflight_by_board" splits that by board and status (rejected is
             one of the in-flight states -- omitting it undercounts every board);
+            "inflight_by_kind" splits the same 61 by status and submission_kind
+            into nine buckets -- "按状态和类型分开看" means this axis, not the
+            board one, and the two must not answer for each other;
             "inflight_multi" lists the tasks carrying more than one in-flight form.
+            "rejected_by_board" gives the rejection RATE per board with numerator
+            and denominator both taken from the submission table (tech 9/293 =
+            3.07% against group 4/169 = 2.37%). Do not derive this from the action
+            log: its 13 rejections are actions, and one form can be rejected more
+            than once.
             "sign_summary" answers "how many need countersigning" -- 155 need_sign
             against 307 that do not, summing to 462. That is a different question
             from status = 'signing', which is the 9 currently at the sign node; do
@@ -508,15 +520,18 @@ async def weekly_progress_coverage(scope: str = "summary", project_group: str = 
             unpublished_by_task (tasks whose submission form IS published while
             progress rows are still unpublished, counted per task in PERIODS:
             version_no is de-duplicated, so this is "几期" and not "几行") /
-            never_reported (the formal tasks that have never reported progress at
-            all: 55 tasks, total_count 55 = the 128 formal tasks minus the 73 that
-            summary counts as covered. Use this for "还有多少条任务从来没报过进展",
-            NOT the freshness bucket "4 从未报进展" -- that bucket keys off
-            t.latest_progress_time being NULL and finds only 9, because the group
-            board's 46 tasks keep their 成效 in task_group_progress_history and so
-            carry a timestamp while holding no task_progress row. Each row's
-            has_group_history flags that case; exactly 9 tasks have reported in
-            neither table) /
+            never_reported (two readings side by side, pick by the question --
+            neither supersedes the other. total_count 55 = no published row in
+            task_progress = the 128 formal tasks minus the 73 summary counts as
+            covered, but it sweeps in all 46 group-board tasks, which DID report,
+            keeping their 成效 in task_group_progress_history.
+            never_reported_either_table 9 = reported into neither table, the rows
+            with has_group_history = 0, equal to t.latest_progress_time being NULL
+            and to the freshness bucket "4 从未报进展". "从来没上报过进展的任务有
+            哪些" and "有多少" are both the 9. Likewise any count of progress ROWS -- monthly
+            distribution, month-on-month, year-on-year -- stays on task_progress
+            alone unless the question names the group board, or the group history
+            rows get added on top) /
             version_gaps (tasks whose max version_no exceeds their actual row
             count, i.e. missing periods) / latest_round (each task's newest
             period with its next_work, one row per task) / missing_next (how many

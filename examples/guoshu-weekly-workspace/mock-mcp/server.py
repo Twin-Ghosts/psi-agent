@@ -1416,7 +1416,13 @@ def weekly_submission_query(
             ``by_kind`` initial vs progress counts.
             ``inflight_count`` in-flight total and the tasks holding them.
             ``inflight_by_board`` in-flight split by board and status.
+            ``inflight_by_kind`` in-flight split by status and submission_kind --
+            nine buckets, a different axis from ``inflight_by_board``; "按状态和
+            类型分开看" means this one.
             ``inflight_multi`` tasks carrying more than one in-flight form.
+            ``rejected_by_board`` rejection rate per board, numerator and
+            denominator both on the submission table (tech 3.07% > group 2.37%).
+            The action log's 13 rejections are action counts, not form counts.
             ``sign_summary`` need_sign vs not, a different question from
             status = 'signing'.
             ``by_signer`` per-signer counts, blank signer excluded.
@@ -1483,7 +1489,29 @@ def weekly_submission_query(
                 limit=1,
             )
 
-        if scope_key in {"inflight_count", "inflight_by_board", "inflight_multi"}:
+        if scope_key == "rejected_by_board":
+            # 「两个看板的驳回比例哪个高」是个比率，分子分母都在提交单上：
+            # 分母 = 该看板的全部单，分子 = status = 'rejected' 的单。没有这一档时
+            # 只能翻 weekly_workflow_query 的动作明细，K1-04 就是这样 6 轮耗尽的
+            # ——动作日志里 rejected 有 13 条，那是动作数不是单数，拿它当分子会答错。
+            # 不加任务发布闸门，与提交单其余各档一致。
+            return store.fetch(
+                "SELECT b.code AS board_code, b.name AS board_name, COUNT(*) AS submissions, "
+                "SUM(s.status = 'rejected') AS rejected, "
+                "ROUND(SUM(s.status = 'rejected') / COUNT(*) * 100, 2) AS rejected_pct "
+                "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+                "JOIN task_board b ON b.id = t.board_id AND b.is_deleted = 0 "
+                "WHERE t.is_deleted = 0 GROUP BY b.id, b.code, b.name ORDER BY rejected_pct DESC",
+                caliber=(
+                    "仅 t.is_deleted = 0，不加任务发布闸门（与提交单其余各档一致）；"
+                    "分母是该看板的全部提交单、分子是 status = 'rejected' 的单，"
+                    "技术组 9/293 = 3.07% 高于集团组 4/169 = 2.37%；"
+                    "不要拿 weekly_workflow_query 的驳回动作数（13 条）当分子"
+                    "——那是动作条数，一张单可被驳回多次，两者不是同一个口径"
+                ),
+                limit=bounded_sub,
+            )
+        if scope_key in {"inflight_count", "inflight_by_board", "inflight_by_kind", "inflight_multi"}:
             # 三档共用同一套在途枚举，只是聚合粒度不同。枚举而非取反：
             # cancelled 那张单既未发布也不在途，status <> 'published' 会多算 1 张。
             placeholders = ", ".join(f"%(f{i})s" for i in range(len(_SUBMISSION_INFLIGHT)))
@@ -1513,6 +1541,24 @@ def weekly_submission_query(
                     flight_params,
                     caliber=(
                         f"{gate}；按看板 + 状态两维分档，rejected 同属在途，各档相加等于在途总数 61；空档不出现即为 0"
+                    ),
+                    limit=bounded_sub,
+                )
+            if scope_key == "inflight_by_kind":
+                # 「按状态和类型分开看」要的是 status x submission_kind 两维，
+                # 与 inflight_by_board 的 board x status 不是同一张表：前者九档
+                # （pending_fill 只有 initial，故不是 5x2=10），后者也是九档，
+                # 数字却对不上，互相代答就答错了维度。
+                return store.fetch(
+                    "SELECT s.status, s.submission_kind, COUNT(*) AS submission_count "
+                    "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+                    f"WHERE t.is_deleted = 0 AND s.status IN ({placeholders}) "
+                    "GROUP BY s.status, s.submission_kind ORDER BY s.status, s.submission_kind",
+                    flight_params,
+                    caliber=(
+                        f"{gate}；按状态 + 类型两维分档，共 9 档相加等于在途总数 61"
+                        "（pending_fill 只有 initial 一种，所以不是 5x2=10 档，空档不出现即为 0）；"
+                        "这与 scope=inflight_by_board 的看板 + 状态是两个维度，不要互答"
                     ),
                     limit=bounded_sub,
                 )
@@ -2121,7 +2167,9 @@ _SUBMISSION_SCOPES = (
     "by_kind",
     "inflight_count",
     "inflight_by_board",
+    "inflight_by_kind",
     "inflight_multi",
+    "rejected_by_board",
     "sign_summary",
     "by_signer",
     "sign_turnaround",
@@ -2749,15 +2797,21 @@ def weekly_progress_coverage(scope: str = "summary", project_group: str = "", li
             return rows
 
         if key == "never_reported":
-            # 「还有多少条正式任务从来没报过进展」：判据是 task_progress 里有没有
-            # 已发布行，走 NOT EXISTS。不能用 t.latest_progress_time IS NULL 代替
-            # ——那一列只跟 task_progress 的写入同步，集团看板的 46 条任务成效写在
-            # task_group_progress_history，它们 latest_progress_time 有值却在
-            # task_progress 里一行都没有，按空值判会答成 9（少 46 条）。
-            # 55 = 128 - 73，与 summary 的 tasks_covered 同一套「进展」定义。
+            # 「从来没报过进展」有两个都成立的口径，取决于问的是哪张表：
+            #   55 条 = task_progress 里没有已发布行（NOT EXISTS），含集团看板全部
+            #           46 条——它们的成效根本不写这张表；
+            #    9 条 = 两张表都没报过（task_progress 与 task_group_progress_history
+            #           都为空），等价于 t.latest_progress_time IS NULL。
+            # 早先这里只写「不要用 latest_progress_time，那样只得 9 条」，把 55 定成
+            # 唯一正解。于是问「从没上报过进展的任务有哪些」一律答 55，而那问的是
+            # 「谁真的没报过」，答案是 9——过火的否定句式牵连了 8 道题。两个数各自
+            # 回答哪个问题必须说清，不能否掉一个。
             total = store.scalar(
                 f"SELECT COUNT(*) FROM task t WHERE {clause} AND NOT EXISTS "
                 "(SELECT 1 FROM task_progress p WHERE p.task_id = t.id AND p.is_published = 1)",
+            )
+            both_empty = store.scalar(
+                f"SELECT COUNT(*) FROM task t WHERE {clause} AND t.latest_progress_time IS NULL",
             )
             rows = store.fetch(
                 "SELECT t.id AS task_id, t.task_name, b.name AS board_name, t.project_group, "
@@ -2768,18 +2822,24 @@ def weekly_progress_coverage(scope: str = "summary", project_group: str = "", li
                 "WHERE p.task_id = t.id AND p.is_published = 1) "
                 "ORDER BY t.id",
                 caliber=(
-                    f"{store.FORMAL_TASK_CALIBER}；「没报过进展」= task_progress 里没有已发布行"
-                    "（NOT EXISTS），total_count 55 = 正式任务 128 - 有进展的 73，"
-                    "与 scope=summary 的 tasks_covered 同一套进展定义；"
-                    "不要用 latest_progress_time 是否为空来判——那样只得 9 条，"
-                    "会漏掉集团看板的 46 条（它们成效写在 task_group_progress_history，"
-                    "该列有值但 task_progress 里一行都没有）；"
-                    "has_group_history = 1 即该任务在集团历史表里报过，"
-                    "真正两张表都没报过的是 9 条（技术组）"
+                    f"{store.FORMAL_TASK_CALIBER}；本档两个口径并列，按问句选一个，"
+                    "不要把其中一个当成唯一正解："
+                    "（甲）真的没报过进展 = 两张表都没有，共 9 条，"
+                    "等价于 t.latest_progress_time IS NULL，"
+                    "问「从来没上报过进展的任务有哪些 / 有多少」答这个（本档 rows 里"
+                    "has_group_history = 0 的就是这 9 条）；"
+                    "（乙）task_progress 里没有已发布行 = 55 条（NOT EXISTS），"
+                    "total_count 就是它，55 = 正式任务 128 - 有进展的 73，"
+                    "与 scope=summary 的 tasks_covered 同一套进展定义，"
+                    "但它把集团看板全部 46 条都算进来——那 46 条报过，只是成效写在"
+                    "task_group_progress_history，问「谁没报过」时用它会多算 46；"
+                    "凡问进展的行数/条数/月度分布/环比/同比，除非问句明说含集团看板，"
+                    "一律只算 task_progress（即技术组），不要把集团历史表的行并进去"
                 ),
                 limit=bounded,
             )
             rows["total_count"] = total["value"]
+            rows["never_reported_either_table"] = both_empty["value"]
             return rows
 
         if key == "version_gaps":

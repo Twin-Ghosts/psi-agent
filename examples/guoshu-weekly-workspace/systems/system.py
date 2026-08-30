@@ -121,14 +121,15 @@ TOOL_GUIDE = """\
   服务端按 version_no 收敛到一任务一行，不要用 weekly_progress_history 拉全部历史自己挑最新，
   也不要按 progress_date 挑——补报的老期号可能日期更晚。问「最新一期没写下一步的有几个」
   用 scope=missing_next，中间某期空着不算。
-  问「还有多少条任务从来没报过进展」用 scope=never_reported：55 条 = 正式任务 128 -
-  有进展的 73，按 task_progress 有无已发布行判定（NOT EXISTS）。不要拿
-  weekly_freshness_distribution 的「4 从未报进展」档来答，那一档按
-  latest_progress_time 判空只得 9 条，会漏掉集团看板的 46 条（成效写在集团历史表，
-  该列有值但 task_progress 里一行都没有）；行内 has_group_history 就是这 46 条的标记。
+  问「从来没报过进展」用 scope=never_reported，一次回两个并列口径，按问句选：
+  never_reported_either_table 9 条是两张表都没报过的（行内 has_group_history = 0，
+  也等于 latest_progress_time 为空），问「从来没上报过进展的任务有哪些／有多少」答这个；
+  total_count 55 是「task_progress 里没有已发布行」（128 - 有进展的 73），它把报过的
+  46 条集团任务也算进来（成效写在集团历史表），只在明确讨论 task_progress 覆盖度时才用。
 - weekly_freshness_distribution：按进展陈旧程度分档（30/90/180 天/从未）。
-  这里的「4 从未报进展」只有 9 条，是 latest_progress_time 为空的口径，不等于
-  「从来没报过进展」的 55 条，后者用 weekly_progress_coverage scope=never_reported。
+  这里的「4 从未报进展」9 条就是两张表都没报过的那 9 条，与
+  weekly_progress_coverage 的 never_reported_either_table 同一口径；那里的 55 是另一个
+  口径（只看 task_progress），两个数各答各的问题，不是谁替代谁。
   问「在办任务里有多少从来没报过进展时间」带 in_flight=True：在办是 8 条而不限状态是 9 条，
   差的那条是已完成的任务 88。各档相加等于同一次返回的 task_total（在办 92 / 全量 128），
   答完可以自己对一遍。
@@ -191,6 +192,11 @@ TOOL_GUIDE = """\
   ——清单封顶 200 行，手数只看得到前一页。提交单一律只加软删闸门，不加任务发布闸门。
   问 O2OA 外部标识（流程号/工作号/任务号）的填充或缺失用 scope=external_ids，三列填充率
   互不相同，不要拿一列代答另一列；问「在途单里有多少带流程号」用 scope=inflight_external。
+  问「两个看板的驳回比例哪个高」用 scope=rejected_by_board：分子分母都在提交单上
+  （技术组 9/293 = 3.07% 高于集团组 4/169 = 2.37%），不要拿动作日志里的 13 条驳回动作
+  当分子——那是动作条数，一张单可被驳回多次。
+  问「在途单按状态和类型分开看」用 scope=inflight_by_kind：状态 + 类型两维 9 档，
+  与 inflight_by_board 的看板 + 状态是两个维度，档数同为 9 但数字不同，不要互答。
   在途单的三个聚合档：scope=inflight_count 给总数 61 与涉及的 55 个任务；
   scope=inflight_by_board 按看板 + 状态分 9 档（rejected 同属在途，漏掉它集团组少 4、
   技术组少 9，九档相加等于 61）；scope=inflight_multi 给同时挂多张在途单的 6 个任务。
@@ -379,11 +385,12 @@ CALIBER_RULES = """\
     最近发生的那条埋在页面中间；把符合条件的全集铺开（13 条驳回全给）答的是
     「有哪些」，不是「最近有哪些」。排序依据是动作自身的时间戳，不是任务 id、
     不是轮次号，也不是任务的更新时间。
-38. 「有没有做过某事」按明细表里存不存在记录判定，不要拿任务表上的汇总列判空。
-    两者会给出不同的数：「从来没报过进展」按 task_progress 有无已发布行判是 55 条，
-    按 t.latest_progress_time 是否为空判只有 9 条——集团看板那 46 条任务的成效
-    写在 task_group_progress_history，汇总列有值而 task_progress 里一行都没有。
-    同一个问题的两个数要能互相对上：55 + 有进展的 73 = 正式任务 128。
+38. 「有没有做过某事」按明细表里存不存在记录判定，不要拿任务表上的汇总列判空——
+    但这条只管「判空」这个动作，不等于哪个数才是答案。「从来没报过进展」按
+    task_progress 有无已发布行判是 55 条，两张表都没报过的是 9 条（集团看板那 46 条
+    任务的成效写在 task_group_progress_history，汇总列有值而 task_progress 里一行
+    都没有）。问「从来没上报过进展的任务」答 9，55 只在讨论 task_progress 覆盖度时用，
+    详见第 65 条。同一套数要能互相对上：55 + 有进展的 73 = 正式任务 128。
 39. 一句话问两个数（多少条、涉及多少任务；多少已发布、多少未发布）就选一次给全的口径，
     不要两处分别取再拼。分开取的风险不在算错加法，在两次闸门不同一：进展的已发布/未发布
     按正式任务口径是 943/123/1066，漏掉任务闸门就变成 945/1068。「多少条」与「涉及多少
@@ -495,6 +502,16 @@ CALIBER_RULES = """\
     project_owner_name，和 group_detail 里多值的 lead_owner_names / project_owner_names。
     集团看板 46 条任务两边的值全都不一致（101 号任务 task 行「陈志远」、集团明细
     「刘海涛,韩雪峰」）。问集团看板的负责人一律按 group_detail 那两列答。
+64. 进展的行数只算 task_progress，除非问句明说要算集团看板。集团看板的成效写在
+    task_group_progress_history，那是另一张表：问月度分布、环比、同比、某月谁报了进展，
+    一律只报 task_progress 的数（今年上半年 349 行 / 70 任务、去年同期 237 / 51），
+    不要把集团历史表的行加上去凑成 517 / 272 那种合计数。
+65. 「从来没报过进展」有两个都成立的口径，按问句选，不要把其中一个当唯一正解：
+    问「从来没上报过进展的任务有哪些／有多少」答两张表都没报的 9 条
+    （weekly_progress_coverage scope=never_reported 的 never_reported_either_table，
+    即 has_group_history = 0 那些行，也等于 latest_progress_time 为空）；
+    total_count 那个 55 是「task_progress 里没有已发布行」，它把报过的 46 条集团任务
+    也算进来了，只在明确讨论 task_progress 覆盖度时才用。
 
 ## 判为不可答
 

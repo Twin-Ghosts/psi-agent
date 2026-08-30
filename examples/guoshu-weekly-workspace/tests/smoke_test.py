@@ -1663,6 +1663,70 @@ async def run() -> int:
         str(td4.get("caliber", ""))[:120],
     )
 
+    # 回归簇一：never_reported 的两个口径必须并列返回，不能只给一个。
+    never = await _call(registry, "weekly_progress_coverage", scope="never_reported")
+    check(
+        "L2-02/O7-04 never_reported 同时给 55 与 9 两个口径",
+        never.get("total_count") == 55 and never.get("never_reported_either_table") == 9,
+        f"total_count={never.get('total_count')} either={never.get('never_reported_either_table')}",
+    )
+    check(
+        "L2-02/O7-04 has_group_history = 0 的行数正好是 9",
+        sum(1 for r in never["rows"] if not r["has_group_history"]) == 9,
+        str(sum(1 for r in never["rows"] if not r["has_group_history"])),
+    )
+    never_cal = str(never.get("caliber", ""))
+    check(
+        "L2-02/O7-04 caliber 并列两档且不再否掉 9 条",
+        "两个口径并列" in never_cal and "共 9 条" in never_cal and "那样只得 9 条" not in never_cal,
+        never_cal[:200],
+    )
+    check(
+        "E3-02/K3-02 caliber 点明行数类问题只算 task_progress",
+        "一律只算 task_progress" in never_cal,
+        never_cal[-200:],
+    )
+
+    # 回归簇二之一：在途单的状态 x 类型九档（与看板 x 状态是两个维度）。
+    kind = await _call(registry, "weekly_submission_query", scope="inflight_by_kind")
+    by_kind = {(r["status"], r["submission_kind"]): r["submission_count"] for r in kind["rows"]}
+    check(
+        "I1-01 在途单按状态 + 类型分 9 档，相加等于 61",
+        len(kind["rows"]) == 9 and sum(by_kind.values()) == 61,
+        f"{len(kind['rows'])} 档 合计 {sum(by_kind.values())}",
+    )
+    check(
+        "I1-01 pending_audit 拆成 initial 7 / progress 14",
+        by_kind.get(("pending_audit", "initial")) == 7 and by_kind.get(("pending_audit", "progress")) == 14,
+        str(sorted(by_kind.items())[:4]),
+    )
+    check(
+        "I1-01 caliber 点明与 inflight_by_board 是两个维度",
+        "不要互答" in str(kind.get("caliber", "")) and "pending_fill 只有 initial" in str(kind.get("caliber", "")),
+        str(kind.get("caliber", ""))[:200],
+    )
+
+    # 回归簇二之二：按看板的驳回率，分子分母都在提交单上。
+    rej = await _call(registry, "weekly_submission_query", scope="rejected_by_board")
+    rej_rows = {r["board_code"]: r for r in rej["rows"]}
+    check(
+        "K1-04 技术组驳回率 3.07% 高于集团组 2.37%",
+        rej["rows"][0]["board_code"] == "tech"
+        and str(rej_rows["tech"]["rejected_pct"]) == "3.07"
+        and str(rej_rows["group"]["rejected_pct"]) == "2.37",
+        str([(r["board_code"], r["rejected_pct"]) for r in rej["rows"]]),
+    )
+    check(
+        "K1-04 分母是该看板全部单（293 / 169）",
+        rej_rows["tech"]["submissions"] == 293 and rej_rows["group"]["submissions"] == 169,
+        str([(r["board_code"], r["submissions"], r["rejected"]) for r in rej["rows"]]),
+    )
+    check(
+        "K1-04 caliber 否掉拿 13 条驳回动作当分子",
+        "13 条" in str(rej.get("caliber", "")) and "动作条数" in str(rej.get("caliber", "")),
+        str(rej.get("caliber", ""))[:200],
+    )
+
     bad_group = await _call(registry, "weekly_aggregate", group_by="不支持的维度")
     check(
         "不支持的聚合维度明确报错",
