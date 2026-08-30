@@ -17,7 +17,12 @@ _call = _module.__dict__["call"]
 _invalid = _module.__dict__["invalid_argument"]
 
 
-async def weekly_person_stats(scope: str = "workload", role: str = "lead_owner", top: int = 200) -> str:
+async def weekly_person_stats(
+    scope: str = "workload",
+    role: str = "lead_owner",
+    project_group: str = "",
+    top: int = 200,
+) -> str:
     """Aggregate formal tasks by person: workload, cross-group spread, id formats.
 
     weekly_owner_roles answers "how many does THIS person have"; this answers the
@@ -37,8 +42,14 @@ async def weekly_person_stats(scope: str = "workload", role: str = "lead_owner",
             and equal lengths are genuine ties to be stated together) /
             reporters (progress rounds filed per person) / reporter_count (distinct
             filers) / reviewers (progress rows reviewed per person) / self_review
-            (rows where filer and reviewer are the same id).
+            (rows where filer and reviewer are the same id) / group_roster (the
+            people of ONE 专项组, de-duplicated: use this for "标准安全组的牵头人
+            都有谁" rather than listing the group's tasks -- 19 tasks there carry
+            only 9 distinct 牵头人, so counting task rows over-counts people).
         role: Person column to group by: lead_owner or project_owner.
+        project_group: Required by group_roster, ignored by every other scope.
+            Matched exactly; weekly_aggregate group_by="project_group" lists the
+            11 valid names.
         top: Row cap, capped at 200.
     """
     try:
@@ -47,5 +58,5 @@ async def weekly_person_stats(scope: str = "workload", role: str = "lead_owner",
         return _invalid("top must be an integer")
     return await _call(
         "weekly_person_stats",
-        {"scope": scope, "role": role, "top": bounded},
+        {"scope": scope, "role": role, "project_group": project_group, "top": bounded},
     )

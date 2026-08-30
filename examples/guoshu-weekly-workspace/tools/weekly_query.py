@@ -23,6 +23,7 @@ async def weekly_task_query(
     status: str = "",
     owner: str = "",
     keyword: str = "",
+    project_group: str = "",
     limit: int = 200,
 ) -> str:
     """Query formal weekly-report tasks with optional filters.
@@ -38,6 +39,10 @@ async def weekly_task_query(
         status: Business status 0未开始/1进行中/2已完成/3已停用, empty for all.
         owner: Owner or lead name; multi-value columns are space-stripped first.
         keyword: Substring of the task name.
+        project_group: 专项组 name, matched exactly -- it is its own column, not a
+            category and not a board. For "这个组的人都有谁" prefer
+            weekly_person_stats scope="group_roster", which de-duplicates the
+            people server-side: 标准安全组 has 19 tasks but only 9 牵头人.
         limit: Max rows to return, capped at 200.
     """
     try:
@@ -52,6 +57,7 @@ async def weekly_task_query(
             "status": status,
             "owner": owner,
             "keyword": keyword,
+            "project_group": project_group,
             "limit": bounded,
         },
     )

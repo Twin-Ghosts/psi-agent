@@ -142,6 +142,7 @@ def weekly_task_query(
     status: str = "",
     owner: str = "",
     keyword: str = "",
+    project_group: str = "",
     limit: int = 200,
 ) -> str:
     """Query formal tasks. Applies R-01 (is_deleted=0 AND published) server-side.
@@ -152,6 +153,9 @@ def weekly_task_query(
         status: Business status 0/1/2/3, empty for all.
         owner: Owner or lead name; multi-value columns are matched per R-13.
         keyword: Substring of the task name.
+        project_group: 专项组 name, matched exactly. 专项组 is its own column and
+            is not a category or a board -- filtering it through ``category`` or
+            ``keyword`` silently returns the wrong set.
         limit: Max rows, capped at 200.
     """
 
@@ -196,12 +200,21 @@ def weekly_task_query(
         if keyword.strip():
             where.append("t.task_name LIKE %(kw)s")
             params["kw"] = f"%{keyword.strip()}%"
+        if project_group.strip():
+            # 专项组是 task 上的独立一列，精确匹配。没有这个过滤器时，
+            # 「某组的牵头人都有谁」只能整表拉回来自己筛，而清单封顶 200 行，
+            # 模型要么答成全库人名要么说数据被截断。
+            where.append("t.project_group = %(pg)s")
+            params["pg"] = project_group.strip()
 
         clause = " AND ".join(where)
+        caliber = store.FORMAL_TASK_CALIBER
+        if project_group.strip():
+            caliber += f"；专项组 = {project_group.strip()}（t.project_group 精确匹配，非分类也非看板）"
         total = store.scalar(
             f"SELECT COUNT(*) FROM task t WHERE {clause}",
             params,
-            caliber=store.FORMAL_TASK_CALIBER,
+            caliber=caliber,
         )
         rows = store.fetch(
             "SELECT t.id, t.task_no, t.task_name, t.board_id, t.category_id, t.status, "
@@ -209,7 +222,7 @@ def weekly_task_query(
             "t.latest_progress_time, t.published_at "
             f"FROM task t WHERE {clause} ORDER BY t.board_id, t.sort_order, t.id",
             params,
-            caliber=store.FORMAL_TASK_CALIBER,
+            caliber=caliber,
             limit=limit,
         )
         rows["total_count"] = total["value"]
@@ -1474,6 +1487,7 @@ _PERSON_STATS_SCOPES = (
     "reporter_count",
     "reviewers",
     "self_review",
+    "group_roster",
 )
 
 # 人员所在的列。姓名列与 ID 列口径不同，必须分开问。
@@ -1484,7 +1498,12 @@ _PERSON_ROLE_COLUMNS: dict[str, tuple[str, str]] = {
 
 
 @mcp.tool()
-def weekly_person_stats(scope: str = "workload", role: str = "lead_owner", top: int = 200) -> str:
+def weekly_person_stats(
+    scope: str = "workload",
+    role: str = "lead_owner",
+    project_group: str = "",
+    top: int = 200,
+) -> str:
     """Aggregate formal tasks by person: workload, cross-group spread, id formats.
 
     weekly_owner_roles answers "how many does THIS person have"; this answers the
@@ -1497,8 +1516,10 @@ def weekly_person_stats(scope: str = "workload", role: str = "lead_owner", top: 
     Args:
         scope: One of workload / workload_summary / single_task / cross_group /
             dual_role / id_format / id_variants / id_longest / reporters /
-            reporter_count / reviewers / self_review.
+            reporter_count / reviewers / self_review / group_roster.
         role: Which person column to group by: lead_owner or project_owner.
+        project_group: Required by ``group_roster``, ignored elsewhere: the 专项组
+            whose people are wanted, matched exactly.
         top: Row cap for the listing scopes.
     """
 
@@ -1557,6 +1578,33 @@ def weekly_person_stats(scope: str = "workload", role: str = "lead_owner", top: 
                 f"FROM task t WHERE {named} "
                 f"GROUP BY t.{column} HAVING task_count = 1 ORDER BY person",
                 caliber=f"{base}；只带 1 个任务的人，HAVING 由服务端判定",
+                limit=bounded,
+            )
+
+        if key == "group_roster":
+            # 「某组的牵头人都有谁」：19 条任务里只有 9 个人，去重必须落在服务端。
+            # 拿任务清单让模型自己数人，它会把同一个人按任务重复计数。
+            target = (project_group or "").strip()
+            if not target:
+                return {
+                    "ok": False,
+                    "error": {
+                        "code": "missing_project_group",
+                        "message": "group_roster 需要 project_group；"
+                        "先用 weekly_aggregate group_by=project_group 看有哪些组",
+                    },
+                }
+            return store.fetch(
+                f"SELECT t.{column} AS person, COUNT(*) AS task_count "
+                f"FROM task t WHERE {named} AND t.project_group = %(pg)s "
+                f"GROUP BY t.{column} ORDER BY task_count DESC, person",
+                {"pg": target},
+                caliber=(
+                    f"{base}；专项组 = {target}（精确匹配）；"
+                    "行数即该组去重后的人数，不要拿任务条数当人数"
+                    "（标准安全组 19 条任务只有 9 位牵头人）；"
+                    "姓名为空的行已排除，所以 task_count 相加可能小于该组任务数"
+                ),
                 limit=bounded,
             )
 
@@ -1957,24 +2005,32 @@ def weekly_field_completeness(field: str = "", list_missing: bool = False, limit
             missing_rows["field_label"] = label
             return missing_rows
 
+        # 完整率必须由服务端算：问「完整率是多少」时模型手算 filled / total 会
+        # 连百分号带小数位一起自己拿主意，答出 100% 这种与 119/128 相矛盾的数。
         if table == "task":
+            expr = f"t.{token} IS NOT NULL AND t.{token} <> ''"
             sql = (
-                f"SELECT COUNT(*) AS total, SUM(t.{token} IS NOT NULL AND t.{token} <> '') AS filled, "
-                f"SUM(t.{token} IS NULL OR t.{token} = '') AS missing "
+                f"SELECT COUNT(*) AS total, SUM({expr}) AS filled, "
+                f"SUM(t.{token} IS NULL OR t.{token} = '') AS missing, "
+                f"ROUND(SUM({expr}) / COUNT(*) * 100, 1) AS filled_pct "
                 f"FROM task t WHERE {clause}"
             )
         else:
             # LEFT JOIN so tasks with no detail row count as missing, not vanish (R-08).
+            expr = f"d.{token} IS NOT NULL AND d.{token} <> ''"
             sql = (
-                f"SELECT COUNT(*) AS total, SUM(d.{token} IS NOT NULL AND d.{token} <> '') AS filled, "
-                f"SUM(d.{token} IS NULL OR d.{token} = '') AS missing "
+                f"SELECT COUNT(*) AS total, SUM({expr}) AS filled, "
+                f"SUM(d.{token} IS NULL OR d.{token} = '') AS missing, "
+                f"ROUND(SUM({expr}) / COUNT(*) * 100, 1) AS filled_pct "
                 f"FROM task t LEFT JOIN {table} d ON d.task_id = t.id WHERE {clause}"
             )
         result = store.fetch(
             sql,
             caliber=(
                 f"{store.FORMAL_TASK_CALIBER}；统计「{label}」非空占比（R-07/R-19）；"
-                "空字符串按未填计入 missing" + ("；LEFT JOIN 保留无明细行的任务（R-08）" if table != "task" else "")
+                "空字符串按未填计入 missing；"
+                "filled_pct 已按 total 算好（保留一位小数），直接引用，不要自己拿 filled / total 重算"
+                + ("；LEFT JOIN 保留无明细行的任务（R-08）" if table != "task" else "")
             ),
             limit=1,
         )
@@ -3385,6 +3441,20 @@ def weekly_group_detail_query(
         columns = ", ".join(f"d.{name}" for name in selected)
         if "completion_time" in selected:
             caliber.append("completion_time 为展示文本，不可做日期运算（R-12）")
+        # 多值负责人栏一并回人数：问「有几位项目责任人」时，模型按逗号自己数
+        # 会漏掉顿号那几行；两种分隔符都要扣。同时点明这一列与 task 上的单值
+        # 同名列不是一个东西——集团看板 46 条任务两列的值并不一致。
+        for name in ("lead_owner_names", "project_owner_names"):
+            if name in selected:
+                columns += (
+                    f", CHAR_LENGTH(d.{name}) - CHAR_LENGTH(REPLACE(REPLACE(d.{name}, '、', ''), ',', '')) + 1 "
+                    f"AS {name.replace('_names', '')}_count"
+                )
+                caliber.append(
+                    f"{name} 的人数已算好（分隔符个数 + 1，顿号与逗号都计入），不要自己按逗号数；"
+                    f"这一列是集团看板的多值口径，与 task 表上单值的 {name.replace('_names', '_name')} "
+                    "并非同一个数据（46 条任务两列的值不一致），问集团看板的负责人一律用本列"
+                )
 
         clause = " AND ".join(where)
         total = store.scalar(

@@ -29,7 +29,10 @@ TOOL_GUIDE = """\
 - weekly_health：连通性自检与各表行数。
 
 任务清单与详情
-- weekly_task_query：按看板/分类/状态/负责人/关键词查正式任务，带 total_count 与 has_more。
+- weekly_task_query：按看板/分类/状态/负责人/关键词/专项组查正式任务，带 total_count 与 has_more。
+  专项组是任务上独立一列，传 project_group 精确筛，别塞进 category 或 keyword。但问「某组的
+  人都有谁」优先用 weekly_person_stats scope=group_roster：任务清单里同一个人按任务重复出现，
+  标准安全组 19 条任务只有 9 位牵头人，拿 19 行去数人会多算。
 - weekly_task_detail：单任务详情（明细 + 近期进展 + 年度目标）。
 - weekly_owner_roles：一个人分角色（责任人/牵头/分管）各带多少任务。
 - weekly_task_ranking：按子记录数（附件/进展/里程碑）给任务排名，普通「前 N 名」用它。
@@ -59,6 +62,8 @@ TOOL_GUIDE = """\
   只看姓名列会答成「无缺失」。
 - weekly_person_stats：人员维度统计——任务量排名/人均/只带一条的人/跨专项组/同时兼两个角色/
   标识写法分档/同名多标识/最长标识，以及填报人、审核人、自审记录。人数与条数都已服务端算好。
+  scope=group_roster 加 project_group 给某一个组的人（已去重，行数即人数）；「用了域账号形式的
+  有多少条」用 scope=id_format 的 NDG 那一档，不要拉清单看标识长相自己数。
 
 进展与时效
 - weekly_progress_history：单任务的进展版本，version_no 倒序，第一条即当期。
@@ -131,6 +136,10 @@ TOOL_GUIDE = """\
 专项组看板（有自己的表，不要拿通用工具查）
 - weekly_group_detail_query：专项组明细表（目标/措施/负责人/完成情况文本）。牵头人与项目
   负责人两列在这张表上，不在 task 行上：fields="lead_owner_names,project_owner_names"。
+  这两列与 task 上同名的单值列不是同一个数据——46 条任务两边的值不一致（97 号任务 task 行上
+  是「秦怀瑾」，这张表上是「胡建国,方永康,邓少华」），问集团看板的负责人一律读本表，
+  拿 weekly_task_query 的 project_owner_name 去答会答成另一个人。要「有几位负责人」直接看
+  返回的 project_owner_count / lead_owner_count，服务端两种分隔符都扣过了。
   问矛盾数据（如「状态还是未开始、却已经写了进度成效」）用 status 与 non_empty 交叉筛，
   两侧同时给条件——只给 status 会把「未开始且成效为空」也收进来，那并不矛盾。
 - weekly_group_owner_query：按负责人查专项组任务，或列出该看板的负责人字段。
@@ -231,7 +240,15 @@ CALIBER_RULES = """\
     caliber 写了按哪两列分档，就按那两列报。
 34. 比率类问题的分母由服务端指定，不要拿本次行数当分母。零附件任务 22 条的分母是
     正式任务 128（total_formal_tasks），挂接率的分母是全部 404 行而不是过闸的 362 行。
-    caliber 里点名哪个字段是分母，就用那个。
+    caliber 里点名哪个字段是分母，就用那个。完整率同理：填报完整度已带 filled_pct
+    （项目负责人 ID 是 128 / 119 / 93.0），直接引用，别自己算成 100%。
+35. 同一个概念在两张表上各有一列时，问哪张看板就读哪张表的列。集团看板的牵头人与
+    项目负责人在 task_group_detail 的多值列上，46 条任务与 task 行上的单值同名列
+    对不上（97 号任务一边「秦怀瑾」、一边「胡建国,方永康,邓少华」）。看板问题答错列，
+    数字自洽也仍是错的答案。
+36. 「某一组的人都有谁」是去重人数题，不是任务清单题。先用按组点名的口径
+    （group_roster），行数即人数；拿该组任务清单自己数，同一个人会按任务重复计数
+    （标准安全组 19 条任务只有 9 位牵头人）。
 
 ## 判为不可答
 

@@ -34,6 +34,14 @@ async def weekly_group_detail_query(
     owner columns are here too: pass fields="lead_owner_names,project_owner_names"
     for "牵头人和项目负责人都有谁", they are not on the shared task row.
 
+    Those multi-value columns are NOT the single-value lead_owner_name /
+    project_owner_name that weekly_task_query returns -- on 46 of the group
+    board's tasks the two disagree (task 97 reads 秦怀瑾 on the task row and
+    胡建国,方永康,邓少华 here), so a group-board owner question answered from the
+    task row is answered off the wrong column. Requesting either column also
+    returns lead_owner_count / project_owner_count, the head-count already
+    computed over both delimiters; quote it instead of counting commas.
+
     completion_time is display text like "2026年内" or "2026Q4", not a date. Filter
     it with contains, and never compute date arithmetic on it.
 

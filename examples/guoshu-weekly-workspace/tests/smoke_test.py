@@ -2134,6 +2134,98 @@ async def run() -> int:
         str(badflow.get("error")),
     )
 
+    # A9 F 类：完整率百分比、按组点名、集团看板负责人两列分歧。
+    pct = await _call(registry, "weekly_field_completeness", field="project_owner_id")
+    check(
+        # 模型在基线里答「完整率 100%」，与它自己引用的 119/128 自相矛盾。
+        "F3-04 项目负责人 ID 完整率由服务端给出 128/119/93.0",
+        str(_first(pct, "total")) == "128"
+        and str(_first(pct, "filled")) == "119"
+        and str(_first(pct, "filled_pct")) == "93.0",
+        str(pct.get("rows")),
+    )
+    check(
+        "F3-04 caliber 点明 filled_pct 已算好、不要自己重算",
+        "不要自己拿 filled / total 重算" in str(pct.get("caliber")),
+        str(pct.get("caliber")),
+    )
+    full = await _call(registry, "weekly_field_completeness", field="project_owner_name")
+    check(
+        # 姓名列确实是 100%，两列口径不同这件事必须两边都能验出来。
+        "F3-01 姓名列 128/128/100.0，与 ID 列的 93.0 不是同一个问题",
+        str(_first(full, "filled")) == "128" and str(_first(full, "filled_pct")) == "100.0",
+        str(full.get("rows")),
+    )
+
+    roster = await _call(registry, "weekly_person_stats", scope="group_roster", project_group="标准安全组")
+    names = [r.get("person") for r in roster.get("rows") or []]
+    check(
+        "F7-03 标准安全组牵头人 9 人，行数即人数（该组 19 条任务）",
+        roster.get("row_count") == 9 and len(names) == 9,
+        str(names),
+    )
+    check(
+        "F7-03 九人姓名与金标逐名一致",
+        set(names)
+        == {
+            "吴晓东",
+            "李建华",
+            "周文斌",
+            "孙立群",
+            "张国栋",
+            "王振国",
+            "赵明辉",
+            "陈志远",
+            "project_lead_b",
+        },
+        str(sorted(names)),
+    )
+    check(
+        "F7-03 caliber 点明不要拿任务条数当人数",
+        "不要拿任务条数当人数" in str(roster.get("caliber")),
+        str(roster.get("caliber")),
+    )
+    noroster = await _call(registry, "weekly_person_stats", scope="group_roster")
+    check(
+        # 缺组名时必须报错并指路，不能默默退化成全库点名。
+        "F7-03 group_roster 缺 project_group 时报 missing_project_group 并指路",
+        noroster.get("ok") is False and noroster.get("error", {}).get("code") == "missing_project_group",
+        str(noroster.get("error")),
+    )
+    pg = await _call(registry, "weekly_task_query", project_group="标准安全组", limit=200)
+    check(
+        "F7-03 weekly_task_query 支持 project_group 精确筛，19 条",
+        pg.get("ok") is True and str(pg.get("total_count")) == "19",
+        str(pg.get("total_count")),
+    )
+
+    det = await _call(
+        registry,
+        "weekly_group_detail_query",
+        task="数据资产入表试点推进",
+        fields="project_owner_names,project_owner_ids",
+    )
+    check(
+        # 金标是明细表的三人，模型答的「秦怀瑾」来自 task 行的单值列。
+        "F5-03 集团明细表负责人为三人且人数由服务端算出",
+        str(_first(det, "project_owner_names")) == "胡建国,方永康,邓少华"
+        and str(_first(det, "project_owner_count")) == "3",
+        str(det.get("rows")),
+    )
+    check(
+        "F5-03 caliber 点明该列与 task 上同名单值列并非同一数据",
+        "并非同一个数据" in str(det.get("caliber")),
+        str(det.get("caliber")),
+    )
+    task_row = await _call(registry, "weekly_task_query", keyword="数据资产入表试点推进", limit=5)
+    single = [r.get("project_owner_name") for r in task_row.get("rows") or [] if r.get("id") == 97]
+    check(
+        # 两列确实不一致这件事本身要锁住：断言只写一边，改坏另一边不会被发现。
+        "F5-03 task 行上的单值列确为「秦怀瑾」，两列不一致是数据事实",
+        single == ["秦怀瑾"],
+        str(single),
+    )
+
     return report()
 
 

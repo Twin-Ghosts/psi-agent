@@ -21,7 +21,7 @@ export GUOSHU_WEEKLY_MCP_TOKEN=demo-token
 python tests/smoke_test.py
 ```
 
-预期 `265/265 passed`。
+预期 `276/276 passed`。
 
 ## 数据层准备
 
@@ -91,7 +91,7 @@ guoshu-weekly-workspace/
 │   ├── _store.py              # 只读查询层 + 口径规则 + 字段管控
 │   └── server.py              # 31 个语义化取数工具（Streamable HTTP MCP）
 └── tests/
-    ├── smoke_test.py          # 265 条契约断言，不花模型 token
+    ├── smoke_test.py          # 276 条契约断言，不花模型 token
     └── baseline.py            # 396 题准确率基线（LLM 判定）
 ```
 
@@ -102,20 +102,20 @@ guoshu-weekly-workspace/
 | 工具 | 用途 |
 |------|------|
 | `weekly_schema` | 看板、分类树、**表字段清单**、口径说明 |
-| `weekly_task_query` | 按看板/分类/状态/负责人/关键词查正式任务 |
+| `weekly_task_query` | 按看板/分类/状态/负责人/关键词/**专项组**查正式任务 |
 | `weekly_task_detail` | 单任务详情（明细 + 近期进展 + 年度目标） |
 | `weekly_progress_history` | 进展版本回溯，`version_no` 倒序 |
 | `weekly_progress_coverage` | 进展历史覆盖度（行数/任务数/起止/最大版本）、未发布进展分档、期号缺号、**每任务最新一期的下一步安排**、最新一期缺下一步计数 |
 | `weekly_aggregate` | 按 board/category/**primary_category**/status/project_group/owner/**workflow_status** 聚合，`top` 硬切前 N 组 |
 | `weekly_scale` | 多子表一次成表：规模（里程碑/附件/年度目标，**全部 `COUNT(DISTINCT)` 防 JOIN 放大**）/ 完备度（有该项的任务数）/ 进展密度（分母含零期任务） |
-| `weekly_field_completeness` | 字段填报完整度（R-07/R-19），字段走白名单 |
+| `weekly_field_completeness` | 字段填报完整度（R-07/R-19），字段走白名单，**完整率 `filled_pct` 服务端算好** |
 | `weekly_task_ranking` | 按子表计数排名（附件/进展/里程碑/提交单） |
 | `weekly_rank` | 排名并列口径三选一：硬切 N 条 / 保留并列 / 每组各自第一，可限定看板并回显 `total_count` |
 | `weekly_milestone_query` | 里程碑清单（已复核正式任务口径），单任务按 `sort_order` 编排 |
 | `weekly_workflow_query` | 审批动作流水（谁在哪个环节做了什么），可按 action/看板过滤、按任务聚合次数；**按环节+动作两维分档**、人均动作数（分子分母同回） |
 | `weekly_submission_query` | 审批提交单（`round_no` / `status` / 填报人），可查任务状态与最新单状态不一致；**按类型分档**（initial / progress）、O2OA 外部标识填充率、在途单（按成员枚举而非取反）、**在途总数/按看板分档/一任务多单**、**会签需求与按人分档/会签耗时对比**、人均轮次、已发布进展单 vs 已发布进展行 |
 | `weekly_owner_roles` | 按角色分别计数（as_owner / as_lead / any_role） |
-| `weekly_person_stats` | 人员统计（任务量/人均/独苗/跨组/双角色/标识写法/填报人/审核人/自审） |
+| `weekly_person_stats` | 人员统计（任务量/人均/独苗/跨组/双角色/标识写法/填报人/审核人/自审/**按专项组点名去重**） |
 | `weekly_attachment_stats` | 附件统计（容量/类型/最大/上传人/挂载去向/**零附件任务清单**/在途提交单/逐月/软删/孤儿） |
 | `weekly_attachment_query` | 附件清单（不含 `storage_path`），可按任务或**看板**筛 |
 | `weekly_import_audit` | 导入批次对账，`reconcile_rows` 反查实际落库行核对声明值，`orphans` 查批次引用完整性 |
@@ -125,7 +125,7 @@ guoshu-weekly-workspace/
 | `weekly_task_lifecycle` | 任务创建/发布的时间分布与建到发的时长 |
 | `weekly_freshness_distribution` | 新鲜度分桶（30/90/180 天）、自定义天窗、时间漂移检出、滞后清单（含从未上报）、近期上报清单 |
 | `weekly_approval_turnaround` | 审批时效（汇总/按看板/最慢/待审积压） |
-| `weekly_group_detail_query` | 集团组明细（目标成果/实施举措/进度成效/完成时间文本/多值负责人），可按 `status` 与 `non_empty` 交叉筛矛盾数据 |
+| `weekly_group_detail_query` | 集团组明细（目标成果/实施举措/进度成效/完成时间文本/多值负责人，**附人数**），可按 `status` 与 `non_empty` 交叉筛矛盾数据 |
 | `weekly_group_owner_query` | 集团组按牵头人或项目负责人查任务（多值精确匹配） |
 | `weekly_group_history` | 集团组历史进展（专表，可按年/月/季/任务/填报人/**滞报天数**/**提交单挂接率**分组，天窗可用 `last_days` 或**日历月** `last_months`） |
 | `weekly_group_stats` | 集团组统计（负责人构成/分隔符写法/一栏几人/完成时间**写法分档**与去重取值/字数/附件/期数/成效一致性） |
@@ -152,7 +152,7 @@ agent 据此给出依据、也据此判断不可答。
 | R-01 正式任务口径 | `_store.formal_task_clause()`，被所有任务类查询强制附加 |
 | R-02 / R-08 空分组保留 | 聚合走 LEFT JOIN，口径条件写在 ON 上 |
 | R-04 / R-14 敏感字段 | `opinion` / `review_comment` 凭 bearer token 分级，见下节 |
-| R-07 / R-19 填报完整度 | `weekly_field_completeness`，空串按未填计入 missing |
+| R-07 / R-19 填报完整度 | `weekly_field_completeness`，空串按未填计入 missing，完整率随行返回不由模型口算 |
 | R-09 / R-10 导入对账 | 批次数 vs 去重快照日期数 vs 去重导入时间数 |
 | R-11 / R-13 多值负责人 | 去空格后匹配；分管领导按填法枚举计数 |
 | R-12 完成时间是文本 | 任务详情的顶层 `caliber` 无条件声明 |
@@ -201,6 +201,11 @@ agent 据此给出依据、也据此判断不可答。
 | 同一动作在不同环节各自计数 | `by_node_action` 按 `node_type` + `action` 两维分 6 档；只按 `action` 分会把 955 条 `approved` 揉成一档，答不了「哪个环节驳回得多」（`audit/rejected` 13） |
 | 已发布进展「单」与「行」不同表 | 提交单侧 272（只数 `submission_kind = 'progress'`，含 initial 会变 400），`task_progress` 侧 943；再并入集团组专表会得到 1305，三个数答的是三个问题 |
 | 挂接率的分母不加行级发布闸门 | `by=linkage` 走全部 404 行而非过闸的 362 行；`linked_rows = 0` 是结论——集团成效历史与审批提交单没有外键落库，不是查不到 |
+| 完整率随行返回不由模型口算 | `filled_pct` 由服务端按 `total` 算到一位小数（`project_owner_id` 128 / 119 / 93.0）；只回计数时基线里模型答成「完整率 100%」，与它自己引用的 119/128 自相矛盾 |
+| 集团看板负责人两列值不一致 | 46 条任务上 `task_group_detail.project_owner_names` 与 `task.project_owner_name` 对不上（97 号任务一边「胡建国,方永康,邓少华」、一边「秦怀瑾」）；看板问题读明细表那一列，读错列时答案自洽也仍是错的 |
+| 多值负责人人数由服务端算 | `lead_owner_count` / `project_owner_count` 随行返回，顿号与逗号都扣过；模型按逗号自己数会漏掉顿号那几行 |
+| 「某组的人都有谁」是去重题 | `scope=group_roster` 行数即人数（标准安全组 9 位牵头人）；拿该组 19 条任务清单自己数，同一个人会按任务重复计数 |
+| 专项组是独立一列不是分类 | `weekly_task_query` 的 `project_group` 精确匹配；塞进 `category` 或 `keyword` 会静默返回错的集合 |
 
 ### 相对时间窗以快照日为基准
 
@@ -236,7 +241,7 @@ R-04/R-14 要的是「按权限返回」。一律遮蔽同样不满足需求—�
 | 数据权限 | 敏感字段按 token 两档分级 | 按 OA 真实身份做行级权限 |
 | 前端 | 无（经 psi-agent 既有接口） | 专建对话应用 + BFF（方案第六章） |
 | 材料生成 | 无 | 报告下载与图表（P1，第 5 期） |
-| 评测 | 265 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
+| 评测 | 276 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
 
 ### mock 数据层的两处不可外推
 

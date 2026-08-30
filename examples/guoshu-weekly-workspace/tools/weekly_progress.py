@@ -371,7 +371,11 @@ async def weekly_field_completeness(field: str = "", list_missing: bool = False,
     Name columns and id columns are different questions: project_owner_name is
     filled on all 128 formal tasks while project_owner_id is filled on 119, so
     "which tasks have no project owner" must be asked against the id column.
-    Set list_missing to get those rows rather than a percentage.
+    Set list_missing to get those rows instead of the counts.
+
+    The count form already carries filled_pct, the rate over the formal-task
+    total rounded to one decimal (project_owner_id: 128 / 119 / 93.0). Quote it
+    as-is; do not recompute filled / total or round it yourself.
 
     Args:
         field: Column to measure; empty lists the supported columns.
