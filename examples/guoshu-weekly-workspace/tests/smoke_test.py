@@ -1347,6 +1347,131 @@ async def run() -> int:
         and "不要说成「已排除」" in str(excl_appr.get("caliber", "")),
         f"total={excl_appr.get('total_count')}",
     )
+    # O2-02. 看板过滤只落在计数上时，行清单永远是跨看板的 47 个分类，另一看板的
+    # 19 个只是变成 cnt=0，和「本看板确实没有任务的分类」长得一样。
+    cat_tech = await _call(registry, "weekly_aggregate", group_by="category", board="tech", top=200)
+    cat_group = await _call(registry, "weekly_aggregate", group_by="category", board="group", top=200)
+    tech_rows = cat_tech.get("rows") or []
+    group_rows = cat_group.get("rows") or []
+    check(
+        "O2-02 技术组分类清单 28 个（7 个一级 + 21 个二级），不含另一看板的分类",
+        cat_tech.get("row_count") == 28
+        and sum(1 for r in tech_rows if not r.get("parent_id")) == 7
+        and sum(1 for r in tech_rows if r.get("parent_id")) == 21,
+        f"row_count={cat_tech.get('row_count')} 一级={sum(1 for r in tech_rows if not r.get('parent_id'))}",
+    )
+    check(
+        "O2-02 集团组分类清单 19 个（5 + 14），两看板相加等于跨看板的 47",
+        cat_group.get("row_count") == 19
+        and sum(1 for r in group_rows if not r.get("parent_id")) == 5
+        and sum(1 for r in group_rows if r.get("parent_id")) == 14
+        and int(cat_tech.get("row_count") or 0) + int(cat_group.get("row_count") or 0) == 47,
+        f"row_count={cat_group.get('row_count')} 一级={sum(1 for r in group_rows if not r.get('parent_id'))}",
+    )
+    check(
+        "O2-02 口径点明一二级要分别报，且 cnt=0 不等于「属于另一个看板」",
+        "要按这两级分别报" in str(cat_tech.get("caliber", ""))
+        and "另一看板的分类根本不在清单里" in str(cat_tech.get("caliber", "")),
+        str(cat_tech.get("caliber", ""))[:160],
+    )
+    # 分类树上的任务数不受过滤影响：技术组 82 + 集团组 46 = 128 个正式任务。
+    tech_sum = sum(int(r.get("cnt") or 0) for r in tech_rows)
+    group_sum = sum(int(r.get("cnt") or 0) for r in group_rows)
+    check(
+        "O2-02 两看板分类下任务数合计仍是 128，过滤没把任务丢掉",
+        tech_sum == 82 and group_sum == 46,
+        f"tech={tech_sum} group={group_sum}",
+    )
+
+    # O3-03. 「任务 2 的附件一共多大」原先没有单任务档，只能翻清单手工加总。
+    att2 = await _call(registry, "weekly_attachment_stats", scope="summary", task="2")
+    att2_row = (att2.get("rows") or [{}])[0]
+    check(
+        "O3-03 单任务附件总量一次调用得出：2 个文件 6914081 字节",
+        att2_row.get("attachment_count") == 2 and att2_row.get("total_bytes") == "6914081",
+        f"row={att2_row}",
+    )
+    check(
+        "O3-03 单任务档不加正式任务闸门，口径写明原因（任务 2 是 rejected）",
+        "本档不加正式任务闸门" in str(att2.get("caliber", "")),
+        str(att2.get("caliber", ""))[:140],
+    )
+    # 单任务档不能污染全局档：454 条是全部正式任务上的活跃附件。
+    att_all = await _call(registry, "weekly_attachment_stats", scope="summary")
+    check(
+        "O3-03 不传 task 时仍是全局 454 条，单任务档没串味",
+        (att_all.get("rows") or [{}])[0].get("attachment_count") == 454,
+        f"row={(att_all.get('rows') or [{}])[0]}",
+    )
+    # 跨任务/全表档传 task 要报错而不是悄悄忽略：静默忽略比报错更糟。
+    att_bad = await _call(registry, "weekly_attachment_stats", scope="zero_attachment", task="2")
+    check(
+        "O3-03 全表口径传 task 报 task_not_applicable，不做静默忽略",
+        att_bad.get("ok") is False
+        and (att_bad.get("error") or {}).get("code") == "task_not_applicable"
+        and "scope=summary" in str((att_bad.get("error") or {}).get("message", "")),
+        str(att_bad.get("error"))[:140],
+    )
+    att_absent = await _call(registry, "weekly_attachment_stats", scope="summary", task="9999")
+    check(
+        "O3-03 库里没这个 id 时报 task_not_found，不回一行 count=0",
+        att_absent.get("ok") is False and (att_absent.get("error") or {}).get("code") == "task_not_found",
+        str(att_absent.get("error"))[:120],
+    )
+
+    # O7-03. 进展行按月报，短窗口在 task_progress 上恒为 0；那个 0 是真的，但答不了
+    # 「最近一周哪些任务更新了进展」——那问的是 task.latest_progress_time。
+    rng7 = await _call(registry, "weekly_progress_range", last_days=7)
+    check(
+        "O7-03 近 7 天进展行 0 条，口径点明是月度节奏而非「没人报」并指向 recent_days",
+        rng7.get("total_count") == 0
+        and "不是「没人报进展」" in str(rng7.get("caliber", ""))
+        and "recent_days=7" in str(rng7.get("caliber", ""))
+        and "也不要退而报" in str(rng7.get("caliber", "")),
+        str(rng7.get("caliber", ""))[-200:],
+    )
+    recent7 = await _call(registry, "weekly_freshness_distribution", recent_days=7)
+    check(
+        "O7-03 指路的 recent_days=7 真能答出 23 条，首行是任务 103（08-14）",
+        recent7.get("row_count") == 23
+        and (recent7.get("rows") or [{}])[0].get("id") == 103
+        and (recent7.get("rows") or [{}])[0].get("days_since") == 1,
+        f"row_count={recent7.get('row_count')} first={(recent7.get('rows') or [{}])[0]}",
+    )
+    # 分组档同样要带上这句，否则 by=task 的 0 行还是死路。
+    rng7_task = await _call(registry, "weekly_progress_range", last_days=7, by="task")
+    check(
+        "O7-03 by=task 的空窗口也带同一句指路",
+        rng7_task.get("row_count") == 0 and "recent_days=7" in str(rng7_task.get("caliber", "")),
+        str(rng7_task.get("caliber", ""))[-120:],
+    )
+    # 长窗口不该被这句话污染：近 60 天有行，提示不出现。
+    rng60 = await _call(registry, "weekly_progress_range", last_days=60, by="month")
+    check(
+        "O7-03 有行的窗口不加空窗提示",
+        rng60.get("row_count", 0) > 0 and "不是「没人报进展」" not in str(rng60.get("caliber", "")),
+        f"row_count={rng60.get('row_count')}",
+    )
+
+    # O6-01. 「李建华负责哪些任务」有两个总体：task 上的单值 lead_owner_name（14 条）
+    # 与集团看板明细表的多值牵头人列（3 条）。基线把两边并起来，于是多两条少一条。
+    own_task = await _call(registry, "weekly_task_query", owner="李建华", limit=200)
+    own_group = await _call(registry, "weekly_group_owner_query", person="李建华")
+    check(
+        "O6-01 task 表口径 14 条，与 gold 的 id 集合一致",
+        sorted(r.get("id") for r in (own_task.get("rows") or []))
+        == [4, 5, 11, 32, 39, 44, 46, 52, 61, 74, 88, 91, 127, 136],
+        f"ids={sorted(r.get('id') for r in (own_task.get('rows') or []))}",
+    )
+    check(
+        "O6-01 明细表多值口径只有 3 条，且与 task 口径不是同一集合",
+        own_group.get("row_count") == 3
+        and {r.get("task_id") for r in (own_group.get("rows") or [])} == {117, 127, 145}
+        and "两个不同总体" in str(own_group.get("caliber", ""))
+        and "不要把两边结果并起来" in str(own_group.get("caliber", "")),
+        f"ids={[r.get('task_id') for r in (own_group.get('rows') or [])]}",
+    )
+
     bad_group = await _call(registry, "weekly_aggregate", group_by="不支持的维度")
     check(
         "不支持的聚合维度明确报错",

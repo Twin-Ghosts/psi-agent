@@ -90,6 +90,8 @@ TOOL_GUIDE = """\
   要另一条按 id 或完整名（含「（N期）」）再查一次，不要把整个系列的期次铺在一起。
 - weekly_progress_range：跨全部任务按时间窗查/计数已发布进展。问「哪个月/哪个季度最多」
   带 peak=True，服务端直接给峰值那一组，不要自己在各组计数间比大小。
+  进展行按月上报，短于半月的窗口在本表上恒为 0 行，此时 caliber 会点明并指向
+  weekly_freshness_distribution recent_days=N——「最近一周哪些任务更新了进展」走那条路。
 - weekly_progress_coverage：进展覆盖范围与回溯深度汇总；scope=summary 里的
   avg_rounds_per_task 就是「平均每条有进展的任务报了多少期」= 12.92（943 期 / 报过进展的
   73 条），分母不是正式任务 128（那样得 7.37）——直接引这一列，不要自己挑分母去除。
@@ -201,6 +203,10 @@ TOOL_GUIDE = """\
   逐个调 weekly_attachment_query 看谁返回空。问「最大的文件是哪个」用 scope=largest
   配 top=1，首行即答。其余聚合——总容量/按类型/最大文件/按上传人/上传人数/挂载去向/
   在途提交单上的附件/逐月趋势/软删审计/孤儿行。清单工具封顶 200 条，求和计数一律用这个。
+  问「某个任务的附件一共多大」传 task，一次即得（任务 2 是 2 个文件 6914081 字节），
+  不要翻清单手工加总；该档按 task_id 外键取数、不加正式任务闸门，
+  故 weekly_task_detail 报 task_not_formal 的任务在这里照样有数。
+  zero_attachment / deleted / deleted_by_link / orphan 是跨任务或全表口径，传 task 会报错。
 - weekly_import_audit：导入批次对账（批次数 vs 去重快照日期数）。默认只报批次自己声明的
   changed_tasks；问「声明与实际对不上」必须带 reconcile_rows=True，服务端反查实际落库并
   直接给出 mismatched_batches。问「有没有进展挂在不存在的批次上」带 orphans=True：
@@ -219,6 +225,9 @@ TOOL_GUIDE = """\
   问「当期」进度成效、或要「前 N 条」，带 order_by="progress_time"：默认按任务 id 排，
   第一页是看板最早那批（97 起），截前 5 条给出的不是当期那 5 条。
 - weekly_group_owner_query：按负责人查专项组任务，或列出该看板的负责人字段。
+  它查的是集团看板明细表的逗号多值牵头人列，与 weekly_task_query owner= 的
+  task.lead_owner_name 单值列是两个不同总体（李建华 3 条 vs 14 条），两边行数不同是正常的，
+  不要把两边结果并起来当一个答案。问「某人负责哪些任务」默认按 task 表口径答。
 - weekly_group_history：专项组进展历史（独立表，非 task_progress）。
   「最近三个月」用 last_months=3（日历月），不要折成 last_days=90：两者边界不同（回到
   05-15 与 05-17），5 月那一档会由 16 变 13；两个参数互斥，同时给服务端直接报错。
@@ -405,6 +414,24 @@ CALIBER_RULES = """\
     approved（那是审批动作的词）。传了域外值时返回的 caliber 会写明「该过滤条件未筛掉
     任何行」，此时结果是全量，不能说成「已排除」——问「我提交但还没发布的」应当
     exclude_status=published（得 4 条），拿 approved 去排会把 25 条已发布的一并列出来。
+52. 「分类」分一级与二级两层，且看板过滤同时作用在分类树上。weekly_aggregate
+    group_by=category 一行一个分类，parent_id 为空即一级、非空即挂在该一级下的二级；
+    问「某看板有哪些分类」要按这两级分别报（技术组 28 个 = 7 + 21，集团组 19 个 = 5 + 14），
+    不要只报一个混合条数。清单只含本看板的分类，另一看板的根本不在里面；cnt = 0 是
+    「本看板内这个分类确实没有正式任务」（R-02 保留空分组），不是「属于另一个看板」。
+53. 单任务的附件总量用 weekly_attachment_stats 传 task，不要翻 weekly_attachment_query
+    的清单手工加总。该档按 task_id 外键取数、不加正式任务闸门，所以 weekly_task_detail
+    报 task_not_formal 的任务在这里照样有数。zero_attachment / deleted / deleted_by_link /
+    orphan 是跨任务或全表口径，传 task 会明确报 task_not_applicable 而非静默忽略。
+54. 「最近一周有哪些任务更新了进展」问的是 task.latest_progress_time，不是 task_progress
+    的行。进展行按月上报（最新一批 progress_date 是 2026-07-31，距快照日 15 天），所以
+    weekly_progress_range last_days=7 必然 0 行——那个 0 是真的，但它不表示「本周没人报」。
+    请用 weekly_freshness_distribution recent_days=7（得 23 条）。也不要退而报「最新一批
+    进展」的 17 条：那是 2026-07-31 那一期的期数，答的是另一个问题。
+55. 「某人负责哪些任务」有两个总体，不能相加。task 表的 lead_owner_name 是单值列
+    （weekly_task_query owner=，李建华 14 条），集团看板明细表的牵头人是逗号多值列
+    （weekly_group_owner_query person=，李建华 3 条）。两边行数不同是正常的：把它们并起来
+    会多出只在明细表挂名的任务、又漏掉 task 上牵头而明细表没列名的任务。默认按 task 表口径答。
 
 ## 判为不可答
 

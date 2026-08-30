@@ -629,7 +629,7 @@ async def weekly_attachment_query(task: str = "", board: str = "", limit: int = 
     return await _call("weekly_attachment_query", {"task": task, "board": board, "limit": bounded})
 
 
-async def weekly_attachment_stats(scope: str = "summary", date_from: str = "", top: int = 200) -> str:
+async def weekly_attachment_stats(scope: str = "summary", date_from: str = "", task: str = "", top: int = 200) -> str:
     """Aggregate attachments: size totals, file types, uploaders, soft-delete audit.
 
     weekly_attachment_query caps at 200 rows, so counting or summing by reading
@@ -650,6 +650,12 @@ async def weekly_attachment_stats(scope: str = "summary", date_from: str = "", t
             over the whole table) / deleted_by_link / orphan (rows whose task_id
             matches no task).
         date_from: For by_month, inclusive lower bound YYYY-MM-DD.
+        task: Task id or name; every scope above then covers only that task. Use
+            this for "how big are task N's attachments in total" instead of
+            listing rows through weekly_attachment_query and adding them up by
+            hand. Works for tasks outside the formal set too (attachments hang
+            off task_id as a plain foreign key), so a task that
+            weekly_task_detail rejects as task_not_formal still answers here.
         top: Row cap, capped at 200.
     """
     try:
@@ -658,7 +664,7 @@ async def weekly_attachment_stats(scope: str = "summary", date_from: str = "", t
         return _invalid("top must be an integer")
     return await _call(
         "weekly_attachment_stats",
-        {"scope": scope, "date_from": date_from, "top": bounded},
+        {"scope": scope, "date_from": date_from, "task": task, "top": bounded},
     )
 
 

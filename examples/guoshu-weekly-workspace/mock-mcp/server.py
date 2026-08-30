@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,14 @@ def _caller_may_read_sensitive(ctx: Context | None) -> bool:
     raw = headers.get("authorization") or headers.get("Authorization") or ""
     token = raw.removeprefix("Bearer").removeprefix("bearer").strip()
     return bool(token) and token == SENSITIVE_TOKEN
+
+
+def _days_between(lo: str, hi: str) -> int:
+    """Span of an inclusive YYYY-MM-DD window in days, 0 if either side is unparseable."""
+    try:
+        return (date.fromisoformat(hi[:10]) - date.fromisoformat(lo[:10])).days
+    except ValueError:
+        return 0
 
 
 def _task_miss(task: str) -> dict[str, Any]:
@@ -428,10 +437,18 @@ def weekly_aggregate(
                 "WHERE b.is_deleted = 0 GROUP BY b.id, b.name ORDER BY b.sort_order"
             )
         elif group_by == "category":
+            # board 必须同时落在分类树上（c.board_id），不能只落在任务的 ON 子句里：
+            # 只过滤计数时，行清单仍是全部 47 个分类，另一看板的 19 个只是变成
+            # cnt=0，和「本看板确实没有任务的分类」长得一模一样。问「技术组下面
+            # 有哪些分类」于是答出 47 条（真值 28：7 个一级 + 21 个二级）。
+            cat_board = ""
+            if board.strip():
+                cat_board = "AND c.board_id = %(bid)s"
             sql = (
-                "SELECT c.name AS group_name, COUNT(t.id) AS cnt FROM task_category c "
+                "SELECT c.name AS group_name, c.parent_id, COUNT(t.id) AS cnt FROM task_category c "
                 f"LEFT JOIN task t ON t.category_id = c.id AND {scope} "
-                "WHERE c.is_deleted = 0 GROUP BY c.id, c.name ORDER BY cnt DESC, c.id"
+                f"WHERE c.is_deleted = 0 {cat_board} "
+                "GROUP BY c.id, c.name, c.parent_id ORDER BY cnt DESC, c.id"
             )
         elif group_by == "primary_category":
             # 任务只挂到二级分类，一级分类得经 parent_id 上跳一层。按 category
@@ -532,6 +549,15 @@ def weekly_aggregate(
                 "各档相加等于未删除任务总数 total_tasks，"
                 "「尚未发布」= total_tasks - published，不要按在途状态逐项相加（cancelled 既非已发布也非在途）；"
                 "published_pct 已由服务端算好，直接引用"
+            )
+        elif group_by == "category":
+            caliber += (
+                "；本档一行一个二级/一级分类，parent_id 为空即一级分类、非空即挂在该一级下的二级分类，"
+                "问「有哪些分类」要按这两级分别报，不要只报一个混合条数；"
+                "看板过滤同时作用在分类树（c.board_id）与任务上，"
+                "故行清单只含本看板的分类：技术组 28 个（7 个一级 + 21 个二级）、集团组 19 个（5 + 14）；"
+                "cnt = 0 表示该分类本看板内确实没有正式任务（R-02 保留空分组），"
+                "不是「属于另一个看板」——另一看板的分类根本不在清单里"
             )
         elif group_by == "primary_category":
             caliber = (
@@ -1047,12 +1073,17 @@ _ATTACHMENT_STATS_SCOPES = (
     "deleted_by_link",
     "orphan",
 )
+# 这几档的问题对象不是「某个任务」：zero_attachment 问的是跨任务的存在性（分母是
+# 全部正式任务），deleted / deleted_by_link / orphan 是对整张附件表的审计。传了
+# task 就报错而不是悄悄忽略——静默忽略会让人以为拿到的是单任务数，那比报错更糟。
+_ATTACHMENT_STATS_WHOLE_TABLE = frozenset({"zero_attachment", "deleted", "deleted_by_link", "orphan"})
 
 
 @mcp.tool()
 def weekly_attachment_stats(
     scope: str = "summary",
     date_from: str = "",
+    task: str = "",
     top: int = 200,
 ) -> str:
     """Aggregate attachments: size totals, file types, uploaders, soft-delete audit.
@@ -1072,6 +1103,13 @@ def weekly_attachment_stats(
             deleted (soft-delete audit, whole table) / deleted_by_link (deleted rows
             by attach point) / orphan (rows whose task_id has no task).
         date_from: For by_month, inclusive lower bound YYYY-MM-DD.
+        task: Task id or name to scope the aggregate to one task. "How big are
+            task 2's attachments" otherwise has no aggregate at all -- the only
+            route is listing rows and summing them by hand, which is both wrong
+            past 200 rows and (on O3-03) burned the whole round budget. Scoping
+            by task drops the formal-task gate on purpose: attachments hang off
+            task_id as a plain foreign key, so a task outside the formal set
+            still has attachments, and gating here would silently answer 0.
         top: Row cap for the listing scopes.
     """
 
@@ -1086,12 +1124,41 @@ def weekly_attachment_stats(
                 },
             }
         bounded = max(1, min(store.MAX_ROWS, int(top)))
+        scoped_task: int | None = None
+        if task.strip():
+            if key in _ATTACHMENT_STATS_WHOLE_TABLE:
+                return {
+                    "ok": False,
+                    "error": {
+                        "code": "task_not_applicable",
+                        "message": (
+                            f"口径 {key} 是跨任务/全表口径，传 task 无意义，不做静默忽略："
+                            "zero_attachment 问的是「哪些任务一个附件都没有」（分母是全部正式任务），"
+                            "deleted / deleted_by_link / orphan 是对整张附件表的软删与孤儿审计。"
+                            "要单任务的附件总量请用 scope=summary 加 task"
+                        ),
+                    },
+                }
+            scoped_task = store.resolve_task_id(task)
+            # resolve_task_id 对纯数字直接放行（外键取数本该如此），所以「库里没这个
+            # id」要单独判一次：不判就会回一行 count = 0，和「这任务确实没附件」
+            # 长得一样，正是 O3-03 那类问题的来源。
+            if scoped_task is None or store.task_miss_reason(str(scoped_task)).get("kind") == "absent":
+                return _task_miss(task)
         # 活跃附件的口径：任务侧 R-01 + 附件行自身的软删标记，两道都要。
-        live = (
-            "FROM task_attachment a JOIN task t ON t.id = a.task_id "
-            f"WHERE {store.formal_task_clause()} AND a.is_deleted = 0"
-        )
-        live_caliber = f"{store.FORMAL_TASK_CALIBER} 且 a.is_deleted = 0（任务闸门 + 附件行软删两道）"
+        # 单任务档例外：附件按 task_id 外键挂，任务不在正式集里也照样有附件，
+        # 此处加闸门只会把 2 条静默答成 0（任务 2 正是 workflow_status='rejected'）。
+        if scoped_task is not None:
+            gate = f"a.task_id = {int(scoped_task)}"
+            live_caliber = (
+                f"仅任务 {scoped_task}，按 task_id 外键取数；a.is_deleted = 0（附件行软删）；"
+                "本档不加正式任务闸门——附件挂在外键上，任务未过 R-01 时它的附件依然存在，"
+                "加闸门会把真实条数静默答成 0"
+            )
+        else:
+            gate = store.formal_task_clause()
+            live_caliber = f"{store.FORMAL_TASK_CALIBER} 且 a.is_deleted = 0（任务闸门 + 附件行软删两道）"
+        live = f"FROM task_attachment a JOIN task t ON t.id = a.task_id WHERE {gate} AND a.is_deleted = 0"
         size_note = "file_size 单位是字节，bytes 列为权威值，MB 列由服务端换算仅供参考"
         # 关联去向的分档表达式，三处口径必须一致，抽出来共用。
         link_case = (
@@ -1163,7 +1230,7 @@ def weekly_attachment_stats(
                 "SELECT t.task_name, p.version_no, COUNT(*) AS attachment_count "
                 "FROM task_attachment a JOIN task_progress p ON p.id = a.progress_id "
                 "AND p.is_published = 1 JOIN task t ON t.id = a.task_id "
-                f"WHERE {store.formal_task_clause()} AND a.is_deleted = 0 "
+                f"WHERE {gate} AND a.is_deleted = 0 "
                 "GROUP BY t.id, t.task_name, p.version_no "
                 "ORDER BY attachment_count DESC, t.id, p.version_no",
                 caliber=(
@@ -1203,7 +1270,7 @@ def weekly_attachment_stats(
                 "SELECT COUNT(*) AS attachment_count "
                 "FROM task_attachment a "
                 "JOIN task_workflow_submission s ON s.id = a.workflow_submission_id "
-                f"JOIN task t ON t.id = a.task_id WHERE {store.formal_task_clause()} "
+                f"JOIN task t ON t.id = a.task_id WHERE {gate} "
                 "AND a.is_deleted = 0 AND s.status <> 'published'",
                 caliber=(
                     f"{live_caliber} 且 s.status <> 'published'（在途提交单）；"
@@ -1914,6 +1981,17 @@ _PROGRESS_DATE_FIELDS: dict[str, str] = {
     "report_time": "上报时间",
 }
 
+# 空窗提示：进展行按月报，短窗口在本表上恒为 0 行，得换问 task 上的
+# latest_progress_time。不写出来，0 行就会被当成「本周没人报」或退化成
+# 「最后一批 17 条」——O7-03 的 6 轮正是耗在这个岔口上。
+_SHORT_WINDOW_HINT = (
+    "；本次窗口内 0 行不是「没人报进展」：进展行按月上报（progress_date 最新一批是 2026-07-31，"
+    "距快照日 2026-08-15 已 15 天），任何短于半月的窗口在 task_progress 上必然为空。"
+    "问「最近一周哪些任务更新了进展」问的是任务上的 latest_progress_time（逐条更新），"
+    "请改用 weekly_freshness_distribution recent_days=7（得 23 条）；"
+    "也不要退而报「最新一批进展」的 17 条，那是 2026-07-31 那一期的期数，答的是另一个问题"
+)
+
 # Bucket expression and ORDER BY for grouped counts. `bucket` is the SELECT alias.
 _PROGRESS_GROUPINGS: dict[str, tuple[str, str]] = {
     "month": ("DATE_FORMAT(p.progress_date, '%%Y-%%m')", "bucket"),
@@ -2300,6 +2378,12 @@ def weekly_progress_range(
             f"{store.FORMAL_TASK_CALIBER}；仅正式发布进展（is_published = 1）；"
             f"{store.window_caliber(lo, hi, label=field_label)}；{store.as_of_caliber()}"
         )
+        # 进展行是按月上报的（progress_date 最新一批是 2026-07-31，距快照日 15 天），
+        # 所以任何短于半月的窗口在本表上必然是 0 行。这个 0 是真的，但它答不了
+        # 「最近一周哪些任务更新了进展」——那问的是任务上的 latest_progress_time
+        # （近 7 天 23 条）。不点明这层，看到 0 行只会退成「最后一批」17 条，
+        # O7-03 那 6 轮就是这么耗掉的。
+        short_window = bool(lo and hi and (_days_between(lo, hi) < 15))
 
         if not grouping:
             # Counts must survive truncation: "今年以来报了多少期" is 366 rows, well
@@ -2327,6 +2411,8 @@ def weekly_progress_range(
             first = totals["rows"][0] if totals["rows"] else {}
             rows["total_count"] = first.get("total_rows")
             rows["total_tasks"] = first.get("total_tasks")
+            if not rows["total_count"] and short_window:
+                rows["caliber"] += _SHORT_WINDOW_HINT
             return rows
 
         expression, order = _PROGRESS_GROUPINGS[grouping]
@@ -2344,13 +2430,16 @@ def weekly_progress_range(
             # has_more = True，看着像「还有行没给」，与「首行即答案」相冲。
             tail = " LIMIT 1"
             note += "；已按计数降序、并列取 bucket 升序，首行即峰值，勿另行比较"
-        return store.fetch(
+        grouped = store.fetch(
             f"SELECT {select} FROM task_progress p JOIN task t ON t.id = p.task_id "
             f"WHERE {where} GROUP BY bucket ORDER BY {group_order}{tail}",
             params,
             caliber=caliber + note,
             limit=limit,
         )
+        if not grouped.get("row_count") and short_window:
+            grouped["caliber"] += _SHORT_WINDOW_HINT
+        return grouped
 
     return _guard("weekly_progress_range", work)
 
@@ -4076,6 +4165,17 @@ def weekly_group_owner_query(person: str = "", role: str = "lead", limit: int = 
             params["who"] = token
             where.append(f"(FIND_IN_SET(%(who)s, d.{id_column}) > 0 OR FIND_IN_SET(%(who)s, d.{name_column}) > 0)")
             caliber.append(f"FIND_IN_SET 精确匹配「{token}」（逗号多值，不用 LIKE 以免跨人误命中）")
+            # 本工具与 weekly_task_query owner= 是两个不同的总体，不是同一答案的
+            # 两半：这里查的是集团看板明细表的多值牵头人列，那里查的是 task 上的
+            # lead_owner_name 单值列。把两边的行并起来既会多出只在明细表里挂名的
+            # 任务，又会漏掉 task 上牵头、明细表里没列名的任务（O6-01 就是这么
+            # 一次多两条、少一条的）。
+            caliber.append(
+                "本档只覆盖集团看板明细表的多值牵头人列，"
+                "与 weekly_task_query owner= 的 task.lead_owner_name 单值列是两个不同总体，"
+                "两边行数不同是正常的，不要把两边结果并起来当一个答案；"
+                f"问「{token}负责哪些任务」按 task 表口径答，请用 weekly_task_query owner="
+            )
         else:
             where.append(f"d.{id_column} <> ''")
             caliber.append("仅列出该角色非空的任务")
