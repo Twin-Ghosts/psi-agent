@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -316,6 +317,25 @@ def weekly_task_detail(task: str, ctx: Context | None = None) -> str:
             caliber="task_id + year 唯一",
             limit=5,
         )
+        # 集团看板的进展不在 task_progress 里（那张表 0 行全属技术看板），而在
+        # task_group_detail.progress_effect 与 task_group_progress_history。
+        # 空的 recent_progress 不说明这一点，就会被当成「这任务没报过进展」，
+        # 于是模型在 progress_history / milestone_stats 之间来回试——Q1-02 那 6 轮
+        # 13 次调用就是这么耗掉的，而答案其实已经在本次返回的 group_detail 里。
+        # 有 group_detail 行本身就等于「这是集团看板任务」——那张表只覆盖集团看板，
+        # 所以不必再回查 board.code。
+        extra = ""
+        if not progress["rows"] and detail["rows"]:
+            effect = (detail["rows"][0].get("progress_effect") or "").strip()
+            if effect:
+                extra = (
+                    "；本任务属集团看板，进展不在 task_progress（该表 0 行全属技术看板），"
+                    "recent_progress 为空不代表没报过进展："
+                    "当期进度成效就在本次返回的 group_detail.progress_effect 里，"
+                    "问「目前进展如何」按它答即可；"
+                    "要历次报送请用 weekly_group_history（task_group_progress_history），"
+                    "weekly_progress_history / weekly_progress_range 对集团任务一律返回空"
+                )
         return {
             "ok": True,
             "task": {k: v for k, v in found.items() if k not in store.BLOCKED_FIELDS},
@@ -329,7 +349,7 @@ def weekly_task_detail(task: str, ctx: Context | None = None) -> str:
             "caliber": (
                 f"{store.FORMAL_TASK_CALIBER}；"
                 "completion_time 为展示文本，不可做日期运算（R-12）；"
-                "review_comment 按权限展示（R-04/R-14）"
+                "review_comment 按权限展示（R-04/R-14）" + extra
             ),
             "snapshot_note": "演示数据（weekly_mock 自建库），非集团真实周报",
         }
@@ -2013,6 +2033,7 @@ _TURNAROUND_SCOPES = ("summary", "board", "slowest", "pending")
 _COVERAGE_SCOPES = (
     "summary",
     "publish_split",
+    "import_split",
     "unpublished",
     "unpublished_by_task",
     "pending_review",
@@ -2149,6 +2170,7 @@ _GROUP_STATS_SCOPES = (
     "overdue",
     "field_lengths",
     "attachments",
+    "attachment_distribution",
     "history_rounds",
     "separators",
     "owner_widths",
@@ -2454,6 +2476,10 @@ def weekly_progress_coverage(scope: str = "summary", project_group: str = "", li
             (943 / 123 / 1066) -- summary carries only the published side and
             ``unpublished`` only the other, and adding them up by hand tends to
             drop the task gate, which reads 945 / 1068 instead.
+            ``import_split`` splits published progress into imported vs
+            hand-entered by ``import_id IS NULL`` (943 / 943 / 0). Nothing else
+            exposes that column, so "how many periods were typed in by hand"
+            otherwise reads as unanswerable when the answer is a plain 0.
             ``unpublished`` splits unpublished progress by its OWN approval code
             (0 草稿 / 1 待审核 / 2 驳回 / 3 通过) -- a different vocabulary from the
             task's workflow_status -- and gives each bucket's row count plus its
@@ -2554,6 +2580,30 @@ def weekly_progress_coverage(scope: str = "summary", project_group: str = "", li
                     "答「进展记录里」仍要按正式任务口径；"
                     "published 943 与 scope=summary 的 progress_rows 同源，"
                     "unpublished 123 与 scope=unpublished 的 total_count 同源"
+                ),
+                limit=1,
+            )
+
+        if key == "import_split":
+            # 「多少条是手工填的、不是导入的」——判据是 task_progress.import_id
+            # 是否为空，此前没有任何工具暴露这一列的分布，模型只能答「无法精确
+            # 统计」（Q5-04 就是这么失分的）。两套闸门的答案差得很远，必须同时
+            # 给全：正式发布口径 943 全部来自导入、手工 0；把 is_published = 1
+            # 去掉则是 1066 行里 948 导入、118 手工——那 118 条全是未发布的草稿。
+            return store.fetch(
+                "SELECT COUNT(*) AS total, SUM(p.import_id IS NOT NULL) AS from_import, "
+                "SUM(p.import_id IS NULL) AS manual, "
+                "SUM(p.is_published = 0 AND p.import_id IS NULL) AS manual_unpublished, "
+                "COUNT(DISTINCT p.import_id) AS batches "
+                "FROM task_progress p JOIN task t ON t.id = p.task_id "
+                f"WHERE {clause} AND p.is_published = 1",
+                caliber=(
+                    f"{store.FORMAL_TASK_CALIBER}；仅正式发布进展（p.is_published = 1）；"
+                    "手工与导入的判据是 task_progress.import_id 是否为空，没有别的标记列；"
+                    "本档口径下 total 943 = from_import 943 + manual 0，"
+                    "即已发布进展全部来自批量导入，手工填报为 0 条（这个 0 是查得出来的，不是取不到数）；"
+                    "去掉 is_published = 1 则是 1066 行里 948 导入 + 118 手工，"
+                    "那 118 条手工的全部未发布，答「有多少条进展是手工填的」按已发布口径答 0"
                 ),
                 limit=1,
             )
@@ -4033,6 +4083,43 @@ def weekly_group_detail_query(
             caliber.append(f"{column} 含「{needle}」（文本匹配，非日期运算）")
             if column not in selected:
                 selected.append(column)
+            # 「要求 2026 年内完成的任务」只能按年份数字扫这一列：completion_time
+            # 是自由文本，46 条里有 28 种写法（2026年内 / 2026年底前 / 2026Q4 /
+            # 2026-12-30 / 2026年9月30日 …）。拿「2026年内」当检索词只命中字面
+            # 相同的 5 条，剩下 26 条同样是 2026 年到期却被漏掉（Q4-03）。
+            if column == "completion_time":
+                year = re.search(r"20\d{2}", needle)
+                if year and needle == year.group():
+                    caliber.append(
+                        f"本次按年份数字「{needle}」扫全部写法，这是唯一可靠的年份过滤方式："
+                        "completion_time 是自由文本，本看板 46 条里有 28 种写法"
+                        "（2026年内 / 2026年底前 / 2026Q4 / 2026-12-30 / 2026年9月30日 等），"
+                        f"用「{needle}年内」这类完整表述当检索词只能命中字面相同的少数几条，"
+                        "会漏掉同年到期但写法不同的任务；写法分档另见 "
+                        "weekly_group_stats scope=completion_time_formats，"
+                        "去重取值见 scope=completion_time_values；"
+                        "另外「持续推进」这类不含年份的写法本次一律不在结果里，"
+                        "它们既不算命中也不代表该年不到期"
+                    )
+                elif year:
+                    # 检索词比裸年份长（「2026年内」「2026年底前」…）时，本次结果
+                    # 只是该写法的字面命中，不是「该年到期的任务」。这一路必须自己
+                    # 报出全年真数，否则模型拿 5 条当 31 条答完就走（Q4-03）。
+                    total_year = store.scalar(
+                        "SELECT COUNT(*) FROM task_group_detail d JOIN task t ON t.id = d.task_id "
+                        f"{store.group_board_join()} "
+                        f"WHERE {store.formal_task_clause()} AND d.completion_time LIKE %(y)s",
+                        {"y": f"%{year.group()}%"},
+                    )
+                    caliber.append(
+                        f"注意：本次只命中字面含「{needle}」的写法，不等于「{year.group()}年到期的任务」。"
+                        "completion_time 是自由文本，本看板 46 条里有 28 种写法"
+                        f"（{year.group()}年内 / {year.group()}年底前 / {year.group()}Q4 / "
+                        f"{year.group()}-12-30 等），"
+                        f"按年份数字「{year.group()}」扫共 {total_year['value']} 条；"
+                        f"问「哪些任务要求 {year.group()} 年内完成」请改用 contains={year.group()}，"
+                        "不要用完整表述当检索词"
+                    )
 
         if status.strip():
             if status.strip() not in {"0", "1", "2", "3"}:
@@ -4179,6 +4266,18 @@ def weekly_group_owner_query(person: str = "", role: str = "lead", limit: int = 
         else:
             where.append(f"d.{id_column} <> ''")
             caliber.append("仅列出该角色非空的任务")
+            # 不带人名时本工具是「按挂名人数排的榜」，不是看板花名册：定序键是
+            # owner_count DESC，带 limit 一截就落在人多的那批任务上，与按 task_id
+            # 顺序列的前 N 条完全是两批（Q3-01 那次 8 条一条都没对上）。而且这里
+            # 一次只带一个角色列，「牵头人和项目负责人分别是谁」在本工具里天生
+            # 答不全。两件事都写进口径，并把出口指出来。
+            caliber.append(
+                "本档按该角色挂名人数倒序（owner_count DESC），是「谁挂名最多」的榜，"
+                "不是看板花名册；带 limit 截出来的前 N 条不等于按任务顺序的前 N 条；"
+                "本工具一次只带一个角色列，"
+                "问「各任务的牵头人和项目负责人分别是谁」要两列同时出、且按 task_id 顺序，"
+                "请用 weekly_group_detail_query fields=lead_owner_names,project_owner_names"
+            )
 
         return store.fetch(
             f"SELECT d.task_id, t.task_name, d.{name_column}, d.{id_column}, "
@@ -4416,7 +4515,12 @@ def weekly_group_stats(scope: str = "owners", top: int = 8, min_rounds: int = 0)
             ``owner_widths`` (people per project_owner_names cell, widest first),
             ``completion_time`` (ISO vs free text vs blank),
             ``field_lengths`` (target_result char stats),
-            ``attachments`` (per-task counts, zero kept),
+            ``attachments`` (per-task counts, zero kept -- a listing, so ``top``
+            cuts it; pass ``top=46`` for the whole board),
+            ``attachment_distribution`` (how many tasks hold 0/1/2/... attachments,
+            counted server-side). Use it for "how many tasks have one attachment":
+            counting that off the truncated listing gives 21/4/4 where the truth is
+            17/3/5.
             ``history_rounds`` (rounds per task, and how many clear ``min_rounds``).
         top: Row cap for the listing scopes.
         min_rounds: For ``history_rounds``, count tasks with at least this many
@@ -4669,7 +4773,39 @@ def weekly_group_stats(scope: str = "owners", top: int = 8, min_rounds: int = 0)
                 limit=bounded,
             )
             rows["no_attachment_summary"] = summary["rows"][0] if summary["rows"] else {}
+            # 46 条任务而 top 默认 8：问「每个任务各有几个附件」时，模型拿到 8 行
+            # 就去手数「几个任务有 1 个附件」，数出 21/4/4 而真值是 17/3/5
+            # （Q2-03）。清单档天生只能给一页，所以把「各档各多少任务」另立一档，
+            # 并在清单的口径里把出口指出来。
+            if rows.get("row_count") and int(rows["row_count"]) < 46:
+                rows["caliber"] += (
+                    f"；本次只返回 {rows['row_count']} 行（top 决定，共 46 条任务），"
+                    "不要照这几行去数「有几个任务是 1 个附件」——"
+                    "要各档任务数请用 scope=attachment_distribution（服务端算完再回），"
+                    "要完整清单请把 top 提到 46"
+                )
             return rows
+
+        if key == "attachment_distribution":
+            # 「有几个附件的任务各有多少个」是分布，不是清单。分布必须服务端算：
+            # 清单档封顶一页，模型翻不到的那 38 行会被当成不存在。零附件那一档
+            # 靠 LEFT JOIN 保住（18 条，占了近四成），漏掉它整个分布就变形了。
+            return store.fetch(
+                "SELECT c.attachments, COUNT(*) AS tasks FROM ("
+                "SELECT t.id, COUNT(a.id) AS attachments "
+                f"FROM task t {join} "
+                "LEFT JOIN task_attachment a ON a.task_id = t.id AND a.is_deleted = 0 "
+                f"WHERE {clause} GROUP BY t.id"
+                ") c GROUP BY c.attachments ORDER BY c.attachments",
+                caliber=(
+                    f"{base}；按附件条数分档统计任务数，附件按 is_deleted = 0 计有效；"
+                    "零附件档由 LEFT JOIN 保住（18 条任务，占 46 条中的近四成，丢了分布就变形）；"
+                    "各档 tasks 相加等于 46；"
+                    "档位不连续是正常的（库里没有 5 个附件的任务，所以 4 之后直接是 6）；"
+                    "这一档是分布，清单在 scope=attachments，不要拿清单的一页去数分布"
+                ),
+                limit=bounded,
+            )
 
         threshold = max(0, int(min_rounds))
         rows = store.fetch(

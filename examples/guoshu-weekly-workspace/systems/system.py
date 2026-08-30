@@ -37,6 +37,9 @@ TOOL_GUIDE = """\
   正式任务时报 task_not_formal 并写明卡在哪个 workflow_status，同时指出提交单/审批动作/
   附件三个工具按同一 id 仍可查（见第 50 条）；库里没这行才报 task_not_found。
   两种情况都不要改用按名字搜——同名系列的（N期）是另外几条任务。
+  集团看板任务的 recent_progress 恒为空（进展不在 task_progress），当期进展就在同一次返回的
+  group_detail.progress_effect 里，返回时会写明这点：问「某个集团任务目前进展如何」一次调用即可，
+  不要再去 weekly_progress_history / weekly_progress_range / weekly_milestone_stats 之间轮换。
 - weekly_owner_roles：一个人分角色（责任人/牵头/分管）各带多少任务。
 - weekly_task_ranking：按子记录数（附件/进展/里程碑）给任务排名，普通「前 N 名」用它。
 - weekly_rank：并列口径三选一的排名。问句涉及并列、分组第一或「最少的几个」时用它，
@@ -98,6 +101,9 @@ TOOL_GUIDE = """\
   scope=publish_split 一行给全
   「已发布 943 / 未发布 123 / 合计 1066」——问「进展记录里多少已发布、多少还没发布」用它，
   不要 summary 取一半、unpublished 取另一半再自己相加，那样容易漏掉任务闸门，会答成 945/1068。
+  scope=import_split 按 import_id 是否为空把已发布进展切成「导入 / 手工」：943 全部来自导入、
+  手工 0 条。问「有多少条进展是手工填的」用它，别答「无法精确统计」——import_id 是唯一判据，
+  没有别的工具暴露这一列（去掉发布闸门是 1066 行里 948 导入 + 118 手工，那 118 条全部未发布）。
   scope=unpublished 给未发布进展
   按自身审批码值分档（0 草稿/1 待审核/2 驳回/3 通过，与任务的 workflow_status 是两套词汇），
   每档同时给 cnt 行数与 task_count 涉及任务数：问「被驳回的进展多少条、涉及多少任务」一次即得
@@ -224,7 +230,15 @@ TOOL_GUIDE = """\
   两侧同时给条件——只给 status 会把「未开始且成效为空」也收进来，那并不矛盾。
   问「当期」进度成效、或要「前 N 条」，带 order_by="progress_time"：默认按任务 id 排，
   第一页是看板最早那批（97 起），截前 5 条给出的不是当期那 5 条。
+  问「哪些任务要求 2026 年内完成」用 contains="2026" field="completion_time" 得 31 条：
+  这一列是自由文本、46 条里 28 种写法，只有按年份数字扫才扫得全；拿「2026年内」当检索词
+  只命中字面相同的 5 条，会漏掉 2026年底前 / 2026Q4 / 2026-12-30 这类同年到期的 26 条
+  （检索词比裸年份长时，返回的口径会自报全年真数并给出改法）。
 - weekly_group_owner_query：按负责人查专项组任务，或列出该看板的负责人字段。
+  不带 person 时它是按挂名人数倒序（owner_count DESC）的榜，不是看板花名册：带 limit 截出的
+  前 8 条落在 101/105/107… 而非按 task_id 顺序的 97..104，且一次只带一个角色列。
+  问「各任务的牵头人和项目负责人分别是谁、给我前 N 条」用
+  weekly_group_detail_query fields="lead_owner_names,project_owner_names"。
   它查的是集团看板明细表的逗号多值牵头人列，与 weekly_task_query owner= 的
   task.lead_owner_name 单值列是两个不同总体（李建华 3 条 vs 14 条），两边行数不同是正常的，
   不要把两边结果并起来当一个答案。问「某人负责哪些任务」默认按 task 表口径答。
@@ -251,6 +265,10 @@ TOOL_GUIDE = """\
   问「状态和当期成效矛盾的有哪些」用 scope=status_effect_conflict：6 条，判据是同一行内部
   status = 0 未开始却填了非空 progress_effect。这与 effect_consistency 不是一回事——那档比的是
   明细表与历史表两处文本是否一致，两处写着同一句话也算一致，答不了自相矛盾。
+  问「每个任务各有几个附件」分两档：scope=attachment_distribution 是分布（0→18 / 1→17 /
+  2→3 / 3→5 / 4→2 / 6→1，相加 46，档位不连续正常），scope=attachments 是清单且 top 默认 8
+  而共 46 条任务——照那 8 行手数「有几个任务是 1 个附件」会得出 21/4/4 这种错数，
+  要完整清单把 top 提到 46（截断时返回的口径会自报只有一页并指向分布档）。
 """
 
 CALIBER_RULES = """\
@@ -432,6 +450,27 @@ CALIBER_RULES = """\
     （weekly_task_query owner=，李建华 14 条），集团看板明细表的牵头人是逗号多值列
     （weekly_group_owner_query person=，李建华 3 条）。两边行数不同是正常的：把它们并起来
     会多出只在明细表挂名的任务、又漏掉 task 上牵头而明细表没列名的任务。默认按 task 表口径答。
+56. 集团看板任务在 task_progress 里 0 行（那张表全属技术看板），它的当期进展在
+    task_group_detail.progress_effect，历次报送在 task_group_progress_history。所以问
+    「某个集团任务目前进展如何」，weekly_task_detail 一次就够——recent_progress 为空不是
+    「没报过进展」，答案就在同一次返回的 group_detail 里。别再去 weekly_progress_history /
+    weekly_progress_range / weekly_milestone_stats 之间轮换，那三个对集团任务一律返回空。
+57. 「有多少条进展是手工填的」判据只有 task_progress.import_id 一列：
+    weekly_progress_coverage scope=import_split 得 943 全部来自导入、手工 0 条。这个 0 是
+    查得出来的，不要答「无法精确统计」。（去掉发布闸门是 1066 行里 948 导入 + 118 手工，
+    那 118 条全部未发布。）
+58. 分布问题一律用分布档，不要拿清单的一页去数。「集团看板每个任务各有几个附件」问的是
+    weekly_group_stats scope=attachment_distribution（0→18 / 1→17 / 2→3 / 3→5 / 4→2 / 6→1，
+    相加 46）；scope=attachments 是清单，top 默认 8 而共 46 条任务，照那 8 行手数会得出
+    21/4/4 这种错数。档位不连续是正常的（没有 5 个附件的任务）。
+59. 「集团看板各任务的牵头人和项目负责人是谁」要两列同时出、且按 task_id 顺序：
+    weekly_group_detail_query fields=lead_owner_names,project_owner_names。
+    weekly_group_owner_query 不带人名时是按挂名人数倒序的榜（前 8 条落在 101,105,…），
+    且一次只带一个角色列，用它答「前 8 条」会得到完全另一批任务。
+60. completion_time 是自由文本（集团看板 46 条里 28 种写法：2026年内 / 2026年底前 /
+    2026Q4 / 2026-12-30 / 2026年9月30日 …）。「哪些任务要求 2026 年内完成」只能按年份数字
+    过滤：weekly_group_detail_query contains=2026 field=completion_time 得 31 条。拿
+    「2026年内」当检索词只命中字面相同的 5 条，会漏掉 26 条同年到期的任务。
 
 ## 判为不可答
 

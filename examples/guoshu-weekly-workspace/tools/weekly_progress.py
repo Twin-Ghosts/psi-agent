@@ -482,6 +482,11 @@ async def weekly_progress_coverage(scope: str = "summary", project_group: str = 
             记录里有多少已发布、多少还没发布" -- summary carries only the published
             side and unpublished only the other, and reading the two separately
             invites dropping the task gate, which turns the pair into 945 / 1068) /
+            import_split (published progress split into imported vs hand-entered
+            by import_id IS NULL: 943 / 943 / 0. Use this for "有多少条进展是手工
+            填的" -- no other tool exposes import_id, so the answer otherwise reads
+            as "cannot tell" when it is a plain 0. The 118 manual rows the whole
+            table holds are all unpublished) /
             unpublished (未发布进展按自身审批码值分档,
             0 草稿 / 1 待审核 / 2 驳回 / 3 通过 -- not the task's workflow_status.
             Every bucket carries cnt AND task_count, so "被驳回的进展有多少条、

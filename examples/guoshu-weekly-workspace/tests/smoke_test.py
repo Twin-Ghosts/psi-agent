@@ -1472,6 +1472,120 @@ async def run() -> int:
         f"ids={[r.get('task_id') for r in (own_group.get('rows') or [])]}",
     )
 
+    # Q5-04. 「有多少条进展是手工填的」判据只有 task_progress.import_id 一列，
+    # 此前没有任何工具暴露它，模型只能答「无法精确统计」，而真答案是 0。
+    imp_split = await _call(registry, "weekly_progress_coverage", scope="import_split")
+    imp_row = (imp_split.get("rows") or [{}])[0]
+    check(
+        "Q5-04 已发布进展 943 全部来自导入，手工 0 条",
+        int(imp_row.get("total") or 0) == 943
+        and int(imp_row.get("from_import") or 0) == 943
+        and int(imp_row.get("manual") or -1) == 0,
+        f"total={imp_row.get('total')} import={imp_row.get('from_import')} manual={imp_row.get('manual')}",
+    )
+    check(
+        "Q5-04 口径写明这个 0 是查得出来的，且给出另一套闸门的数",
+        "不是取不到数" in str(imp_split.get("caliber", ""))
+        and "948" in str(imp_split.get("caliber", ""))
+        and "118" in str(imp_split.get("caliber", "")),
+        str(imp_split.get("caliber", ""))[-140:],
+    )
+
+    # Q2-03. 附件清单档天生只给一页（top 默认 8，共 46 条任务），基线照那 8 行
+    # 手数分布，数出 21/4/4 而真值是 17/3/5。分布必须服务端算完再回。
+    att_dist = await _call(registry, "weekly_group_stats", scope="attachment_distribution", top=20)
+    dist = {r.get("attachments"): r.get("tasks") for r in (att_dist.get("rows") or [])}
+    check(
+        "Q2-03 附件分布 0→18 / 1→17 / 2→3 / 3→5 / 4→2 / 6→1，各档相加 46",
+        dist == {0: 18, 1: 17, 2: 3, 3: 5, 4: 2, 6: 1} and sum(dist.values()) == 46,
+        f"dist={dist}",
+    )
+    check(
+        "Q2-03 分布档说明零附件由 LEFT JOIN 保住、档位不连续属正常",
+        "零附件档由 LEFT JOIN 保住" in str(att_dist.get("caliber", ""))
+        and "档位不连续" in str(att_dist.get("caliber", "")),
+        str(att_dist.get("caliber", ""))[-140:],
+    )
+    # 截断的清单必须自报截断并指向分布档；给满 46 行时这句话不该出现。
+    att8 = await _call(registry, "weekly_group_stats", scope="attachments", top=8)
+    att46 = await _call(registry, "weekly_group_stats", scope="attachments", top=46)
+    check(
+        "Q2-03 截断的清单自报只有一页并指向分布档",
+        att8.get("row_count") == 8
+        and "attachment_distribution" in str(att8.get("caliber", ""))
+        and "共 46 条任务" in str(att8.get("caliber", "")),
+        str(att8.get("caliber", ""))[-120:],
+    )
+    check(
+        "Q2-03 给满 46 行时不加截断提示",
+        att46.get("row_count") == 46 and "attachment_distribution" not in str(att46.get("caliber", "")),
+        f"row_count={att46.get('row_count')}",
+    )
+
+    # Q3-01. 不带人名的 owner 榜按 owner_count DESC 排且一次只带一个角色列，
+    # 「前 8 条」落在人多的那批（101,105,…）而非 gold 的 task_id 顺序 97..104。
+    roster = await _call(registry, "weekly_group_owner_query", role="lead", limit=8)
+    check(
+        "Q3-01 owner 榜前 8 条按挂名人数排，不是 task_id 顺序",
+        [r.get("task_id") for r in (roster.get("rows") or [])][:2] == [101, 105]
+        and "不是看板花名册" in str(roster.get("caliber", ""))
+        and "weekly_group_detail_query fields=lead_owner_names,project_owner_names" in str(roster.get("caliber", "")),
+        f"ids={[r.get('task_id') for r in (roster.get('rows') or [])]}",
+    )
+    both = await _call(
+        registry,
+        "weekly_group_detail_query",
+        fields="lead_owner_names,project_owner_names",
+        limit=8,
+    )
+    check(
+        "Q3-01 明细表一次出两列且按 task_id 顺序，前 8 条与 gold 一致",
+        [r.get("task_id") for r in (both.get("rows") or [])] == [97, 98, 99, 100, 101, 102, 103, 104]
+        and all(r.get("lead_owner_names") and r.get("project_owner_names") for r in (both.get("rows") or [])),
+        f"ids={[r.get('task_id') for r in (both.get('rows') or [])]}",
+    )
+
+    # Q4-03. completion_time 是自由文本（46 条 28 种写法），「2026 年内完成」只能
+    # 按年份数字扫得 31 条；拿「2026年内」当检索词只命中字面相同的 5 条。
+    ct_year = await _call(registry, "weekly_group_detail_query", contains="2026", field="completion_time", limit=200)
+    ct_text = await _call(
+        registry, "weekly_group_detail_query", contains="2026年内", field="completion_time", limit=200
+    )
+    check(
+        "Q4-03 按年份数字扫得 31 条，并说明这是唯一可靠的年份过滤方式",
+        ct_year.get("total_count") == 31
+        and "唯一可靠的年份过滤方式" in str(ct_year.get("caliber", ""))
+        and "28 种写法" in str(ct_year.get("caliber", "")),
+        f"total={ct_year.get('total_count')}",
+    )
+    check(
+        "Q4-03 用完整表述只得 5 条，口径自报全年真数 31 并给出改法",
+        ct_text.get("total_count") == 5
+        and "不等于「2026年到期的任务」" in str(ct_text.get("caliber", ""))
+        and "共 31 条" in str(ct_text.get("caliber", ""))
+        and "contains=2026" in str(ct_text.get("caliber", "")),
+        str(ct_text.get("caliber", ""))[-140:],
+    )
+
+    # Q1-02. 集团看板任务在 task_progress 里 0 行，空的 recent_progress 不说明
+    # 「进展在另一张表」就会被当成没报过进展——基线为此耗了 6 轮 13 次调用，
+    # 而答案就在同一次返回的 group_detail.progress_effect 里。
+    td99 = await _call(registry, "weekly_task_detail", task="99")
+    td4 = await _call(registry, "weekly_task_detail", task="4")
+    check(
+        "Q1-02 集团任务的空 recent_progress 自报进展在 group_detail 里",
+        td99.get("recent_progress") == []
+        and bool((td99.get("group_detail") or [{}])[0].get("progress_effect"))
+        and "recent_progress 为空不代表没报过进展" in str(td99.get("caliber", ""))
+        and "weekly_group_history" in str(td99.get("caliber", "")),
+        str(td99.get("caliber", ""))[-140:],
+    )
+    check(
+        "Q1-02 技术看板任务有进展行，不加这句提示",
+        len(td4.get("recent_progress") or []) == 3 and "recent_progress 为空不代表" not in str(td4.get("caliber", "")),
+        f"n={len(td4.get('recent_progress') or [])}",
+    )
+
     bad_group = await _call(registry, "weekly_aggregate", group_by="不支持的维度")
     check(
         "不支持的聚合维度明确报错",

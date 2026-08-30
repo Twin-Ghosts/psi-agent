@@ -216,7 +216,12 @@ async def weekly_group_stats(scope: str = "owners", top: int = 8, min_rounds: in
             snapshot) /
             field_lengths
             (target_result char stats) / attachments (per-task counts,
-            zero-attachment tasks kept) / history_rounds (published periods
+            zero-attachment tasks kept -- a listing, so top cuts it; pass top=46
+            for the whole board) / attachment_distribution (how many tasks hold
+            0/1/2/... attachments, counted on the server. Use it for "how many
+            tasks have exactly one attachment": counting that off the default
+            8-row listing gives 21/4/4 where the truth is 17/3/5) /
+            history_rounds (published periods
             per task) / status_effect_conflict (the 6 rows contradicting
             themselves: status 0 未开始 while progress_effect describes work
             already delivered) / effect_consistency (each task's current
