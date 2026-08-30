@@ -1852,6 +1852,60 @@ async def run() -> int:
         months.get("ok") is True and months.get("row_count") == 7,
         f"rows={months.get('row_count')}",
     )
+    check(
+        "K3-01 环比 prev_count / mom_change 由服务端算好，首月为空",
+        [r.get("mom_change") for r in months.get("rows", [])] == [None, 1, -2, 1, 1, -13, -31]
+        and [r.get("prev_count") for r in months.get("rows", [])] == [None, 60, 61, 59, 60, 61, 48],
+        str([(r.get("bucket"), r.get("prev_count"), r.get("mom_change")) for r in months.get("rows", [])]),
+    )
+    all_months = await _call(registry, "weekly_progress_range", by="month")
+    worst = min(
+        ((r["bucket"], int(r["mom_change"])) for r in all_months.get("rows", []) if r.get("mom_change") is not None),
+        key=lambda t: t[1],
+        default=("", 0),
+    )
+    check(
+        "K3-03 降幅最大取 mom_change 最负的一档（2026-07 的 -31）",
+        all_months.get("row_count") == 19 and worst == ("2026-07", -31),
+        f"rows={all_months.get('row_count')} worst={worst}",
+    )
+    check(
+        "环比 caliber 点明勿自行错位相减，且降幅取最负不取绝对值",
+        "不要自己把行错位相减" in str(all_months.get("caliber", ""))
+        and "不是绝对值最大" in str(all_months.get("caliber", "")),
+        str(all_months.get("caliber", ""))[-200:],
+    )
+    # K3-01. 不限窗口时 2026-01 的 prev_count 会取到 2025-12 的 58，那是跨年口径。
+    jan = next((r for r in all_months.get("rows", []) if r.get("bucket") == "2026-01"), {})
+    check(
+        "K3-01 反例 不限窗口时首月对照跨到上一年（2025-12 的 58）",
+        int(jan.get("prev_count") or -1) == 58 and "跨年口径" in str(all_months.get("caliber", "")),
+        str(jan),
+    )
+    mom3 = await _call(registry, "weekly_progress_history", task="隐私计算平台自主可控攻关", limit=3)
+    mom3_rows = mom3.get("rows", [])
+    full_hist = await _call(registry, "weekly_progress_history", task="隐私计算平台自主可控攻关")
+    gap_summary = full_hist.get("gap_summary") or {}
+    check(
+        "D4-03 平均间隔由服务端 ROUND 到一位小数（30.3，17 个间隔）",
+        str(gap_summary.get("avg_gap_days")) == "30.3" and int(gap_summary.get("gap_count", -1)) == 17,
+        str(gap_summary),
+    )
+    check(
+        "D4-03 caliber 点明勿自行平均（30.29 与口径 30.3 不一致）",
+        "gap_summary.avg_gap_days" in str(full_hist.get("caliber", ""))
+        and "30.29" in str(full_hist.get("caliber", "")),
+        str(full_hist.get("caliber", ""))[-200:],
+    )
+    check(
+        "D4-01 最近三期自带上一期对照 prev_progress 与 gap_days",
+        mom3.get("row_count") == 3
+        and [r.get("version_no") for r in mom3_rows] == [18, 17, 16]
+        and [r.get("gap_days") for r in mom3_rows] == [30, 31, 30]
+        # 第 n 行的 prev_progress 必须等于第 n+1 行的正文，错位一格就是抄串了。
+        and all(mom3_rows[i].get("prev_progress") == mom3_rows[i + 1].get("latest_progress") for i in range(2)),
+        str([(r.get("version_no"), r.get("gap_days")) for r in mom3_rows]),
+    )
     # progress_date 与 report_time 不可互换：补报时两者相差数十天。
     late = await _call(
         registry,
@@ -2481,6 +2535,21 @@ async def run() -> int:
         "B6 对照 业务状态仍在发布闸门内（14/78/31/5，合计 128）",
         biz_map == {"未开始": 14, "进行中": 78, "已完成": 31, "已停用": 5},
         str(biz_map),
+    )
+    # B3-02. 完成率由服务端 ROUND 到一位小数：31 / 128 手算是 24.21875，
+    # 报成 24.22% 就与口径的 24.2% 不一致。
+    biz_totals = biz.get("totals") or {}
+    check(
+        "B3-02 完成率由服务端算好（128 / 31 / 24.2）",
+        int(biz_totals.get("total_tasks", -1)) == 128
+        and int(biz_totals.get("finished_tasks", -1)) == 31
+        and str(biz_totals.get("finish_rate_pct")) == "24.2",
+        str(biz_totals),
+    )
+    check(
+        "B3-02 caliber 点明勿自行相除（24.22% 是手算出来的）",
+        "totals.finish_rate_pct" in str(biz.get("caliber", "")) and "24.2" in str(biz.get("caliber", "")),
+        str(biz.get("caliber", ""))[-200:],
     )
 
     # R6-03. 自然月与 90 天是两个窗口：三个月前是 2026-05-15，90 天前是

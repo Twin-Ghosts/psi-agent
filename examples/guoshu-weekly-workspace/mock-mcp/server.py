@@ -64,6 +64,50 @@ def _days_between(lo: str, hi: str) -> int:
         return 0
 
 
+def _progress_mom(
+    store_: Any,
+    select: str,
+    where: str,
+    params: dict[str, Any],
+    caliber: str,
+    grouping: str,
+    limit: int,
+) -> dict[str, Any]:
+    """Wrap a month/quarter bucket count with its previous bucket and the delta.
+
+    "环比变化" is a question about adjacent PAIRS, not about a list of counts. A
+    caller handed only the per-bucket counts has to line the rows up itself, and
+    misreading which bucket is the previous one is exactly how K3-03 reported
+    2026-06 as 61 when it is 48. LAG runs server-side over the bucket order so
+    the pairing is not a judgement call.
+
+    The first bucket's prev_count and change are NULL on purpose: there is no
+    earlier bucket to compare against, and filling it with 0 would invent a
+    100% drop.
+    """
+    label = "月" if grouping == "month" else "季"
+    inner = f"SELECT {select} FROM task_progress p JOIN task t ON t.id = p.task_id WHERE {where} GROUP BY bucket"
+    return store_.fetch(
+        # mom_change 不叫 change:change 是 MySQL 保留字,裸用会语法错。
+        "SELECT bucket, progress_count, task_count, "
+        "LAG(progress_count) OVER (ORDER BY bucket) AS prev_count, "
+        "progress_count - LAG(progress_count) OVER (ORDER BY bucket) AS mom_change "
+        f"FROM ({inner}) buckets ORDER BY bucket",
+        params,
+        caliber=caliber
+        + (
+            f"；prev_count 是上一{label}的条数、mom_change 是本{label}减上一{label}，"
+            "两列由服务端按时序 LAG 算好，环比直接读 mom_change，不要自己把行错位相减；"
+            f"首{label}的 prev_count 与 mom_change 为空是对的（没有上一{label}可比）；"
+            "问「降幅最大的是哪个月」取 mom_change 最小（最负）的那行，不是绝对值最大；"
+            f"prev_count 只在本次窗口内取上一{label}：问「2026 年的环比」要把窗口限定在该年"
+            "（传 date_from=2026-01-01），不限定则首档会取到上一年的数（2026-01 拿到 2025-12 的 58），"
+            "那是跨年口径，不是该年的环比"
+        ),
+        limit=limit,
+    )
+
+
 def _task_miss(task: str) -> dict[str, Any]:
     """Build the formal-task miss error, saying WHICH kind of miss it is.
 
@@ -406,16 +450,42 @@ def weekly_progress_history(
         if published_only:
             where += " AND is_published = 1"
             caliber += "；is_published = 1"
+        # 「这几期有什么变化」要的是相邻两期并排，不是各期原文。只给各期让模型
+        # 自己错位对照，它会把上一期的正文抄串行,或干脆不给对照列。prev_progress
+        # 与 gap_days 由服务端用 LAG 算好,按 version_no 升序取前一期。
         rows = store.fetch(
             "SELECT id, task_id, version_no, latest_progress, next_work, progress_date, "
-            "report_time, is_published, review_comment "
+            "report_time, is_published, review_comment, "
+            "LAG(latest_progress) OVER (ORDER BY version_no) AS prev_progress, "
+            "DATEDIFF(progress_date, LAG(progress_date) OVER (ORDER BY version_no)) AS gap_days "
             f"FROM task_progress WHERE {where} ORDER BY version_no DESC, id DESC",
             {"tid": task_id},
-            caliber=caliber
+            caliber=caliber + "；prev_progress 是同一任务上一期（version_no 小一档）的正文，"
+            "gap_days 是与上一期 progress_date 相隔天数，两列均由服务端 LAG 算好，"
+            "对比相邻两期直接读这两列，不要自己把行错位相减；"
+            "问「最近几期有什么变化」按最近 3 期作答（传 limit=3），"
+            "多列一期就与口径不一致"
             + ("；review_comment 原文返回（本次凭证有敏感字段权限）" if may_read else "；review_comment 已按权限遮蔽"),
             can_read_sensitive=may_read,
             limit=limit,
         )
+        # 「平均隔多少天」的均值也由服务端 ROUND 到一位小数。让模型拿 gap_days
+        # 自己平均,结果是 30.285714,报成 30.29 而口径是 30.3——与完成率 24.22
+        # vs 24.2 同一族的毛病:小数位由谁定。首期 gap 为 NULL 不进分母。
+        gaps = store.fetch(
+            "SELECT ROUND(AVG(gap_days), 1) AS avg_gap_days, COUNT(gap_days) AS gap_count "
+            "FROM (SELECT DATEDIFF(progress_date, LAG(progress_date) OVER (ORDER BY version_no)) "
+            f"AS gap_days FROM task_progress WHERE {where}) g WHERE gap_days IS NOT NULL",
+            {"tid": task_id},
+            limit=1,
+        )
+        if gaps.get("rows"):
+            rows["gap_summary"] = gaps["rows"][0]
+            rows["caliber"] += (
+                "；问「两次报进展平均隔多少天」直接读 gap_summary.avg_gap_days"
+                "（服务端 AVG 后 ROUND 到一位小数，首期无上一期不进分母），"
+                "自己拿 gap_days 平均会多带小数位（30.29 与口径的 30.3 不一致）"
+            )
         # 同名系列（2期/3期/4期）是各自独立的任务，各有自己的进展。按裸名解析
         # 只会落到其中一条，这是对的；但只被告知「这里有 14 期」的调用方无从
         # 知道系列存在，答「这个任务的进展历史」时就容易把整个系列铺开。
@@ -669,6 +739,28 @@ def weekly_aggregate(
                 limit=1,
             )
             result["totals"] = totals["rows"][0] if totals["rows"] else {}
+        if group_by == "status":
+            # 「完成率是多少」与分档是同一题的两面。分档只给条数,模型要自己
+            # 31 / 128 相除,结果是 24.21875,报出来成了 24.22%,而口径是保留
+            # 一位小数的 24.2%。率一律由服务端 ROUND 算好(里程碑与 project_group
+            # 两路早就这么做),这里补齐,不让模型手算再自己定小数位。
+            st_where = "t.is_deleted = 0 AND t.workflow_status = 'published'" + (
+                " AND t.board_id = %(bid)s" if board.strip() else ""
+            )
+            totals = store.fetch(
+                "SELECT COUNT(*) AS total_tasks, SUM(t.status = 2) AS finished_tasks, "
+                "ROUND(SUM(t.status = 2) / COUNT(*) * 100, 1) AS finish_rate_pct "
+                f"FROM task t WHERE {st_where}",
+                params,
+                limit=1,
+            )
+            result["totals"] = totals["rows"][0] if totals["rows"] else {}
+            caliber += (
+                "；完成率已由服务端算好放在 totals.finish_rate_pct（已完成 status = 2 占正式任务的比例，"
+                "保留一位小数），直接引用该数字——自己拿分档条数相除会多带小数位，"
+                "31 / 128 手算成 24.22% 而口径是 24.2%"
+            )
+            result["caliber"] = caliber
         return result
 
     return _guard("weekly_aggregate", work)
@@ -2636,6 +2728,11 @@ def weekly_progress_range(
         group_order = order
         note = f"；按 {grouping} 分组计数"
         tail = ""
+        if grouping in {"month", "quarter"} and not peak:
+            # 环比要的是相邻两档并排。只给各月计数,模型自己错位相减会把上一档
+            # 记错(K3-03 曾把 2026-06 的 48 说成 61)。prev_count / change 由服务端
+            # 用 LAG 按时序算好,首档 change 为 NULL 是对的:没有上一档可比。
+            return _progress_mom(store, select, where, params, caliber + note, grouping, limit)
         if peak:
             # 「哪个月最高」的裁决落在服务端。按 bucket 时序返回 19 行让模型自己
             # 挑最大值，它会把 2026-02(61) 和名次靠后的月份看成并列。
