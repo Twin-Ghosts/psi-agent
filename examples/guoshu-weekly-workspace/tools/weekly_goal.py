@@ -119,7 +119,14 @@ async def weekly_milestone_stats(
             milestones, so "里程碑最多的任务是哪条" is the first row alone) /
             mismatch (task status vs milestone status disagreements).
         by: Dimension for by_dimension: year / category / group_name / status /
-            task_status.
+            task_status / primary_category. The last one groups by the task's
+            top-level category (t.category_id's parent -- task categories only go
+            two levels deep) and is NOT the same axis as category, which is the
+            milestone row's own label. "哪个一级分类的里程碑完成率最高" is 改革与治理
+            at 67.5% under primary_category; by=category answers a different
+            question and reads 国家任务 58.9%. This axis sorts by finish_rate_pct,
+            so the first row is the answer; pass min_total to keep small buckets
+            from topping the list.
         year: Restrict to one milestone year; 0 covers all.
         category: Restrict to one milestone category.
         min_total: For by_dimension, drop buckets below this count; inclusive.

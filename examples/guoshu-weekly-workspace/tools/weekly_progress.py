@@ -107,6 +107,12 @@ async def weekly_task_lifecycle(by: str = "", year: int = 0) -> str:
     from progress reporting. Use it for "when was this set up", "how many tasks
     were opened in <year>", "how long from creation to publication".
 
+    Bucketed results carry ``currently_finished`` next to ``created_count``:
+    "2025 和 2026 年各完成了多少" needs both, and the task table has no completion
+    date, so the finished figure is the CURRENT status of tasks opened in that
+    bucket (2025: 105 opened / 26 now done, 2026: 23 / 5) -- not "finished during
+    that year". The 31 finished tasks store-wide split 26 + 5 across the two years.
+
     Args:
         by: Empty returns a min/max/average summary; month or year counts per bucket.
         year: Restrict to one creation year; 0 means all years.
@@ -162,10 +168,16 @@ async def weekly_freshness_distribution(
         in_flight: True restricts the bucket distribution to 在办 tasks (status 0
             未开始 and 1 进行中). Required for "有多少条在办任务从来没报过进展时间":
             the answer is 8, while the un-gated buckets say 9, the extra one being
-            task 88, which is already 已完成. Ignored by the listing branches
-            (stale_days already gates on 在办 by itself).
-        by: With stale_days, "project_group" returns stale_count per 专项组
-            instead of the rows.
+            task 88, which is already 已完成. With stale_days AND by, it also gates
+            the per-group figures; by itself the grouped view covers every formal
+            task, which is what "占比" questions mean.
+        by: With stale_days, groups instead of listing: "board" or
+            "project_group". Each row carries total (the group's own denominator),
+            stale_count / stale_pct and the complementary active_count /
+            active_pct, so "哪个组滞后占比最高" and "两个看板的上报活跃度对比" are
+            both single calls. Counts alone mislead: 标准安全组 has the most stale
+            tasks (5) yet 26.3% ranks below 国家工程办 (4 of 15 = 26.7%). The board
+            view reads 技术组 61 active of 82 (74.4%) vs 集团 46 of 46 (100%).
         limit: Max rows for the listing views, capped at 200.
     """
     try:

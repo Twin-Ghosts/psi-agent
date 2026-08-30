@@ -206,12 +206,25 @@ async def weekly_group_stats(scope: str = "owners", top: int = 8, min_rounds: in
             completion_time_formats (those strings grouped into 6 写法 buckets;
             "各种写法各有多少条" wants this, and answering it with the 28 distinct
             values of completion_time_values is off by a whole magnitude) /
+            overdue (tasks past their planned completion date and still open.
+            completion_time is display text that nothing else may date-arithmetic,
+            so this scope normalises the two parseable 写法 on the server -- ISO
+            dates as-is, YYYYQn to that quarter's last day -- and returns
+            unparsable_count for the 34 free-text rows, which are UNJUDGEABLE
+            rather than on time. Looking at ISO dates alone finds nothing; the
+            quarter rows surface task 123, 2026Q2 = 2026-06-30, 46 days past the
+            snapshot) /
             field_lengths
             (target_result char stats) / attachments (per-task counts,
             zero-attachment tasks kept) / history_rounds (published periods
-            per task) / effect_consistency (each task's current progress_effect
-            against its newest published history row; same = 0 rows come first,
-            so check whether any exist before saying they all agree).
+            per task) / status_effect_conflict (the 6 rows contradicting
+            themselves: status 0 未开始 while progress_effect describes work
+            already delivered) / effect_consistency (each task's current
+            progress_effect against its newest published history row; same = 0
+            rows come first, so check whether any exist before saying they all
+            agree. Not the same question as status_effect_conflict -- two copies
+            of the same sentence agree with each other and still contradict the
+            status).
         top: Row cap for the listing scopes.
         min_rounds: For history_rounds, also count tasks with at least this many
             periods. Inclusive: "at least 5" means 5 or more.

@@ -705,6 +705,133 @@ async def run() -> int:
         "仅 2026-01-01 起" in str(by_month.get("caliber", "")),
     )
 
+    # J1-01. 基线里三个字节数都被答成「约 7.5MB」这类约数，对不上参考答案。
+    # 明细口径已写明「原样报出，不要换算成 KB/MB 也不要写「约」」，钉住这句话
+    # 与三个原始字节值：一旦谁把 file_size 改成换算后的数，这条先红。
+    att_one = await _call(registry, "weekly_attachment_query", task="隐私计算平台自主可控攻关")
+    check(
+        "J1-01 该任务 3 个附件按原始字节返回，口径禁止换算与约数",
+        sorted(str(r.get("file_size")) for r in (att_one.get("rows") or [])) == ["6166957", "6769427", "7903110"]
+        and "不要换算成 KB/MB" in str(att_one.get("caliber", "")),
+        f"sizes={[r.get('file_size') for r in (att_one.get('rows') or [])]}",
+    )
+
+    # K1-03. 看板轴的滞后/活跃两侧共用一个分母，两侧相加须等于 total。窗口取 90 天
+    # ——「活跃度」按季度看，30 天窗口下集团看板也有滞后，答不出「全活跃」这个对比。
+    fresh_board = await _call(registry, "weekly_freshness_distribution", stale_days=90, by="board")
+    board_rows = {str(r.get("bucket")): r for r in (fresh_board.get("rows") or [])}
+    tech = board_rows.get("技术组重点任务进展", {})
+    grp = board_rows.get("集团重点任务调度", {})
+    check(
+        "K1-03 按看板分滞后：技术组重点任务进展 61/82 活跃 74.4%，集团重点任务调度 46/46 全活跃",
+        str(tech.get("active_count")) == "61"
+        and str(tech.get("total")) == "82"
+        and str(tech.get("active_pct")) == "74.4"
+        and str(grp.get("active_count")) == "46"
+        and str(grp.get("active_pct")) == "100.0",
+        f"tech={tech} grp={grp}",
+    )
+    check(
+        "K1-03 每组滞后与活跃相加等于 total",
+        all(
+            int(r.get("stale_count") or 0) + int(r.get("active_count") or 0) == int(r.get("total") or 0)
+            for r in (fresh_board.get("rows") or [])
+        ),
+        f"rows={fresh_board.get('rows')}",
+    )
+
+    # K2-03. 占比题的反例本体：条数最多的组不是占比最高的组。首行必须按 stale_pct 排出来。
+    # 同样取 90 天窗口，且不加在办闸门（问「占比」问的是全部正式任务，分母 128）。
+    fresh_pg = await _call(registry, "weekly_freshness_distribution", stale_days=90, by="project_group")
+    pg_rows = fresh_pg.get("rows") or []
+    pg_map = {str(r.get("bucket")): r for r in pg_rows}
+    check(
+        "K2-03 专项组滞后占比首行是国家工程办 4/15=26.7%，压过条数更多的标准安全组 5/19=26.3%",
+        str(pg_rows[0].get("bucket")) == "国家工程办"
+        and str(pg_rows[0].get("stale_pct")) == "26.7"
+        and str(pg_map.get("标准安全组", {}).get("stale_count")) == "5"
+        and str(pg_map.get("标准安全组", {}).get("stale_pct")) == "26.3",
+        f"head={pg_rows[:2]}",
+    )
+    check(
+        "K2-03 口径说明占比由服务端算且条数最多未必占比最高",
+        "不要拿滞后条数跟别处的任务数手工相除" in str(fresh_pg.get("caliber", ""))
+        and "条数最多的那组未必占比最高" in str(fresh_pg.get("caliber", "")),
+    )
+    bad_axis = await _call(registry, "weekly_freshness_distribution", stale_days=30, by="owner")
+    check(
+        "滞后分组不支持的轴显式报错并列出支持值",
+        bad_axis.get("ok") is False
+        and bad_axis.get("error", {}).get("code") == "unsupported_group_by"
+        and "project_group" in str(bad_axis.get("error", {}).get("message", "")),
+        f"err={bad_axis.get('error')}",
+    )
+
+    # K3-04. 「各年完成多少」的两个数要同排给出，且各年已完成相加等于全库 31 条。
+    life_year = await _call(registry, "weekly_task_lifecycle", by="year")
+    year_map = {str(r.get("bucket")): r for r in (life_year.get("rows") or [])}
+    check(
+        "K3-04 按年：2025 建 105/当前完成 26，2026 建 23/完成 5，两年完成相加为 31",
+        str(year_map.get("2025", {}).get("created_count")) == "105"
+        and str(year_map.get("2025", {}).get("currently_finished")) == "26"
+        and str(year_map.get("2026", {}).get("created_count")) == "23"
+        and str(year_map.get("2026", {}).get("currently_finished")) == "5"
+        and sum(int(r.get("currently_finished") or 0) for r in (life_year.get("rows") or [])) == 31,
+        f"rows={life_year.get('rows')}",
+    )
+    check(
+        "K3-04 口径说明这是按建单档看当前状态而非那一年完成的",
+        "不是「那一年完成的任务数」" in str(life_year.get("caliber", "")),
+    )
+
+    # K5-03. 一级分类与里程碑自己的 category 是两个轴，同一问题给出两个不同首行。
+    prim = await _call(registry, "weekly_milestone_stats", scope="by_dimension", by="primary_category")
+    cat = await _call(registry, "weekly_milestone_stats", scope="by_dimension", by="category")
+    prim_head = (prim.get("rows") or [{}])[0]
+    cat_head = (cat.get("rows") or [{}])[0]
+    check(
+        "K5-03 一级分类完成率首行改革与治理 40/27=67.5%，与 by=category 的国家任务 58.9% 不是同一个轴",
+        str(prim_head.get("bucket")) == "改革与治理"
+        and str(prim_head.get("total")) == "40"
+        and str(prim_head.get("finish_rate_pct")) == "67.5"
+        and str(cat_head.get("bucket")) == "国家任务"
+        and str(cat_head.get("finish_rate_pct")) == "58.9",
+        f"prim={prim_head} cat={cat_head}",
+    )
+    check(
+        "K5-03 口径点明用 by=category 会答成里程碑类别",
+        "用 by=category 会答成里程碑类别" in str(prim.get("caliber", "")),
+    )
+
+    # K4-01. 超期只能判可归一化的那部分：季度归一化后才露出任务 123，34 条判不了要单独报。
+    overdue = await _call(registry, "weekly_group_stats", scope="overdue")
+    od_rows = overdue.get("rows") or []
+    check(
+        "K4-01 超期 1 条为任务 123（2026Q2→2026-06-30，逾期 46 天），另有 34 条写法判不了",
+        len(od_rows) == 1
+        and str(od_rows[0].get("task_id")) == "123"
+        and str(od_rows[0].get("deadline")) == "2026-06-30"
+        and str(od_rows[0].get("days_overdue")) == "46"
+        and str(overdue.get("unparsable_count")) == "34",
+        f"rows={od_rows} unparsable={overdue.get('unparsable_count')}",
+    )
+    check(
+        "K4-01 口径把「无法判断」与「没超期」分开",
+        "是「无法判断」而不是「没超期」" in str(overdue.get("caliber", "")),
+    )
+
+    # K4-04. 行内自相矛盾（未开始却写了成效）与两表文本一致性是两个不同的口径。
+    conflict = await _call(registry, "weekly_group_stats", scope="status_effect_conflict")
+    check(
+        "K4-04 状态与成效自相矛盾恰为 6 条任务 97/108/130/137/140/142",
+        sorted(int(r.get("task_id")) for r in (conflict.get("rows") or [])) == [97, 108, 130, 137, 140, 142],
+        f"ids={[r.get('task_id') for r in (conflict.get('rows') or [])]}",
+    )
+    check(
+        "K4-04 口径区分本档与 effect_consistency",
+        "与 scope=effect_consistency 不是一回事" in str(conflict.get("caliber", "")),
+    )
+
     # 未知口径必须报错并列出支持值，而不是静默退回默认档。
     bad_scope = await _call(registry, "weekly_attachment_stats", scope="by_weekday")
     check(
@@ -927,11 +1054,25 @@ async def run() -> int:
         and "0 未开始同样在办" in str(stale.get("caliber", "")),
         f"total={stale.get('total_count')} first={(stale.get('rows') or [{}])[0]}",
     )
-    stale_pg = await _call(registry, "weekly_freshness_distribution", stale_days=30, by="project_group")
+    # 与上面那份在办清单同源要显式加 in_flight：分组视图默认不加在办闸门
+    # （占比题的分母是全部 128 条正式任务），加了闸门分母才是 92、滞后才是 46。
+    stale_pg = await _call(registry, "weekly_freshness_distribution", stale_days=30, by="project_group", in_flight=True)
     check(
-        "滞后按专项组分组 11 组，各组相加等于 46",
-        stale_pg.get("row_count") == 11 and sum(int(r.get("stale_count", 0)) for r in stale_pg.get("rows", [])) == 46,
-        f"rows={[(r.get('project_group'), r.get('stale_count')) for r in stale_pg.get('rows', [])]}",
+        "滞后按专项组分组 11 组，在办闸门下各组相加等于 46",
+        stale_pg.get("row_count") == 11
+        and sum(int(r.get("stale_count", 0)) for r in stale_pg.get("rows", [])) == 46
+        and sum(int(r.get("total", 0)) for r in stale_pg.get("rows", [])) == 92,
+        f"rows={[(r.get('bucket'), r.get('stale_count'), r.get('total')) for r in stale_pg.get('rows', [])]}",
+    )
+    # 不加闸门时分母回到 128、滞后 65：两个数各自成立，差别只在闸门，
+    # 一旦谁把默认改回自带在办，这条会连同 K2-03 的首行一起红。
+    stale_pg_all = await _call(registry, "weekly_freshness_distribution", stale_days=30, by="project_group")
+    check(
+        "同一分组视图不加在办闸门时分母 128、滞后 65",
+        sum(int(r.get("total", 0)) for r in stale_pg_all.get("rows", [])) == 128
+        and sum(int(r.get("stale_count", 0)) for r in stale_pg_all.get("rows", [])) == 65
+        and "要只看在办请加 in_flight=true" in str(stale_pg_all.get("caliber", "")),
+        f"rows={[(r.get('bucket'), r.get('stale_count'), r.get('total')) for r in stale_pg_all.get('rows', [])]}",
     )
     recent = await _call(registry, "weekly_freshness_distribution", recent_days=7)
     check(

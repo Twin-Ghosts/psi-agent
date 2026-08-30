@@ -1867,6 +1867,13 @@ _COVERAGE_SCOPES = (
 # 「最新一期」的定序键：version_no 大者为新，同期再按 id 兜底，两级都要。
 # 只按 progress_date 或只按 id 取最新都会取错行（latest_by_wrong_key）：
 # 期号与日期并非单调同向，补报的老期号可能有更晚的 progress_date。
+# 滞后/活跃分组的两根轴。值是 (分组表达式, 额外 JOIN)。看板要 JOIN 回 task_board
+# 才有名字，专项组就在 task 上。两轴都按同一套「滞后 = 从未上报 或 早于窗口」判。
+_STALE_AXES: dict[str, tuple[str, str]] = {
+    "board": ("b.name", "JOIN task_board b ON b.id = t.board_id AND b.is_deleted = 0 "),
+    "project_group": ("IFNULL(NULLIF(TRIM(t.project_group),''),'(未填)')", ""),
+}
+
 _LATEST_PROGRESS_CTE = (
     "(SELECT p.*, ROW_NUMBER() OVER (PARTITION BY p.task_id "
     "ORDER BY p.version_no DESC, p.id DESC) AS rn "
@@ -1978,12 +1985,25 @@ _GROUP_STATS_SCOPES = (
     "completion_time",
     "completion_time_values",
     "completion_time_formats",
+    "overdue",
     "field_lengths",
     "attachments",
     "history_rounds",
     "separators",
     "owner_widths",
     "effect_consistency",
+    "status_effect_conflict",
+)
+
+# completion_time 是展示文本（R-12），能算日期的只有两种写法：标准日期原样用，
+# 季度取该季末日。其余 34 条是「2026年底前」「持续推进」这类自由文本，没有
+# 可比的日子，归一化后为 NULL——不能猜成 12-31，那是替业务下判断。
+_COMPLETION_DEADLINE = (
+    "CASE "
+    "WHEN d.completion_time REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN d.completion_time "
+    "WHEN d.completion_time REGEXP '^[0-9]{4}Q[1-4]$' THEN CONCAT(LEFT(d.completion_time, 4), '-', "
+    "ELT(CAST(SUBSTRING(d.completion_time, 6, 1) AS UNSIGNED), '03-31', '06-30', '09-30', '12-31')) "
+    "END"
 )
 
 # 完成时间的「写法」分档。判别顺序即优先级，不能重排：'2026年6月底' 同时命中
@@ -2028,6 +2048,8 @@ _MILESTONE_DIMENSIONS: dict[str, str] = {
     "group_name": "承担组",
     "status": "完成状态",
     "task_status": "任务状态",
+    # 任务分类树的一级。与 category（里程碑自己的类别文本）是两个维度，别混。
+    "primary_category": "任务一级分类",
 }
 
 _MILESTONE_STATS_SCOPES = ("summary", "by_dimension", "deleted", "fully_deleted", "per_task", "mismatch")
@@ -2853,11 +2875,25 @@ def weekly_task_lifecycle(by: str = "", year: int = 0) -> str:
 
         if grouping:
             expression = _CREATED_GROUPINGS[grouping]
+            # 「2025 和 2026 年各完成了多少条任务」问的是两件事：那年建了多少条，
+            # 其中当前已完成多少条。只回 created_count 时模型要么答成建单数，要么
+            # 去别处找「已完成 31 条」硬套到某一年——那 31 条是全库当前状态，
+            # 按年一分是 26 + 5。currently_finished 与分母同排返回，两个数才配得上。
+            # 库里没有「完成时间」列，所以这是「按建单年份看当前状态」，不是
+            # 「那一年完成的」——口径里必须说明，否则跨年完成的任务会被误读。
             return store.fetch(
-                f"SELECT {expression} AS bucket, COUNT(*) AS created_count "
+                f"SELECT {expression} AS bucket, COUNT(*) AS created_count, "
+                "SUM(t.status = 2) AS currently_finished, "
+                "SUM(t.status IN (0, 1)) AS currently_in_flight, "
+                "ROUND(SUM(t.status = 2) / COUNT(*) * 100, 1) AS finished_pct "
                 f"FROM task t WHERE {where} GROUP BY bucket ORDER BY bucket",
                 params,
-                caliber=caliber + f"；按 created_at 的{grouping}分组",
+                caliber=(
+                    caliber + f"；按 created_at 的{grouping}分组；"
+                    "created_count 是那一档新建的任务数，currently_finished 是其中「当前 status = 2」的条数；"
+                    "任务表没有完成时间列，所以这是按建单档看当前状态，不是「那一年完成的任务数」——"
+                    "跨档完成的任务仍记在建单档；各档 currently_finished 相加等于全库已完成总数（31）"
+                ),
             )
         return store.fetch(
             "SELECT COUNT(*) AS formal_tasks, MIN(t.created_at) AS earliest_created, "
@@ -2952,23 +2988,46 @@ def weekly_freshness_distribution(
                 f"滞后超过 {days} 天，含从未上报（latest_progress_time 为 NULL）；"
                 f"{store.as_of_caliber()}"
             )
-            if (by or "").strip() == "project_group":
+            axis_key = (by or "").strip().lower()
+            if axis_key:
+                chosen = _STALE_AXES.get(axis_key)
+                if chosen is None:
+                    return {
+                        "ok": False,
+                        "error": {
+                            "code": "unsupported_group_by",
+                            "message": f"不支持的分组轴：{by}；支持 {', '.join(sorted(_STALE_AXES))}",
+                        },
+                    }
+                axis, extra = chosen
+                # 「哪个组滞后占比最高」只给 stale_count 答不了：标准安全组 5 条最多，
+                # 但它有 19 个任务，占比 26.3% 低于国家工程办的 4/15=26.7%。分母与
+                # 占比必须与计数同排返回，否则模型只能拿别处的任务数手工除，一错就
+                # 全错。in_flight=false 时不加在办闸门——问「占比」通常问全部任务。
+                gate = f" AND {in_progress}" if in_flight else ""
+                gate_note = (
+                    "；仅在办任务（status IN (0, 1)）"
+                    if in_flight
+                    else "；含该组全部正式任务，不分是否在办（要只看在办请加 in_flight=true）"
+                )
                 return store.fetch(
-                    "SELECT t.project_group, COUNT(*) AS stale_count "
-                    f"FROM task t WHERE {store.formal_task_clause()} AND {in_progress} AND {stale} "
-                    "GROUP BY t.project_group ORDER BY stale_count DESC, t.project_group",
+                    f"SELECT {axis} AS bucket, COUNT(*) AS total, "
+                    f"SUM({stale}) AS stale_count, "
+                    f"ROUND(SUM({stale}) / COUNT(*) * 100, 1) AS stale_pct, "
+                    f"COUNT(*) - SUM({stale}) AS active_count, "
+                    f"ROUND((COUNT(*) - SUM({stale})) / COUNT(*) * 100, 1) AS active_pct "
+                    f"FROM task t {extra}"
+                    f"WHERE {store.formal_task_clause()}{gate} "
+                    f"GROUP BY {axis} ORDER BY stale_pct DESC, bucket",
                     params,
-                    caliber=note + "；按专项组计数，各组相加等于清单总数",
+                    caliber=(
+                        note + gate_note + "；total 是该组分母，stale_pct = stale_count / total，"
+                        "active_count / active_pct 是同一分母下报过进展的那一侧（两者互补，相加为 100）；"
+                        "占比由服务端算，不要拿滞后条数跟别处的任务数手工相除；"
+                        "问「占比最高的组」按 stale_pct 排序的首行答，条数最多的那组未必占比最高"
+                    ),
                     limit=bounded,
                 )
-            if (by or "").strip():
-                return {
-                    "ok": False,
-                    "error": {
-                        "code": "unsupported_group_by",
-                        "message": "by 目前只支持 project_group",
-                    },
-                }
             total = store.scalar(
                 f"SELECT COUNT(*) FROM task t WHERE {store.formal_task_clause()} AND {in_progress} AND {stale}",
                 params,
@@ -3537,7 +3596,25 @@ def weekly_milestone_stats(
                         "message": f"不支持的维度：{by}；支持 {', '.join(sorted(_MILESTONE_DIMENSIONS))}",
                     },
                 }
-            column = "t.status" if dimension == "task_status" else f"m.{dimension}"
+            # 一级分类不在里程碑行上：m.category 是里程碑自己的类别文本，任务的
+            # 分类挂在 t.category_id 且只到二级，一级要再往上跳一层 parent_id。
+            # 两者名字像但根本不是一回事——按 m.category 分组得到「国家任务 58.9%」，
+            # 按一级分类分组首行是「改革与治理 67.5%」，答「哪个一级分类最高」只有
+            # 后者算得对。两层 JOIN 各自带 is_deleted = 0。
+            joins = ""
+            order = "total DESC, bucket"
+            if dimension == "primary_category":
+                column = "pc.name"
+                joins = (
+                    " JOIN task_category c ON c.id = t.category_id AND c.is_deleted = 0"
+                    " JOIN task_category pc ON pc.id = c.parent_id AND pc.is_deleted = 0"
+                )
+                # 问的是「完成率最高」，按完成率排序，并列按分类名定序。
+                order = "finish_rate_pct DESC, bucket"
+            elif dimension == "task_status":
+                column = "t.status"
+            else:
+                column = f"m.{dimension}"
             having = ""
             if min_total:
                 params["min_total"] = max(1, int(min_total))
@@ -3546,10 +3623,20 @@ def weekly_milestone_stats(
             return store.fetch(
                 f"SELECT {column} AS bucket, COUNT(*) AS total, SUM(m.status = 1) AS finished, "
                 "ROUND(SUM(m.status = 1) / COUNT(*) * 100, 1) AS finish_rate_pct "
-                f"FROM task_milestone m JOIN task t ON t.id = m.task_id WHERE {active} "
-                f"GROUP BY bucket {having}ORDER BY total DESC, bucket",
+                f"FROM task_milestone m JOIN task t ON t.id = m.task_id{joins} WHERE {active} "
+                f"GROUP BY bucket {having}ORDER BY {order}",
                 params,
-                caliber="；".join(caliber) + f"；按{_MILESTONE_DIMENSIONS[dimension]}分组",
+                caliber="；".join(caliber)
+                + f"；按{_MILESTONE_DIMENSIONS[dimension]}分组"
+                + (
+                    "；一级分类取 t.category_id 的父级（任务分类只到二级，往上跳一层），"
+                    "与里程碑自己的 m.category 文本不是同一个维度——"
+                    "问「哪个一级分类完成率最高」必须用这个轴，用 by=category 会答成里程碑类别；"
+                    "本轴按 finish_rate_pct 降序，首行即最高（改革与治理 67.5%%）；"
+                    "小样本分类会把比率抬高，要设门槛请加 min_total"
+                    if dimension == "primary_category"
+                    else ""
+                ),
                 limit=bounded,
             )
 
@@ -4226,6 +4313,63 @@ def weekly_group_stats(scope: str = "owners", top: int = 8, min_rounds: int = 0)
             )
             rows["total_count"] = total["value"]
             return rows
+
+        if key == "overdue":
+            # 「超过计划完成时间还没完成的」此前无路可走：completion_time 是展示
+            # 文本，各处口径都写明不做日期运算，模型照规则答「不可答」是对的。
+            # 但 46 条里有 12 条写法可解析（6 个标准日期 + 6 个季度），这一档把
+            # 归一化放在服务端，并把不可解析的 34 条单独计数——它们不是「没超期」，
+            # 是判不了，两者混起来会把「无法判断」说成「都没超期」。
+            # 只看标准日期写法时一条超期都查不到，季度归一化后才露出任务 123
+            # （2026Q2 → 2026-06-30，快照日已过 46 天）——季度那 6 条不能不算。
+            unparsable = store.scalar(
+                "SELECT COUNT(*) "
+                f"FROM task_group_detail d JOIN task t ON t.id = d.task_id {join} "
+                f"WHERE {clause} AND d.completion_time IS NOT NULL AND d.completion_time <> '' "
+                f"AND {_COMPLETION_DEADLINE} IS NULL",
+            )
+            rows = store.fetch(
+                f"SELECT t.id AS task_id, t.task_name, t.status, d.completion_time, "
+                f"{_COMPLETION_DEADLINE} AS deadline, "
+                f"DATEDIFF(%(as_of)s, {_COMPLETION_DEADLINE}) AS days_overdue "
+                f"FROM task_group_detail d JOIN task t ON t.id = d.task_id {join} "
+                f"WHERE {clause} AND {_COMPLETION_DEADLINE} < %(as_of)s AND t.status <> 2 "
+                f"ORDER BY deadline, t.id",
+                {"as_of": store.AS_OF},
+                caliber=(
+                    f"{base}；超期 = 归一化截止日早于快照日且 status <> 2（未完成）；"
+                    f"{store.as_of_caliber()}；"
+                    "completion_time 是展示文本，只有标准日期与 YYYYQn 两种写法能归一化"
+                    f"（季度取季末日），其余 {unparsable['value']} 条判不了、不在本档，"
+                    "它们是「无法判断」而不是「没超期」，报结论时要把这个数一并说明；"
+                    "只按标准日期写法看会一条都查不到，季度那几条归一化后才露出来；"
+                    "本档行数即可判定的超期任务数，为 0 才是「可判定的那些都没超期」"
+                ),
+                limit=bounded,
+            )
+            rows["unparsable_count"] = unparsable["value"]
+            return rows
+
+        if key == "status_effect_conflict":
+            # 「状态和当期成效描述矛盾」问的是同一行内部对不上：status = 0 未开始，
+            # 却在 progress_effect 里写了「已建成 39 个功能模块」这类已发生的成效。
+            # 与 effect_consistency 不是一个问题——那个比的是明细表与历史表两处
+            # 文本是否一致，两者都写着同样的话也照样是「一致」，答不了自相矛盾。
+            return store.fetch(
+                "SELECT t.id AS task_id, t.task_name, t.status, "
+                "LEFT(d.progress_effect, 50) AS effect_head "
+                f"FROM task_group_detail d JOIN task t ON t.id = d.task_id {join} "
+                f"WHERE {clause} AND t.status = 0 "
+                "AND d.progress_effect IS NOT NULL AND d.progress_effect <> '' "
+                "ORDER BY t.id",
+                caliber=(
+                    f"{base}；矛盾判据是同一行内部：status = 0（未开始）却填了非空 progress_effect；"
+                    "共 6 条；effect_head 是前 50 字，完整文本用 weekly_group_detail_query 取；"
+                    "这与 scope=effect_consistency 不是一回事——那档比的是明细表与历史表两处文本是否一致，"
+                    "两处写着同一句话也算一致，答不了「状态与成效自相矛盾」"
+                ),
+                limit=bounded,
+            )
 
         if key == "effect_consistency":
             # 明细表的当前成效 vs 历史表最新一期的成效。逐条比对必须在服务端做：
