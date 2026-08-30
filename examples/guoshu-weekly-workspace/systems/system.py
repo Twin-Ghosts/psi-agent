@@ -40,6 +40,10 @@ TOOL_GUIDE = """\
   集团看板任务的 recent_progress 恒为空（进展不在 task_progress），当期进展就在同一次返回的
   group_detail.progress_effect 里，返回时会写明这点：问「某个集团任务目前进展如何」一次调用即可，
   不要再去 weekly_progress_history / weekly_progress_range / weekly_milestone_stats 之间轮换。
+  本工具一次返回两套负责人列：task 行上单值的 lead_owner_name / project_owner_name，和
+  group_detail 里多值的 lead_owner_names / project_owner_names。集团看板 46 条任务两边的值
+  全都不一致（101 号任务 task 行「陈志远」、集团明细「刘海涛,韩雪峰」），有 group_detail 行时
+  返回会写明按哪一列答：问集团看板任务的牵头人/项目负责人一律用多值那两列。
 - weekly_owner_roles：一个人分角色（责任人/牵头/分管）各带多少任务。
 - weekly_task_ranking：按子记录数（附件/进展/里程碑）给任务排名，普通「前 N 名」用它。
 - weekly_rank：并列口径三选一的排名。问句涉及并列、分组第一或「最少的几个」时用它，
@@ -145,7 +149,9 @@ TOOL_GUIDE = """\
   分组视图默认含该组全部正式任务（占比题就是这个意思），只看在办再加 in_flight=True。
 
 年度目标与里程碑
-- weekly_year_goal_query：年度目标与里程碑摘要清单。
+- weekly_year_goal_query：年度目标与里程碑摘要清单。问「某个看板各任务的年度目标」传 board：
+  看板在 task 上、目标行里没有，所以不要按该看板的任务逐个调这个工具——那样既是几十次调用，
+  也算不出该看板自己的总数（集团组 109 行 / 46 任务，全量是 313 行 / 128 任务）。
 - weekly_year_goal_stats：年度目标覆盖率、哪些任务缺目标、跨年度分布。
   问「在办任务还没定目标」带 in_progress_only=True，已完成/已暂停的缺目标不算缺口。
   只问某个看板就传 board，不要拉全库清单自己筛——自己筛会把 total_count 一起丢掉。
@@ -196,6 +202,8 @@ TOOL_GUIDE = """\
   问「平均每个任务提交几轮」用 scope=rounds_per_task：3.08 = 462 / 150，分母是有提交单
   的任务数。问「已发布的进展提交单有多少」用 scope=published_vs_progress：提交单侧 272
   （只数 progress 类，含 initial 会变 400），task_progress 侧 943，两个数分属两张表。
+  问「某人在某个看板的提交单」传 board：看板在 task 上、提交单行里没有，全量 462 张单而清单
+  封顶 200 行，自己从清单里手挑必然残缺（宋佳明跨看板 32 张，集团只有 18 张）。
 - weekly_approval_turnaround：审批耗时（整体/按看板/最慢/在办积压）。
   scope=slowest 回 task_id、并列按 id 升序，并给 top_tie_count：最慢那档是并列的
   （59 天两轮，任务 76 与 143），问「最慢的一轮是哪条任务」取首行一条（任务 76），
@@ -218,6 +226,10 @@ TOOL_GUIDE = """\
   直接给出 mismatched_batches。问「有没有进展挂在不存在的批次上」带 orphans=True：
   orphan_rows = 0 就是「引用完整」这个结论本身，不要当成空结果换口径重查；
   import_id 为空的 120 条是未经导入的手工填报，服务端单列为 rows_without_import，不算孤儿。
+  问「最近一批跑完的导入影响了哪些任务」带 latest_finished=True：「跑完」是 status = 1、
+  「最近」才是按 data_date，服务端一次做完选批与列任务（第 19 批 / 17 个任务）。
+  默认清单按 data_date 倒序，头一条是第 20 批——它 status 0 且实落 0 行，拿它答等于答了一批
+  没跑的；也不要自己先挑批次再查任务，挑批次正是会错的那一步。
 
 专项组看板（有自己的表，不要拿通用工具查）
 - weekly_group_detail_query：专项组明细表（目标/措施/负责人/完成情况文本）。牵头人与项目
@@ -471,6 +483,18 @@ CALIBER_RULES = """\
     2026Q4 / 2026-12-30 / 2026年9月30日 …）。「哪些任务要求 2026 年内完成」只能按年份数字
     过滤：weekly_group_detail_query contains=2026 field=completion_time 得 31 条。拿
     「2026年内」当检索词只命中字面相同的 5 条，会漏掉 26 条同年到期的任务。
+61. 看板挂在 task 上，子表行里没有 board_id。问「某看板的提交单 / 年度目标 / 附件」一律把
+    看板作为参数传下去（weekly_submission_query board= / weekly_year_goal_query board= /
+    weekly_attachment_query board=），不要拉全量再手挑，也不要按任务逐个循环：清单封顶
+    200 行，手挑出来的必然残缺（宋佳明跨看板 32 张单，集团只有 18 张），逐个循环还答不出
+    该看板自己的总数（集团年度目标 109 行 / 46 任务，全量是 313 行 / 128 任务）。
+62. 「最近一批跑完的导入」两个词都是条件：跑完是 status = 1，最近才是按 data_date。
+    weekly_import_audit latest_finished=True 一次给出选批与受影响任务（第 19 批 / 17 个
+    任务）。按日期最新的是第 20 批，它 status 0、实落 0 行——拿它答等于答了一批没跑的。
+63. weekly_task_detail 一次返回两套负责人列：task 行上单值的 lead_owner_name /
+    project_owner_name，和 group_detail 里多值的 lead_owner_names / project_owner_names。
+    集团看板 46 条任务两边的值全都不一致（101 号任务 task 行「陈志远」、集团明细
+    「刘海涛,韩雪峰」）。问集团看板的负责人一律按 group_detail 那两列答。
 
 ## 判为不可答
 

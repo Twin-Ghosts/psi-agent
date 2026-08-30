@@ -21,7 +21,7 @@ export GUOSHU_WEEKLY_MCP_TOKEN=demo-token
 python tests/smoke_test.py
 ```
 
-预期 `377/377 passed`。
+预期 `386/386 passed`。
 
 ## 数据层准备
 
@@ -91,7 +91,7 @@ guoshu-weekly-workspace/
 │   ├── _store.py              # 只读查询层 + 口径规则 + 字段管控
 │   └── server.py              # 31 个语义化取数工具（Streamable HTTP MCP）
 └── tests/
-    ├── smoke_test.py          # 377 条契约断言，不花模型 token
+    ├── smoke_test.py          # 386 条契约断言，不花模型 token
     └── baseline.py            # 396 题准确率基线（LLM 判定）
 ```
 
@@ -103,7 +103,7 @@ guoshu-weekly-workspace/
 |------|------|
 | `weekly_schema` | 看板、分类树、**表字段清单**、口径说明 |
 | `weekly_task_query` | 按看板/分类/状态/负责人/关键词/**专项组**查正式任务 |
-| `weekly_task_detail` | 单任务详情（明细 + 近期进展 + 年度目标）；**id 存在但不属正式任务时报 `task_not_formal` 并写明卡在哪个 `workflow_status`、指出提交单/审批动作/附件三个工具按同一 id 仍可查，库里真没这行才报 `task_not_found`**；**集团看板任务的 `recent_progress` 恒为空（进展不在 `task_progress`），返回时写明当期进展就在同一次给出的 `group_detail.progress_effect` 里、历次报送用 `weekly_group_history`** |
+| `weekly_task_detail` | 单任务详情（明细 + 近期进展 + 年度目标）；**id 存在但不属正式任务时报 `task_not_formal` 并写明卡在哪个 `workflow_status`、指出提交单/审批动作/附件三个工具按同一 id 仍可查，库里真没这行才报 `task_not_found`**；**集团看板任务的 `recent_progress` 恒为空（进展不在 `task_progress`），返回时写明当期进展就在同一次给出的 `group_detail.progress_effect` 里、历次报送用 `weekly_group_history`**；**同时返回两套负责人列时判胜负：集团看板 46 条任务的 `task.lead_owner_name` 与 `group_detail.lead_owner_names` 全都不一致（101 号任务「陈志远」vs「刘海涛,韩雪峰」），caliber 直接判给多值列** |
 | `weekly_progress_history` | 进展版本回溯，`version_no` 倒序，**同名系列的兄弟任务随 `same_name_series` 回报** |
 | `weekly_progress_coverage` | 进展历史覆盖度（行数/任务数/起止/最大版本、**平均每条有进展的任务报了几期 12.92**）、**已发布/未发布/合计一行给全（943/123/1066）**、未发布进展分档（**每档同时给行数与涉及任务数**）、**待审核清单带对外可见期号**、期号缺号、**每任务最新一期的下一步安排**、最新一期缺下一步计数、**从未报过进展的 55 条（按 NOT EXISTS 判，非汇总列判空）**、**导入 vs 手工一行给全（`import_split`：943 全部来自导入、手工 0；判据只有 `import_id`）** |
 | `weekly_aggregate` | 按 board/category/**primary_category**/status/project_group/owner/**workflow_status** 聚合，`top` 硬切前 N 组；**专项组同排给 `finished` 与 `finish_rate_pct`，`order_by="finish_rate"` 可按率定序（完成率最低 3 组：标准安全组 1/19=5.3%、数据基础设施组 2/15=13.3%、治理合规组 2/10=20.0%）**；**`top_sub_per_primary` 排的是「每个一级分类下任务数最多的二级分类」共 11 行——被排名的单位是分类，与 `weekly_rank per_group` 排任务不可互答** |
@@ -113,12 +113,12 @@ guoshu-weekly-workspace/
 | `weekly_rank` | 排名并列口径三选一：硬切 N 条 / 保留并列 / 每组各自第一，可限定看板并回显 `total_count`；**另有两档不是名次：`distribution` 给五数概括（q1=2 / 中位 6 / q3=15 / 均值 7.37 / 分母 128）、`quartiles` 给 NTILE(4) 等量四档（各 32 条，区间 0-0 / 0-5 / 6-14 / 14-18）** |
 | `weekly_milestone_query` | 里程碑清单（已复核正式任务口径），单任务按 `sort_order` 编排，**同名系列的兄弟任务随 `same_name_series` 回报** |
 | `weekly_workflow_query` | 审批动作流水（谁在哪个环节做了什么），可按 action/看板过滤、按任务聚合次数；**按环节+动作两维分档**、人均动作数（分子分母同回）、**按动作时间倒序并带任务名与填报人（回答「最近谁被驳回了」）** |
-| `weekly_submission_query` | 审批提交单（`round_no` / `status` / 填报人），可查任务状态与最新单状态不一致；**按类型分档**（initial / progress）、O2OA 外部标识填充率、在途单（按成员枚举而非取反）、**在途总数/按看板分档/一任务多单**、**会签需求与按人分档/会签耗时对比**、人均轮次、已发布进展单 vs 已发布进展行 |
+| `weekly_submission_query` | 审批提交单（`round_no` / `status` / 填报人），可查任务状态与最新单状态不一致；**按类型分档**（initial / progress）、O2OA 外部标识填充率、在途单（按成员枚举而非取反）、**在途总数/按看板分档/一任务多单**、**会签需求与按人分档/会签耗时对比**、人均轮次、已发布进展单 vs 已发布进展行；**`board=` 由服务端下推看板（提交单行里没有 `board_id`）：462 张单而清单封顶 200 行，手挑必残缺（宋佳明跨看板 32 张、集团 18 张）** |
 | `weekly_owner_roles` | 按角色分别计数（as_owner / as_lead / any_role） |
 | `weekly_person_stats` | 人员统计（任务量/人均/独苗/跨组/双角色/标识写法/填报人/审核人/自审/**按专项组点名去重**） |
 | `weekly_attachment_stats` | 附件统计（容量/类型/最大/上传人/挂载去向/**零附件任务清单**/在途提交单/逐月/软删/孤儿）；**传 `task` 即单任务档，一次给出该任务附件总量（任务 2：2 个文件 6914081 字节），按外键取数不加正式任务闸门；`zero_attachment` 等全表口径传 `task` 报 `task_not_applicable` 而非静默忽略** |
 | `weekly_attachment_query` | 附件清单（不含 `storage_path`），可按任务或**看板**筛 |
-| `weekly_import_audit` | 导入批次对账，`reconcile_rows` 反查实际落库行核对声明值，`orphans` 查批次引用完整性 |
+| `weekly_import_audit` | 导入批次对账，`reconcile_rows` 反查实际落库行核对声明值，`orphans` 查批次引用完整性；**`latest_finished=True` 一次做完「选批 + 列受影响任务」（跑完 = `status = 1`，最近才按 `data_date`：第 19 批 / 17 个任务；按日期最新的第 20 批 `status = 0` 且实落 0 行）** |
 | `weekly_freshness` | 各看板最新进展时间 |
 | `weekly_health` | 连通性自检与各表行数 |
 | `weekly_progress_range` | 时间窗内的进展（全表跨任务，可按月/季/任务分组计数），`peak` 直接给峰值组；**进展行按月上报，短于半月的窗口恒为 0 行，此时口径点明并指向 `weekly_freshness_distribution recent_days=N`** |
@@ -129,7 +129,7 @@ guoshu-weekly-workspace/
 | `weekly_group_owner_query` | 集团组按牵头人或项目负责人查任务（多值精确匹配）；**查的是明细表多值列，与 `weekly_task_query owner=` 的 `task.lead_owner_name` 单值列是两个总体（李建华 3 条 vs 14 条），不可相加**；**不带人名时是按挂名人数倒序的榜而非花名册，且一次只带一个角色列，「各任务牵头人和项目负责人前 N 条」改用 `weekly_group_detail_query`** |
 | `weekly_group_history` | 集团组历史进展（专表，可按年/月/季/**任务（带 `task_id`，并列按 id 定序）**/填报人/**滞报天数**/**提交单挂接率**分组，天窗可用 `last_days` 或**日历月** `last_months`） |
 | `weekly_group_stats` | 集团组统计（负责人构成/分隔符写法/一栏几人/完成时间**写法分档**与去重取值/字数/附件/期数/成效一致性/**超期（归一化标准日期与 `YYYYQn`，1 条超期＋34 条写法判不了单列 `unparsable_count`）**/**状态与成效自相矛盾（未开始却填了成效，6 条）**、**附件条数分布（`attachment_distribution`：0→18/1→17/2→3/3→5/4→2/6→1，相加 46；清单档 `top` 默认 8，截断时自报只有一页并指向本档）**） |
-| `weekly_year_goal_query` | 年度目标条目（按任务/年份，带里程碑摘要） |
+| `weekly_year_goal_query` | 年度目标条目（按任务/年份，带里程碑摘要）；**`board=` 由服务端下推看板（目标行里没有 `board_id`）：集团组 109 行 / 46 任务，全量 313 行 / 128 任务，不要按任务逐个循环** |
 | `weekly_year_goal_stats` | 年度目标统计（分年/覆盖率/缺口，可限在办/缺口分组/跨年跨度/连续设标） |
 | `weekly_milestone_stats` | 里程碑统计（完成率/多维分解（**含 `primary_category` 任务一级分类轴：改革与治理 67.5% 居首，与里程碑自己的 `category` 轴答出的国家任务 58.9% 不是同一回事**）/软删审计/**里程碑被全删的 3 条任务**/每任务分布（**带 `top_tie_count`：最多那档 23 条并列**）/任务与里程碑错配） |
 
@@ -236,6 +236,9 @@ agent 据此给出依据、也据此判断不可答。
 | 「前 N 条」得先问清按什么排 | `weekly_group_owner_query` 不带人名时是按挂名人数倒序的榜，且一次只带一个角色列，所以「集团看板各任务的牵头人和项目负责人、给我前 8 条」在它上面落到 101/105/107… 而 gold 是按 `task_id` 顺序的 97..104 两列齐出（Q3-01 整张列表一条都没对上）。正解是 `weekly_group_detail_query fields=lead_owner_names,project_owner_names`，现在榜档的 caliber 直接指过去 |
 | 自由文本按年份过滤只能扫年份数字 | `completion_time` 是展示文本，集团看板 46 条里有 28 种写法（`2026年内` / `2026年底前` / `2026Q4` / `2026-12-30` / `2026年9月30日` …）。「哪些任务要求 2026 年内完成」按 `contains=2026` 扫得 31 条；Q4-03 拿「2026年内」当检索词，只命中字面相同的 5 条，漏掉 26 条同年到期的。现在裸年份会说明这是唯一可靠的过滤方式，检索词比裸年份长时则**自报全年真数并给出改法** |
 | 取不到数与真值是 0 要分开 | 「有多少条进展是手工填的」判据只有 `task_progress.import_id` 一列，此前没有任何工具暴露它，Q5-04 只能答「无法精确统计」，而真答案是 0（943 条已发布进展全部来自导入）。新增 `weekly_progress_coverage scope=import_split`，并把另一套闸门的数一并写进 caliber：去掉发布闸门是 1066 行里 948 导入 + 118 手工，那 118 条全部未发布 |
+| 子表里没有看板列，看板条件必须由服务端下推 | 看板挂在 `task` 上，`task_workflow_submission` / `task_year_goal` 行里都没有 `board_id`。没有参数时模型只能拉全量再手挑：462 张提交单而清单封顶 200 行，R3-05 于是把「宋佳明未发布的集团任务」答成 1 条（真值 18 条，他跨看板共 32 张）；R4-01 更是循环调了 13 次 `weekly_year_goal_query` 还是混进技术看板的任务，且循环永远算不出该看板自己的总数。两个工具都加 `board=`：集团年度目标 109 行 / 46 任务，全量 313 行 / 128 任务 |
+| 「最近一批跑完的」两个词都是条件 | 「跑完」是 `status = 1`，「最近」才是按 `data_date`。默认清单按日期倒序，头一条是第 20 批——它 `status = 0` 且实落 0 行，拿它答「影响了哪些任务」根本无从答起，R7-03 六轮耗尽也没给出答案。`weekly_import_audit latest_finished=True` 一次做完选批与列任务（第 19 批 / 2026-07-31 / 17 个任务）。选批与列任务不能分两次调用：挑批次正是会错的那一步 |
+| 一个工具返回两套竞争列，就得判个胜负 | `weekly_task_detail` 同时回 `task` 行上单值的 `lead_owner_name` / `project_owner_name` 和 `group_detail` 里多值的 `lead_owner_names` / `project_owner_names`，集团看板 46 条任务两边的值**全都不一致**（101 号任务前者「陈志远」、后者「刘海涛,韩雪峰」）。谁排在上面谁就被当成答案，R8-02 照 task 行答了「陈志远」。现在有 `group_detail` 行时 caliber 直接点名两边的值并判给多值列，没有该行的技术看板任务不加这句 |
 
 ### 相对时间窗以快照日为基准
 
@@ -271,7 +274,7 @@ R-04/R-14 要的是「按权限返回」。一律遮蔽同样不满足需求—�
 | 数据权限 | 敏感字段按 token 两档分级 | 按 OA 真实身份做行级权限 |
 | 前端 | 无（经 psi-agent 既有接口） | 专建对话应用 + BFF（方案第六章） |
 | 材料生成 | 无 | 报告下载与图表（P1，第 5 期） |
-| 评测 | 377 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
+| 评测 | 386 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
 
 ### mock 数据层的两处不可外推
 

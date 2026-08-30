@@ -340,6 +340,7 @@ async def weekly_submission_query(
     exclude_status: str = "",
     status_mismatch: bool = False,
     scope: str = "",
+    board: str = "",
     limit: int = 200,
 ) -> str:
     """Query approval submission forms: round_no, status, reporter, signer.
@@ -393,6 +394,11 @@ async def weekly_submission_query(
             have a process id, with 在途 enumerated member by member rather than
             negated: status <> 'published' also picks up the cancelled form,
             which is neither published nor in flight.
+        board: Board code or name (group / tech) to keep only that board's forms.
+            The board lives on task, not on the form, so ask for it here instead of
+            narrowing a 462-row listing by hand: 宋佳明 holds 32 forms across both
+            boards and only 18 of them are group ones, and the listing caps at 200
+            so a hand-filtered page is a subset of the real answer.
         limit: Max rows to return, capped at 200.
     """
     try:
@@ -408,6 +414,7 @@ async def weekly_submission_query(
             "exclude_status": exclude_status,
             "status_mismatch": bool(status_mismatch),
             "scope": scope,
+            "board": board,
             "limit": bounded,
         },
     )

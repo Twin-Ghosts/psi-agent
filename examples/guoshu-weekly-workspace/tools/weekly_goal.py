@@ -17,7 +17,7 @@ _call = _module.__dict__["call"]
 _invalid = _module.__dict__["invalid_argument"]
 
 
-async def weekly_year_goal_query(task: str = "", year: int = 0, limit: int = 200) -> str:
+async def weekly_year_goal_query(task: str = "", year: int = 0, board: str = "", limit: int = 200) -> str:
     """List annual goals and milestone summaries. One row per task per year.
 
     Use this for "what is task X's 2026 goal" and for board-wide goal listings.
@@ -27,6 +27,11 @@ async def weekly_year_goal_query(task: str = "", year: int = 0, limit: int = 200
     Args:
         task: Task id or name; empty covers every formal task.
         year: Four-digit year; 0 covers all years.
+        board: Board code or name (group / tech) to keep only that board's goals.
+            Ask for the board here rather than looping this tool over its tasks:
+            the board lives on task, not on the goal row, so a per-task loop is
+            both 46 calls and unable to give the board's own totals (109 goal rows
+            over 46 tasks, against 313 over 128 board-wide).
         limit: Max rows, capped at 200.
     """
     try:
@@ -36,7 +41,7 @@ async def weekly_year_goal_query(task: str = "", year: int = 0, limit: int = 200
         return _invalid("year and limit must be integers")
     return await _call(
         "weekly_year_goal_query",
-        {"task": task, "year": yr, "limit": bounded},
+        {"task": task, "year": yr, "board": board, "limit": bounded},
     )
 
 

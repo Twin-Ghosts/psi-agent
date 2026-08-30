@@ -1586,6 +1586,83 @@ async def run() -> int:
         f"n={len(td4.get('recent_progress') or [])}",
     )
 
+    # R3-05. 提交单表里没有 board_id，看板在 task 上：不按看板筛，「我提交但还没
+    # 发布的集团任务」只能从 462 张单里手挑，基线因此只报了 1 条（真值 18 条）。
+    sub_group = await _call(registry, "weekly_submission_query", reporter="宋佳明", board="group", limit=50)
+    sub_all = await _call(registry, "weekly_submission_query", reporter="宋佳明", limit=50)
+    check(
+        "R3-05 按看板筛出宋佳明的 18 条集团提交单，口径写明按 task 的 board_id 过滤",
+        sub_group.get("total_count") == 18
+        and len(sub_group.get("rows") or []) == 18
+        and "仅看板 group" in str(sub_group.get("caliber", "")),
+        f"total={sub_group.get('total_count')}",
+    )
+    check(
+        "R3-05 不带看板是跨看板 32 条，两个口径不可互代",
+        sub_all.get("total_count") == 32 and "仅看板" not in str(sub_all.get("caliber", "")),
+        f"total={sub_all.get('total_count')}",
+    )
+    sub_bad_board = await _call(registry, "weekly_submission_query", board="不存在的看板")
+    check(
+        "R3-05 看板名不匹配时明确报错，不静默返回全量",
+        sub_bad_board.get("ok") is False and sub_bad_board["error"]["code"] == "board_not_found",
+        str(sub_bad_board.get("error"))[:100],
+    )
+
+    # R4-01. 年度目标行上没有看板：基线为了「集团看板各任务的年度目标」把
+    # weekly_year_goal_query 循环调了 13 次，仍答不出该看板自己的总数。
+    goal_group = await _call(registry, "weekly_year_goal_query", board="group", limit=10)
+    goal_all = await _call(registry, "weekly_year_goal_query", limit=3)
+    check(
+        "R4-01 集团看板年度目标 109 行 / 46 任务，前 10 条从 97 号任务起",
+        goal_group.get("total_count") == 109
+        and goal_group.get("total_tasks") == 46
+        and [row["task_id"] for row in goal_group["rows"]][:2] == [97, 97]
+        and "仅看板 group" in str(goal_group.get("caliber", "")),
+        f"total={goal_group.get('total_count')} tasks={goal_group.get('total_tasks')}",
+    )
+    check(
+        "R4-01 不带看板是全量 313 行 / 128 任务，与看板档不是一个口径",
+        goal_all.get("total_count") == 313 and goal_all.get("total_tasks") == 128,
+        f"total={goal_all.get('total_count')}",
+    )
+
+    # R7-03. 「最近一批跑完的」两个词都是条件：按 data_date 最新的是第 20 批，
+    # 它 status 0、实落 0 行，拿它答等于答了一批没跑的（基线六轮耗尽也没给出答案）。
+    fin = await _call(registry, "weekly_import_audit", latest_finished=True, limit=50)
+    check(
+        "R7-03 最近跑完的是第 19 批，影响 17 个任务，选批与列任务一次做完",
+        (fin.get("batch") or {}).get("id") == 19
+        and (fin.get("batch") or {}).get("status") == 1
+        and fin.get("row_count") == 17
+        and [row["task_id"] for row in fin["rows"]][:3] == [5, 17, 21],
+        f"batch={(fin.get('batch') or {}).get('id')} n={fin.get('row_count')}",
+    )
+    check(
+        "R7-03 口径点名第 20 批 status 0 实落 0 行，不能只按日期取最新",
+        "「跑完」是 status = 1，不能只按日期取最新" in str(fin.get("caliber", ""))
+        and "第 20 批" in str(fin.get("caliber", "")),
+        str(fin.get("caliber", ""))[:140],
+    )
+
+    # R8-02. 同一次返回里有两套负责人列，集团看板 46 条任务两边的值全不一样：
+    # 基线照 task 行答了「陈志远」，真值是集团明细的「刘海涛,韩雪峰」。
+    td101 = await _call(registry, "weekly_task_detail", task="101")
+    check(
+        "R8-02 两套负责人列不一致时，口径判给 group_detail 的多值列并把两边都点出来",
+        td101["task"]["lead_owner_name"] == "陈志远"
+        and (td101.get("group_detail") or [{}])[0].get("lead_owner_names") == "刘海涛,韩雪峰"
+        and "负责人一律按 group_detail 的多值列" in str(td101.get("caliber", ""))
+        and "「陈志远」" in str(td101.get("caliber", ""))
+        and "「刘海涛,韩雪峰」" in str(td101.get("caliber", "")),
+        str(td101.get("caliber", ""))[:160],
+    )
+    check(
+        "R8-02 技术看板任务没有集团明细行，不加这句提示",
+        not (td4.get("group_detail") or []) and "负责人一律按 group_detail" not in str(td4.get("caliber", "")),
+        str(td4.get("caliber", ""))[:120],
+    )
+
     bad_group = await _call(registry, "weekly_aggregate", group_by="不支持的维度")
     check(
         "不支持的聚合维度明确报错",

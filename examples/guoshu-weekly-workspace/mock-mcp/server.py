@@ -324,6 +324,33 @@ def weekly_task_detail(task: str, ctx: Context | None = None) -> str:
         # 13 次调用就是这么耗掉的，而答案其实已经在本次返回的 group_detail 里。
         # 有 group_detail 行本身就等于「这是集团看板任务」——那张表只覆盖集团看板，
         # 所以不必再回查 board.code。
+        # 本工具一次返回两套负责人列：task 行上的单值 lead_owner_name /
+        # project_owner_name，和 group_detail 里的多值 lead_owner_names /
+        # project_owner_names。集团看板 46 条任务两边的值都不一样（101 号任务
+        # task 行写「陈志远」，集团明细写「刘海涛,韩雪峰」），谁在上面谁就被当成
+        # 答案——R8-02 就是照 task 行答了「陈志远」。哪一列对不该让模型猜，
+        # 有 group_detail 行就直接判给多值列。
+        owners = ""
+        if detail["rows"]:
+            row = detail["rows"][0]
+            pairs = [
+                ("牵头人", "lead_owner_name", "lead_owner_names"),
+                ("项目负责人", "project_owner_name", "project_owner_names"),
+            ]
+            clashes = []
+            for label, single, multi in pairs:
+                one = (found.get(single) or "").strip()
+                many = (row.get(multi) or "").strip()
+                if many and one != many:
+                    clashes.append(f"{label} task 行是「{one or '(空)'}」、集团明细是「{many}」")
+            if clashes:
+                owners = (
+                    "；本任务属集团看板，负责人一律按 group_detail 的多值列"
+                    "（lead_owner_names / project_owner_names）答，"
+                    "不要用 task 行上单值的 lead_owner_name / project_owner_name："
+                    f"两边并非同一个数据，本任务就不一致（{'；'.join(clashes)}），"
+                    "集团看板 46 条任务两列的值全都不一致"
+                )
         extra = ""
         if not progress["rows"] and detail["rows"]:
             effect = (detail["rows"][0].get("progress_effect") or "").strip()
@@ -349,7 +376,7 @@ def weekly_task_detail(task: str, ctx: Context | None = None) -> str:
             "caliber": (
                 f"{store.FORMAL_TASK_CALIBER}；"
                 "completion_time 为展示文本，不可做日期运算（R-12）；"
-                "review_comment 按权限展示（R-04/R-14）" + extra
+                "review_comment 按权限展示（R-04/R-14）" + owners + extra
             ),
             "snapshot_note": "演示数据（weekly_mock 自建库），非集团真实周报",
         }
@@ -1361,6 +1388,7 @@ def weekly_submission_query(
     exclude_status: str = "",
     status_mismatch: bool = False,
     scope: str = "",
+    board: str = "",
     limit: int = 200,
 ) -> str:
     """Query approval submission forms (task_workflow_submission).
@@ -1374,6 +1402,11 @@ def weekly_submission_query(
         reporter: Reporter id or name, exact match after trimming.
         status: Keep only this submission status.
         exclude_status: Drop this status (e.g. approved, for "not yet approved").
+        board: Board code or name to keep only that board's submissions. The board
+            lives on ``task``, not on the form, so without this every 集团看板
+            question over the forms has to be narrowed by hand out of a 462-row
+            listing capped at 200 -- and 宋佳明's 32 forms shrink to the 18 group
+            ones only after that filter (R3-05).
         status_mismatch: True 只保留「任务 workflow_status 与其最新一轮提交单状态
             disagrees with its newest submission's status, one row per task. The two
             are separate vocabularies, so the comparison happens server-side.
@@ -1608,12 +1641,26 @@ def weekly_submission_query(
             )
         params: dict[str, Any] = {}
         where = ["t.is_deleted = 0"]
+        extra_caliber: list[str] = []
         if task.strip():
             task_id = store.resolve_task_id(task)
             if task_id is None:
                 return _task_miss(task)
             where.append("s.task_id = %(tid)s")
             params["tid"] = task_id
+        if board.strip():
+            # 看板在 task 上，提交单表里没有 board_id：不按看板筛，「我提交但还没
+            # 发布的集团任务」只能从 462 张单里手挑，而清单封顶 200 行，挑出来的
+            # 必然是残缺的（R3-05 就只报了 1 条，真值 18 条）。
+            board_id = store.resolve_board(board)
+            if board_id is None:
+                return {
+                    "ok": False,
+                    "error": {"code": "board_not_found", "message": f"未匹配到看板：{board}"},
+                }
+            where.append("t.board_id = %(bid)s")
+            params["bid"] = board_id
+            extra_caliber.append(f"仅看板 {board.strip()}（看板在 task 上，已按任务的 board_id 过滤）")
         if reporter.strip():
             token = reporter.strip()
             where.append("(TRIM(IFNULL(s.reporter_id,'')) = %(rep)s OR TRIM(IFNULL(s.reporter_name,'')) = %(rep)s)")
@@ -1645,9 +1692,12 @@ def weekly_submission_query(
             "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
             f"WHERE {clause} ORDER BY s.task_id, s.round_no, s.id",
             params,
-            caliber=(
-                "task_id + round_no 唯一；payload 草稿快照默认不并入正式数据，不返回；"
-                "submission_kind 区分 initial / progress"
+            caliber="；".join(
+                [
+                    "task_id + round_no 唯一；payload 草稿快照默认不并入正式数据，不返回",
+                    "submission_kind 区分 initial / progress",
+                    *extra_caliber,
+                ]
             ),
             limit=limit,
         )
@@ -3021,11 +3071,22 @@ def weekly_rank(
 
 
 @mcp.tool()
-def weekly_import_audit(limit: int = 200, reconcile_rows: bool = False, orphans: bool = False) -> str:
+def weekly_import_audit(
+    limit: int = 200,
+    reconcile_rows: bool = False,
+    orphans: bool = False,
+    latest_finished: bool = False,
+) -> str:
     """Reconcile Excel import batches: batch count vs distinct import times (R-09/R-10).
 
     Args:
         limit: Max rows, capped at 200.
+        latest_finished: True returns the tasks touched by the newest FINISHED
+            batch (status = 1). "最近一批跑完的导入影响了哪些任务" needs the
+            finished gate: the listing's newest batch by date is id 20, which is
+            still status 0 and landed 0 progress rows, so answering off the top of
+            the listing describes a batch that has not run. The finished one is
+            id 19 with 17 tasks.
         reconcile_rows: True adds the per-batch declared-vs-landed comparison
             (changed_tasks vs the progress rows actually carrying that import_id).
             Required for "对得上吗" -- the declared figure lives on the batch row
@@ -3045,6 +3106,46 @@ def weekly_import_audit(limit: int = 200, reconcile_rows: bool = False, orphans:
             caliber="批次数 vs 去重业务快照日期数 vs 去重导入时间数（R-09/R-10）",
             limit=1,
         )
+        if latest_finished:
+            # 「最近一批跑完的」两个词都是条件：最近按 data_date，跑完按 status = 1。
+            # 只按日期取头一条会拿到第 20 批——它 status 0、一条进展都没落库，
+            # 于是「影响了哪些任务」根本无从答起（R7-03 六轮耗尽也没给出答案）。
+            # 选批与列任务必须一次做完：分两次调用，模型会在中间那步就把批次挑错。
+            batch = store.fetch(
+                "SELECT id, file_name, data_date, import_time, changed_tasks AS declared_tasks, status "
+                "FROM task_progress_import WHERE status = 1 ORDER BY data_date DESC, id DESC",
+                caliber="跑完 = status = 1；最近按 data_date 倒序、同日按 id 倒序",
+                limit=1,
+            )
+            if not batch["rows"]:
+                return {
+                    "ok": True,
+                    "rows": [],
+                    "row_count": 0,
+                    "caliber": "库里没有 status = 1 的导入批次，即没有跑完的批次",
+                    "snapshot_note": store.SNAPSHOT_NOTE,
+                }
+            picked = batch["rows"][0]
+            rows = store.fetch(
+                "SELECT p.import_id, p.task_id, t.task_name, COUNT(*) AS progress_rows "
+                "FROM task_progress p JOIN task t ON t.id = p.task_id "
+                f"WHERE {store.formal_task_clause()} AND p.import_id = %(bid)s "
+                "GROUP BY p.import_id, p.task_id, t.task_name ORDER BY p.task_id",
+                {"bid": picked["id"]},
+                caliber=(
+                    f"{store.FORMAL_TASK_CALIBER}；"
+                    f"最近一批跑完的是第 {picked['id']} 批（{picked['data_date']}，status = 1）；"
+                    "「跑完」是 status = 1，不能只按日期取最新："
+                    "按 data_date 最新的是第 20 批，它 status 0 且实落 0 行，拿它答等于答了一批没跑的；"
+                    f"该批声明 changed_tasks {picked['declared_tasks']}，实际落库任务数见 row_count，"
+                    "两者不等是常态（声明与落库是两个口径，核对用 reconcile_rows=True）；"
+                    "progress_rows 是该任务在这批里的进展行数，不是任务数"
+                ),
+                limit=limit,
+            )
+            rows["batch"] = picked
+            rows["reconciliation"] = summary["rows"][0] if summary["rows"] else {}
+            return rows
         if orphans:
             # NOT EXISTS 而非 LEFT JOIN ... IS NULL：这里只要判定存在性。
             # import_id IS NULL 是「没走导入」不是「挂错批次」，用 SUM 单列出来，
@@ -3534,7 +3635,7 @@ def weekly_approval_turnaround(scope: str = "summary", top: int = 8) -> str:
 
 
 @mcp.tool()
-def weekly_year_goal_query(task: str = "", year: int = 0, limit: int = 200) -> str:
+def weekly_year_goal_query(task: str = "", year: int = 0, board: str = "", limit: int = 200) -> str:
     """List annual goals and milestone summaries for formal tasks.
 
     ``task_year_goal`` is unique per (task, year). Only ``weekly_task_detail``
@@ -3544,6 +3645,11 @@ def weekly_year_goal_query(task: str = "", year: int = 0, limit: int = 200) -> s
     Args:
         task: Task id or name; empty covers every formal task.
         year: Four-digit year; 0 covers every year the task has goals for.
+        board: Board code or name to keep only that board's goals. The board lives
+            on ``task``, not on the goal row, so "集团看板各任务的年度目标" without
+            it walks the board task by task -- 13 calls that still cannot say how
+            many goal rows the board holds (109 over 46 tasks, against 313 over
+            128 board-wide).
         limit: Max rows, capped at 200.
     """
 
@@ -3558,6 +3664,16 @@ def weekly_year_goal_query(task: str = "", year: int = 0, limit: int = 200) -> s
                 return _task_miss(task)
             params["tid"] = task_id
             where.append("g.task_id = %(tid)s")
+        if board.strip():
+            board_id = store.resolve_board(board)
+            if board_id is None:
+                return {
+                    "ok": False,
+                    "error": {"code": "board_not_found", "message": f"未匹配到看板：{board}"},
+                }
+            params["bid"] = board_id
+            where.append("t.board_id = %(bid)s")
+            caliber.append(f"仅看板 {board.strip()}（看板在 task 上，已按任务的 board_id 过滤）")
         if year:
             params["yr"] = int(year)
             where.append("g.year = %(yr)s")

@@ -98,7 +98,12 @@ async def weekly_freshness() -> str:
     return await _call("weekly_freshness", {})
 
 
-async def weekly_import_audit(limit: int = 200, reconcile_rows: bool = False, orphans: bool = False) -> str:
+async def weekly_import_audit(
+    limit: int = 200,
+    reconcile_rows: bool = False,
+    orphans: bool = False,
+    latest_finished: bool = False,
+) -> str:
     """Reconcile Excel import batches against distinct snapshot dates (R-09/R-10).
 
     Compare batch_count with distinct_dates and distinct_import_times to tell a
@@ -106,6 +111,13 @@ async def weekly_import_audit(limit: int = 200, reconcile_rows: bool = False, or
 
     Args:
         limit: Max batch rows to return, capped at 200.
+        latest_finished: When True, return the tasks the newest FINISHED batch
+            touched, batch pick included. Use it for "最近一批跑完的导入影响了哪些
+            任务": 跑完 means status = 1, and the newest batch by date is id 20,
+            which is still status 0 with 0 rows landed -- answering off the plain
+            listing's first row describes a batch that never ran. The finished one
+            is id 19 with 17 tasks. Do not pick the batch yourself and then query
+            it: the pick is the part that goes wrong.
         reconcile_rows: When True, also look up what each batch actually landed
             (via task_progress.import_id) and compare it against the batch's own
             changed_tasks. Required for "声明与实际对不上" questions -- the
@@ -124,7 +136,12 @@ async def weekly_import_audit(limit: int = 200, reconcile_rows: bool = False, or
         return _invalid("limit must be an integer")
     return await _call(
         "weekly_import_audit",
-        {"limit": bounded, "reconcile_rows": bool(reconcile_rows), "orphans": bool(orphans)},
+        {
+            "limit": bounded,
+            "reconcile_rows": bool(reconcile_rows),
+            "orphans": bool(orphans),
+            "latest_finished": bool(latest_finished),
+        },
     )
 
 

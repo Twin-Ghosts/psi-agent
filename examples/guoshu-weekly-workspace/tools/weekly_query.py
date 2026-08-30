@@ -69,6 +69,13 @@ async def weekly_task_detail(task: str) -> str:
     Use this for "tell me about task X" questions. completion_time in the group
     detail is free text -- never compute dates from it (R-12).
 
+    The reply carries two sets of owner columns: single-value lead_owner_name /
+    project_owner_name on the task row, and multi-value lead_owner_names /
+    project_owner_names inside group_detail. For a group-board task they disagree
+    on all 46 rows, so quote the group_detail pair -- the caliber says so
+    explicitly whenever they differ. Task 101 reads 陈志远 on the task row and
+    刘海涛,韩雪峰 in the group detail.
+
     Args:
         task: Task id or task name (fuzzy match on name).
     """
