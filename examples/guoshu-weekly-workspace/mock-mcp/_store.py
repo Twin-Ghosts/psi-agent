@@ -38,6 +38,20 @@ FORMAL_TASK_CALIBER = "is_deleted = 0 AND workflow_status = 'published'"
 # Fields that must never cross the MCP boundary (chapter 7.2 of the plan).
 BLOCKED_FIELDS = frozenset({"storage_path", "payload"})
 
+# Key NAMES from payload may cross the boundary; key values may not.
+#
+# A field-name list is contract information -- it goes into the MCP contract
+# document either way, and ["nextWork", "progressDate", "latestProgress"] reveals
+# nothing about what anyone reported.  The values are business data: draft text
+# may be unapproved wording that would be quoted as if it were final, so payload
+# itself stays in BLOCKED_FIELDS.
+#
+# These columns are computed server-side via JSON_KEYS and JSON_EXTRACT ... IS
+# NULL, so they carry names and existence only.  Releasing them is not releasing
+# payload: _scrub still drops the column named payload, which is why a derived
+# column must be named something else -- one of the three below.
+PAYLOAD_KEY_COLUMNS = frozenset({"payload_keys", "payload_key_count", "has_payload"})
+
 # Fields released only when the caller holds the matching permission.
 SENSITIVE_FIELDS = frozenset({"review_comment", "opinion"})
 

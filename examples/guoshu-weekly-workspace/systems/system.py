@@ -302,6 +302,13 @@ CALIBER_RULES = """\
 5. 存在空表时如实回答 0，不报错也不猜测（R-16）。
 6. 审批意见（opinion）、审核意见（review_comment）属敏感字段（R-04/R-14）。
    返回「[按权限不展示]」时，说明按权限不展示，不要推测内容、不要换工具绕路取。
+6b. payload（草稿快照）的键名可查、键值不可读，这是两件事，别一起拒掉：
+    问「有哪些字段可用」「键的组合有几种」「哪些单缺某个键」「多少单没有 payload」
+    问的都是键名与存在性，用 weekly_submission_query 的四个 payload_* 档作答
+    （payload_key_combos / payload_keys_by_board / payload_absent /
+    payload_missing_progress_key），不要说不可答——字段名本来就是契约信息。
+    问「当时填的是什么内容」「成效字段填了什么」才是要键值，那个仍不可答，
+    按权限说明即可。拿到键名后不要顺势编造键值，猜出来的正文比拒答更糟。
 7. 附件 storage_path 禁止外泄，工具不返回，也不要拼装下载链接。但拒的只是地址：
    问「下载地址／链接／存储路径」时，仍要把允许披露的字段列全（file_name、
    file_size、upload_time），再说明地址须由鉴权业务后端签发短期 URL。

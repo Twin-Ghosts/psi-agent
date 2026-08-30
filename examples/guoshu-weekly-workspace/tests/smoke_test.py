@@ -1727,6 +1727,73 @@ async def run() -> int:
         str(rej.get("caliber", ""))[:200],
     )
 
+    # payload 四档：键名可列、键值绝不外泄。断言分两组——数字对不对，以及
+    # 有没有把填报正文带出来。后者是安全边界，比数字更要紧，所以正文样本直接写死。
+    combos = await _call(registry, "weekly_submission_query", scope="payload_key_combos")
+    combo_map = {r["payload_keys"]: r["submission_count"] for r in combos["rows"]}
+    check(
+        "I7-02 payload 键组合 4 种，条数 196/150/111/3",
+        len(combo_map) == 4 and sorted(combo_map.values(), reverse=True) == [196, 150, 111, 3],
+        str(combo_map),
+    )
+    leak_samples = ("（快照）本轮填报进展", "（快照）本轮进度成效", "2026年12月底")
+    check(
+        "payload_key_combos 不带出任何键值",
+        not any(s in json.dumps(combos, ensure_ascii=False) for s in leak_samples),
+        json.dumps(combos, ensure_ascii=False)[:200],
+    )
+    by_board = await _call(registry, "weekly_submission_query", scope="payload_keys_by_board")
+    check(
+        "I6-03 按看板列键组合共 5 行",
+        by_board["row_count"] == 5,
+        str(by_board["row_count"]),
+    )
+    check(
+        "I6-03 两看板键不同名且不带键值",
+        "progressEffect" in json.dumps(by_board, ensure_ascii=False)
+        and "latestProgress" in json.dumps(by_board, ensure_ascii=False)
+        and not any(s in json.dumps(by_board, ensure_ascii=False) for s in leak_samples),
+        json.dumps(by_board, ensure_ascii=False)[:200],
+    )
+    absent = await _call(registry, "weekly_submission_query", scope="payload_absent")
+    check(
+        "I7-03 没有 payload 的单 = 2",
+        absent["value"] == 2,
+        str(absent.get("value")),
+    )
+    missing = await _call(registry, "weekly_submission_query", scope="payload_missing_progress_key")
+    check(
+        "I7-01 缺两个进展键 = 153 张（150 建单 + 3 只有 completionTime）",
+        missing["row_count"] == 153,
+        str(missing["row_count"]),
+    )
+    check(
+        "I7-01 caliber 点明 153 且提醒别读成 150，不带键值",
+        "153" in str(missing.get("caliber", ""))
+        and "别把它当成 150" in str(missing.get("caliber", ""))
+        and not any(s in json.dumps(missing, ensure_ascii=False) for s in leak_samples),
+        str(missing.get("caliber", ""))[:200],
+    )
+
+    trace = await _call(registry, "weekly_workflow_query", task="数据资源登记体系建设")
+    trace_rows = trace.get("rows", [])
+    trace_times = [str(r.get("created_at")) for r in trace_rows]
+    check(
+        "I3-02 审批轨迹 13 条且按 created_at 升序",
+        trace["row_count"] == 13 and trace_times == sorted(trace_times),
+        str(trace["row_count"]) + " " + str(trace_times[:5]),
+    )
+    check(
+        "I3-02 轮次号不等于时间序：第 3 轮排在第 2 轮之前",
+        [r.get("round_no") for r in trace_rows] == [1, 1, 1, 1, 3, 3, 3, 2, 2, 2, 4, 4, 4],
+        str([r.get("round_no") for r in trace_rows]),
+    )
+    check(
+        "I3-02 caliber 点明按时间不按轮次",
+        "created_at" in str(trace.get("caliber", "")) and "round_no" in str(trace.get("caliber", "")),
+        str(trace.get("caliber", ""))[:200],
+    )
+
     bad_group = await _call(registry, "weekly_aggregate", group_by="不支持的维度")
     check(
         "不支持的聚合维度明确报错",

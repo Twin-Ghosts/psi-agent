@@ -1026,11 +1026,16 @@ def weekly_workflow_query(
             f"FROM task_workflow_action a {board_join} "
             "LEFT JOIN task_workflow_submission s ON s.id = a.submission_id "
             f"WHERE {' AND '.join(where)} "
-            "ORDER BY a.task_id, s.round_no, a.id",
+            # 审批轨迹按 created_at 排，不按 round_no。轮次号不等于时间序:任务 3
+            # 的第 3 轮(2025-09-19)实际早于第 2 轮(2025-10-13),按 round_no 排会
+            # 把两轮对调,读出来的轨迹是错的。
+            "ORDER BY a.task_id, a.created_at, a.id",
             params,
             caliber="；".join(
                 [
                     *caliber_extra,
+                    "轨迹按 created_at 时间升序，不按 round_no——轮次号与实际时间不一致，"
+                    "存在第 3 轮早于第 2 轮的任务，按轮次读会把顺序读反",
                     "opinion 属敏感字段，按权限展示（R-04/R-14）"
                     + (
                         "；本次凭证有敏感字段权限，opinion 原文返回"
@@ -1395,7 +1400,9 @@ def weekly_submission_query(
 
     Distinct from weekly_workflow_query, which returns the action *log*: a
     submission carries round_no and its own status, and the action log cannot be
-    aggregated into it.  payload (the draft snapshot) is never returned.
+    aggregated into it.  payload key VALUES (the draft text) are never returned;
+    the four ``payload_*`` scopes expose key names and existence only, which is
+    contract information rather than reported content.
 
     Args:
         task: Task id or name; empty covers all tasks.
@@ -1420,6 +1427,18 @@ def weekly_submission_query(
             nine buckets, a different axis from ``inflight_by_board``; "按状态和
             类型分开看" means this one.
             ``inflight_multi`` tasks carrying more than one in-flight form.
+            ``payload_key_combos`` which key combinations exist across all forms
+            and how many carry each -- key NAMES only, never a key value. Four
+            combos (196 / 150 / 111 / 3).
+            ``payload_keys_by_board`` the same split per board: the two boards do
+            not share field names (tech latestProgress / progressDate / nextWork,
+            group progressEffect / completionTime).
+            ``payload_absent`` how many forms have no payload at all (2). Distinct
+            from a form whose payload merely lacks one key.
+            ``payload_missing_progress_key`` forms where neither board's progress
+            key is present -- 153, being 150 opening forms (taskName /
+            overallGoal) plus 3 carrying only completionTime, so not just the 150.
+            Existence is judged on keys, values are never read.
             ``rejected_by_board`` rejection rate per board, numerator and
             denominator both on the submission table (tech 3.07% > group 2.37%).
             The action log's 13 rejections are action counts, not form counts.
@@ -1487,6 +1506,77 @@ def weekly_submission_query(
                     "缺失率已按 total 算好，直接引用 missing_task_id_pct"
                 ),
                 limit=1,
+            )
+
+        # payload 的四档：只算键名与存在性，一律不取键值。
+        #
+        # payload 本体仍在 store.BLOCKED_FIELDS 里，任何 token 都读不到填报正文。
+        # 这四档返回的是 JSON_KEYS 的结果与「某键在不在」的判断，属于字段名清单，
+        # 也就是本来就要写进 MCP 契约交给入口组的那部分信息，不含任何人填了什么。
+        # 没有这四档时，问「有哪些字段可用」只能靠模型猜键名，猜出来的键名比拒答更糟。
+        if scope_key == "payload_key_combos":
+            return store.fetch(
+                "SELECT JSON_KEYS(s.payload) AS payload_keys, COUNT(*) AS submission_count "
+                "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+                "WHERE t.is_deleted = 0 AND s.payload IS NOT NULL "
+                "GROUP BY payload_keys ORDER BY submission_count DESC",
+                caliber=(
+                    "只返回键名组合与条数，不返回任何键值（payload 本体仍禁止外泄）；"
+                    "共 4 种组合：技术组填报 196、建单 150、集团组填报 111、只有完成时间 3；"
+                    "另有 2 张单根本没有 payload（见 scope=payload_absent），"
+                    "4 种组合合计 460 张加这 2 张等于 462 张全量单；"
+                    "缺两个进展键的是后两种组合合计 153 张（150 + 3），不是只有 150；"
+                    "不要从键名推测填报内容——键名不是内容，猜出来的正文比拒答更糟"
+                ),
+                limit=bounded_sub,
+            )
+        if scope_key == "payload_keys_by_board":
+            return store.fetch(
+                "SELECT b.code AS board_code, JSON_KEYS(s.payload) AS payload_keys, "
+                "COUNT(*) AS submission_count "
+                "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+                "JOIN task_board b ON b.id = t.board_id AND b.is_deleted = 0 "
+                "WHERE t.is_deleted = 0 AND s.payload IS NOT NULL "
+                "GROUP BY b.code, payload_keys ORDER BY b.code, submission_count DESC",
+                caliber=(
+                    "只返回键名组合与条数，不返回任何键值；两个看板的填报键不同名："
+                    "技术组用 latestProgress / progressDate / nextWork，"
+                    "集团组用 progressEffect / completionTime，"
+                    "建单单（taskName / overallGoal）两个看板都有；"
+                    "问「某看板的 payload 里有哪些字段可用」用这一档，"
+                    "不要拿 scope=payload_key_combos 的全量组合代答"
+                ),
+                limit=bounded_sub,
+            )
+        if scope_key == "payload_absent":
+            return store.scalar(
+                "SELECT COUNT(*) AS value FROM task_workflow_submission s "
+                "JOIN task t ON t.id = s.task_id "
+                "WHERE t.is_deleted = 0 AND s.payload IS NULL",
+                caliber=(
+                    "payload IS NULL 的单数，即根本没有草稿快照的单；"
+                    "「没有 payload」（2 张）与「payload 里缺某个键」是两件事，"
+                    "后者见 scope=payload_missing_progress_key（150 张建单单）；"
+                    "不加任务发布闸门，与提交单其余各档一致"
+                ),
+            )
+        if scope_key == "payload_missing_progress_key":
+            return store.fetch(
+                "SELECT t.task_name, s.round_no, JSON_KEYS(s.payload) AS payload_keys "
+                "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+                "WHERE t.is_deleted = 0 AND s.payload IS NOT NULL "
+                "AND JSON_EXTRACT(s.payload, '$.latestProgress') IS NULL "
+                "AND JSON_EXTRACT(s.payload, '$.progressEffect') IS NULL "
+                "ORDER BY t.id, s.round_no",
+                caliber=(
+                    "两个看板的进展键都不在的单，共 153 张，分两种键组合："
+                    "150 张建单单（taskName / overallGoal，那一轮报的是立项信息不是进展）"
+                    "加 3 张只有 completionTime 的单；"
+                    "别把它当成 150——那 3 张同样两个进展键都没有，漏掉就少一档；"
+                    "判断只用键在不在，不读键值；"
+                    "这与 scope=payload_absent 的 2 张「没有 payload」不是同一批"
+                ),
+                limit=bounded_sub,
             )
 
         if scope_key == "rejected_by_board":
@@ -2169,6 +2259,10 @@ _SUBMISSION_SCOPES = (
     "inflight_by_board",
     "inflight_by_kind",
     "inflight_multi",
+    "payload_key_combos",
+    "payload_keys_by_board",
+    "payload_absent",
+    "payload_missing_progress_key",
     "rejected_by_board",
     "sign_summary",
     "by_signer",
