@@ -756,17 +756,25 @@ def weekly_workflow_query(
 
 
 @mcp.tool()
-def weekly_attachment_query(task: str = "", limit: int = 200) -> str:
+def weekly_attachment_query(task: str = "", board: str = "", limit: int = 200) -> str:
     """List attachments without ever returning storage_path (chapter 7.2).
 
     Args:
         task: Task id or name; empty lists across all formal tasks.
+        board: Board code or name (e.g. group / tech) to keep only that board's
+            attachments. Without it, asking "what files does the group board hold"
+            forces a task-by-task loop over 46 tasks.
         limit: Max rows, capped at 200.
     """
 
     def work() -> dict[str, Any]:
         params: dict[str, Any] = {}
         where = ["att.is_deleted = 0"]
+        joins = ""
+        caliber = [
+            "is_deleted = 0；storage_path 禁止外泄，不在返回字段内",
+            "file_size 单位是字节，原样报出，不要换算成 KB/MB 也不要写「约」",
+        ]
         if task.strip():
             task_id = store.resolve_task_id(task)
             if task_id is None:
@@ -776,15 +784,31 @@ def weekly_attachment_query(task: str = "", limit: int = 200) -> str:
                 }
             where.append("att.task_id = %(tid)s")
             params["tid"] = task_id
+        if board.strip():
+            # 看板在 task 上，附件表里没有 board_id，所以按看板筛必须 JOIN 回
+            # task 并顺带带上任务闸门与任务名——没有任务名的清单答不了「哪些任务」。
+            board_id = store.resolve_board(board)
+            if board_id is None:
+                return {
+                    "ok": False,
+                    "error": {"code": "board_not_found", "message": f"未匹配到看板：{board}"},
+                }
+            joins = " JOIN task t ON t.id = att.task_id"
+            where.append(store.formal_task_clause())
+            where.append("t.board_id = %(bid)s")
+            params["bid"] = board_id
+            caliber.append(f"仅看板 {board.strip()}（看板在 task 上，已 JOIN 回任务并附加正式任务闸门）")
+        columns = (
+            "att.id, att.task_id, att.progress_id, att.workflow_submission_id, "
+            "att.file_name, att.file_size, att.uploader_id, att.upload_time"
+        )
+        if board.strip():
+            columns += ", t.task_name"
         return store.fetch(
-            "SELECT att.id, att.task_id, att.progress_id, att.workflow_submission_id, "
-            "att.file_name, att.file_size, att.uploader_id, att.upload_time "
-            f"FROM task_attachment att WHERE {' AND '.join(where)} ORDER BY att.id",
+            f"SELECT {columns} FROM task_attachment att{joins} "
+            f"WHERE {' AND '.join(where)} ORDER BY att.task_id, att.id",
             params,
-            caliber=(
-                "is_deleted = 0；storage_path 禁止外泄，不在返回字段内；"
-                "file_size 单位是字节，原样报出，不要换算成 KB/MB 也不要写「约」"
-            ),
+            caliber="；".join(caliber),
             limit=limit,
         )
 
@@ -800,6 +824,7 @@ _ATTACHMENT_STATS_SCOPES = (
     "uploader_count",
     "by_link",
     "by_progress",
+    "zero_attachment",
     "on_open_submission",
     "by_month",
     "deleted",
@@ -932,6 +957,29 @@ def weekly_attachment_stats(
                 limit=bounded,
             )
 
+        if key == "zero_attachment":
+            # NOT EXISTS 而非 LEFT JOIN ... HAVING COUNT = 0：问的是存在性。
+            # 22 条一次列全，别让模型按 128 个任务逐个调 weekly_attachment_query
+            # 去看哪个返回空——基线里那正是 51 次重复调用的来源。
+            # 分母 128 一并给出：占比要用它，不能拿本次行数当分母。
+            total = store.scalar(
+                f"SELECT COUNT(*) FROM task t WHERE {store.formal_task_clause()}",
+            )
+            rows = store.fetch(
+                "SELECT t.id AS task_id, t.task_name FROM task t "
+                f"WHERE {store.formal_task_clause()} AND NOT EXISTS "
+                "(SELECT 1 FROM task_attachment a WHERE a.task_id = t.id AND a.is_deleted = 0) "
+                "ORDER BY t.id",
+                caliber=(
+                    f"{live_caliber}；一个有效附件都没有的正式任务，按 NOT EXISTS 判定；"
+                    "附件软删的任务算「没有」（a.is_deleted = 0 后为空即没有）；"
+                    "total_count 是零附件任务数，total_formal_tasks 才是分母"
+                ),
+                limit=bounded,
+            )
+            rows["total_formal_tasks"] = total["value"]
+            return rows
+
         if key == "on_open_submission":
             # 「在途」= 提交单状态不是 published。提交单状态另有码值，
             # 不能拿任务的 workflow_status 来判。
@@ -1043,6 +1091,23 @@ def weekly_submission_query(
                     "message": f"不支持的口径：{scope}；支持 {', '.join(s or '(空)' for s in _SUBMISSION_SCOPES)}",
                 },
             }
+
+        if scope_key == "by_kind":
+            # 提交单一律只加软删闸门，不加任务发布闸门：在途任务的提交单同样是
+            # 提交单，加了发布闸门 312/150 会缩成 310/128，把两条在途任务的单
+            # 连同 22 条未发布任务的单一起吞掉。
+            return store.fetch(
+                "SELECT s.submission_kind, COUNT(*) AS submission_count "
+                "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+                "WHERE t.is_deleted = 0 GROUP BY s.submission_kind "
+                "ORDER BY submission_count DESC, s.submission_kind",
+                caliber=(
+                    "仅 t.is_deleted = 0（提交单不加任务发布闸门：在途任务的提交单同样计入）；"
+                    "initial 是初次提交、progress 是进展提交，两档相加等于提交单总数 462；"
+                    "各档条数由服务端聚合，不要翻明细自己数——清单封顶 200 行只能看到前一页"
+                ),
+                limit=2,
+            )
 
         if scope_key == "external_ids":
             # 三列各自的填充率必须一次算完。让模型翻明细数空值，200 行封顶下
@@ -1498,7 +1563,7 @@ _LATEST_PROGRESS_CTE = (
 # 提交单的附加口径。空串走通用清单；两个 external 口径专门回答 O2OA 外部标识
 # （o2_process_id / o2_work_id / o2_task_id）填得全不全，这三列此前没有任何
 # 工具能取到，模型只能答「取不到」。
-_SUBMISSION_SCOPES = ("", "external_ids", "inflight_external")
+_SUBMISSION_SCOPES = ("", "by_kind", "external_ids", "inflight_external")
 
 # 「在途」的成员必须列举，不能写成 status <> 'published'：cancelled 那 1 张单
 # 既不是已发布也不在途，用取反会把它算进来（60 vs 59，negation_includes_cancelled）。

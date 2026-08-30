@@ -1919,6 +1919,91 @@ async def run() -> int:
         str(orph.get("caliber"))[-60:],
     )
 
+    # A7 治理循环调用：以下三处是基线里重复调用最凶的题，缺的不是数据而是
+    # 「一次调用答完」的路径。基线里 weekly_progress_history 被单题调 74 次、
+    # weekly_attachment_query 51 次，6 轮题通过率只有 12.1%——慢与错同源。
+
+    # I4-03. 提交单只加软删闸门，不加任务发布闸门。
+    kind = await _call(registry, "weekly_submission_query", scope="by_kind")
+    kind_map = {str(r.get("submission_kind")): int(r.get("submission_count", -1)) for r in kind.get("rows") or []}
+    check(
+        "I4-03 提交单类型 progress 312 / initial 150，相加 462",
+        kind_map == {"progress": 312, "initial": 150} and sum(kind_map.values()) == 462,
+        str(kind_map),
+    )
+    check(
+        "I4-03 口径写明不加任务发布闸门",
+        "不加任务发布闸门" in str(kind.get("caliber", "")),
+        str(kind.get("caliber"))[:80],
+    )
+
+    # O3-04. NOT EXISTS 判存在性，分母另给，别拿 22 当分母。
+    zero = await _call(registry, "weekly_attachment_stats", scope="zero_attachment")
+    check(
+        "O3-04 零附件正式任务 22 条，首行任务 9，分母 128",
+        zero.get("row_count") == 22
+        and int(_first(zero, "task_id") or -1) == 9
+        and int(zero.get("total_formal_tasks") or -1) == 128,
+        f"rows={zero.get('row_count')} 分母={zero.get('total_formal_tasks')}",
+    )
+    check(
+        "O3-04 口径点明 NOT EXISTS 判定与分母区分",
+        "NOT EXISTS" in str(zero.get("caliber", "")) and "total_formal_tasks 才是分母" in str(zero.get("caliber", "")),
+        str(zero.get("caliber"))[-90:],
+    )
+
+    # R5-01. 看板在 task 上，附件表没有 board_id，按看板筛必须 JOIN 回任务。
+    gatt = await _call(registry, "weekly_attachment_query", board="group", limit=10)
+    check(
+        "R5-01 集团组附件前 10 按 task_id 定序（97/97/97/101/102/103/104...）",
+        [int(r.get("task_id", -1)) for r in gatt.get("rows") or []] == [97, 97, 97, 101, 102, 103, 104, 104, 104, 104],
+        str([r.get("task_id") for r in gatt.get("rows") or []]),
+    )
+    check(
+        "R5-01 带 board 时同时给出 task_name，否则答不了「哪些任务」",
+        all(str(r.get("task_name") or "") for r in gatt.get("rows") or []),
+        str(_first(gatt, "task_name")),
+    )
+    gall = await _call(registry, "weekly_attachment_query", board="group")
+    check(
+        "R5-01 集团组共 52 个有效附件，一次调用列全",
+        gall.get("row_count") == 52 and gall.get("has_more") is False,
+        f"rows={gall.get('row_count')} has_more={gall.get('has_more')}",
+    )
+    gname = await _call(registry, "weekly_attachment_query", board="集团重点任务调度", limit=3)
+    check(
+        "R5-01 看板 code 与看板名都能认",
+        gname.get("ok") is not False and int(_first(gname, "task_id") or -1) == 97,
+        str(_first(gname, "task_id")),
+    )
+    gbad = await _call(registry, "weekly_attachment_query", board="不存在的组")
+    check(
+        "R5-01 错看板名报 board_not_found 而非静默返回全库",
+        gbad.get("ok") is False and gbad.get("error", {}).get("code") == "board_not_found",
+        str(gbad.get("error")),
+    )
+    plain = await _call(registry, "weekly_attachment_query", limit=3)
+    check(
+        "R5-01 对照 不带 board 时仍不带 task_name（旧行为未变）",
+        plain.get("row_count") == 3 and "task_name" not in (plain.get("rows") or [{}])[0],
+        str(list((plain.get("rows") or [{}])[0])),
+    )
+    check(
+        "storage_path 在按看板筛时同样不外泄",
+        all("storage_path" not in r for r in gatt.get("rows") or []),
+        str(list((gatt.get("rows") or [{}])[0])),
+    )
+
+    # J2-03. 金标就是取最大的那一条，largest + top=1 一次即答。
+    big = await _call(registry, "weekly_attachment_stats", scope="largest", top=1)
+    check(
+        "J2-03 最大附件一次即答（行业数据标注基地能力建设-会议纪要.pdf / 8379724 字节）",
+        big.get("row_count") == 1
+        and int(_first(big, "file_size") or -1) == 8379724
+        and str(_first(big, "file_name")) == "行业数据标注基地能力建设-会议纪要.pdf",
+        f"{_first(big, 'file_name')} {_first(big, 'file_size')}",
+    )
+
     return report()
 
 

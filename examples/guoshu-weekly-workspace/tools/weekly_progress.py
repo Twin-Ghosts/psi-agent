@@ -283,7 +283,13 @@ async def weekly_submission_query(
             with their newest submission's status. Deliberately drops the
             published gate -- a published task whose latest form is still in
             flight is exactly what this asks for.
-        scope: Empty for the normal listing. "external_ids" reports how many
+        scope: Empty for the normal listing. "by_kind" answers "how many initial
+            vs progress submissions" in one call -- 312 progress and 150 initial,
+            summing to 462. Do not read the listing back and count rows: it caps
+            at 200, so a hand count sees only the first page. This scope keeps the
+            soft-delete gate only; adding the publish gate would shrink it to
+            310/128 and drop the forms belonging to the 22 unpublished tasks.
+            "external_ids" reports how many
             forms carry each O2OA identifier (o2_process_id / o2_work_id /
             o2_task_id) -- the three fill rates differ, so one cannot stand in
             for another. "inflight_external" counts the in-flight forms that
@@ -465,18 +471,23 @@ async def weekly_rank(
     )
 
 
-async def weekly_attachment_query(task: str = "", limit: int = 200) -> str:
+async def weekly_attachment_query(task: str = "", board: str = "", limit: int = 200) -> str:
     """List attachments. storage_path is never returned and must not be requested.
 
     Args:
         task: Task id or name; empty lists across all formal tasks.
+        board: Board code or name (group / tech) to keep only that board's
+            attachments; the rows then carry task_name too. Ask for the board here
+            rather than looping this tool over each of the board's tasks -- the
+            board lives on task, not on the attachment row, so a per-task loop is
+            both 46 calls and unable to tell you the board total (52 for group).
         limit: Max rows to return, capped at 200.
     """
     try:
         bounded = max(1, min(200, int(limit)))
     except TypeError, ValueError:
         return _invalid("limit must be an integer")
-    return await _call("weekly_attachment_query", {"task": task, "limit": bounded})
+    return await _call("weekly_attachment_query", {"task": task, "board": board, "limit": bounded})
 
 
 async def weekly_attachment_stats(scope: str = "summary", date_from: str = "", top: int = 200) -> str:
@@ -491,10 +502,14 @@ async def weekly_attachment_stats(scope: str = "summary", date_from: str = "", t
             extension) / largest (biggest first) / by_uploader (per uploader with
             size) / uploader_count (distinct uploaders) / by_link (attached to
             progress vs submission vs the task itself) / by_progress (per published
-            progress round, attachment-heavy first) / on_open_submission (how many
-            hang off submissions that are not yet published) / by_month (uploads per
-            month) / deleted (soft-delete audit over the whole table) /
-            deleted_by_link / orphan (rows whose task_id matches no task).
+            progress round, attachment-heavy first) / zero_attachment (the 22 formal
+            tasks holding no live attachment at all, listed in one call -- do not
+            loop weekly_attachment_query over all 128 tasks looking for empty
+            replies; total_formal_tasks is the denominator, not the row count) /
+            on_open_submission (how many hang off submissions that are not yet
+            published) / by_month (uploads per month) / deleted (soft-delete audit
+            over the whole table) / deleted_by_link / orphan (rows whose task_id
+            matches no task).
         date_from: For by_month, inclusive lower bound YYYY-MM-DD.
         top: Row cap, capped at 200.
     """

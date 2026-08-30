@@ -21,7 +21,7 @@ export GUOSHU_WEEKLY_MCP_TOKEN=demo-token
 python tests/smoke_test.py
 ```
 
-预期 `236/236 passed`。
+预期 `248/248 passed`。
 
 ## 数据层准备
 
@@ -91,7 +91,7 @@ guoshu-weekly-workspace/
 │   ├── _store.py              # 只读查询层 + 口径规则 + 字段管控
 │   └── server.py              # 31 个语义化取数工具（Streamable HTTP MCP）
 └── tests/
-    ├── smoke_test.py          # 236 条契约断言，不花模型 token
+    ├── smoke_test.py          # 248 条契约断言，不花模型 token
     └── baseline.py            # 396 题准确率基线（LLM 判定）
 ```
 
@@ -113,11 +113,11 @@ guoshu-weekly-workspace/
 | `weekly_rank` | 排名并列口径三选一：硬切 N 条 / 保留并列 / 每组各自第一，可限定看板并回显 `total_count` |
 | `weekly_milestone_query` | 里程碑清单（已复核正式任务口径），单任务按 `sort_order` 编排 |
 | `weekly_workflow_query` | 审批动作流水（谁在哪个环节做了什么），可按 action/看板过滤、按任务聚合次数 |
-| `weekly_submission_query` | 审批提交单（`round_no` / `status` / 填报人），可查任务状态与最新单状态不一致；O2OA 外部标识填充率、在途单（按成员枚举而非取反） |
+| `weekly_submission_query` | 审批提交单（`round_no` / `status` / 填报人），可查任务状态与最新单状态不一致；**按类型分档**（initial / progress）、O2OA 外部标识填充率、在途单（按成员枚举而非取反） |
 | `weekly_owner_roles` | 按角色分别计数（as_owner / as_lead / any_role） |
 | `weekly_person_stats` | 人员统计（任务量/人均/独苗/跨组/双角色/标识写法/填报人/审核人/自审） |
-| `weekly_attachment_stats` | 附件统计（容量/类型/最大/上传人/挂载去向/在途提交单/逐月/软删/孤儿） |
-| `weekly_attachment_query` | 附件清单（不含 `storage_path`） |
+| `weekly_attachment_stats` | 附件统计（容量/类型/最大/上传人/挂载去向/**零附件任务清单**/在途提交单/逐月/软删/孤儿） |
+| `weekly_attachment_query` | 附件清单（不含 `storage_path`），可按任务或**看板**筛 |
 | `weekly_import_audit` | 导入批次对账，`reconcile_rows` 反查实际落库行核对声明值，`orphans` 查批次引用完整性 |
 | `weekly_freshness` | 各看板最新进展时间 |
 | `weekly_health` | 连通性自检与各表行数 |
@@ -189,6 +189,9 @@ agent 据此给出依据、也据此判断不可答。
 | 滞报天数取最后一次上报 | `grouping=lag` 用 `MAX(report_time)` 与快照日之差，用 `MIN` 会把老任务全排到榜首；同时回 `total_tasks`，因为从未上报的任务不在这张表里，拿行数当集团组任务数会少算 |
 | 孤儿引用与「未走导入」是两件事 | `orphans=True` 按 `NOT EXISTS` 判 `import_id` 有值却查不到批次，结果 0 即引用完整；`import_id IS NULL` 的 120 条是手工填报，单列为 `rows_without_import`，混进孤儿数会把它们全报成异常 |
 | 0 是结论不是空结果 | 孤儿数 0、最新一期缺下一步 0，口径里直接写明「这是结论本身，不要换口径重算」，否则模型会反复改条件去凑非零 |
+| 提交单不加任务发布闸门 | `by_kind` 得 312 progress + 150 initial = 462；加上发布闸门会缩成 310/128，把未发布任务的提交单一起吞掉。在途任务的提交单同样是提交单 |
+| 「一个都没有」用 `NOT EXISTS` 一次列全 | `zero_attachment` 直接给 22 条零附件任务，并另给分母 128；缺这一档时模型只能对 128 个任务逐个调 `weekly_attachment_query` 看谁返回空 |
+| 看板在 `task` 上不在附件行上 | 按看板筛附件必须 JOIN 回 task（`weekly_attachment_query` 的 `board` 参数），并顺带带出 `task_name`；否则「集团组有哪些附件」只能按 46 个任务逐个调，还算不出看板总数 52 |
 
 ### 相对时间窗以快照日为基准
 
@@ -224,7 +227,7 @@ R-04/R-14 要的是「按权限返回」。一律遮蔽同样不满足需求—�
 | 数据权限 | 敏感字段按 token 两档分级 | 按 OA 真实身份做行级权限 |
 | 前端 | 无（经 psi-agent 既有接口） | 专建对话应用 + BFF（方案第六章） |
 | 材料生成 | 无 | 报告下载与图表（P1，第 5 期） |
-| 评测 | 236 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
+| 评测 | 248 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
 
 ### mock 数据层的两处不可外推
 
