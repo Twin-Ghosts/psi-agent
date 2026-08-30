@@ -21,7 +21,7 @@ export GUOSHU_WEEKLY_MCP_TOKEN=demo-token
 python tests/smoke_test.py
 ```
 
-预期 `332/332 passed`。
+预期 `343/343 passed`。
 
 ## 数据层准备
 
@@ -91,7 +91,7 @@ guoshu-weekly-workspace/
 │   ├── _store.py              # 只读查询层 + 口径规则 + 字段管控
 │   └── server.py              # 31 个语义化取数工具（Streamable HTTP MCP）
 └── tests/
-    ├── smoke_test.py          # 332 条契约断言，不花模型 token
+    ├── smoke_test.py          # 343 条契约断言，不花模型 token
     └── baseline.py            # 396 题准确率基线（LLM 判定）
 ```
 
@@ -106,11 +106,11 @@ guoshu-weekly-workspace/
 | `weekly_task_detail` | 单任务详情（明细 + 近期进展 + 年度目标） |
 | `weekly_progress_history` | 进展版本回溯，`version_no` 倒序，**同名系列的兄弟任务随 `same_name_series` 回报** |
 | `weekly_progress_coverage` | 进展历史覆盖度（行数/任务数/起止/最大版本、**平均每条有进展的任务报了几期 12.92**）、**已发布/未发布/合计一行给全（943/123/1066）**、未发布进展分档（**每档同时给行数与涉及任务数**）、**待审核清单带对外可见期号**、期号缺号、**每任务最新一期的下一步安排**、最新一期缺下一步计数、**从未报过进展的 55 条（按 NOT EXISTS 判，非汇总列判空）** |
-| `weekly_aggregate` | 按 board/category/**primary_category**/status/project_group/owner/**workflow_status** 聚合，`top` 硬切前 N 组 |
+| `weekly_aggregate` | 按 board/category/**primary_category**/status/project_group/owner/**workflow_status** 聚合，`top` 硬切前 N 组；**专项组同排给 `finished` 与 `finish_rate_pct`，`order_by="finish_rate"` 可按率定序（完成率最低 3 组：标准安全组 1/19=5.3%、数据基础设施组 2/15=13.3%、治理合规组 2/10=20.0%）**；**`top_sub_per_primary` 排的是「每个一级分类下任务数最多的二级分类」共 11 行——被排名的单位是分类，与 `weekly_rank per_group` 排任务不可互答** |
 | `weekly_scale` | 多子表一次成表：规模（里程碑/附件/年度目标，**全部 `COUNT(DISTINCT)` 防 JOIN 放大**）/ 完备度（有该项的任务数）/ 进展密度（分母含零期任务） |
 | `weekly_field_completeness` | 字段填报完整度（R-07/R-19），字段走白名单，**完整率 `filled_pct` 服务端算好** |
 | `weekly_task_ranking` | 按子表计数排名（附件/进展/里程碑/提交单） |
-| `weekly_rank` | 排名并列口径三选一：硬切 N 条 / 保留并列 / 每组各自第一，可限定看板并回显 `total_count` |
+| `weekly_rank` | 排名并列口径三选一：硬切 N 条 / 保留并列 / 每组各自第一，可限定看板并回显 `total_count`；**另有两档不是名次：`distribution` 给五数概括（q1=2 / 中位 6 / q3=15 / 均值 7.37 / 分母 128）、`quartiles` 给 NTILE(4) 等量四档（各 32 条，区间 0-0 / 0-5 / 6-14 / 14-18）** |
 | `weekly_milestone_query` | 里程碑清单（已复核正式任务口径），单任务按 `sort_order` 编排，**同名系列的兄弟任务随 `same_name_series` 回报** |
 | `weekly_workflow_query` | 审批动作流水（谁在哪个环节做了什么），可按 action/看板过滤、按任务聚合次数；**按环节+动作两维分档**、人均动作数（分子分母同回）、**按动作时间倒序并带任务名与填报人（回答「最近谁被驳回了」）** |
 | `weekly_submission_query` | 审批提交单（`round_no` / `status` / 填报人），可查任务状态与最新单状态不一致；**按类型分档**（initial / progress）、O2OA 外部标识填充率、在途单（按成员枚举而非取反）、**在途总数/按看板分档/一任务多单**、**会签需求与按人分档/会签耗时对比**、人均轮次、已发布进展单 vs 已发布进展行 |
@@ -123,7 +123,7 @@ guoshu-weekly-workspace/
 | `weekly_health` | 连通性自检与各表行数 |
 | `weekly_progress_range` | 时间窗内的进展（全表跨任务，可按月/季/任务分组计数），`peak` 直接给峰值组 |
 | `weekly_task_lifecycle` | 任务创建/发布的时间分布与建到发的时长（分档时**同排给出 `currently_finished`：2025 建 105/已完成 26，2026 建 23/完成 5**，两档相加即全库 31 条；表无完成时间列，故这是按建单档看当前状态） |
-| `weekly_freshness_distribution` | 新鲜度分桶（30/90/180 天，**可加 `in_flight` 只看在办：从未报进展在办 8 条、不限状态 9 条**，随返回给 `task_total` 供各档自校）、自定义天窗、**时间漂移检出（73 条，双向不一致）**、滞后清单（含从未上报）、**按看板/专项组分组的滞后占比（带分母 `total` 与 `stale_pct`/`active_pct`：国家工程办 4/15=26.7% 高于条数更多的标准安全组 5/19=26.3%）**、近期上报清单 |
+| `weekly_freshness_distribution` | 新鲜度分桶（30/90/180 天，**可加 `in_flight` 只看在办：从未报进展在办 8 条、不限状态 9 条**，随返回给 `task_total` 供各档自校）、自定义天窗、**时间漂移检出（73 条，双向不一致）**、滞后清单（含从未上报）、**按看板/专项组分组的滞后占比（带分母 `total` 与 `stale_pct`/`active_pct`：国家工程办 4/15=26.7% 高于条数更多的标准安全组 5/19=26.3%）**、近期上报清单；**清单档可加 `reported_only` 排除从未上报的（否则它们无天数可比却占满前几行，答「最久没上报的 5 个」会零命中；排除后首条任务 1 达 250 天，两档都随返回 `never_reported_count`）** |
 | `weekly_approval_turnaround` | 审批时效（汇总/按看板/**最慢：带 `task_id`、并列按 id 定序、随返回 `top_tie_count`**/待审积压） |
 | `weekly_group_detail_query` | 集团组明细（目标成果/实施举措/进度成效/完成时间文本/多值负责人，**附人数**），可按 `status` 与 `non_empty` 交叉筛矛盾数据，**`order_by="progress_time"` 按最新进展倒序供「当期/前 N 条」取用** |
 | `weekly_group_owner_query` | 集团组按牵头人或项目负责人查任务（多值精确匹配） |
@@ -221,6 +221,10 @@ agent 据此给出依据、也据此判断不可答。
 | 一级分类与里程碑自己的类别是两个轴 | 任务分类挂在 `t.category_id` 且只到二级，一级要再往上跳一层 `parent_id`；`by=primary_category` 得改革与治理 40/27=67.5% 居首，`by=category` 得的是里程碑类别文本的国家任务 58.9%。名字像但答的不是同一个问题，问「哪个一级分类完成率最高」只有前者算得对 |
 | 展示文本归一化后「判不了」≠「没超期」 | `completion_time` 是展示文本（R-12），46 条里只有 12 条能归一化（6 个标准日期原样用 + 6 个 `YYYYQn` 取季末日），`scope=overdue` 由服务端算出 1 条超期（任务 123，2026Q2→2026-06-30，逾期 46 天），余下 34 条随 `unparsable_count` 单列。只按标准日期写法看一条都查不到，季度那几条归一化后才露出来；把两者混在一起会把「无法判断」说成「都没超期」 |
 | 行内自相矛盾与两表文本不一致是两回事 | `scope=status_effect_conflict` 判同一行内部：`status = 0`（未开始）却填了非空 `progress_effect`，共 6 条（97/108/130/137/140/142）；`scope=effect_consistency` 比的是明细表与历史表两处文本是否一致，两处写着同一句话也算一致，答不了「状态与成效矛盾」 |
+| 排序键要选问句真正问的那个量 | 「完成率最低的 3 个组」按率定序（`weekly_aggregate order_by=finish_rate ascending=true`）得标准安全组 5.3% / 数据基础设施组 13.3% / 治理合规组 20.0%；拿任务数排出来的是另一批人：完成数同为 2 条时，治理合规组 2/10=20.0% 反而高于数据基础设施组 2/15=13.3%。完成数最少 ≠ 完成率最低 |
+| 「最久没上报」与「从来没报过」是两问 | 从未上报的任务没有天数可比，却在默认排序里排最前，把「最久没上报的前 5 个」整个占满，与真答案零交集。`reported_only=true` 把它们排除后首条是任务 1（250 天），两档都随返回 `never_reported_count`（清单档在办闸门下 8 条），报结论时要说明排除了几条 |
+| 中位数与分档不是名次题 | 在名次档（`mode=cut`）的可见 5 行里取中间值会答成 14，真值是 6：问分位用 `mode=distribution`（q1=2 / 中位 6 / q3=15 / 均值 7.37 / 分母 128），问「分成四档」用 `mode=quartiles`。NTILE(4) 是等量分档，四档各 32 条（按期数区间等宽切会得 17/39/41/31，那是另一种分法）；等量分档下边界期数跨档重复出现是正常的。两档都保留 0 期任务，32 条 0 期恰占满第一档 |
+| 被排名的单位是什么，看问句在数什么 | 「每个一级分类下任务数最多的二级分类」数的是分类，用 `weekly_aggregate group_by=top_sub_per_primary`（11 行）；「每个一级分类下进展最多的任务」数的是任务，用 `weekly_rank mode=per_group group_by=primary_category`。两者都是「每组第一」，但胜出者一个是分类、一个是任务，互相代答就答错了对象 |
 
 ### 相对时间窗以快照日为基准
 
@@ -256,7 +260,7 @@ R-04/R-14 要的是「按权限返回」。一律遮蔽同样不满足需求—�
 | 数据权限 | 敏感字段按 token 两档分级 | 按 OA 真实身份做行级权限 |
 | 前端 | 无（经 psi-agent 既有接口） | 专建对话应用 + BFF（方案第六章） |
 | 材料生成 | 无 | 报告下载与图表（P1，第 5 期） |
-| 评测 | 332 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
+| 评测 | 343 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
 
 ### mock 数据层的两处不可外推
 

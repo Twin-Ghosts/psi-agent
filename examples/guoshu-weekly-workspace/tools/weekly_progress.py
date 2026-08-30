@@ -132,6 +132,7 @@ async def weekly_freshness_distribution(
     recent_days: int = 0,
     in_flight: bool = False,
     by: str = "",
+    reported_only: bool = False,
     limit: int = 200,
 ) -> str:
     """Report how stale progress is: 30/90/180-day buckets, a custom window, or drift.
@@ -178,6 +179,14 @@ async def weekly_freshness_distribution(
             both single calls. Counts alone mislead: 标准安全组 has the most stale
             tasks (5) yet 26.3% ranks below 国家工程办 (4 of 15 = 26.7%). The board
             view reads 技术组 61 active of 82 (74.4%) vs 集团 46 of 46 (100%).
+        reported_only: True drops never-reported tasks from the stale_days
+            listing. "最久没上报进展的 5 个任务" asks whose LAST report is furthest
+            back, and the never-reported tasks have no such figure at all --
+            8 of them under this listing's 在办 gate (9 un-gated) sort first and
+            fill the whole top 5, so the answer shares no rows with the intended
+            one. The reply carries never_reported_count
+            either way; "从来没报过的有哪些" is the other question, answered by
+            the default listing or weekly_progress_coverage never_reported (55).
         limit: Max rows for the listing views, capped at 200.
     """
     try:
@@ -197,6 +206,7 @@ async def weekly_freshness_distribution(
             "recent_days": recent,
             "in_flight": bool(in_flight),
             "by": by,
+            "reported_only": bool(reported_only),
             "limit": bounded,
         },
     )
@@ -559,7 +569,17 @@ async def weekly_rank(
         mode: cut -- hard-cut to top rows, ties past the boundary excluded;
             keep_ties -- RANK(), every task down to place top, so expect more
             than top rows; per_group -- ROW_NUMBER() per bucket, one row per
-            group, ties inside a group settled by task id.
+            group, ties inside a group settled by task id;
+            distribution -- one row of five-number summary (q1 / median / q3 /
+            min / max / avg / task_total) over EVERY task under the caliber;
+            quartiles -- NTILE(4), four equal-sized bands with each band's task
+            count and rounds range.
+            The last two are not ranking questions: reading a median off cut's
+            top rows takes the middle of what happens to be visible and answers
+            14 where the truth is 6. Both keep zero-round tasks in the
+            population (32 of them fill the first quartile exactly), and
+            quartiles is EQUAL-COUNT banding (32/32/32/32), not equal-WIDTH
+            banding over the rounds range (which gives 17/39/41/31).
         top: cut takes this many rows; keep_ties ranks down to this place. 1..200.
             per_group ignores it -- one row per group means the group count is
             the row count.

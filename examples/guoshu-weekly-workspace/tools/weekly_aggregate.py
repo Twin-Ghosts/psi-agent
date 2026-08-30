@@ -17,7 +17,14 @@ _call = _module.__dict__["call"]
 _invalid = _module.__dict__["invalid_argument"]
 
 
-async def weekly_aggregate(group_by: str, board: str = "", metric: str = "count", top: int = 0) -> str:
+async def weekly_aggregate(
+    group_by: str,
+    board: str = "",
+    metric: str = "count",
+    top: int = 0,
+    order_by: str = "",
+    ascending: bool = False,
+) -> str:
     """Aggregate formal tasks by one dimension.
 
     Empty groups are preserved (the service puts the caliber on the JOIN's ON
@@ -37,8 +44,13 @@ async def weekly_aggregate(group_by: str, board: str = "", metric: str = "count"
     single published bucket and hide the 22 tasks the question is about.
 
     Args:
-        group_by: One of board / category / primary_category / status /
-            workflow_status / project_group / owner.
+        group_by: One of board / category / primary_category /
+            top_sub_per_primary / status / workflow_status / project_group /
+            owner. top_sub_per_primary answers "每个一级分类下任务数最多的二级分类
+            是哪个": the ranked unit is the SUBCATEGORY, one row per 一级分类
+            (11 rows), ties inside a group settled by category id. That is a
+            different question from weekly_rank mode=per_group
+            group_by=primary_category, which returns each 一级分类's top TASK.
         board: Optional board code or name to scope the aggregation. For
             primary_category this scopes the category tree's own board, which is
             a different path from the task's board.
@@ -49,6 +61,14 @@ async def weekly_aggregate(group_by: str, board: str = "", metric: str = "count"
             the question, not missing from the data. Ignored for workflow_status,
             whose reply also carries a totals block with the unpublished count
             and the published share already computed.
+        order_by: "finish_rate" re-orders the project_group breakdown by
+            completion rate. The rows always carry finished and finish_rate_pct
+            next to cnt, but the default ordering is by task count, off which
+            "完成率最低的 3 个组" cannot be read. Fewest finished is not lowest
+            rate: 治理合规组 2 of 10 = 20.0% sits ABOVE 数据基础设施组 2 of 15 =
+            13.3% though both finished 2.
+        ascending: True with order_by="finish_rate" puts the lowest rate first,
+            which is what "完成率最低" asks for.
     """
     if not group_by.strip():
         return _invalid("group_by must not be empty")
@@ -58,7 +78,14 @@ async def weekly_aggregate(group_by: str, board: str = "", metric: str = "count"
         return _invalid("top must be an integer")
     return await _call(
         "weekly_aggregate",
-        {"group_by": group_by, "board": board, "metric": metric, "top": cut},
+        {
+            "group_by": group_by,
+            "board": board,
+            "metric": metric,
+            "top": cut,
+            "order_by": order_by,
+            "ascending": bool(ascending),
+        },
     )
 
 

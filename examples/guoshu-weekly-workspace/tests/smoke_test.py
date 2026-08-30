@@ -388,6 +388,91 @@ async def run() -> int:
         [int(r["lead_owner_count"]) for r in grows] == [9, 10, 11, 9, 9, 8, 7, 6, 6, 6, 5],
         f"leads={[r.get('lead_owner_count') for r in grows]}",
     )
+
+    # L2-04. 完成率与分母同排返回，且要能按率定序——按任务数排给不出「完成率最低的 3 组」。
+    low_rate = await _call(
+        registry, "weekly_aggregate", group_by="project_group", order_by="finish_rate", ascending=True, top=3
+    )
+    check(
+        "L2-04 完成率最低 3 组：标准安全组 1/19=5.3、数据基础设施组 2/15=13.3、治理合规组 2/10=20.0",
+        [
+            (r.get("group_name"), str(r.get("finished")), str(r.get("finish_rate_pct")))
+            for r in (low_rate.get("rows") or [])
+        ]
+        == [("标准安全组", "1", "5.3"), ("数据基础设施组", "2", "13.3"), ("治理合规组", "2", "20.0")]
+        and str(low_rate.get("total_groups")) == "11",
+        f"rows={low_rate.get('rows')}",
+    )
+    check(
+        "L2-04 默认按任务数定序时口径指路 order_by=finish_rate",
+        "请加 order_by=finish_rate" in str(groups.get("caliber", ""))
+        and "完成数最少的组不等于完成率最低的组" in str(groups.get("caliber", "")),
+    )
+
+    # L4-02. 被排名的单位是二级分类而不是任务：与 weekly_rank per_group 的胜出者类型不同。
+    top_sub = await _call(registry, "weekly_aggregate", group_by="top_sub_per_primary")
+    check(
+        "L4-02 每个一级分类下任务数最多的二级分类共 11 行，首行产业生态→数据标注基地 4",
+        top_sub.get("row_count") == 11
+        and (top_sub.get("rows") or [{}])[0].get("group_name") == "产业生态"
+        and (top_sub.get("rows") or [{}])[0].get("sub_name") == "数据标注基地"
+        and str((top_sub.get("rows") or [{}])[0].get("cnt")) == "4",
+        f"head={(top_sub.get('rows') or [{}])[:2]}",
+    )
+    top_task = await _call(
+        registry, "weekly_rank", metric="progress_rounds", mode="per_group", group_by="primary_category"
+    )
+    check(
+        "L4-02 同为「每组第一」但胜出者一个是分类一个是任务，两档不可互答",
+        {r.get("sub_name") for r in (top_sub.get("rows") or [])}
+        != {r.get("task_name") for r in (top_task.get("rows") or [])}
+        and "被排名的单位是二级分类而不是任务" in str(top_sub.get("caliber", "")),
+    )
+
+    # L5-03 / L5-04. 分位与分档不是名次题：拿 cut 的前几行手算中位会答成 14（真值 6）。
+    dist = await _call(registry, "weekly_rank", metric="progress_rounds", mode="distribution")
+    drow = (dist.get("rows") or [{}])[0]
+    check(
+        "L5-03 五数概括 q1=2 中位 6 q3=15 极值 0-18 均值 7.37 分母 128",
+        (
+            str(drow.get("q1")),
+            str(drow.get("median")),
+            str(drow.get("q3")),
+            str(drow.get("min_rounds")),
+            str(drow.get("max_rounds")),
+            str(drow.get("avg_rounds")),
+            str(drow.get("task_total")),
+        )
+        == ("2", "6", "15", "0", "18", "7.37", "128"),
+        f"row={drow}",
+    )
+    check(
+        "L5-03 口径点明不要拿名次档前几行手算中位",
+        "会答成 14" in str(dist.get("caliber", "")),
+    )
+    quart = await _call(registry, "weekly_rank", metric="progress_rounds", mode="quartiles")
+    check(
+        "L5-04 NTILE(4) 等量四档各 32 条，区间 0-0 / 0-5 / 6-14 / 14-18",
+        [
+            (str(r.get("quartile")), str(r.get("tasks")), str(r.get("min_rounds")), str(r.get("max_rounds")))
+            for r in (quart.get("rows") or [])
+        ]
+        == [("1", "32", "0", "0"), ("2", "32", "0", "5"), ("3", "32", "6", "14"), ("4", "32", "14", "18")],
+        f"rows={quart.get('rows')}",
+    )
+    check(
+        "L5-04 口径区分等量分档与等宽分档，并说明边界跨档重复不是错",
+        "会得 17/39/41/31" in str(quart.get("caliber", "")) and "跨档重复出现" in str(quart.get("caliber", "")),
+    )
+    bad_mode = await _call(registry, "weekly_rank", metric="progress_rounds", mode="deciles")
+    check(
+        "排名不支持的 mode 显式报错并列出全部五档",
+        bad_mode.get("ok") is False
+        and bad_mode.get("error", {}).get("code") == "unsupported_mode"
+        and "distribution" in str(bad_mode.get("error", {}).get("message", ""))
+        and "quartiles" in str(bad_mode.get("error", {}).get("message", "")),
+        f"err={bad_mode.get('error')}",
+    )
     check(
         "N3-04 任务数序列与 gold 一致（同数按组名定序，避免并列漂移）",
         [int(r["cnt"]) for r in grows] == [19, 15, 15, 14, 12, 11, 10, 10, 8, 8, 6],
@@ -1074,6 +1159,25 @@ async def run() -> int:
         and "要只看在办请加 in_flight=true" in str(stale_pg_all.get("caliber", "")),
         f"rows={[(r.get('bucket'), r.get('stale_count'), r.get('total')) for r in stale_pg_all.get('rows', [])]}",
     )
+    # L2-01. 「最久没上报的 5 个」与「从来没报过的」是两问：不排除从未上报的，
+    # 前 5 行会被 8 条无天数可比的占满，与真答案零交集。两侧都钉住。
+    oldest = await _call(registry, "weekly_freshness_distribution", stale_days=1, reported_only=True, limit=5)
+    check(
+        "L2-01 排除从未上报后最久那 5 条按天数倒序，首条任务 1 达 250 天",
+        [(r.get("id"), r.get("days_since")) for r in (oldest.get("rows") or [])]
+        == [(1, 250), (24, 225), (60, 218), (87, 190), (11, 166)]
+        and str(oldest.get("never_reported_count")) == "8",
+        f"rows={[(r.get('id'), r.get('days_since')) for r in (oldest.get('rows') or [])]}",
+    )
+    oldest_all = await _call(registry, "weekly_freshness_distribution", stale_days=1, limit=5)
+    check(
+        "L2-01 不排除时前 5 行全是从未上报（days_since 为空），与上面零交集",
+        all(r.get("days_since") is None for r in (oldest_all.get("rows") or []))
+        and not ({r.get("id") for r in (oldest_all.get("rows") or [])} & {1, 24, 60, 87, 11})
+        and "应加 reported_only=true" in str(oldest_all.get("caliber", "")),
+        f"ids={[r.get('id') for r in (oldest_all.get('rows') or [])]}",
+    )
+
     recent = await _call(registry, "weekly_freshness_distribution", recent_days=7)
     check(
         "近 7 天上报 23 个任务，不加 status 过滤（问的是有无上报）",

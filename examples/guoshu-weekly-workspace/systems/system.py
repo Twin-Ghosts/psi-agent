@@ -40,6 +40,10 @@ TOOL_GUIDE = """\
   mode=cut 硬切 N 条 / keep_ties 把第 N 名的并列全列出 / per_group 每组各取第一，
   ascending=True 取最少那一端（期数为 0 的任务会保留）。要「某看板每个任务各有几个」传
   board 限定看板，并把 top 提到 total_count 那么大——total_count 与 row_count 相等才算列全。
+  另有两档不是名次而是分布，问「中位数/四分位」用 mode=distribution（一行给 q1=2 / 中位 6 /
+  q3=15 / 极值 0-18 / 均值 7.37 / 分母 128），问「分成四档各多少」用 mode=quartiles
+  （NTILE(4) 等量四档，各 32 条并给出各档期数区间）。这两档都落在全部任务上且保留 0 期任务；
+  拿 mode=cut 的前几行自己取中间值会答成 14（真值 6），拿等宽区间切会答成 17/39/41/31（真值 32×4）。
 - weekly_task_lifecycle：任务创建时间与创建到发布的耗时。
   问「2025 和 2026 年各完成了多少条」用 by=year：每档带 created_count 与 currently_finished
   （2025 建 105 条、现已完成 26；2026 建 23 条、完成 5），两个数配一起才答得全。
@@ -48,7 +52,14 @@ TOOL_GUIDE = """\
 
 聚合与完整性
 - weekly_aggregate：按 board/category/primary_category/status/project_group/owner 聚合计数，
-  空分组会保留；group_by=project_group 还直接给出各组的牵头人数与责任人数（已去重）。
+  空分组会保留；group_by=project_group 还直接给出各组的牵头人数与责任人数（已去重），
+  以及 finished 与 finish_rate_pct。问「完成率最低/最高的几个组」要加 order_by=finish_rate
+  （配 ascending=True 取最低），默认按任务数定序答不出：标准安全组 1/19=5.3% 最低，
+  而完成数同为 2 条的治理合规组 2/10=20.0% 反而高于数据基础设施组 2/15=13.3%——
+  完成数最少的组不是完成率最低的组。
+  问「每个一级分类下任务数最多的二级分类」用 group_by=top_sub_per_primary：被排名的单位是
+  二级分类（11 行，一行一个一级分类），与 weekly_rank per_group group_by=primary_category
+  给的「每个一级分类下的头号任务」是两题，别互相代答。
   问「一级分类」用 primary_category，问「分类」若指二级才用 category——任务只挂二级分类，
   两者档数不同（技术组 6 档 vs 全库 47 档）。要「前 N 个分类」就带 top，服务端硬切并回显总组数。
   问「审批流转状态分布」「多少条还没发布」用 group_by=workflow_status——这是唯一不加发布闸门
@@ -108,6 +119,10 @@ TOOL_GUIDE = """\
   答完可以自己对一遍。
   要「哪些任务很久没上报」用 stale_days（只算在办，含从未上报），
   要「最近哪些任务上报了」用 recent_days（不限状态）。
+  但问「最久没上报的前 N 个任务」要再加 reported_only=True：那问的是「上一次上报离今天最久」，
+  从未上报的 8 条没有天数可比却排在最前，会把前 5 名整个占满，答出的 5 条与真答案毫无交集
+  （真答案首条是任务 1 行业可信数据空间建设，250 天）。「从来没报过的有哪些」是另一问，
+  用默认档或 weekly_progress_coverage scope=never_reported；两档都随返回 never_reported_count。
   问「latest_progress_time 与实际最新进展不一致的有哪些」用 drift=True：73 条，
   两个方向都算不一致（汇总列偏早、偏晚都在内），是去规范化列的漂移清单而非漏报清单，
   行数即任务数，按这个数报，别只截前几条当成全部。
@@ -359,6 +374,22 @@ CALIBER_RULES = """\
     YYYYQn 取季末日），另外 34 条自由文本判不了，随返回 unparsable_count。答法是
     「可判定的这些里超期 N 条，另有 34 条写法无法判断」，既不能说成「都没超期」，
     也不能整题判死。
+46. 排序键要选问句真正问的那个量，不是手边有的那个。「完成率最低的 3 个组」按 finish_rate_pct
+    定序（weekly_aggregate order_by=finish_rate + ascending），拿任务数排出来的前三组是另一批：
+    完成数同为 2 条的治理合规组 2/10=20.0% 反而高于数据基础设施组 2/15=13.3%。
+47. 「最久没上报的前 N 个」和「从来没报过的有哪些」是两问，同一个清单答不了两次。
+    前者问「上一次上报离今天最久」，从未上报的没有天数可比却排在最前，会把前 5 名整个占满，
+    要加 reported_only=true 把它们排除（首条是任务 1，250 天）；后者才是那 8 条本身。
+    两档都随返回 never_reported_count，报结论时把排除掉几条说出来。
+48. 中位数与分档不是名次题，不要在名次档的可见行上手算。问「中位数/四分位」用
+    weekly_rank mode=distribution（q1=2 / 中位 6 / q3=15 / 均值 7.37 / 分母 128），
+    在 mode=cut 的前 5 行里取中间值会答成 14。问「分成四档」用 mode=quartiles：
+    NTILE(4) 是等量分档，四档各 32 条（按期数区间等宽切会得 17/39/41/31，那是另一种分法）；
+    等量分档下边界期数跨档重复出现是正常的，不是错。两档都保留 0 期任务（32 条恰占满第一档）。
+49. 被排名的单位是什么，要看问句在数什么。「每个一级分类下任务数最多的二级分类」数的是
+    二级分类（weekly_aggregate group_by=top_sub_per_primary，11 行），
+    「每个一级分类下进展最多的任务」数的是任务（weekly_rank per_group group_by=primary_category）。
+    两者都是「每组第一」，但胜出者一个是分类、一个是任务，互相代答就答错了对象。
 
 ## 判为不可答
 

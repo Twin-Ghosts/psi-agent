@@ -347,7 +347,14 @@ def weekly_progress_history(
 
 
 @mcp.tool()
-def weekly_aggregate(group_by: str, board: str = "", metric: str = "count", top: int = 0) -> str:
+def weekly_aggregate(
+    group_by: str,
+    board: str = "",
+    metric: str = "count",
+    top: int = 0,
+    order_by: str = "",
+    ascending: bool = False,
+) -> str:
     """Aggregate formal tasks. Uses LEFT JOIN so empty groups still appear (R-02/R-08).
 
     Args:
@@ -358,6 +365,11 @@ def weekly_aggregate(group_by: str, board: str = "", metric: str = "count", top:
         top: When > 0, hard-cut to that many groups after the ordering. "任务最多
             的前 5 个分类" means exactly 5 rows even though 9 categories tie at 5
             tasks -- the cut is the answer, not a truncation to apologise for.
+        order_by: ``finish_rate`` re-orders the project_group breakdown by
+            completion rate instead of task count. "完成率最低的 3 个组" cannot be
+            read off a count-ordered list, and the group with the fewest finished
+            tasks is not the one with the lowest rate.
+        ascending: True with order_by=finish_rate puts the LOWEST rate first.
     """
 
     def work() -> dict[str, Any]:
@@ -404,6 +416,23 @@ def weekly_aggregate(group_by: str, board: str = "", metric: str = "count", top:
                 f"WHERE {store.formal_task_clause()} "
                 "GROUP BY pc.id, pc.name ORDER BY cnt DESC, pc.id"
             )
+        elif group_by == "top_sub_per_primary":
+            # 「每个一级分类下任务数最多的二级分类」排的是分类而不是任务：
+            # weekly_rank 的 per_group 一组给一个任务，答不了这题。分组轴是一级
+            # 分类，被排名的单位是它下面的二级分类，度量是各二级分类的任务数。
+            # 组内并列按 c.id 裁决（与 gold 的 ROW_NUMBER 同一套定序键），
+            # 一组一行，行数即一级分类数。
+            sql = (
+                "SELECT primary_name AS group_name, sub_name, tasks AS cnt FROM ("
+                "SELECT pc.name AS primary_name, c.name AS sub_name, COUNT(t.id) AS tasks, "
+                "ROW_NUMBER() OVER (PARTITION BY pc.id ORDER BY COUNT(t.id) DESC, c.id) AS rn "
+                "FROM task t "
+                "JOIN task_category c ON c.id = t.category_id AND c.is_deleted = 0 "
+                "JOIN task_category pc ON pc.id = c.parent_id AND pc.is_deleted = 0 "
+                f"WHERE {scope} "
+                "GROUP BY pc.id, pc.name, c.id, c.name) r "
+                "WHERE r.rn = 1 ORDER BY r.primary_name"
+            )
         elif group_by == "status":
             sql = (
                 "SELECT CASE t.status WHEN 0 THEN '未开始' WHEN 1 THEN '进行中' "
@@ -424,13 +453,26 @@ def weekly_aggregate(group_by: str, board: str = "", metric: str = "count", top:
             )
         elif group_by == "project_group":
             # 组里「几个人牵头」必须由服务端去重，交给模型自己数人名会数错。
+            # 完成率与分母同排返回：问「完成率最低的 3 个组」时，只给 cnt 的话
+            # 模型得再去别处取每组已完成数，两次闸门不同一就全错；且完成数最少
+            # 的组不等于完成率最低的组（治理合规组 2/10=20.0% 高于数据基础设施
+            # 组 2/15=13.3%，两组已完成都是 2 条）。
             sql = (
                 "SELECT IFNULL(NULLIF(TRIM(t.project_group),''),'(未填)') AS group_name, "
                 "COUNT(*) AS cnt, "
+                "SUM(t.status = 2) AS finished, "
+                "ROUND(SUM(t.status = 2) / COUNT(*) * 100, 1) AS finish_rate_pct, "
                 "COUNT(DISTINCT NULLIF(TRIM(t.lead_owner_name),'')) AS lead_owner_count, "
                 "COUNT(DISTINCT NULLIF(TRIM(t.project_owner_name),'')) AS project_owner_count "
                 f"FROM task t WHERE {scope} GROUP BY group_name ORDER BY cnt DESC, group_name"
             )
+            if (order_by or "").strip().lower() == "finish_rate":
+                # 「完成率最低/最高的几个组」要按率定序，默认的按任务数排给不出。
+                direction = "ASC" if ascending else "DESC"
+                sql = sql.replace(
+                    "ORDER BY cnt DESC, group_name",
+                    f"ORDER BY finish_rate_pct {direction}, group_name",
+                )
         elif group_by == "owner":
             # R-11: 分管领导栏存在多种填法，先按填法枚举再计数，不做归一化猜测。
             sql = (
@@ -442,8 +484,8 @@ def weekly_aggregate(group_by: str, board: str = "", metric: str = "count", top:
                 "ok": False,
                 "error": {
                     "code": "unsupported_group_by",
-                    "message": "group_by 支持 board / category / primary_category / status / "
-                    "workflow_status / project_group / owner",
+                    "message": "group_by 支持 board / category / primary_category / "
+                    "top_sub_per_primary / status / workflow_status / project_group / owner",
                 },
             }
         caliber = f"{store.FORMAL_TASK_CALIBER}；LEFT JOIN 保留空分组（R-02/R-08）"
@@ -464,8 +506,28 @@ def weekly_aggregate(group_by: str, board: str = "", metric: str = "count", top:
                 "不是二级分类；看板过滤落在分类树所属看板上；"
                 "只统计挂到分类树上的任务，未挂分类的任务不进任何一档"
             )
+        elif group_by == "top_sub_per_primary":
+            caliber = (
+                f"{store.FORMAL_TASK_CALIBER}；每个一级分类只返回任务数最多的那一个二级分类"
+                "（group_name 是一级分类，sub_name 是胜出的二级分类，cnt 是它的任务数）；"
+                "被排名的单位是二级分类而不是任务——问「每个一级分类下哪个二级分类任务最多」用本档，"
+                "weekly_rank mode=per_group group_by=primary_category 给的是每个一级分类下的头号任务，是另一题；"
+                "组内并列按分类 id 升序裁决，一组一行，行数等于一级分类数，不要把并列的二级分类都列出来"
+            )
         elif group_by == "project_group":
-            caliber += "；lead_owner_count / project_owner_count 已由服务端按人名去重，直接引用该数字，不要自己数人名"
+            caliber += (
+                "；lead_owner_count / project_owner_count 已由服务端按人名去重，直接引用该数字，不要自己数人名"
+                "；finished 是该组已完成（status = 2）条数，finish_rate_pct = finished / cnt，"
+                "已由服务端算好，不要拿别处取的完成数手工相除；"
+                "完成数最少的组不等于完成率最低的组（治理合规组 2/10=20.0% 高于数据基础设施组 2/15=13.3%）"
+            )
+            if (order_by or "").strip().lower() == "finish_rate":
+                caliber += (
+                    f"；本次按 finish_rate_pct {'升序' if ascending else '降序'}定序，"
+                    f"首行即完成率{'最低' if ascending else '最高'}的组，并列按组名定序"
+                )
+            else:
+                caliber += "；本次按任务数定序，问「完成率最低/最高的几个组」请加 order_by=finish_rate"
         cut = 0
         if top:
             try:
@@ -1936,7 +1998,10 @@ _SCALE_AXES: dict[str, tuple[str, str, str]] = {
 #   per_group ——「每组各自的第一名」，一组一行，组内并列按定序取第一。
 # 同一份数据在三种语义下行数不同（进展期数前 3 名：cut=3、keep_ties=12），
 # 让模型自己在 200 行明细上判断，多返回和少返回都会被判集合不一致。
-_RANK_MODES = ("cut", "keep_ties", "per_group")
+# 另有两档不是名次而是分布，问「中位数」「分成四档」时用它们：
+#   distribution ——五数概括（Q1/中位数/Q3/极值/均值），一行；
+#   quartiles    ——NTILE(4) 等量四档，每档任务数与期数区间。
+_RANK_MODES = ("cut", "keep_ties", "per_group", "distribution", "quartiles")
 
 # 可排名的度量。每项给出：子表、子表自身闸门、计数表达式、中文标签。
 # 全部走 LEFT JOIN，零值行才不会被 INNER JOIN 静默丢掉（inner_join_drops_zero）。
@@ -2709,6 +2774,53 @@ def weekly_rank(
                 limit=store.MAX_ROWS,
             )
 
+        if key in ("distribution", "quartiles"):
+            # 分位数与等量分档不是名次题：cut 只给榜首几条，模型拿它算中位数
+            # 只能在可见的 5 行里取中间那行，答出 14 而真值是 6。分位口径必须
+            # 落在全部 128 条任务上，且零期任务要留在分母里——32 条 0 期正好
+            # 占满第一档，把它们丢掉四档边界会整体右移。
+            counts = f"SELECT t.id, {expression} AS rounds FROM task t {join} WHERE {clause} GROUP BY t.id"
+            if key == "distribution":
+                # PERCENT_RANK 取「首个达到该分位的值」，与 gold 同法：不做插值，
+                # 报的是库里真实出现过的期数，而不是两值之间算出来的小数。
+                return store.fetch(
+                    "SELECT MIN(CASE WHEN pr >= 0.25 THEN rounds END) AS q1, "
+                    "MIN(CASE WHEN pr >= 0.5 THEN rounds END) AS median, "
+                    "MIN(CASE WHEN pr >= 0.75 THEN rounds END) AS q3, "
+                    "MIN(rounds) AS min_rounds, MAX(rounds) AS max_rounds, "
+                    "ROUND(AVG(rounds), 2) AS avg_rounds, COUNT(*) AS task_total "
+                    f"FROM (SELECT rounds, PERCENT_RANK() OVER (ORDER BY rounds) AS pr FROM ({counts}) c) r",
+                    params,
+                    caliber=(
+                        f"{base.replace('降序', '分布').replace('升序', '分布')}；"
+                        "分位数落在该口径下的全部任务上（task_total 即分母），"
+                        "零期任务留在分母里（32 条 0 期），丢掉它们分位会整体抬高；"
+                        "分位取「首个达到该分位的实际期数」，不做插值，所以报的是库里真实出现过的值；"
+                        "中位数与均值不是一个数（中位 6 / 均值另算），问哪个报哪个；"
+                        "不要拿名次档（mode=cut）的前几行自己取中间值——那只在可见行里取中位，会答成 14"
+                    ),
+                    limit=1,
+                )
+            # NTILE(4) 是等量分档：先按期数排序再均分任务数，四档各 32 条，
+            # 边界值因此会跨档重复出现（第 2 档 max 与第 3 档 min 都可能是同一
+            # 个期数）。这与「按期数区间等宽分档」是两回事，后者各档条数不等
+            # （17/39/41/31），基线即答成了等宽那种。
+            return store.fetch(
+                "SELECT quartile, COUNT(*) AS tasks, MIN(rounds) AS min_rounds, MAX(rounds) AS max_rounds "
+                f"FROM (SELECT rounds, NTILE(4) OVER (ORDER BY rounds) AS quartile FROM ({counts}) c) q "
+                "GROUP BY quartile ORDER BY quartile",
+                params,
+                caliber=(
+                    f"{base.replace('降序', '分档').replace('升序', '分档')}；"
+                    "NTILE(4) 等量四档：先按期数升序再均分任务条数，各档 tasks 基本相等（32/32/32/32），"
+                    "不是按期数区间等宽切（等宽切各档条数不等，会得 17/39/41/31）；"
+                    "min_rounds / max_rounds 是该档实际覆盖的期数区间，"
+                    "等量分档下边界期数会跨档重复出现（同一期数的任务被分到相邻两档），这不是错；"
+                    "零期任务留在分档里（32 条 0 期恰好占满第一档）"
+                ),
+                limit=store.MAX_ROWS,
+            )
+
         if key == "keep_ties":
             # RANK() 而非 ROW_NUMBER()：问句明说要并列，第 N 名有几个就返回几个，
             # 行数因此可能远大于 top（进展期数前 3 名共 12 行）。
@@ -2919,6 +3031,7 @@ def weekly_freshness_distribution(
     recent_days: int = 0,
     in_flight: bool = False,
     by: str = "",
+    reported_only: bool = False,
     limit: int = 200,
 ) -> str:
     """Bucket formal tasks by how stale their latest progress is (30/90/180 天/从未).
@@ -2945,7 +3058,11 @@ def weekly_freshness_distribution(
             (status 0 and 1). "在办任务里有多少从来没报过进展时间" is 8, while the
             un-gated buckets read 9 -- the extra one is task 88, already 已完成.
             Only affects the plain distribution, not the listing branches.
-        by: ``project_group`` 让 stale_days 返回各组滞后计数而不是清单。
+        by: ``board`` / ``project_group`` 让 stale_days 返回各组滞后占比而不是清单。
+        reported_only: True excludes never-reported tasks from the stale listing.
+            "最久没上报的 5 个" asks which task's LAST report is furthest back;
+            never-reported tasks have no such day count and would fill the top 5
+            (9 of them sort first), answering a different question entirely.
         limit: Max rows for the listing branches, capped at 200.
     """
 
@@ -3032,16 +3149,37 @@ def weekly_freshness_distribution(
                 f"SELECT COUNT(*) FROM task t WHERE {store.formal_task_clause()} AND {in_progress} AND {stale}",
                 params,
             )
+            # 「最久没上报的 5 个任务」问的是「上一次上报离今天最久」，从未上报的
+            # 任务没有这个天数——它们的 days_since 为空，排在最前时会把前 5 名整
+            # 个占满（9 条从未上报），答出的 5 条与「最久」那 5 条毫无交集。
+            # reported_only 把从未上报的排除，让天数可比；「从来没报过的有哪些」
+            # 是另一问，用默认档或 weekly_progress_coverage scope=never_reported。
+            never_total = store.scalar(
+                f"SELECT COUNT(*) FROM task t WHERE {store.formal_task_clause()} AND {in_progress} "
+                "AND t.latest_progress_time IS NULL",
+                params,
+            )
+            reported_gate = " AND t.latest_progress_time IS NOT NULL" if reported_only else ""
+            listing_note = (
+                f"；已排除从未上报的 {never_total['value']} 条（它们没有天数可比，"
+                "不是「最久没上报」的答案；要问它们请去掉 reported_only 或用 "
+                "weekly_progress_coverage scope=never_reported）；行首即最久未上报的那条"
+                if reported_only
+                else "；从未上报的排在最前，其 days_since 为空。"
+                "注意问「最久没上报的前 N 条」时它们会占满前几行，"
+                "那问的是「上一次上报离今天最久」，应加 reported_only=true 把无天数可比的排除"
+            )
             rows = store.fetch(
                 "SELECT t.id, t.task_name, t.status, t.latest_progress_time, "
                 "DATEDIFF(%(as_of)s, t.latest_progress_time) AS days_since "
-                f"FROM task t WHERE {store.formal_task_clause()} AND {in_progress} AND {stale} "
+                f"FROM task t WHERE {store.formal_task_clause()} AND {in_progress} AND {stale}{reported_gate} "
                 "ORDER BY t.latest_progress_time IS NOT NULL, t.latest_progress_time, t.id",
                 params,
-                caliber=note + "；从未上报的排在最前，其 days_since 为空",
+                caliber=note + listing_note,
                 limit=bounded,
             )
             rows["total_count"] = total["value"]
+            rows["never_reported_count"] = never_total["value"]
             return rows
         if within_days and not task.strip():
             lo, _ = store.date_window(last_days=within_days)
