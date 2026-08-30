@@ -2461,6 +2461,40 @@ async def run() -> int:
         str(sorted(unique_name.keys())),
     )
 
+    slowest = await _call(registry, "weekly_approval_turnaround", scope="slowest", top=3)
+    slow_rows = slowest.get("rows") or []
+    check(
+        # 榜首 59 天是两轮并列，只回任务名时模型手上没有定序键，两条都列就成了多余条目。
+        "E8-04 审批最慢首行为任务 76、59 天，并列按 id 升序",
+        [r.get("task_id") for r in slow_rows] == [76, 143, 18]
+        and str(slow_rows[0].get("days")) == "59"
+        and str(slowest.get("top_tie_count")) == "2",
+        str([(r.get("task_id"), r.get("days")) for r in slow_rows]),
+    )
+    top_one = await _call(registry, "weekly_approval_turnaround", scope="slowest", top=1)
+    check(
+        "E8-04 取 top=1 仍报出并列数，不把并列藏起来",
+        [r.get("task_id") for r in (top_one.get("rows") or [])] == [76]
+        and str(top_one.get("top_tie_count")) == "2"
+        and "并列" in str(top_one.get("caliber")),
+        str(top_one.get("rows")),
+    )
+
+    drift = await _call(registry, "weekly_freshness_distribution", drift=True)
+    check(
+        # 金标 LIMIT 8 是截断，全集 73 条；口径要写清是双向漂移而不是漏报。
+        "E6-04 漂移清单 73 条，按 task id 升序，首行任务 1",
+        str(drift.get("row_count")) == "73"
+        and (drift.get("rows") or [{}])[0].get("task_id") == 1
+        and drift.get("has_more") is False,
+        f"row_count={drift.get('row_count')} first={(drift.get('rows') or [{}])[0].get('task_id')}",
+    )
+    check(
+        "E6-04 caliber 点明双向不一致且给出 73 这个规模",
+        "偏早" in str(drift.get("caliber")) and "73" in str(drift.get("caliber")),
+        str(drift.get("caliber")),
+    )
+
     return report()
 
 

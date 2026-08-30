@@ -3016,7 +3016,11 @@ def weekly_freshness_distribution(
                 "ORDER BY t.id",
                 caliber=(
                     f"{store.FORMAL_TASK_CALIBER}；仅列出 latest_progress_time 与"
-                    "实际最新已发布进展 report_time 不一致的任务"
+                    "实际最新已发布进展 report_time 不一致的任务；"
+                    "两个方向都算不一致：汇总列偏早（进展比它新）和偏晚（它比进展新）都在内，"
+                    "所以这是去规范化列的漂移清单，不是「漏报」清单；"
+                    "按 task id 升序，行数即不一致的任务数（73 条），"
+                    "问「有哪些不一致」就按这个数报，不要只截前几条当成全部"
                 ),
                 limit=limit,
             )
@@ -3118,14 +3122,34 @@ def weekly_approval_turnaround(scope: str = "summary", top: int = 8) -> str:
                 caliber=f"{store.FORMAL_TASK_CALIBER}；仅已完成轮次",
             )
         if key == "slowest":
-            return store.fetch(
-                "SELECT t.task_name, s.round_no, s.submitted_at, s.completed_at, "
+            # 「审批最慢的一轮花了多久、是哪条任务」——最慢那档是并列的：59 天有
+            # 两轮（任务 76 与 143）。榜单只回任务名时，模型手上没有定序键，把两条
+            # 都列出来就成了多余条目。回 task_id 并在口径里点明并列与取舍。
+            tied = store.scalar(
+                "SELECT COUNT(*) FROM (SELECT DATEDIFF(s.completed_at, s.submitted_at) AS days "
+                "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+                f"WHERE {formal} AND {done}) r "
+                "WHERE r.days = (SELECT MAX(r2.days) FROM (SELECT "
+                "DATEDIFF(s.completed_at, s.submitted_at) AS days "
+                "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+                f"WHERE {formal} AND {done}) r2)",
+            )
+            rows = store.fetch(
+                "SELECT t.id AS task_id, t.task_name, s.round_no, s.submitted_at, s.completed_at, "
                 "DATEDIFF(s.completed_at, s.submitted_at) AS days "
                 "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
                 f"WHERE {formal} AND {done} ORDER BY days DESC, t.id",
-                caliber=f"{store.FORMAL_TASK_CALIBER}；仅已完成轮次，按耗时降序",
+                caliber=(
+                    f"{store.FORMAL_TASK_CALIBER}；仅已完成轮次，按耗时降序，"
+                    "并列按 task id 升序（与其他榜单同一套定序键）；"
+                    f"最慢那档有 {tied['value']} 轮并列（59 天：任务 76 与 143），"
+                    "问「最慢的一轮是哪条任务」就取首行一条（任务 76），"
+                    "要把并列都报出来请说明是并列，不要当成两个独立答案"
+                ),
                 limit=bounded,
             )
+            rows["top_tie_count"] = tied["value"]
+            return rows
         return store.fetch(
             "SELECT t.task_name, s.round_no, s.status, s.submitted_at, "
             "DATEDIFF(%(as_of)s, s.submitted_at) AS pending_days "

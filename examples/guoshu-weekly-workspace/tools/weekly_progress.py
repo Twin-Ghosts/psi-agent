@@ -148,7 +148,11 @@ async def weekly_freshness_distribution(
             of the snapshot date. Use this for windows the fixed buckets cannot
             express, such as 7 days.
         drift: True lists only tasks whose latest_progress_time disagrees with
-            their real newest published progress row.
+            their real newest published progress row. Both directions count as a
+            disagreement -- the denormalised column can be earlier OR later than
+            the progress rows -- so this is a drift list, not a list of missed
+            reports. It spans 73 tasks; report that figure rather than the first
+            few rows.
         stale_days: When > 0, lists 在办任务 (status 0 未开始 and 1 进行中, both
             count) whose newest progress is older than that many days. Never
             reported counts as stale and sorts first, with days_since NULL.
@@ -192,6 +196,12 @@ async def weekly_approval_turnaround(scope: str = "summary", top: int = 8) -> st
     scope="pending" is the still-unfinished backlog and deliberately does not
     apply the published filter -- a submission stuck in approval is by definition
     not published yet.
+
+    scope="slowest" returns task_id alongside the name, breaks ties by that id,
+    and carries top_tie_count. The slowest round is a tie: two rounds sit at 59
+    days, so "审批最慢的一轮是哪条任务" is answered by the first row alone
+    (task 76). Listing both without saying they tie reads as two separate
+    answers, which is a different claim.
 
     Args:
         scope: summary / board / slowest / pending.
