@@ -317,7 +317,7 @@ def weekly_progress_history(
         if published_only:
             where += " AND is_published = 1"
             caliber += "；is_published = 1"
-        return store.fetch(
+        rows = store.fetch(
             "SELECT id, task_id, version_no, latest_progress, next_work, progress_date, "
             "report_time, is_published, review_comment "
             f"FROM task_progress WHERE {where} ORDER BY version_no DESC, id DESC",
@@ -327,6 +327,21 @@ def weekly_progress_history(
             can_read_sensitive=may_read,
             limit=limit,
         )
+        # 同名系列（2期/3期/4期）是各自独立的任务，各有自己的进展。按裸名解析
+        # 只会落到其中一条，这是对的；但只被告知「这里有 14 期」的调用方无从
+        # 知道系列存在，答「这个任务的进展历史」时就容易把整个系列铺开。
+        # 把兄弟任务显式回报，让这个取舍看得见。
+        siblings = store.name_series(task_id)
+        if siblings:
+            rows["same_name_series"] = siblings
+            rows["caliber"] += (
+                f"；本次只含任务 {task_id} 一条的进展，"
+                f"同系列另有 {len(siblings)} 条独立任务（"
+                + "、".join(f"{s['id']} {s['task_name']}" for s in siblings)
+                + "），各有自己的期次，不要合并进本任务的历史；"
+                "要另一条就按 id 或完整名（含「（N期）」）再查一次"
+            )
+        return rows
 
     return _guard("weekly_progress_history", work)
 
@@ -1976,7 +1991,10 @@ _GROUP_HISTORY_GROUPINGS: dict[str, tuple[str, str]] = {
     "year": ("YEAR(h.report_time)", "bucket"),
     "month": ("DATE_FORMAT(h.report_time, '%%Y-%%m')", "bucket"),
     "quarter": ("CONCAT(YEAR(h.report_time), 'Q', QUARTER(h.report_time))", "bucket"),
-    "task": ("t.task_name", "progress_count DESC, bucket"),
+    # 并列按 task id 升序，不按任务名：11 期的有 8 条并列，问「前 5 条」时按名排
+    # 与按 id 排是两个不同集合（按名排把 133 号顶进前 5、把 115 号挤出去）。
+    # 名次题的定序键要与其他榜单一致，一律 task id。
+    "task": ("t.task_name", "progress_count DESC, t.id"),
     "reporter": ("h.reporter_id", "progress_count DESC, bucket"),
     # 滞报榜按任务给最后一次上报距快照日的天数。放进分组白名单而不是单独开
     # 工具：问的仍是这张历史表的分面，只是聚合出的是 lag 而非条数。
@@ -2473,13 +2491,22 @@ def weekly_progress_coverage(scope: str = "summary", project_group: str = "", li
                 limit=bounded,
             )
 
+        # 「平均每条有进展的任务报了多少期」= 943 / 73 = 12.92。分母是报过进展的
+        # 73 条，不是正式任务 128 条（那样得 7.37）。这个除法交给服务端做：
+        # 两个数摆在同一行时，模型仍可能拿别的分母去除，或按各任务期数心算平均。
         return store.fetch(
             "SELECT COUNT(*) AS progress_rows, COUNT(DISTINCT p.task_id) AS tasks_covered, "
+            "ROUND(COUNT(*) / COUNT(DISTINCT p.task_id), 2) AS avg_rounds_per_task, "
             "MIN(p.progress_date) AS earliest, MAX(p.progress_date) AS latest, "
             "MAX(p.version_no) AS max_version "
             "FROM task_progress p JOIN task t ON t.id = p.task_id "
             f"WHERE {clause} AND p.is_published = 1",
-            caliber=f"{store.FORMAL_TASK_CALIBER}；仅正式发布进展（is_published = 1）",
+            caliber=(
+                f"{store.FORMAL_TASK_CALIBER}；仅正式发布进展（is_published = 1）；"
+                "avg_rounds_per_task 12.92 = 943 期 / 报过进展的 73 条任务，"
+                "分母是 tasks_covered 而不是正式任务 128（那样得 7.37）；"
+                "「平均每条有进展的任务报了多少期」直接引用这一列，不要自己另算"
+            ),
             limit=1,
         )
 
@@ -3939,13 +3966,21 @@ def weekly_group_history(
             )
 
         select = f"{expression} AS bucket, COUNT(*) AS progress_count"
-        if grouping not in ("task",):
+        group_sql = "bucket"
+        note = f"；按 {grouping} 分组计数"
+        if grouping == "task":
+            # 按任务分组时把 task_id 一并选出并纳入 GROUP BY：并列要按 id 定序，
+            # 只回任务名的话模型手上没有定序键，也没法与其他榜单对齐。
+            select = f"t.id AS task_id, {select}"
+            group_sql = "t.id, bucket"
+            note += "；并列按 task id 升序（不按任务名排——11 期的有 8 条并列，两种排法给出的前 5 条不是同一批）"
+        else:
             select += ", COUNT(DISTINCT h.task_id) AS task_count"
         return store.fetch(
             f"SELECT {select} FROM task_group_progress_history h {joins} "
-            f"WHERE {clause} GROUP BY bucket ORDER BY {order}",
+            f"WHERE {clause} GROUP BY {group_sql} ORDER BY {order}",
             params,
-            caliber="；".join(caliber) + f"；按 {grouping} 分组计数",
+            caliber="；".join(caliber) + note,
             limit=limit,
         )
 

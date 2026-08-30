@@ -2416,6 +2416,51 @@ async def run() -> int:
         str(bad_order),
     )
 
+    depth = await _call(registry, "weekly_progress_coverage", scope="summary")
+    check(
+        # 分母是报过进展的 73 条，拿正式任务 128 去除得 7.37，正是基线答错的那个数。
+        "D3-04 平均期数 12.92 = 943 / 73，服务端直接给到",
+        str(_first(depth, "avg_rounds_per_task")) == "12.92"
+        and str(_first(depth, "progress_rows")) == "943"
+        and str(_first(depth, "tasks_covered")) == "73",
+        str(depth.get("rows")),
+    )
+    check(
+        "D3-04 caliber 点明分母是 73 而非 128",
+        "73" in str(depth.get("caliber")) and "7.37" in str(depth.get("caliber")),
+        str(depth.get("caliber")),
+    )
+
+    by_task = await _call(registry, "weekly_group_history", by="task", limit=5)
+    task_rows = by_task.get("rows") or []
+    check(
+        # 11 期的有 8 条并列，按任务名排会把 133 顶进前 5、把 115 挤出去。
+        "D5-04 看板按任务计期前 5 条并列按 id：104/105/115/120/127",
+        [r.get("task_id") for r in task_rows] == [104, 105, 115, 120, 127]
+        and {str(r.get("progress_count")) for r in task_rows} == {"11"},
+        str([(r.get("task_id"), r.get("bucket"), r.get("progress_count")) for r in task_rows]),
+    )
+    check(
+        "D5-04 分组回 task_id 且 caliber 说明定序键",
+        "task_id" in (by_task.get("columns") or []) and "task id" in str(by_task.get("caliber")),
+        f"columns={by_task.get('columns')}",
+    )
+
+    series = await _call(registry, "weekly_progress_history", task="数据资源登记体系建设")
+    check(
+        # 同名系列是四条独立任务，只被告知「这里有 14 期」的调用方无从知道兄弟存在。
+        "D1-02 同名系列显式回报：41（2期）/60（3期）/79（4期）",
+        [s.get("id") for s in (series.get("same_name_series") or [])] == [41, 60, 79]
+        and "不要合并进本任务的历史" in str(series.get("caliber")),
+        str(series.get("same_name_series")),
+    )
+    unique_name = await _call(registry, "weekly_progress_history", task="多方安全计算性能优化")
+    check(
+        "D1-02 无同名系列时不挂 same_name_series 字段",
+        unique_name.get("ok") is not False and "same_name_series" not in unique_name,
+        str(sorted(unique_name.keys())),
+    )
+
     return report()
 
 

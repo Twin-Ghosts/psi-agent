@@ -24,6 +24,14 @@ async def weekly_progress_history(task: str, published_only: bool = True, limit:
     current period. Draft rows (is_published = 0) are excluded by default and
     must not be reported as formal progress.
 
+    Only ONE task's periods come back, even when the name belongs to a series.
+    「数据资源登记体系建设」 and its three 期 suffixes are four separate tasks
+    with separate progress; a bare name resolves to one of them and the siblings
+    arrive under same_name_series. Report the resolved task's periods as that
+    task's, mention the series if the question is open-ended, and query again by
+    id or by the full name when the caller wants another 期 -- never merge the
+    family's periods into one history.
+
     Args:
         task: Task id or name.
         published_only: True keeps only formally published progress.
@@ -417,6 +425,11 @@ async def weekly_progress_coverage(scope: str = "summary", project_group: str = 
 
     Use this for "how far back does the history go" or "how many progress records
     are there in total" -- one call instead of walking every task.
+
+    summary also carries avg_rounds_per_task, the answer to "平均每条有进展的任务
+    报了多少期": 12.92, which is 943 periods over the 73 tasks that reported, not
+    over the 128 formal tasks (that division gives 7.37). Quote the column rather
+    than dividing by a denominator of your own choosing.
 
     For "下一步打算做什么" use scope="latest_round", never the full history: the
     newest period is picked by version_no (ties broken by id), and a task with 19

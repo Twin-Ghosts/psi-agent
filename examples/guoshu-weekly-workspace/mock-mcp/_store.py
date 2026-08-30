@@ -343,6 +343,37 @@ def resolve_task(task: str) -> dict[str, Any] | None:
         conn.close()
 
 
+_SERIES_SUFFIX = re.compile(r"（\d+期）$")
+
+
+def name_series(task_id: int) -> list[dict[str, Any]]:
+    """List the OTHER formal tasks whose name is the same series as ``task_id``'s.
+
+    「数据资源登记体系建设」 and its three 期 suffixes are four separate tasks
+    with their own progress. Resolving the bare name lands on exactly one of them,
+    which is correct -- but a caller told only "here are 14 periods" cannot tell
+    whether the series exists at all, and answers about "this task's history" then
+    drift into listing every 期 in the family. Returning the siblings makes the
+    choice visible instead of implicit; an empty list means the name is unique.
+    """
+    conn = connect()
+    try:
+        row = _one(conn, "SELECT task_name FROM task WHERE id = %(id)s", {"id": int(task_id)})
+        if row is None:
+            return []
+        base = _SERIES_SUFFIX.sub("", str(row["task_name"]))
+        with conn.cursor() as cursor:
+            cursor.execute(
+                f"SELECT t.id, t.task_name FROM task t WHERE {formal_task_clause()} "
+                "AND t.id <> %(id)s AND (t.task_name = %(base)s OR t.task_name LIKE %(like)s) "
+                "ORDER BY t.id",
+                {"id": int(task_id), "base": base, "like": f"{base}（%期）"},
+            )
+            return [dict(r) for r in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
 def resolve_task_id(task: str) -> int | None:
     """Resolve a foreign-key task_id, WITHOUT the formal-task filter.
 

@@ -140,6 +140,12 @@ async def weekly_group_history(
         task: Task id or name; empty covers the whole board.
         version_no: Return one specific period (larger is newer, per task).
         by: Empty lists rows; year / month / quarter / task / reporter counts them.
+            task returns task_id alongside the name and breaks ties by that id,
+            not by task name. This matters for "报得最多的前 5 条": eight tasks tie
+            at 11 periods, so name order answers 127/105/133/120/104 while id order
+            answers 104/105/115/120/127 -- a different set, not a reshuffle. Every
+            other ranking here breaks ties by id too, so quote task_id when the
+            question asks which tasks.
             lag ranks tasks by days since their last report -- use it for "哪些
             任务最久没报", and read lag_days rather than deriving it from dates.
             Tasks that never reported are absent from that ranking by definition;
