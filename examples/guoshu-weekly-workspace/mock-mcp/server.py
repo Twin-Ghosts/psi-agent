@@ -1822,7 +1822,15 @@ _TURNAROUND_SCOPES = ("summary", "board", "slowest", "pending")
 # 进展覆盖面的四个口径。unpublished / version_gaps 都是「让模型自己数会数错」
 # 的那类：一个要辨两套状态码值，一个要拿最大期号减实际期数。
 # unpublished_by_task 再往下一层，落到「哪些任务挂着未发布进展」的逐任务清单。
-_COVERAGE_SCOPES = ("summary", "unpublished", "unpublished_by_task", "version_gaps", "latest_round", "missing_next")
+_COVERAGE_SCOPES = (
+    "summary",
+    "unpublished",
+    "unpublished_by_task",
+    "never_reported",
+    "version_gaps",
+    "latest_round",
+    "missing_next",
+)
 
 # 「最新一期」的定序键：version_no 大者为新，同期再按 id 兜底，两级都要。
 # 只按 progress_date 或只按 id 取最新都会取错行（latest_by_wrong_key）：
@@ -2217,7 +2225,10 @@ def weekly_progress_coverage(scope: str = "summary", project_group: str = "", li
             (0 草稿 / 1 待审核 / 2 驳回 / 3 通过) -- a different vocabulary from the
             task's workflow_status. ``unpublished_by_task`` lists the tasks that
             hold unpublished periods while their submission is already published,
-            most periods first. ``version_gaps`` tasks missing a period.
+            most periods first. ``never_reported`` lists the 55 formal tasks with
+            no published row in task_progress at all -- judged by NOT EXISTS, not
+            by ``latest_progress_time IS NULL``, which only finds 9 of them.
+            ``version_gaps`` tasks missing a period.
             ``latest_round`` gives each task's NEWEST published period with its
             ``next_work`` -- use it for "下一步打算做什么", never the full history
             (a task with 19 periods would otherwise contribute 19 rows and its
@@ -2335,6 +2346,40 @@ def weekly_progress_coverage(scope: str = "summary", project_group: str = "", li
                     "（提交单已发布、进展还挂着未发布，两套码值各判一次）；"
                     "unpublished_rounds 按 version_no 去重，是「期数」不是「行数」；"
                     "并列按 task id 升序，total_count 为符合条件的任务总数"
+                ),
+                limit=bounded,
+            )
+            rows["total_count"] = total["value"]
+            return rows
+
+        if key == "never_reported":
+            # 「还有多少条正式任务从来没报过进展」：判据是 task_progress 里有没有
+            # 已发布行，走 NOT EXISTS。不能用 t.latest_progress_time IS NULL 代替
+            # ——那一列只跟 task_progress 的写入同步，集团看板的 46 条任务成效写在
+            # task_group_progress_history，它们 latest_progress_time 有值却在
+            # task_progress 里一行都没有，按空值判会答成 9（少 46 条）。
+            # 55 = 128 - 73，与 summary 的 tasks_covered 同一套「进展」定义。
+            total = store.scalar(
+                f"SELECT COUNT(*) FROM task t WHERE {clause} AND NOT EXISTS "
+                "(SELECT 1 FROM task_progress p WHERE p.task_id = t.id AND p.is_published = 1)",
+            )
+            rows = store.fetch(
+                "SELECT t.id AS task_id, t.task_name, b.name AS board_name, t.project_group, "
+                "EXISTS (SELECT 1 FROM task_group_progress_history h "
+                "WHERE h.task_id = t.id AND h.is_published = 1) AS has_group_history "
+                f"FROM task t LEFT JOIN task_board b ON b.id = t.board_id WHERE {clause} "
+                "AND NOT EXISTS (SELECT 1 FROM task_progress p "
+                "WHERE p.task_id = t.id AND p.is_published = 1) "
+                "ORDER BY t.id",
+                caliber=(
+                    f"{store.FORMAL_TASK_CALIBER}；「没报过进展」= task_progress 里没有已发布行"
+                    "（NOT EXISTS），total_count 55 = 正式任务 128 - 有进展的 73，"
+                    "与 scope=summary 的 tasks_covered 同一套进展定义；"
+                    "不要用 latest_progress_time 是否为空来判——那样只得 9 条，"
+                    "会漏掉集团看板的 46 条（它们成效写在 task_group_progress_history，"
+                    "该列有值但 task_progress 里一行都没有）；"
+                    "has_group_history = 1 即该任务在集团历史表里报过，"
+                    "真正两张表都没报过的是 9 条（技术组）"
                 ),
                 limit=bounded,
             )

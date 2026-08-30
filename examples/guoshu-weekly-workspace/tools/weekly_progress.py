@@ -417,6 +417,15 @@ async def weekly_progress_coverage(scope: str = "summary", project_group: str = 
             unpublished_by_task (tasks whose submission form IS published while
             progress rows are still unpublished, counted per task in PERIODS:
             version_no is de-duplicated, so this is "几期" and not "几行") /
+            never_reported (the formal tasks that have never reported progress at
+            all: 55 tasks, total_count 55 = the 128 formal tasks minus the 73 that
+            summary counts as covered. Use this for "还有多少条任务从来没报过进展",
+            NOT the freshness bucket "4 从未报进展" -- that bucket keys off
+            t.latest_progress_time being NULL and finds only 9, because the group
+            board's 46 tasks keep their 成效 in task_group_progress_history and so
+            carry a timestamp while holding no task_progress row. Each row's
+            has_group_history flags that case; exactly 9 tasks have reported in
+            neither table) /
             version_gaps (tasks whose max version_no exceeds their actual row
             count, i.e. missing periods) / latest_round (each task's newest
             period with its next_work, one row per task) / missing_next (how many

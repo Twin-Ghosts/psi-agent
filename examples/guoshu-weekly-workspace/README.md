@@ -21,7 +21,7 @@ export GUOSHU_WEEKLY_MCP_TOKEN=demo-token
 python tests/smoke_test.py
 ```
 
-预期 `282/282 passed`。
+预期 `286/286 passed`。
 
 ## 数据层准备
 
@@ -91,7 +91,7 @@ guoshu-weekly-workspace/
 │   ├── _store.py              # 只读查询层 + 口径规则 + 字段管控
 │   └── server.py              # 31 个语义化取数工具（Streamable HTTP MCP）
 └── tests/
-    ├── smoke_test.py          # 282 条契约断言，不花模型 token
+    ├── smoke_test.py          # 286 条契约断言，不花模型 token
     └── baseline.py            # 396 题准确率基线（LLM 判定）
 ```
 
@@ -105,7 +105,7 @@ guoshu-weekly-workspace/
 | `weekly_task_query` | 按看板/分类/状态/负责人/关键词/**专项组**查正式任务 |
 | `weekly_task_detail` | 单任务详情（明细 + 近期进展 + 年度目标） |
 | `weekly_progress_history` | 进展版本回溯，`version_no` 倒序 |
-| `weekly_progress_coverage` | 进展历史覆盖度（行数/任务数/起止/最大版本）、未发布进展分档、期号缺号、**每任务最新一期的下一步安排**、最新一期缺下一步计数 |
+| `weekly_progress_coverage` | 进展历史覆盖度（行数/任务数/起止/最大版本）、未发布进展分档、期号缺号、**每任务最新一期的下一步安排**、最新一期缺下一步计数、**从未报过进展的 55 条（按 NOT EXISTS 判，非汇总列判空）** |
 | `weekly_aggregate` | 按 board/category/**primary_category**/status/project_group/owner/**workflow_status** 聚合，`top` 硬切前 N 组 |
 | `weekly_scale` | 多子表一次成表：规模（里程碑/附件/年度目标，**全部 `COUNT(DISTINCT)` 防 JOIN 放大**）/ 完备度（有该项的任务数）/ 进展密度（分母含零期任务） |
 | `weekly_field_completeness` | 字段填报完整度（R-07/R-19），字段走白名单，**完整率 `filled_pct` 服务端算好** |
@@ -207,6 +207,7 @@ agent 据此给出依据、也据此判断不可答。
 | 「某组的人都有谁」是去重题 | `scope=group_roster` 行数即人数（标准安全组 9 位牵头人）；拿该组 19 条任务清单自己数，同一个人会按任务重复计数 |
 | 专项组是独立一列不是分类 | `weekly_task_query` 的 `project_group` 精确匹配；塞进 `category` 或 `keyword` 会静默返回错的集合 |
 | 「最近」是排序题不是筛选题 | `scope=recent` 按动作自身时间戳倒序（不是任务 id、不是轮次号），取头几条即可；把 13 条驳回全铺开答的是「有哪些」而非「最近有哪些」 |
+| 存在性按明细表判，不拿汇总列判空 | 「从来没报过进展」用 `scope=never_reported` 按 `task_progress` 有无已发布行判定得 55 条；按 `t.latest_progress_time` 判空只得 9 条，漏掉集团看板那 46 条（成效在集团历史表，汇总列有值而 `task_progress` 无行）。55 + 有进展的 73 = 正式任务 128 |
 
 ### 相对时间窗以快照日为基准
 
@@ -242,7 +243,7 @@ R-04/R-14 要的是「按权限返回」。一律遮蔽同样不满足需求—�
 | 数据权限 | 敏感字段按 token 两档分级 | 按 OA 真实身份做行级权限 |
 | 前端 | 无（经 psi-agent 既有接口） | 专建对话应用 + BFF（方案第六章） |
 | 材料生成 | 无 | 报告下载与图表（P1，第 5 期） |
-| 评测 | 282 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
+| 评测 | 286 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
 
 ### mock 数据层的两处不可外推
 

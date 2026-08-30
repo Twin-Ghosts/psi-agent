@@ -77,7 +77,14 @@ TOOL_GUIDE = """\
   服务端按 version_no 收敛到一任务一行，不要用 weekly_progress_history 拉全部历史自己挑最新，
   也不要按 progress_date 挑——补报的老期号可能日期更晚。问「最新一期没写下一步的有几个」
   用 scope=missing_next，中间某期空着不算。
+  问「还有多少条任务从来没报过进展」用 scope=never_reported：55 条 = 正式任务 128 -
+  有进展的 73，按 task_progress 有无已发布行判定（NOT EXISTS）。不要拿
+  weekly_freshness_distribution 的「4 从未报进展」档来答，那一档按
+  latest_progress_time 判空只得 9 条，会漏掉集团看板的 46 条（成效写在集团历史表，
+  该列有值但 task_progress 里一行都没有）；行内 has_group_history 就是这 46 条的标记。
 - weekly_freshness_distribution：按进展陈旧程度分档（30/90/180 天/从未）。
+  这里的「4 从未报进展」只有 9 条，是 latest_progress_time 为空的口径，不等于
+  「从来没报过进展」的 55 条，后者用 weekly_progress_coverage scope=never_reported。
   要「哪些任务很久没上报」用 stale_days（只算在办，含从未上报），
   要「最近哪些任务上报了」用 recent_days（不限状态）。
 
@@ -257,6 +264,11 @@ CALIBER_RULES = """\
     最近发生的那条埋在页面中间；把符合条件的全集铺开（13 条驳回全给）答的是
     「有哪些」，不是「最近有哪些」。排序依据是动作自身的时间戳，不是任务 id、
     不是轮次号，也不是任务的更新时间。
+38. 「有没有做过某事」按明细表里存不存在记录判定，不要拿任务表上的汇总列判空。
+    两者会给出不同的数：「从来没报过进展」按 task_progress 有无已发布行判是 55 条，
+    按 t.latest_progress_time 是否为空判只有 9 条——集团看板那 46 条任务的成效
+    写在 task_group_progress_history，汇总列有值而 task_progress 里一行都没有。
+    同一个问题的两个数要能互相对上：55 + 有进展的 73 = 正式任务 128。
 
 ## 判为不可答
 

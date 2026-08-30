@@ -2268,6 +2268,34 @@ async def run() -> int:
         str(bad_scope.get("error")),
     )
 
+    never = await _call(registry, "weekly_progress_coverage", scope="never_reported", limit=200)
+    never_rows = never.get("rows") or []
+    check(
+        # 基线答的 9 来自 freshness 的「4 从未报进展」档（按 latest_progress_time
+        # 判空）；金标 55 按 NOT EXISTS 判，两者差的 46 条全在集团看板。
+        "B7-03 从未报进展 55 条 = 正式任务 128 - 有进展 73",
+        str(never.get("total_count")) == "55" and len(never_rows) == 55,
+        f"total={never.get('total_count')} rows={len(never_rows)}",
+    )
+    check(
+        "B7-03 其中 46 条在集团历史表报过，真正两张表都没报的是 9 条",
+        sum(1 for r in never_rows if r.get("has_group_history")) == 46
+        and sum(1 for r in never_rows if not r.get("has_group_history")) == 9,
+        str([r.get("has_group_history") for r in never_rows]),
+    )
+    check(
+        "B7-03 caliber 点明不能用 latest_progress_time 判空（那样只得 9）",
+        "latest_progress_time" in str(never.get("caliber")) and "9" in str(never.get("caliber")),
+        str(never.get("caliber")),
+    )
+    covered = await _call(registry, "weekly_progress_coverage", scope="summary")
+    check(
+        # 两档必须同一套「进展」定义，否则 55 + 73 对不上 128。
+        "B7-03 与 summary 同源：tasks_covered 73 且 943 期进展",
+        str(_first(covered, "tasks_covered")) == "73" and str(_first(covered, "progress_rows")) == "943",
+        str(covered.get("rows")),
+    )
+
     return report()
 
 
