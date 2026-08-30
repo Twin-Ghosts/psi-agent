@@ -214,6 +214,7 @@ async def weekly_workflow_query(
     action: str = "",
     board: str = "",
     by_task: bool = False,
+    scope: str = "",
     limit: int = 200,
 ) -> str:
     """Trace the approval action LOG (who did what, at which node).
@@ -237,6 +238,15 @@ async def weekly_workflow_query(
         board: Board code or name to scope the log.
         by_task: True returns action_count per task (次数, not 任务数) instead of
             the action rows.
+        scope: Empty for the log itself. "by_node_action" counts every node_type +
+            action pair, one row each: the same approved appears separately at the
+            audit, leader and sign nodes, so grouping by action alone collapses 955
+            approvals into one bucket and cannot say which node rejects most. Do
+            not count the listing by hand -- the log holds 1578 rows against a
+            200-row cap, so a hand count only ever sees the first page.
+            "actions_per_task" returns the average action count (10.52) with its
+            numerator 1578 and denominator 150 -- the denominator is the tasks that
+            have actions, not the 128 published ones.
         limit: Max rows to return, capped at 200.
     """
     try:
@@ -250,6 +260,7 @@ async def weekly_workflow_query(
             "action": action,
             "board": board,
             "by_task": bool(by_task),
+            "scope": scope,
             "limit": bounded,
         },
     )
@@ -289,6 +300,25 @@ async def weekly_submission_query(
             at 200, so a hand count sees only the first page. This scope keeps the
             soft-delete gate only; adding the publish gate would shrink it to
             310/128 and drop the forms belonging to the 22 unpublished tasks.
+            "inflight_count" returns the in-flight total (61) and the tasks holding
+            them; "inflight_by_board" splits that by board and status (rejected is
+            one of the in-flight states -- omitting it undercounts every board);
+            "inflight_multi" lists the tasks carrying more than one in-flight form.
+            "sign_summary" answers "how many need countersigning" -- 155 need_sign
+            against 307 that do not, summing to 462. That is a different question
+            from status = 'signing', which is the 9 currently at the sign node; do
+            not answer one with the other. "by_signer" gives per-signer counts with
+            blank signers excluded, since a blank means no signer was assigned
+            rather than someone who signed nothing. "sign_turnaround" gives the
+            average days by need_sign over completed forms only (274 rows at 14.5
+            days versus 128 at 14.7) -- unfinished forms have no duration, so the
+            two groups sum to 402, not 462. "rounds_per_task" gives the average
+            rounds (3.08 = 462 / 150) with both numerator and denominator.
+            "published_vs_progress" returns the published progress FORMS (272)
+            beside the published progress ROWS (943), which live in different
+            tables under different gates -- counting initial forms too gives 400,
+            which answers a different question, and folding in the group board's
+            task_group_progress_history gives 1305.
             "external_ids" reports how many
             forms carry each O2OA identifier (o2_process_id / o2_work_id /
             o2_task_id) -- the three fill rates differ, so one cannot stand in

@@ -654,6 +654,7 @@ def weekly_workflow_query(
     action: str = "",
     board: str = "",
     by_task: bool = False,
+    scope: str = "",
     limit: int = 200,
     ctx: Context | None = None,
 ) -> str:
@@ -666,11 +667,54 @@ def weekly_workflow_query(
             filter nothing and the full log would pass as a filtered set.
         board: Board code or name to scope by. "集团看板哪些任务被驳回过" needs it.
         by_task: True aggregates per task into action_count instead of listing rows.
+        scope: ``by_node_action`` counts every node_type + action pair in one row
+            each; ``actions_per_task`` returns the average action count with its
+            numerator and denominator.  Either beats counting a truncated listing:
+            the log holds 1578 rows and the listing stops at 200.
         limit: Max rows, capped at 200.
     """
     may_read = _caller_may_read_sensitive(ctx)
 
     def work() -> dict[str, Any]:
+        bounded_flow = max(1, min(store.MAX_ROWS, int(limit)))
+        scope_key = (scope or "").strip().lower()
+        if scope_key not in _WORKFLOW_SCOPES:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported_scope",
+                    "message": f"不支持的口径：{scope}；支持 {', '.join(s or '(空)' for s in _WORKFLOW_SCOPES)}",
+                },
+            }
+        if scope_key == "by_node_action":
+            # node_type 与 action 是两列，必须两维一起分档：同一个 approved
+            # 在 audit / leader / sign 三个节点各有一份，只按 action 分会把
+            # 955 条 approved 揉成一档，答不了「哪个节点驳回得多」。
+            return store.fetch(
+                "SELECT a.node_type, a.action, COUNT(*) AS action_count "
+                "FROM task_workflow_action a JOIN task t ON t.id = a.task_id "
+                "WHERE t.is_deleted = 0 GROUP BY a.node_type, a.action "
+                "ORDER BY action_count DESC, a.node_type, a.action",
+                caliber=(
+                    "仅 t.is_deleted = 0（动作日志跨发布状态，不加发布闸门）；"
+                    "按 node_type + action 两维分档，同一个 action 在不同节点分别计数，"
+                    "各档相加等于动作总数 1578；条数由服务端聚合，"
+                    "不要翻明细自己数——日志 1578 条而清单封顶 200 行"
+                ),
+                limit=bounded_flow,
+            )
+        if scope_key == "actions_per_task":
+            return store.fetch(
+                "SELECT ROUND(COUNT(*) / COUNT(DISTINCT a.task_id), 2) AS avg_actions, "
+                "COUNT(*) AS total_actions, COUNT(DISTINCT a.task_id) AS tasks "
+                "FROM task_workflow_action a JOIN task t ON t.id = a.task_id "
+                "WHERE t.is_deleted = 0",
+                caliber=(
+                    "仅 t.is_deleted = 0；分母是有动作记录的任务数（COUNT DISTINCT task_id = 150），"
+                    "不是已发布任务数 128；1578 / 150 = 10.52，分子分母一并给出以便核对"
+                ),
+                limit=1,
+            )
         params: dict[str, Any] = {}
         where = ["1 = 1"]
         caliber_extra: list[str] = []
@@ -1074,7 +1118,22 @@ def weekly_submission_query(
         status_mismatch: True 只保留「任务 workflow_status 与其最新一轮提交单状态
             disagrees with its newest submission's status, one row per task. The two
             are separate vocabularies, so the comparison happens server-side.
-        scope: ``external_ids`` fill rates for the three O2OA identifier columns
+        scope: Server-side aggregates.  Prefer one of these over reading the
+            listing back and counting rows by hand: the listing caps at 200, so a
+            hand count only ever sees the first page.
+            ``by_kind`` initial vs progress counts.
+            ``inflight_count`` in-flight total and the tasks holding them.
+            ``inflight_by_board`` in-flight split by board and status.
+            ``inflight_multi`` tasks carrying more than one in-flight form.
+            ``sign_summary`` need_sign vs not, a different question from
+            status = 'signing'.
+            ``by_signer`` per-signer counts, blank signer excluded.
+            ``sign_turnaround`` average days by need_sign, completed forms only.
+            ``rounds_per_task`` average submission rounds, numerator and
+            denominator both returned.
+            ``published_vs_progress`` published progress forms against published
+            progress rows, which live in different tables.
+            ``external_ids`` fill rates for the three O2OA identifier columns
             (o2_process_id / o2_work_id / o2_task_id), which the row listing does
             not carry. ``inflight_external`` counts in-flight submissions holding
             an external process id. Empty returns the ordinary listing.
@@ -1091,6 +1150,8 @@ def weekly_submission_query(
                     "message": f"不支持的口径：{scope}；支持 {', '.join(s or '(空)' for s in _SUBMISSION_SCOPES)}",
                 },
             }
+
+        bounded_sub = max(1, min(store.MAX_ROWS, int(limit)))
 
         if scope_key == "by_kind":
             # 提交单一律只加软删闸门，不加任务发布闸门：在途任务的提交单同样是
@@ -1126,6 +1187,124 @@ def weekly_submission_query(
                     "o2_process_id / o2_work_id / o2_task_id 是 O2OA 侧的外部标识，"
                     "三列填充率互不相同，不要用其中一列代答另一列；"
                     "缺失率已按 total 算好，直接引用 missing_task_id_pct"
+                ),
+                limit=1,
+            )
+
+        if scope_key in {"inflight_count", "inflight_by_board", "inflight_multi"}:
+            # 三档共用同一套在途枚举，只是聚合粒度不同。枚举而非取反：
+            # cancelled 那张单既未发布也不在途，status <> 'published' 会多算 1 张。
+            placeholders = ", ".join(f"%(f{i})s" for i in range(len(_SUBMISSION_INFLIGHT)))
+            flight_params: dict[str, Any] = {f"f{i}": value for i, value in enumerate(_SUBMISSION_INFLIGHT)}
+            gate = (
+                f"在途 = status IN ({', '.join(_SUBMISSION_INFLIGHT)})，按成员枚举而非取反"
+                "（cancelled 既未发布也不在途）；仅 t.is_deleted = 0，不加任务发布闸门"
+            )
+            if scope_key == "inflight_count":
+                return store.fetch(
+                    "SELECT COUNT(*) AS inflight_submissions, COUNT(DISTINCT s.task_id) AS tasks "
+                    "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+                    f"WHERE t.is_deleted = 0 AND s.status IN ({placeholders})",
+                    flight_params,
+                    caliber=f"{gate}；总数 61 由服务端聚合，不要翻明细自己数（清单封顶 200 行）",
+                    limit=1,
+                )
+            if scope_key == "inflight_by_board":
+                # 按看板 + 状态两维分档：rejected 也是在途的一档，漏掉它
+                # 各看板就都少算（group 少 4、tech 少 9）。
+                return store.fetch(
+                    "SELECT b.code AS board_code, s.status, COUNT(*) AS submission_count "
+                    "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+                    "JOIN task_board b ON b.id = t.board_id AND b.is_deleted = 0 "
+                    f"WHERE t.is_deleted = 0 AND s.status IN ({placeholders}) "
+                    "GROUP BY b.code, s.status ORDER BY b.code, s.status",
+                    flight_params,
+                    caliber=(
+                        f"{gate}；按看板 + 状态两维分档，rejected 同属在途，各档相加等于在途总数 61；空档不出现即为 0"
+                    ),
+                    limit=bounded_sub,
+                )
+            return store.fetch(
+                "SELECT t.id AS task_id, t.task_name, COUNT(*) AS pending_submissions "
+                "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+                f"WHERE t.is_deleted = 0 AND s.status IN ({placeholders}) "
+                "GROUP BY t.id, t.task_name HAVING pending_submissions > 1 "
+                "ORDER BY pending_submissions DESC, t.id",
+                flight_params,
+                caliber=(
+                    f"{gate}；HAVING COUNT(*) > 1 判「同时挂多张在途单」，服务端已聚合，不要按任务逐个调清单去比对"
+                ),
+                limit=bounded_sub,
+            )
+
+        if scope_key in {"sign_summary", "by_signer", "sign_turnaround"}:
+            if scope_key == "sign_summary":
+                return store.fetch(
+                    "SELECT SUM(s.need_sign = 1) AS need_sign, SUM(s.need_sign = 0) AS no_sign, "
+                    "COUNT(*) AS total FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+                    "WHERE t.is_deleted = 0",
+                    caliber=(
+                        "仅 t.is_deleted = 0；need_sign 是「这张单要不要会签」的标记，"
+                        "155 + 307 = 462 等于提交单总数；它与 status = 'signing'（正在会签，9 张）"
+                        "是两个问题，不要拿在途的 signing 张数答「有多少需要会签」"
+                    ),
+                    limit=1,
+                )
+            if scope_key == "by_signer":
+                # signer_name 为空的不算：那是「没有会签人」不是某个人签了 0 单。
+                return store.fetch(
+                    "SELECT s.signer_name, COUNT(*) AS signed_count "
+                    "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+                    "WHERE t.is_deleted = 0 AND s.signer_name IS NOT NULL "
+                    "GROUP BY s.signer_name ORDER BY signed_count DESC, s.signer_name",
+                    caliber=(
+                        "仅 t.is_deleted = 0 且 signer_name 非空（空值是「没有会签人」，"
+                        "不是某人签了 0 单）；9 位会签人一次列全，人数与条数都由服务端算"
+                    ),
+                    limit=bounded_sub,
+                )
+            # 会签是否更慢：分母只含已完结的单，未完结的没有耗时可算。
+            return store.fetch(
+                "SELECT s.need_sign, COUNT(*) AS n, "
+                "ROUND(AVG(DATEDIFF(s.completed_at, s.submitted_at)), 1) AS avg_days "
+                "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+                "WHERE t.is_deleted = 0 AND s.completed_at IS NOT NULL AND s.submitted_at IS NOT NULL "
+                "GROUP BY s.need_sign ORDER BY s.need_sign",
+                caliber=(
+                    "仅 t.is_deleted = 0 且已完结（completed_at 与 submitted_at 均非空）；"
+                    "未完结的单没有耗时，不进分母，所以 n 相加 402 小于总数 462；"
+                    "两档均值 14.5 与 14.7 由全量算出，不要拿清单前 200 行的样本均值代答"
+                ),
+                limit=2,
+            )
+
+        if scope_key == "rounds_per_task":
+            return store.fetch(
+                "SELECT ROUND(COUNT(*) / COUNT(DISTINCT s.task_id), 2) AS avg_rounds, "
+                "COUNT(*) AS total_submissions, COUNT(DISTINCT s.task_id) AS tasks "
+                "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+                "WHERE t.is_deleted = 0",
+                caliber=(
+                    "仅 t.is_deleted = 0；分母是有提交单的任务数（COUNT DISTINCT task_id = 150），"
+                    "不是全部任务数也不是已发布任务数 128；462 / 150 = 3.08，"
+                    "分子分母一并给出以便核对，不要自己拿别处的任务数去除"
+                ),
+                limit=1,
+            )
+
+        if scope_key == "published_vs_progress":
+            # 两个数各有自己的表和闸门，一次给全，避免模型跨两次调用对不上口径。
+            return store.fetch(
+                "SELECT (SELECT COUNT(*) FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+                "WHERE t.is_deleted = 0 AND s.status = 'published' AND s.submission_kind = 'progress') "
+                "AS published_progress_submissions, "
+                "(SELECT COUNT(*) FROM task_progress p JOIN task t ON t.id = p.task_id "
+                "WHERE t.is_deleted = 0 AND p.is_published = 1) AS published_progress_rows",
+                caliber=(
+                    "两个数不同表不同闸门：已发布进展提交单 272 只数 submission_kind = 'progress' 的单"
+                    "（含 initial 会变 400，那答的是另一个问题）；已发布进展行 943 在 task_progress 上"
+                    "按 p.is_published = 1 计；集团组的 task_group_progress_history 是第三张表，"
+                    "不并入这 943，加进来会得到 1305"
                 ),
                 limit=1,
             )
@@ -1560,10 +1739,27 @@ _LATEST_PROGRESS_CTE = (
     "FROM task_progress p WHERE p.is_published = 1)"
 )
 
+# 动作日志的聚合口径。日志 1578 条而清单封顶 200 行，所以「各节点各动作多少条」
+# 和「人均多少次动作」都必须服务端算完再回，模型翻明细自己数必然只数到第一页。
+_WORKFLOW_SCOPES = ("", "by_node_action", "actions_per_task")
+
 # 提交单的附加口径。空串走通用清单；两个 external 口径专门回答 O2OA 外部标识
 # （o2_process_id / o2_work_id / o2_task_id）填得全不全，这三列此前没有任何
 # 工具能取到，模型只能答「取不到」。
-_SUBMISSION_SCOPES = ("", "by_kind", "external_ids", "inflight_external")
+_SUBMISSION_SCOPES = (
+    "",
+    "by_kind",
+    "inflight_count",
+    "inflight_by_board",
+    "inflight_multi",
+    "sign_summary",
+    "by_signer",
+    "sign_turnaround",
+    "rounds_per_task",
+    "published_vs_progress",
+    "external_ids",
+    "inflight_external",
+)
 
 # 「在途」的成员必须列举，不能写成 status <> 'published'：cancelled 那 1 张单
 # 既不是已发布也不在途，用取反会把它算进来（60 vs 59，negation_includes_cancelled）。
@@ -1681,6 +1877,8 @@ _GROUP_HISTORY_GROUPINGS: dict[str, tuple[str, str]] = {
     # 滞报榜按任务给最后一次上报距快照日的天数。放进分组白名单而不是单独开
     # 工具：问的仍是这张历史表的分面，只是聚合出的是 lag 而非条数。
     "lag": ("t.id", "lag_days DESC, bucket"),
+    # 与提交单的挂接率。同样是这张表的分面，聚合出的是填充数而非条数。
+    "linkage": ("t.id", "bucket"),
 }
 
 _YEAR_GOAL_SCOPES = ("by_year", "coverage", "missing", "missing_by_group", "span", "multi_year")
@@ -3296,6 +3494,9 @@ def weekly_group_history(
         by: Empty lists rows; ``year`` / ``month`` / ``quarter`` / ``task`` /
             ``reporter`` returns counts per group. ``lag`` ranks tasks by how
             many days since their last report -- use it for "谁最久没报".
+            ``linkage`` counts how many rows carry a workflow_submission_id, over
+            all 404 rows rather than the 362 published ones, since the question is
+            a fill rate.
         latest_only: Keep only each task's newest published version.
         date_from: Inclusive start on ``report_time``, YYYY-MM-DD.
         date_to: Inclusive end on ``report_time``, YYYY-MM-DD.
@@ -3433,6 +3634,29 @@ def weekly_group_history(
             )
             rows["total_tasks"] = total["value"]
             return rows
+
+        if grouping == "linkage":
+            # 这一档故意不加 is_published 闸门：问的是「有多少行挂上了提交单」，
+            # 分母该是表里全部 404 行，用过闸的 362 行会把 42 条草稿的挂接状况
+            # 一起丢掉。两个数都回，并写明哪个是哪个。
+            bare = " AND ".join(w for w in where if "h.is_published" not in w)
+            return store.fetch(
+                "SELECT COUNT(*) AS total_rows, "
+                "SUM(h.workflow_submission_id IS NOT NULL) AS linked_rows, "
+                "SUM(h.workflow_submission_id IS NULL) AS unlinked_rows, "
+                "SUM(h.is_published = 1) AS published_rows "
+                f"FROM task_group_progress_history h {joins} WHERE {bare}",
+                params,
+                caliber=(
+                    "任务侧 is_deleted = 0 AND workflow_status = 'published'，"
+                    "但本档不加历史行的 is_published 闸门：问的是挂接率，"
+                    "分母该是表内全部 404 行（过闸的 362 行会漏掉 42 条草稿的挂接状况）；"
+                    "linked_rows 按 workflow_submission_id 非空判定，"
+                    "0 即这张表整体没有与提交单挂接，不是查不到——"
+                    "集团组的成效历史独立于审批提交单，两者没有外键落库"
+                ),
+                limit=1,
+            )
 
         select = f"{expression} AS bucket, COUNT(*) AS progress_count"
         if grouping not in ("task",):

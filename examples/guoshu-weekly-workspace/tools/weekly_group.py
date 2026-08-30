@@ -129,6 +129,12 @@ async def weekly_group_history(
             任务最久没报", and read lag_days rather than deriving it from dates.
             Tasks that never reported are absent from that ranking by definition;
             total_tasks counts the ones on it, not the whole board.
+            linkage counts how many history rows carry a workflow_submission_id.
+            It deliberately drops the row-level publish gate: a fill rate needs all
+            404 rows as its denominator, and the 362 published ones would hide how
+            the 42 drafts are linked. linked_rows comes back as 0, which means this
+            table simply has no link to the submission forms -- report that, do not
+            read it as a lookup failure or retry with other parameters.
         latest_only: Keep only each task's newest published period.
         date_from: Inclusive start on report time, YYYY-MM-DD.
         date_to: Inclusive end on report time, YYYY-MM-DD.

@@ -21,7 +21,7 @@ export GUOSHU_WEEKLY_MCP_TOKEN=demo-token
 python tests/smoke_test.py
 ```
 
-预期 `248/248 passed`。
+预期 `265/265 passed`。
 
 ## 数据层准备
 
@@ -91,7 +91,7 @@ guoshu-weekly-workspace/
 │   ├── _store.py              # 只读查询层 + 口径规则 + 字段管控
 │   └── server.py              # 31 个语义化取数工具（Streamable HTTP MCP）
 └── tests/
-    ├── smoke_test.py          # 248 条契约断言，不花模型 token
+    ├── smoke_test.py          # 265 条契约断言，不花模型 token
     └── baseline.py            # 396 题准确率基线（LLM 判定）
 ```
 
@@ -112,8 +112,8 @@ guoshu-weekly-workspace/
 | `weekly_task_ranking` | 按子表计数排名（附件/进展/里程碑/提交单） |
 | `weekly_rank` | 排名并列口径三选一：硬切 N 条 / 保留并列 / 每组各自第一，可限定看板并回显 `total_count` |
 | `weekly_milestone_query` | 里程碑清单（已复核正式任务口径），单任务按 `sort_order` 编排 |
-| `weekly_workflow_query` | 审批动作流水（谁在哪个环节做了什么），可按 action/看板过滤、按任务聚合次数 |
-| `weekly_submission_query` | 审批提交单（`round_no` / `status` / 填报人），可查任务状态与最新单状态不一致；**按类型分档**（initial / progress）、O2OA 外部标识填充率、在途单（按成员枚举而非取反） |
+| `weekly_workflow_query` | 审批动作流水（谁在哪个环节做了什么），可按 action/看板过滤、按任务聚合次数；**按环节+动作两维分档**、人均动作数（分子分母同回） |
+| `weekly_submission_query` | 审批提交单（`round_no` / `status` / 填报人），可查任务状态与最新单状态不一致；**按类型分档**（initial / progress）、O2OA 外部标识填充率、在途单（按成员枚举而非取反）、**在途总数/按看板分档/一任务多单**、**会签需求与按人分档/会签耗时对比**、人均轮次、已发布进展单 vs 已发布进展行 |
 | `weekly_owner_roles` | 按角色分别计数（as_owner / as_lead / any_role） |
 | `weekly_person_stats` | 人员统计（任务量/人均/独苗/跨组/双角色/标识写法/填报人/审核人/自审） |
 | `weekly_attachment_stats` | 附件统计（容量/类型/最大/上传人/挂载去向/**零附件任务清单**/在途提交单/逐月/软删/孤儿） |
@@ -127,7 +127,7 @@ guoshu-weekly-workspace/
 | `weekly_approval_turnaround` | 审批时效（汇总/按看板/最慢/待审积压） |
 | `weekly_group_detail_query` | 集团组明细（目标成果/实施举措/进度成效/完成时间文本/多值负责人），可按 `status` 与 `non_empty` 交叉筛矛盾数据 |
 | `weekly_group_owner_query` | 集团组按牵头人或项目负责人查任务（多值精确匹配） |
-| `weekly_group_history` | 集团组历史进展（专表，可按年/月/季/任务/填报人/**滞报天数**分组，天窗可用 `last_days` 或**日历月** `last_months`） |
+| `weekly_group_history` | 集团组历史进展（专表，可按年/月/季/任务/填报人/**滞报天数**/**提交单挂接率**分组，天窗可用 `last_days` 或**日历月** `last_months`） |
 | `weekly_group_stats` | 集团组统计（负责人构成/分隔符写法/一栏几人/完成时间**写法分档**与去重取值/字数/附件/期数/成效一致性） |
 | `weekly_year_goal_query` | 年度目标条目（按任务/年份，带里程碑摘要） |
 | `weekly_year_goal_stats` | 年度目标统计（分年/覆盖率/缺口，可限在办/缺口分组/跨年跨度/连续设标） |
@@ -192,6 +192,15 @@ agent 据此给出依据、也据此判断不可答。
 | 提交单不加任务发布闸门 | `by_kind` 得 312 progress + 150 initial = 462；加上发布闸门会缩成 310/128，把未发布任务的提交单一起吞掉。在途任务的提交单同样是提交单 |
 | 「一个都没有」用 `NOT EXISTS` 一次列全 | `zero_attachment` 直接给 22 条零附件任务，并另给分母 128；缺这一档时模型只能对 128 个任务逐个调 `weekly_attachment_query` 看谁返回空 |
 | 看板在 `task` 上不在附件行上 | 按看板筛附件必须 JOIN 回 task（`weekly_attachment_query` 的 `board` 参数），并顺带带出 `task_name`；否则「集团组有哪些附件」只能按 46 个任务逐个调，还算不出看板总数 52 |
+| 计数题一律服务端聚合，不许翻清单手数 | 清单封顶 200 行，手数只看得到第一页——基线里模型自己写过「无法精确求出全库总数」。在途 61、动作 1578、集团历史 404 都远超 200，所以各自都有一次成型的聚合档 |
+| 「需会签」与「正在会签」是两个问题 | `sign_summary` 的 `need_sign = 1` 有 155 张（另 307 张不需，合计 462），而在途 `status = 'signing'` 只有 9 张；拿后者答前者会少一个量级 |
+| `rejected` 也是在途的一档 | `inflight_by_board` 九档相加等于 61；漏掉 `rejected` 则集团组少 4、技术组少 9 |
+| 耗时均值只算已完结的单 | `sign_turnaround` 要求 `completed_at` 与 `submitted_at` 均非空，两档 274 + 128 = 402 小于总数 462；未完结的单没有耗时，硬塞进分母会把均值拉低 |
+| 会签人空值是「没有会签人」 | `by_signer` 排除 `signer_name IS NULL`：空值不代表某人签了 0 单，混进来会多出一个不存在的「人」 |
+| 人均类指标分子分母同回 | `rounds_per_task` 3.08 = 462 / 150、`actions_per_task` 10.52 = 1578 / 150，分母都是「有记录的任务数」而非已发布的 128；只回均值时模型会自己拿别处的任务数去除 |
+| 同一动作在不同环节各自计数 | `by_node_action` 按 `node_type` + `action` 两维分 6 档；只按 `action` 分会把 955 条 `approved` 揉成一档，答不了「哪个环节驳回得多」（`audit/rejected` 13） |
+| 已发布进展「单」与「行」不同表 | 提交单侧 272（只数 `submission_kind = 'progress'`，含 initial 会变 400），`task_progress` 侧 943；再并入集团组专表会得到 1305，三个数答的是三个问题 |
+| 挂接率的分母不加行级发布闸门 | `by=linkage` 走全部 404 行而非过闸的 362 行；`linked_rows = 0` 是结论——集团成效历史与审批提交单没有外键落库，不是查不到 |
 
 ### 相对时间窗以快照日为基准
 
@@ -227,7 +236,7 @@ R-04/R-14 要的是「按权限返回」。一律遮蔽同样不满足需求—�
 | 数据权限 | 敏感字段按 token 两档分级 | 按 OA 真实身份做行级权限 |
 | 前端 | 无（经 psi-agent 既有接口） | 专建对话应用 + BFF（方案第六章） |
 | 材料生成 | 无 | 报告下载与图表（P1，第 5 期） |
-| 评测 | 248 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
+| 评测 | 265 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
 
 ### mock 数据层的两处不可外推
 

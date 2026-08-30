@@ -2004,6 +2004,136 @@ async def run() -> int:
         f"{_first(big, 'file_name')} {_first(big, 'file_size')}",
     )
 
+    # A8. 病灶是「从被截断的 200 行清单里手数」——模型自己都写过「无法精确求出
+    # 全库总数」。以下各档一律服务端聚合完再回，断言盯的是数字本身与分母口径。
+    ifc = await _call(registry, "weekly_submission_query", scope="inflight_count")
+    check(
+        "I3-01 在途提交单 61 张、分布在 55 个任务上",
+        str(_first(ifc, "inflight_submissions")) == "61" and str(_first(ifc, "tasks")) == "55",
+        str(ifc.get("rows")),
+    )
+    ifb = await _call(registry, "weekly_submission_query", scope="inflight_by_board")
+    ifb_rows = {(r.get("board_code"), r.get("status")): r.get("submission_count") for r in ifb.get("rows") or []}
+    check(
+        "I3-02 在途按看板 + 状态两维分 9 档，rejected 同属在途（group 4 / tech 9）",
+        ifb.get("row_count") == 9
+        and str(ifb_rows.get(("group", "rejected"))) == "4"
+        and str(ifb_rows.get(("tech", "rejected"))) == "9"
+        and str(ifb_rows.get(("group", "pending_audit"))) == "14"
+        and str(ifb_rows.get(("tech", "pending_leader"))) == "10",
+        str(ifb.get("rows")),
+    )
+    check(
+        "I3-02 各档相加等于在途总数 61（漏掉任一档即少算）",
+        sum(int(v) for v in ifb_rows.values()) == 61,
+        str(sorted(ifb_rows.items())),
+    )
+    ifm = await _call(registry, "weekly_submission_query", scope="inflight_multi")
+    check(
+        "I3-02 同时挂 2 张在途单的任务 6 个，服务端 HAVING 判定",
+        ifm.get("row_count") == 6 and all(str(r.get("pending_submissions")) == "2" for r in ifm.get("rows") or []),
+        str([r.get("task_id") for r in ifm.get("rows") or []]),
+    )
+    sgs = await _call(registry, "weekly_submission_query", scope="sign_summary")
+    check(
+        "I4-01 需会签 155 / 不需 307 / 合计 462",
+        str(_first(sgs, "need_sign")) == "155"
+        and str(_first(sgs, "no_sign")) == "307"
+        and str(_first(sgs, "total")) == "462",
+        str(sgs.get("rows")),
+    )
+    check(
+        # need_sign 是标记、signing 是当前节点，两者答的不是一个问题。
+        "I4-01 need_sign 不等于在途 signing 的 9 张（两套口径已在 caliber 里点明）",
+        "signing" in str(sgs.get("caliber")),
+        str(sgs.get("caliber")),
+    )
+    bys = await _call(registry, "weekly_submission_query", scope="by_signer")
+    check(
+        "I4-02 会签人 9 位，罗小川 29 单居首、郑亚楠 1 单垫底",
+        bys.get("row_count") == 9
+        and str(_first(bys, "signer_name")) == "罗小川"
+        and str(_first(bys, "signed_count")) == "29"
+        and all(str(r.get("signer_name") or "") for r in bys.get("rows") or []),
+        str([(r.get("signer_name"), r.get("signed_count")) for r in bys.get("rows") or []]),
+    )
+    sgt = await _call(registry, "weekly_submission_query", scope="sign_turnaround")
+    sgt_rows = {str(r.get("need_sign")): (r.get("n"), r.get("avg_days")) for r in sgt.get("rows") or []}
+    check(
+        "I4-03 会签耗时 128 单 14.7 天 vs 不会签 274 单 14.5 天，未完结的不进分母",
+        sgt.get("row_count") == 2
+        and str(sgt_rows.get("1")) == "(128, '14.7')"
+        and str(sgt_rows.get("0")) == "(274, '14.5')",
+        str(sgt.get("rows")),
+    )
+    check(
+        "I4-03 两档相加 402 < 462，caliber 已写明未完结不计",
+        sum(int(v[0]) for v in sgt_rows.values()) == 402 and "402" in str(sgt.get("caliber")),
+        str(sgt.get("caliber")),
+    )
+    rpt = await _call(registry, "weekly_submission_query", scope="rounds_per_task")
+    check(
+        "I5-01 人均提交轮次 3.08 = 462 / 150，分子分母一并回",
+        str(_first(rpt, "avg_rounds")) == "3.08"
+        and str(_first(rpt, "total_submissions")) == "462"
+        and str(_first(rpt, "tasks")) == "150",
+        str(rpt.get("rows")),
+    )
+    pvp = await _call(registry, "weekly_submission_query", scope="published_vs_progress")
+    check(
+        "I5-02 已发布进展提交单 272 vs 已发布进展行 943（两表两闸门）",
+        str(_first(pvp, "published_progress_submissions")) == "272"
+        and str(_first(pvp, "published_progress_rows")) == "943",
+        str(pvp.get("rows")),
+    )
+    bna = await _call(registry, "weekly_workflow_query", scope="by_node_action")
+    bna_rows = {(r.get("node_type"), r.get("action")): r.get("action_count") for r in bna.get("rows") or []}
+    check(
+        "I3-03 动作按 node_type + action 分 6 档，approved 在三个节点各自计数",
+        bna.get("row_count") == 6
+        and str(bna_rows.get(("fill", "submitted"))) == "460"
+        and str(bna_rows.get(("audit", "approved"))) == "400"
+        and str(bna_rows.get(("leader", "approved"))) == "400"
+        and str(bna_rows.get(("sign", "approved"))) == "155"
+        and str(bna_rows.get(("admin", "created"))) == "150"
+        and str(bna_rows.get(("audit", "rejected"))) == "13",
+        str(bna.get("rows")),
+    )
+    check(
+        "I3-03 各档相加等于动作总数 1578",
+        sum(int(v) for v in bna_rows.values()) == 1578,
+        str(sorted(bna_rows.items())),
+    )
+    apt = await _call(registry, "weekly_workflow_query", scope="actions_per_task")
+    check(
+        "I3-04 人均动作 10.52 = 1578 / 150，分母是有动作的任务数而非 128",
+        str(_first(apt, "avg_actions")) == "10.52"
+        and str(_first(apt, "total_actions")) == "1578"
+        and str(_first(apt, "tasks")) == "150",
+        str(apt.get("rows")),
+    )
+    lnk = await _call(registry, "weekly_group_history", by="linkage")
+    check(
+        "I8-03 集团成效历史 404 行全部未挂提交单（linked 0），分母不是过闸的 362",
+        str(_first(lnk, "total_rows")) == "404"
+        and str(_first(lnk, "linked_rows")) == "0"
+        and str(_first(lnk, "unlinked_rows")) == "404"
+        and str(_first(lnk, "published_rows")) == "362",
+        str(lnk.get("rows")),
+    )
+    check(
+        # 0 必须被读成「确实没有挂接」，不能被读成「查不到」。
+        "I8-03 caliber 明说 0 即没有挂接，不是查不到",
+        "不是查不到" in str(lnk.get("caliber")),
+        str(lnk.get("caliber")),
+    )
+    badflow = await _call(registry, "weekly_workflow_query", scope="by_action")
+    check(
+        "A8 动作侧错 scope 报 unsupported_scope 并列出值域，而非静默返回全量日志",
+        badflow.get("ok") is False and badflow.get("error", {}).get("code") == "unsupported_scope",
+        str(badflow.get("error")),
+    )
+
     return report()
 
 
