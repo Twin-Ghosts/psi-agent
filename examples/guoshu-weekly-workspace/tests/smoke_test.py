@@ -2296,6 +2296,126 @@ async def run() -> int:
         str(covered.get("rows")),
     )
 
+    split = await _call(registry, "weekly_progress_coverage", scope="publish_split")
+    check(
+        # 基线答的 945/1068 是不加任务闸门的数，两处分别取再相加就会落到那组。
+        "C6-01 已发布/未发布/合计一行给全：943 + 123 = 1066",
+        str(_first(split, "published")) == "943"
+        and str(_first(split, "unpublished")) == "123"
+        and str(_first(split, "total")) == "1066",
+        str(split.get("rows")),
+    )
+    check(
+        "C6-01 caliber 点明去掉任务闸门得 945/1068",
+        "945" in str(split.get("caliber")) and "1068" in str(split.get("caliber")),
+        str(split.get("caliber")),
+    )
+    check(
+        # 943 必须与 summary 的 progress_rows 同源，否则同一个数两处不一致。
+        "C6-01 published 与 summary 的 progress_rows 一致",
+        str(_first(split, "published")) == str(_first(covered, "progress_rows")),
+        f"split={_first(split, 'published')} summary={_first(covered, 'progress_rows')}",
+    )
+
+    unpub = await _call(registry, "weekly_progress_coverage", scope="unpublished", limit=50)
+    unpub_rows = unpub.get("rows") or []
+    rejected = next((r for r in unpub_rows if r.get("status") == 2), {})
+    check(
+        # 「多少条、涉及多少任务」一句话两个数；只给 cnt 的话 33 无处可取。
+        "C6-04 驳回 39 行涉及 33 条任务，两个数同一行",
+        str(rejected.get("cnt")) == "39" and str(rejected.get("task_count")) == "33",
+        str(rejected),
+    )
+    check(
+        "C6-04 三档 cnt 相加等于 total_count 123",
+        sum(int(r.get("cnt") or 0) for r in unpub_rows) == 123 and str(unpub.get("total_count")) == "123",
+        str([r.get("cnt") for r in unpub_rows]),
+    )
+    check(
+        # task_count 不可相加：22 + 47 + 33 = 102，而去重后只有 72 条任务。
+        "C6-04 caliber 点明各档 task_count 不可相加（去重后 72 条）",
+        "不可相加" in str(unpub.get("caliber")) and "72" in str(unpub.get("caliber")),
+        str(unpub.get("caliber")),
+    )
+
+    pending = await _call(registry, "weekly_progress_coverage", scope="pending_review", limit=8)
+    pending_rows = pending.get("rows") or []
+    check(
+        # 金标按 report_time 倒序取 8；unpublished 那档只给「待审核 58 条」一个数。
+        "C6-03 待审核清单按 report_time 倒序，首行为 48 号任务 08-01 18:10",
+        len(pending_rows) == 8
+        and pending_rows[0].get("task_id") == 48
+        and str(pending_rows[0].get("report_time")) == "2026-08-01 18:10:00"
+        and str(pending.get("total_count")) == "58",
+        str(pending_rows[:1]),
+    )
+    check(
+        # 「对外还是上一期」这半句得有 public_version 才对得上。
+        "C6-03 带对外可见期号：4 号任务压着 19 期、对外 18 期",
+        any(
+            r.get("task_id") == 4 and r.get("pending_version") == 19 and r.get("public_version") == 18
+            for r in pending_rows
+        ),
+        str([(r.get("task_id"), r.get("pending_version"), r.get("public_version")) for r in pending_rows]),
+    )
+    check(
+        # 48 号首期就卡在审核，对外一期都没有，不能当成「上一期」。
+        "C6-03 48 号 public_version 为空（首期即卡审核，对外一期都没有）",
+        pending_rows[0].get("public_version") is None and "为空" in str(pending.get("caliber")),
+        str(pending_rows[0]),
+    )
+
+    flight = await _call(registry, "weekly_freshness_distribution", in_flight=True)
+    flight_rows = flight.get("rows") or []
+    never_bucket = next((r for r in flight_rows if "从未" in str(r.get("freshness_bucket"))), {})
+    check(
+        # 金标问的是在办：全量分档那档是 9，多算了已完成的任务 88。
+        "C3-03 在办从未报进展 8 条，各档相加等于在办总数 92",
+        str(never_bucket.get("task_count")) == "8"
+        and sum(int(r.get("task_count") or 0) for r in flight_rows) == 92
+        and str(flight.get("task_total")) == "92",
+        str(flight_rows),
+    )
+    all_flight = await _call(registry, "weekly_freshness_distribution")
+    all_never = next((r for r in (all_flight.get("rows") or []) if "从未" in str(r.get("freshness_bucket"))), {})
+    check(
+        "C3-03 不加 in_flight 仍是 9，且 caliber 指路 in_flight=true",
+        str(all_never.get("task_count")) == "9"
+        and "in_flight" in str(all_flight.get("caliber"))
+        and str(all_flight.get("task_total")) == "128",
+        f"never={all_never.get('task_count')} total={all_flight.get('task_total')}",
+    )
+    check(
+        # 这一档的 9/8 与 never_reported 的 55 是两套判据，口径里必须互相点明。
+        "C3-03 caliber 点明与 never_reported 的 55 不是同一判据",
+        "never_reported" in str(flight.get("caliber")) and "55" in str(flight.get("caliber")),
+        str(flight.get("caliber")),
+    )
+
+    cur_effect = await _call(
+        registry,
+        "weekly_group_detail_query",
+        fields="target_result,progress_effect,completion_time",
+        order_by="progress_time",
+        limit=5,
+    )
+    cur_rows = cur_effect.get("rows") or []
+    check(
+        # 默认按 task_id 排，前 5 条是 97-101（看板最早那批），答的不是「当期」。
+        "C2-04 当期进度成效前 5 条按最新进展倒序：103/128/113/149/116",
+        [r.get("task_id") for r in cur_rows] == [103, 128, 113, 149, 116]
+        and str(cur_rows[0].get("latest_progress_time")) == "2026-08-14 14:00:00",
+        str([(r.get("task_id"), r.get("latest_progress_time")) for r in cur_rows]),
+    )
+    bad_order = await _call(registry, "weekly_group_detail_query", order_by="__bad__", limit=1)
+    check(
+        "C2-04 不支持的排序键明确报错，不静默退回 task_id 序",
+        bad_order.get("ok") is False
+        and (bad_order.get("error") or {}).get("code") == "unsupported_order_by"
+        and "progress_time" in str((bad_order.get("error") or {}).get("message")),
+        str(bad_order),
+    )
+
     return report()
 
 

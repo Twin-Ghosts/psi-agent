@@ -1824,8 +1824,10 @@ _TURNAROUND_SCOPES = ("summary", "board", "slowest", "pending")
 # unpublished_by_task 再往下一层，落到「哪些任务挂着未发布进展」的逐任务清单。
 _COVERAGE_SCOPES = (
     "summary",
+    "publish_split",
     "unpublished",
     "unpublished_by_task",
+    "pending_review",
     "never_reported",
     "version_gaps",
     "latest_round",
@@ -2221,13 +2223,21 @@ def weekly_progress_coverage(scope: str = "summary", project_group: str = "", li
 
     Args:
         scope: ``summary`` row count, tasks covered, date span, max version_no.
+            ``publish_split`` gives published / unpublished / total in one row
+            (943 / 123 / 1066) -- summary carries only the published side and
+            ``unpublished`` only the other, and adding them up by hand tends to
+            drop the task gate, which reads 945 / 1068 instead.
             ``unpublished`` splits unpublished progress by its OWN approval code
             (0 草稿 / 1 待审核 / 2 驳回 / 3 通过) -- a different vocabulary from the
-            task's workflow_status. ``unpublished_by_task`` lists the tasks that
+            task's workflow_status -- and gives each bucket's row count plus its
+            distinct task count, since "多少条进展、涉及多少任务" wants both (驳回
+            is 39 rows over 33 tasks). ``unpublished_by_task`` lists the tasks that
             hold unpublished periods while their submission is already published,
-            most periods first. ``never_reported`` lists the 55 formal tasks with
-            no published row in task_progress at all -- judged by NOT EXISTS, not
-            by ``latest_progress_time IS NULL``, which only finds 9 of them.
+            most periods first. ``pending_review`` lists the 待审核 periods newest
+            first with the task's publicly visible version alongside, for "存在
+            待审核进展但对外还是上一期". ``never_reported`` lists the 55 formal tasks
+            with no published row in task_progress at all -- judged by NOT EXISTS,
+            not by ``latest_progress_time IS NULL``, which only finds 9 of them.
             ``version_gaps`` tasks missing a period.
             ``latest_round`` gives each task's NEWEST published period with its
             ``next_work`` -- use it for "下一步打算做什么", never the full history
@@ -2299,6 +2309,28 @@ def weekly_progress_coverage(scope: str = "summary", project_group: str = "", li
             rows["total_count"] = total["value"]
             return rows
 
+        if key == "publish_split":
+            # 「多少已发布、多少还没发布」要的是一行三个数。summary 只给已发布那
+            # 一侧（943），unpublished 只给未发布那一侧（123），两处分别取再自己
+            # 相加，模型多半会漏掉任务闸门：不加 t.workflow_status = 'published'
+            # 就是 945/1068，正是基线答错的那组数。三个数一次给全，闸门写进口径。
+            return store.fetch(
+                "SELECT SUM(p.is_published = 1) AS published, SUM(p.is_published = 0) AS unpublished, "
+                "COUNT(*) AS total, COUNT(DISTINCT p.task_id) AS tasks "
+                "FROM task_progress p JOIN task t ON t.id = p.task_id "
+                f"WHERE {clause}",
+                caliber=(
+                    f"{store.FORMAL_TASK_CALIBER}；进展行按 is_published 一分为二，"
+                    "published 943 + unpublished 123 = total 1066，三个数同一次查询同一套闸门；"
+                    "闸门是任务侧的（任务未删除且 workflow_status = 'published'），"
+                    "去掉它得 945/123/1068——多出的 2 行挂在非正式任务上，"
+                    "答「进展记录里」仍要按正式任务口径；"
+                    "published 943 与 scope=summary 的 progress_rows 同源，"
+                    "unpublished 123 与 scope=unpublished 的 total_count 同源"
+                ),
+                limit=1,
+            )
+
         if key == "unpublished":
             # 未发布进展自己带一套审批状态码值（0 草稿 / 1 待审核 / 2 驳回 /
             # 3 通过），和任务的 workflow_status 不是一回事。分档必须在服务端做，
@@ -2307,16 +2339,53 @@ def weekly_progress_coverage(scope: str = "summary", project_group: str = "", li
                 "SELECT COUNT(*) FROM task_progress p JOIN task t ON t.id = p.task_id "
                 f"WHERE {clause} AND p.is_published = 0",
             )
+            # 每档同时回 task_count：「被驳回的进展有多少条？涉及多少条任务？」
+            # 一句话问两个数，只给 cnt 的话第二个数无处可取——而 39 条驳回落在
+            # 33 条任务上，模型拿 39 当任务数就答错了。
             rows = store.fetch(
                 "SELECT p.status, CASE p.status WHEN 0 THEN '草稿' WHEN 1 THEN '待审核' "
                 "WHEN 2 THEN '驳回' WHEN 3 THEN '通过' ELSE '未知' END AS status_label, "
-                "COUNT(*) AS cnt FROM task_progress p JOIN task t ON t.id = p.task_id "
+                "COUNT(*) AS cnt, COUNT(DISTINCT p.task_id) AS task_count "
+                "FROM task_progress p JOIN task t ON t.id = p.task_id "
                 f"WHERE {clause} AND p.is_published = 0 GROUP BY p.status ORDER BY p.status",
                 caliber=(
                     f"{store.FORMAL_TASK_CALIBER}；仅未发布进展（p.is_published = 0）；"
                     "status 是进展行自己的审批码值 0 草稿 / 1 待审核 / 2 驳回 / 3 通过，"
                     "不要拿任务的 workflow_status（published、pending_audit 等）来套；"
-                    "各档相加等于 total_count"
+                    "cnt 是进展行数，task_count 是该档涉及的任务数（已去重），"
+                    "两者不相等——驳回 39 行落在 33 条任务上；"
+                    "各档 cnt 相加等于 total_count，但各档 task_count 不可相加"
+                    "（同一任务可能同时有草稿和驳回，去重后未发布任务共 72 条）"
+                ),
+                limit=bounded,
+            )
+            rows["total_count"] = total["value"]
+            return rows
+
+        if key == "pending_review":
+            # 「有哪些任务存在待审核的进展、但对外看到的还是上一期」：要的是清单
+            # 且按上报时间倒序取头几条，unpublished 那个分档只给「待审核 58 条」
+            # 这一个数字，答不出是哪些任务。顺带把对外可见的期号一并回来——
+            # 「对外还是上一期」这半句得有 public_version 才对得上，
+            # 任务 48 的 public_version 为空（首期就卡在待审核，对外一期都没有）。
+            total = store.scalar(
+                "SELECT COUNT(*) FROM task_progress p JOIN task t ON t.id = p.task_id "
+                f"WHERE {clause} AND p.is_published = 0 AND p.status = 1",
+            )
+            rows = store.fetch(
+                "SELECT t.id AS task_id, t.task_name, p.version_no AS pending_version, "
+                "p.report_time, (SELECT MAX(q.version_no) FROM task_progress q "
+                "WHERE q.task_id = t.id AND q.is_published = 1) AS public_version "
+                "FROM task_progress p JOIN task t ON t.id = p.task_id "
+                f"WHERE {clause} AND p.is_published = 0 AND p.status = 1 "
+                "ORDER BY p.report_time DESC, t.id",
+                caliber=(
+                    f"{store.FORMAL_TASK_CALIBER}；仅待审核进展（is_published = 0 且 status = 1，"
+                    "两个条件各判一次，status 是进展行自己的审批码值）；"
+                    "按上报时间 report_time 倒序（并列按任务 id 升序），首行即最近提交的那条；"
+                    "pending_version 是压在审核里的期号，public_version 是对外可见的最新已发布期号，"
+                    "两者相差一期即「对外还是上一期」；public_version 为空表示该任务首期就卡在审核，"
+                    "对外一期都没有；total_count 58 是待审核行数，涉及 47 条任务"
                 ),
                 limit=bounded,
             )
@@ -2770,6 +2839,7 @@ def weekly_freshness_distribution(
     drift: bool = False,
     stale_days: int = 0,
     recent_days: int = 0,
+    in_flight: bool = False,
     by: str = "",
     limit: int = 200,
 ) -> str:
@@ -2793,6 +2863,10 @@ def weekly_freshness_distribution(
             counts as stale and sorts first.
         recent_days: When > 0, lists tasks that DID report within that window,
             newest first. 与 stale_days 是相反的一端。
+        in_flight: True restricts the bucket distribution to 在办 tasks
+            (status 0 and 1). "在办任务里有多少从来没报过进展时间" is 8, while the
+            un-gated buckets read 9 -- the extra one is task 88, already 已完成.
+            Only affects the plain distribution, not the listing branches.
         by: ``project_group`` 让 stale_days 返回各组滞后计数而不是清单。
         limit: Max rows for the listing branches, capped at 200.
     """
@@ -2919,6 +2993,17 @@ def weekly_freshness_distribution(
                 ),
                 limit=limit,
             )
+        # 「在办任务从来没报过进展时间」问的是在办那一档，全量分档给的是 9，
+        # 含一条已完成的（任务 88），答在办就多了一条。in_flight 把闸门加在
+        # 服务端，别再靠 stale_days=99999 这种取巧凑出 8。
+        flight_clause = " AND t.status IN (0, 1)" if in_flight else ""
+        flight_note = (
+            "；仅在办任务（status IN (0, 1)，0 未开始同样在办）：全量 128 条里在办 92 条，"
+            "「4 从未报进展」在办是 8 条而全量是 9 条，差的那条是任务 88（已完成）"
+            if in_flight
+            else "；含全部正式任务，不分是否在办：「4 从未报进展」9 条里有 1 条已完成，"
+            "问「在办任务」请加 in_flight=true 得 8 条"
+        )
         buckets = store.fetch(
             "SELECT CASE "
             "WHEN t.latest_progress_time IS NULL THEN '4 从未报进展' "
@@ -2926,23 +3011,30 @@ def weekly_freshness_distribution(
             "WHEN t.latest_progress_time >= DATE_SUB(%(as_of)s, INTERVAL 90 DAY) THEN '2 31-90 天' "
             "WHEN t.latest_progress_time >= DATE_SUB(%(as_of)s, INTERVAL 180 DAY) THEN '3 91-180 天' "
             "ELSE '5 超过 180 天' END AS freshness_bucket, COUNT(*) AS task_count "
-            f"FROM task t WHERE {store.formal_task_clause()} "
+            f"FROM task t WHERE {store.formal_task_clause()}{flight_clause} "
             "GROUP BY freshness_bucket ORDER BY freshness_bucket",
             {"as_of": store.AS_OF},
-            caliber=f"{store.FORMAL_TASK_CALIBER}；{store.as_of_caliber()}",
+            caliber=(
+                f"{store.FORMAL_TASK_CALIBER}；{store.as_of_caliber()}{flight_note}"
+                "；这里的「从未报进展」按 t.latest_progress_time 是否为空判，"
+                "与 weekly_progress_coverage scope=never_reported 的 55 条不是同一个判据"
+            ),
         )
         # E6-01 asks how current the board is overall, which the buckets do not
         # state: the newest timestamp and how far it lags the snapshot date.
         overall = store.fetch(
             "SELECT MAX(t.latest_progress_time) AS newest_progress, "
-            "DATEDIFF(%(as_of)s, MAX(t.latest_progress_time)) AS days_behind "
-            f"FROM task t WHERE {store.formal_task_clause()}",
+            "DATEDIFF(%(as_of)s, MAX(t.latest_progress_time)) AS days_behind, "
+            "COUNT(*) AS task_total "
+            f"FROM task t WHERE {store.formal_task_clause()}{flight_clause}",
             {"as_of": store.AS_OF},
             limit=1,
         )
         first = overall["rows"][0] if overall["rows"] else {}
         buckets["newest_progress"] = first.get("newest_progress")
         buckets["days_behind"] = first.get("days_behind")
+        # 各档相加等于 task_total：分档答案能自己验一遍，不必再查一次任务总数。
+        buckets["task_total"] = first.get("task_total")
         buckets["as_of"] = store.AS_OF
         return buckets
 
@@ -3423,6 +3515,7 @@ def weekly_group_detail_query(
     field: str = "",
     status: str = "",
     non_empty: str = "",
+    order_by: str = "",
     limit: int = 200,
 ) -> str:
     """Query the 集团组 board's own detail table (target/measures/owners/completion text).
@@ -3447,6 +3540,10 @@ def weekly_group_detail_query(
         non_empty: Comma-separated columns required to be non-empty. Pair with
             ``status`` for the contradiction question: without it, tasks that are
             未开始 *and* blank come along and inflate the count.
+        order_by: ``progress_time`` orders by the task's latest progress newest
+            first, which is what "当期进度成效" means -- the default task-id order
+            puts the board's oldest rows on page one and a "给我前 5 条" cut then
+            returns 5 rows that are not the current ones. Empty keeps task-id order.
         limit: Max rows, capped at 200.
     """
 
@@ -3547,6 +3644,28 @@ def weekly_group_detail_query(
                     "并非同一个数据（46 条任务两列的值不一致），问集团看板的负责人一律用本列"
                 )
 
+        # 「当期进度成效」要的是最近报过的那几条，默认按 task_id 排会把看板最早
+        # 那批放在第一页，再取前 5 条答的就不是当期。排序键落在服务端，
+        # 顺带把 latest_progress_time 一并选出来，让「凭什么是这 5 条」可核。
+        order_key = (order_by or "").strip().lower()
+        if order_key and order_key != "progress_time":
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported_order_by",
+                    "message": f"不支持的排序：{order_by}；目前只支持 progress_time",
+                },
+            }
+        if order_key == "progress_time":
+            columns += ", t.latest_progress_time"
+            order_sql = "t.latest_progress_time DESC, d.task_id DESC"
+            caliber.append(
+                "按任务最新进展时间 latest_progress_time 倒序（并列按任务 id 倒序），"
+                "首行即最近报过的；集团看板 46 条该列都非空，所以排序不会把空值顶到前面"
+            )
+        else:
+            order_sql = "d.task_id"
+
         clause = " AND ".join(where)
         total = store.scalar(
             "SELECT COUNT(*) FROM task_group_detail d JOIN task t ON t.id = d.task_id "
@@ -3557,7 +3676,7 @@ def weekly_group_detail_query(
             f"SELECT d.task_id, t.task_name, t.status, {columns} "
             "FROM task_group_detail d JOIN task t ON t.id = d.task_id "
             f"{store.group_board_join()} "
-            f"WHERE {clause} ORDER BY d.task_id",
+            f"WHERE {clause} ORDER BY {order_sql}",
             params,
             caliber="；".join([*caliber, "total_count 为符合条件的任务总数，判断列全看它而非返回行数"]),
             limit=limit,

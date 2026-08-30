@@ -24,6 +24,7 @@ async def weekly_group_detail_query(
     field: str = "",
     status: str = "",
     non_empty: str = "",
+    order_by: str = "",
     limit: int = 200,
 ) -> str:
     """Query the group board's own detail table: goals, measures, owners, due text.
@@ -56,6 +57,11 @@ async def weekly_group_detail_query(
         non_empty: Comma-separated columns that must be non-empty. Without it the
             contradiction question also collects tasks that are 未开始 and blank,
             which are not contradictory at all.
+        order_by: "progress_time" orders by the task's latest progress, newest
+            first, and returns latest_progress_time alongside. Use it whenever the
+            question says 当期 or asks for the first N rows: the default task-id
+            order starts at the board's oldest tasks, so "当期进度成效" plus a
+            "前 5 条" cut returns 5 rows that are not the current ones.
         limit: Max rows, capped at 200. The reply carries total_count; when it
             exceeds the rows returned, the listing is short, not the answer.
     """
@@ -74,6 +80,7 @@ async def weekly_group_detail_query(
             "field": field,
             "status": status,
             "non_empty": non_empty,
+            "order_by": order_by,
             "limit": bounded,
         },
     )

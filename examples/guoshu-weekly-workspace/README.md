@@ -21,7 +21,7 @@ export GUOSHU_WEEKLY_MCP_TOKEN=demo-token
 python tests/smoke_test.py
 ```
 
-预期 `286/286 passed`。
+预期 `300/300 passed`。
 
 ## 数据层准备
 
@@ -91,7 +91,7 @@ guoshu-weekly-workspace/
 │   ├── _store.py              # 只读查询层 + 口径规则 + 字段管控
 │   └── server.py              # 31 个语义化取数工具（Streamable HTTP MCP）
 └── tests/
-    ├── smoke_test.py          # 286 条契约断言，不花模型 token
+    ├── smoke_test.py          # 300 条契约断言，不花模型 token
     └── baseline.py            # 396 题准确率基线（LLM 判定）
 ```
 
@@ -105,7 +105,7 @@ guoshu-weekly-workspace/
 | `weekly_task_query` | 按看板/分类/状态/负责人/关键词/**专项组**查正式任务 |
 | `weekly_task_detail` | 单任务详情（明细 + 近期进展 + 年度目标） |
 | `weekly_progress_history` | 进展版本回溯，`version_no` 倒序 |
-| `weekly_progress_coverage` | 进展历史覆盖度（行数/任务数/起止/最大版本）、未发布进展分档、期号缺号、**每任务最新一期的下一步安排**、最新一期缺下一步计数、**从未报过进展的 55 条（按 NOT EXISTS 判，非汇总列判空）** |
+| `weekly_progress_coverage` | 进展历史覆盖度（行数/任务数/起止/最大版本）、**已发布/未发布/合计一行给全（943/123/1066）**、未发布进展分档（**每档同时给行数与涉及任务数**）、**待审核清单带对外可见期号**、期号缺号、**每任务最新一期的下一步安排**、最新一期缺下一步计数、**从未报过进展的 55 条（按 NOT EXISTS 判，非汇总列判空）** |
 | `weekly_aggregate` | 按 board/category/**primary_category**/status/project_group/owner/**workflow_status** 聚合，`top` 硬切前 N 组 |
 | `weekly_scale` | 多子表一次成表：规模（里程碑/附件/年度目标，**全部 `COUNT(DISTINCT)` 防 JOIN 放大**）/ 完备度（有该项的任务数）/ 进展密度（分母含零期任务） |
 | `weekly_field_completeness` | 字段填报完整度（R-07/R-19），字段走白名单，**完整率 `filled_pct` 服务端算好** |
@@ -123,9 +123,9 @@ guoshu-weekly-workspace/
 | `weekly_health` | 连通性自检与各表行数 |
 | `weekly_progress_range` | 时间窗内的进展（全表跨任务，可按月/季/任务分组计数），`peak` 直接给峰值组 |
 | `weekly_task_lifecycle` | 任务创建/发布的时间分布与建到发的时长 |
-| `weekly_freshness_distribution` | 新鲜度分桶（30/90/180 天）、自定义天窗、时间漂移检出、滞后清单（含从未上报）、近期上报清单 |
+| `weekly_freshness_distribution` | 新鲜度分桶（30/90/180 天，**可加 `in_flight` 只看在办：从未报进展在办 8 条、不限状态 9 条**，随返回给 `task_total` 供各档自校）、自定义天窗、时间漂移检出、滞后清单（含从未上报）、近期上报清单 |
 | `weekly_approval_turnaround` | 审批时效（汇总/按看板/最慢/待审积压） |
-| `weekly_group_detail_query` | 集团组明细（目标成果/实施举措/进度成效/完成时间文本/多值负责人，**附人数**），可按 `status` 与 `non_empty` 交叉筛矛盾数据 |
+| `weekly_group_detail_query` | 集团组明细（目标成果/实施举措/进度成效/完成时间文本/多值负责人，**附人数**），可按 `status` 与 `non_empty` 交叉筛矛盾数据，**`order_by="progress_time"` 按最新进展倒序供「当期/前 N 条」取用** |
 | `weekly_group_owner_query` | 集团组按牵头人或项目负责人查任务（多值精确匹配） |
 | `weekly_group_history` | 集团组历史进展（专表，可按年/月/季/任务/填报人/**滞报天数**/**提交单挂接率**分组，天窗可用 `last_days` 或**日历月** `last_months`） |
 | `weekly_group_stats` | 集团组统计（负责人构成/分隔符写法/一栏几人/完成时间**写法分档**与去重取值/字数/附件/期数/成效一致性） |
@@ -208,6 +208,8 @@ agent 据此给出依据、也据此判断不可答。
 | 专项组是独立一列不是分类 | `weekly_task_query` 的 `project_group` 精确匹配；塞进 `category` 或 `keyword` 会静默返回错的集合 |
 | 「最近」是排序题不是筛选题 | `scope=recent` 按动作自身时间戳倒序（不是任务 id、不是轮次号），取头几条即可；把 13 条驳回全铺开答的是「有哪些」而非「最近有哪些」 |
 | 存在性按明细表判，不拿汇总列判空 | 「从来没报过进展」用 `scope=never_reported` 按 `task_progress` 有无已发布行判定得 55 条；按 `t.latest_progress_time` 判空只得 9 条，漏掉集团看板那 46 条（成效在集团历史表，汇总列有值而 `task_progress` 无行）。55 + 有进展的 73 = 正式任务 128 |
+| 一句话两个数就一次取全 | 分开取的风险不是加错，是两次闸门不同一：已发布/未发布按正式任务口径为 943/123/1066，漏掉任务闸门变 945/1068（基线即答成 125/1068）。`scope=publish_split` 一行给全；「多少条 / 涉及多少任务」也是两个数，驳回 39 行落在 33 条任务上，各档任务数不可相加（去重后 72 条） |
+| 问「在办」就加在办闸门 | `in_flight=True` 后「从未报进展」是 8 条，不限状态的同一档是 9 条，多出的是已完成的任务 88；返回的 `task_total`（在办 92 / 全量 128）即本次闸门下的总数，各档相加应等于它 |
 
 ### 相对时间窗以快照日为基准
 
@@ -243,7 +245,7 @@ R-04/R-14 要的是「按权限返回」。一律遮蔽同样不满足需求—�
 | 数据权限 | 敏感字段按 token 两档分级 | 按 OA 真实身份做行级权限 |
 | 前端 | 无（经 psi-agent 既有接口） | 专建对话应用 + BFF（方案第六章） |
 | 材料生成 | 无 | 报告下载与图表（P1，第 5 期） |
-| 评测 | 286 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
+| 评测 | 300 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
 
 ### mock 数据层的两处不可外推
 

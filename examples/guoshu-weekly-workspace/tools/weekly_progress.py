@@ -116,13 +116,20 @@ async def weekly_freshness_distribution(
     drift: bool = False,
     stale_days: int = 0,
     recent_days: int = 0,
+    in_flight: bool = False,
     by: str = "",
     limit: int = 200,
 ) -> str:
     """Report how stale progress is: 30/90/180-day buckets, a custom window, or drift.
 
     The default bucket view also carries newest_progress and days_behind, which
-    answer "how current is the board overall".
+    answer "how current is the board overall", plus task_total so the buckets can
+    be checked against it -- they sum to it.
+
+    The "4 从未报进展" bucket keys off t.latest_progress_time being NULL. That is a
+    narrower question than "从来没报过进展": 46 group-board tasks carry a timestamp
+    while holding no task_progress row at all, so use
+    weekly_progress_coverage scope="never_reported" (55) for that phrasing.
 
     stale_days and recent_days are the LISTINGS behind "哪些任务很久没上报" and
     "最近有哪些任务上报了". Both anchor to the snapshot date on the server.
@@ -140,6 +147,11 @@ async def weekly_freshness_distribution(
         recent_days: When > 0, lists tasks that reported within that many days,
             newest first. No status filter -- the question is whether a report
             came in, not whether the task is still open.
+        in_flight: True restricts the bucket distribution to 在办 tasks (status 0
+            未开始 and 1 进行中). Required for "有多少条在办任务从来没报过进展时间":
+            the answer is 8, while the un-gated buckets say 9, the extra one being
+            task 88, which is already 已完成. Ignored by the listing branches
+            (stale_days already gates on 在办 by itself).
         by: With stale_days, "project_group" returns stale_count per 专项组
             instead of the rows.
         limit: Max rows for the listing views, capped at 200.
@@ -159,6 +171,7 @@ async def weekly_freshness_distribution(
             "drift": bool(drift),
             "stale_days": stale,
             "recent_days": recent,
+            "in_flight": bool(in_flight),
             "by": by,
             "limit": bounded,
         },
@@ -412,8 +425,22 @@ async def weekly_progress_coverage(scope: str = "summary", project_group: str = 
     newer date than the latest one.
 
     Args:
-        scope: summary (depth totals) / unpublished (未发布进展按自身审批码值分档,
-            0 草稿 / 1 待审核 / 2 驳回 / 3 通过 -- not the task's workflow_status) /
+        scope: summary (depth totals) / publish_split (published, unpublished and
+            total progress rows in ONE row: 943 / 123 / 1066. Use this for "进展
+            记录里有多少已发布、多少还没发布" -- summary carries only the published
+            side and unpublished only the other, and reading the two separately
+            invites dropping the task gate, which turns the pair into 945 / 1068) /
+            unpublished (未发布进展按自身审批码值分档,
+            0 草稿 / 1 待审核 / 2 驳回 / 3 通过 -- not the task's workflow_status.
+            Every bucket carries cnt AND task_count, so "被驳回的进展有多少条、
+            涉及多少条任务" is one call: 39 rows over 33 tasks. The task_counts
+            must not be summed -- one task can hold both a draft and a rejection,
+            and de-duplicated the whole unpublished set spans 72 tasks) /
+            pending_review (the 待审核 periods, newest report_time first, each with
+            the task's publicly visible version_no alongside -- for "存在待审核
+            进展、但对外看到的还是上一期". 58 rows over 47 tasks; a NULL
+            public_version means the very first period is still in review, so
+            nothing is public yet) /
             unpublished_by_task (tasks whose submission form IS published while
             progress rows are still unpublished, counted per task in PERIODS:
             version_no is de-duplicated, so this is "几期" and not "几行") /

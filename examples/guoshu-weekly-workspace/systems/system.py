@@ -69,8 +69,16 @@ TOOL_GUIDE = """\
 - weekly_progress_history：单任务的进展版本，version_no 倒序，第一条即当期。
 - weekly_progress_range：跨全部任务按时间窗查/计数已发布进展。问「哪个月/哪个季度最多」
   带 peak=True，服务端直接给峰值那一组，不要自己在各组计数间比大小。
-- weekly_progress_coverage：进展覆盖范围与回溯深度汇总；scope=unpublished 给未发布进展
+- weekly_progress_coverage：进展覆盖范围与回溯深度汇总；scope=publish_split 一行给全
+  「已发布 943 / 未发布 123 / 合计 1066」——问「进展记录里多少已发布、多少还没发布」用它，
+  不要 summary 取一半、unpublished 取另一半再自己相加，那样容易漏掉任务闸门，会答成 945/1068。
+  scope=unpublished 给未发布进展
   按自身审批码值分档（0 草稿/1 待审核/2 驳回/3 通过，与任务的 workflow_status 是两套词汇），
+  每档同时给 cnt 行数与 task_count 涉及任务数：问「被驳回的进展多少条、涉及多少任务」一次即得
+  （39 行落在 33 条任务上），各档 cnt 可相加、task_count 不可相加（去重后未发布任务共 72 条）。
+  scope=pending_review 给待审核进展清单，按上报时间倒序并带对外可见期号 public_version：
+  问「存在待审核进展、但对外还是上一期」用它，58 行涉及 47 条任务；public_version 为空
+  表示该任务首期就卡在审核，对外一期都没有，不能说成「还是上一期」。
   scope=unpublished_by_task 给「提交单已发布、进展却还挂着未发布」的任务及各自期数
   （已按 version_no 去重，是期数不是行数），scope=version_gaps 给期号有缺的任务。
   问「各任务最新一期的下一步安排」用 scope=latest_round（可带 project_group 限定项目组）：
@@ -85,6 +93,9 @@ TOOL_GUIDE = """\
 - weekly_freshness_distribution：按进展陈旧程度分档（30/90/180 天/从未）。
   这里的「4 从未报进展」只有 9 条，是 latest_progress_time 为空的口径，不等于
   「从来没报过进展」的 55 条，后者用 weekly_progress_coverage scope=never_reported。
+  问「在办任务里有多少从来没报过进展时间」带 in_flight=True：在办是 8 条而不限状态是 9 条，
+  差的那条是已完成的任务 88。各档相加等于同一次返回的 task_total（在办 92 / 全量 128），
+  答完可以自己对一遍。
   要「哪些任务很久没上报」用 stale_days（只算在办，含从未上报），
   要「最近哪些任务上报了」用 recent_days（不限状态）。
 
@@ -153,6 +164,8 @@ TOOL_GUIDE = """\
   返回的 project_owner_count / lead_owner_count，服务端两种分隔符都扣过了。
   问矛盾数据（如「状态还是未开始、却已经写了进度成效」）用 status 与 non_empty 交叉筛，
   两侧同时给条件——只给 status 会把「未开始且成效为空」也收进来，那并不矛盾。
+  问「当期」进度成效、或要「前 N 条」，带 order_by="progress_time"：默认按任务 id 排，
+  第一页是看板最早那批（97 起），截前 5 条给出的不是当期那 5 条。
 - weekly_group_owner_query：按负责人查专项组任务，或列出该看板的负责人字段。
 - weekly_group_history：专项组进展历史（独立表，非 task_progress）。
   「最近三个月」用 last_months=3（日历月），不要折成 last_days=90：两者边界不同（回到
@@ -269,6 +282,14 @@ CALIBER_RULES = """\
     按 t.latest_progress_time 是否为空判只有 9 条——集团看板那 46 条任务的成效
     写在 task_group_progress_history，汇总列有值而 task_progress 里一行都没有。
     同一个问题的两个数要能互相对上：55 + 有进展的 73 = 正式任务 128。
+39. 一句话问两个数（多少条、涉及多少任务；多少已发布、多少未发布）就选一次给全的口径，
+    不要两处分别取再拼。分开取的风险不在算错加法，在两次闸门不同一：进展的已发布/未发布
+    按正式任务口径是 943/123/1066，漏掉任务闸门就变成 945/1068。「多少条」与「涉及多少
+    任务」也不是同一个数，驳回 39 行落在 33 条任务上，且各档的任务数不可相加
+    （同一任务可以既有草稿又有驳回，去重后是 72 条）。
+40. 问「在办」就要加在办闸门，别拿不限状态的分档答。「在办任务里有多少从来没报过进展
+    时间」是 8 条，不限状态的同一档是 9 条，多出来的是已完成的任务 88。分档类答案末尾
+    的 task_total 就是本次闸门下的总数（在办 92 / 全量 128），各档相加应等于它。
 
 ## 判为不可答
 
