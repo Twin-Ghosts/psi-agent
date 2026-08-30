@@ -683,7 +683,10 @@ def weekly_workflow_query(
         scope: ``by_node_action`` counts every node_type + action pair in one row
             each; ``actions_per_task`` returns the average action count with its
             numerator and denominator.  Either beats counting a truncated listing:
-            the log holds 1578 rows and the listing stops at 200.
+            the log holds 1578 rows and the listing stops at 200.  ``recent``
+            orders by the action's own timestamp and carries the task name and
+            the submitter -- any "最近谁被驳回了" question needs it, because the
+            default listing is ordered by task id and answers no such question.
         limit: Max rows, capped at 200.
     """
     may_read = _caller_may_read_sensitive(ctx)
@@ -761,6 +764,49 @@ def weekly_workflow_query(
             where.append("t.is_deleted = 0 AND t.board_id = %(bid)s")
             params["bid"] = board_id
             caliber_extra.append("按看板过滤时任务侧只加 is_deleted = 0（动作日志本就跨发布状态）")
+        if scope_key == "recent":
+            # 「最近有哪些提交单被驳回了」问的是时间序。默认流水按 task_id, round_no
+            # 排，最近发生的那条埋在中间，模型只能把 13 条全铺开当答案，答不出「最近」。
+            # 顺带把任务名与填报人一并 JOIN 回来：只给 task_id 与操作人，
+            # 「谁的单子被谁驳回」还得再查两次。
+            if not board.strip():
+                where.append("t.is_deleted = 0")
+            if task.strip():
+                task_id = store.resolve_task_id(task)
+                if task_id is None:
+                    return {
+                        "ok": False,
+                        "error": {"code": "task_not_found", "message": f"未匹配到正式任务：{task}"},
+                    }
+                where.append("a.task_id = %(tid)s")
+                params["tid"] = task_id
+            return store.fetch(
+                "SELECT a.id, a.task_id, t.task_name, s.round_no, s.reporter_name, s.status, "
+                "a.node_type, a.action, a.operator_name, a.opinion, a.created_at AS acted_at "
+                "FROM task_workflow_action a JOIN task t ON t.id = a.task_id "
+                "JOIN task_workflow_submission s ON s.id = a.submission_id "
+                f"WHERE {' AND '.join(where)} "
+                "ORDER BY a.created_at DESC, t.id",
+                params,
+                caliber="；".join(
+                    [
+                        *caliber_extra,
+                        "按动作发生时间 acted_at 倒序（并列按任务 id 升序），"
+                        "第一行即最近一次；「最近」看的是动作时间，不是任务 id 也不是轮次号",
+                        "只含挂在提交单上的动作（INNER JOIN 提交单），"
+                        "带任务名与该单填报人，无须再查任务表；"
+                        "status 是提交单当前状态，与本行 action 未必同一时刻",
+                        "opinion 属敏感字段，按权限展示（R-04/R-14）"
+                        + (
+                            "；本次凭证有敏感字段权限，opinion 原文返回"
+                            if may_read
+                            else "；本次凭证无敏感字段权限，opinion 已遮蔽"
+                        ),
+                    ]
+                ),
+                can_read_sensitive=may_read,
+                limit=bounded_flow,
+            )
         if by_task:
             # 「哪些任务被驳回过」问的是任务集合与次数，不是动作流水。逐条明细
             # 里同一任务会出现多次，模型按行数报会把次数当成任务数。
@@ -1789,7 +1835,7 @@ _LATEST_PROGRESS_CTE = (
 
 # 动作日志的聚合口径。日志 1578 条而清单封顶 200 行，所以「各节点各动作多少条」
 # 和「人均多少次动作」都必须服务端算完再回，模型翻明细自己数必然只数到第一页。
-_WORKFLOW_SCOPES = ("", "by_node_action", "actions_per_task")
+_WORKFLOW_SCOPES = ("", "by_node_action", "actions_per_task", "recent")
 
 # 提交单的附加口径。空串走通用清单；两个 external 口径专门回答 O2OA 外部标识
 # （o2_process_id / o2_work_id / o2_task_id）填得全不全，这三列此前没有任何

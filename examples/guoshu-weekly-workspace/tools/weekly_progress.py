@@ -247,7 +247,14 @@ async def weekly_workflow_query(
             "actions_per_task" returns the average action count (10.52) with its
             numerator 1578 and denominator 150 -- the denominator is the tasks that
             have actions, not the 128 published ones.
-        limit: Max rows to return, capped at 200.
+            "recent" orders by the action's own timestamp, newest first, and adds
+            the task name, the submission's round_no, its reporter_name and its
+            status. Every "最近谁被驳回了 / 谁驳回的" question needs this scope: the
+            plain log is ordered by task id, so the newest action sits in the
+            middle of the page and cannot be identified. Combine it with
+            action="rejected" and limit to take the newest N rejections.
+        limit: Max rows to return, capped at 200. With scope="recent" this is how
+            many of the newest actions you want (e.g. 8).
     """
     try:
         bounded = max(1, min(200, int(limit)))

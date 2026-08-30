@@ -21,7 +21,7 @@ export GUOSHU_WEEKLY_MCP_TOKEN=demo-token
 python tests/smoke_test.py
 ```
 
-预期 `276/276 passed`。
+预期 `282/282 passed`。
 
 ## 数据层准备
 
@@ -91,7 +91,7 @@ guoshu-weekly-workspace/
 │   ├── _store.py              # 只读查询层 + 口径规则 + 字段管控
 │   └── server.py              # 31 个语义化取数工具（Streamable HTTP MCP）
 └── tests/
-    ├── smoke_test.py          # 276 条契约断言，不花模型 token
+    ├── smoke_test.py          # 282 条契约断言，不花模型 token
     └── baseline.py            # 396 题准确率基线（LLM 判定）
 ```
 
@@ -112,7 +112,7 @@ guoshu-weekly-workspace/
 | `weekly_task_ranking` | 按子表计数排名（附件/进展/里程碑/提交单） |
 | `weekly_rank` | 排名并列口径三选一：硬切 N 条 / 保留并列 / 每组各自第一，可限定看板并回显 `total_count` |
 | `weekly_milestone_query` | 里程碑清单（已复核正式任务口径），单任务按 `sort_order` 编排 |
-| `weekly_workflow_query` | 审批动作流水（谁在哪个环节做了什么），可按 action/看板过滤、按任务聚合次数；**按环节+动作两维分档**、人均动作数（分子分母同回） |
+| `weekly_workflow_query` | 审批动作流水（谁在哪个环节做了什么），可按 action/看板过滤、按任务聚合次数；**按环节+动作两维分档**、人均动作数（分子分母同回）、**按动作时间倒序并带任务名与填报人（回答「最近谁被驳回了」）** |
 | `weekly_submission_query` | 审批提交单（`round_no` / `status` / 填报人），可查任务状态与最新单状态不一致；**按类型分档**（initial / progress）、O2OA 外部标识填充率、在途单（按成员枚举而非取反）、**在途总数/按看板分档/一任务多单**、**会签需求与按人分档/会签耗时对比**、人均轮次、已发布进展单 vs 已发布进展行 |
 | `weekly_owner_roles` | 按角色分别计数（as_owner / as_lead / any_role） |
 | `weekly_person_stats` | 人员统计（任务量/人均/独苗/跨组/双角色/标识写法/填报人/审核人/自审/**按专项组点名去重**） |
@@ -206,6 +206,7 @@ agent 据此给出依据、也据此判断不可答。
 | 多值负责人人数由服务端算 | `lead_owner_count` / `project_owner_count` 随行返回，顿号与逗号都扣过；模型按逗号自己数会漏掉顿号那几行 |
 | 「某组的人都有谁」是去重题 | `scope=group_roster` 行数即人数（标准安全组 9 位牵头人）；拿该组 19 条任务清单自己数，同一个人会按任务重复计数 |
 | 专项组是独立一列不是分类 | `weekly_task_query` 的 `project_group` 精确匹配；塞进 `category` 或 `keyword` 会静默返回错的集合 |
+| 「最近」是排序题不是筛选题 | `scope=recent` 按动作自身时间戳倒序（不是任务 id、不是轮次号），取头几条即可；把 13 条驳回全铺开答的是「有哪些」而非「最近有哪些」 |
 
 ### 相对时间窗以快照日为基准
 
@@ -241,7 +242,7 @@ R-04/R-14 要的是「按权限返回」。一律遮蔽同样不满足需求—�
 | 数据权限 | 敏感字段按 token 两档分级 | 按 OA 真实身份做行级权限 |
 | 前端 | 无（经 psi-agent 既有接口） | 专建对话应用 + BFF（方案第六章） |
 | 材料生成 | 无 | 报告下载与图表（P1，第 5 期） |
-| 评测 | 276 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
+| 评测 | 282 条契约断言 + 396 题基线 | 再加 200 题真实库集 + 多轮追问集 |
 
 ### mock 数据层的两处不可外推
 

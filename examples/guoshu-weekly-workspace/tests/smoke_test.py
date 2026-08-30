@@ -2226,6 +2226,48 @@ async def run() -> int:
         str(single),
     )
 
+    recent_rej = await _call(registry, "weekly_workflow_query", scope="recent", action="rejected", limit=8)
+    rej_rows = recent_rej.get("rows") or []
+    check(
+        # 金标要「最近」被驳回的 8 条；默认流水按 task_id 排，最近那条埋在中间。
+        "I2-01 最近驳回首行为 111 号任务 2026-07-18 那条，按动作时间倒序",
+        len(rej_rows) == 8
+        and rej_rows[0].get("task_id") == 111
+        and str(rej_rows[0].get("acted_at")) == "2026-07-18 17:10:00"
+        and rej_rows[0].get("operator_name") == "高志强",
+        str(rej_rows[:1]),
+    )
+    check(
+        "I2-01 时间严格倒序，且带任务名与填报人两列",
+        [str(r.get("acted_at")) for r in rej_rows] == sorted((str(r.get("acted_at")) for r in rej_rows), reverse=True)
+        and all(r.get("task_name") and r.get("reporter_name") for r in rej_rows),
+        str([(r.get("task_name"), r.get("reporter_name"), str(r.get("acted_at"))) for r in rej_rows]),
+    )
+    check(
+        "I2-01 caliber 点明「最近」看动作时间而非任务 id 或轮次",
+        "不是任务 id 也不是轮次号" in str(recent_rej.get("caliber")),
+        str(recent_rej.get("caliber")),
+    )
+    all_rej = await _call(registry, "weekly_workflow_query", scope="recent", action="rejected", limit=200)
+    check(
+        # 全库驳回动作 13 条：只要 8 条是金标的取数口径，不是数据只有 8 条。
+        "I2-01 驳回动作全量 13 条，前 8 条是时间序取头不是全集",
+        (all_rej.get("row_count") or 0) == 13,
+        str(all_rej.get("row_count")),
+    )
+    recent_any = await _call(registry, "weekly_workflow_query", scope="recent", limit=3)
+    check(
+        "I2-01 recent 不带 action 时同样倒序，首行为 2026-08-15 那条",
+        str(_first(recent_any, "acted_at")) == "2026-08-15 10:05:00",
+        str(recent_any.get("rows")),
+    )
+    bad_scope = await _call(registry, "weekly_workflow_query", scope="recently", limit=3)
+    check(
+        "I2-01 错口径名报错并列出 recent，不静默退成全量流水",
+        bad_scope.get("ok") is False and "recent" in str(bad_scope.get("error")),
+        str(bad_scope.get("error")),
+    )
+
     return report()
 
 
