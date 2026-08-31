@@ -319,6 +319,21 @@ def weekly_task_query(
             limit=limit,
         )
         rows["total_count"] = total["value"]
+        # 本工具回的 lead_owner_name / project_owner_name 是 task 行上的单值列。
+        # 集团看板 46 条任务这两列与集团明细表的多值列全都不一致（任务 101 这里是
+        # 「陈志远」，明细表是「刘海涛,韩雪峰」），而返回里此前没有任何提示，
+        # 问「某个集团任务的牵头人是谁」照这两列答就答错了人（R8-02）。
+        # 提示只在结果真含集团看板任务时才挂，免得给技术看板的问答添噪声。
+        group_hits = [r for r in (rows.get("rows") or []) if str(r.get("board_id")) == "2"]
+        if group_hits:
+            rows["group_board_owner_note"] = (
+                f"结果里有集团看板任务（board_id = 2，共 {len(group_hits)} 条）。"
+                "本工具的 lead_owner_name / project_owner_name 是 task 行上的单值列，"
+                "集团看板这两列与集团明细表的多值列 lead_owner_names / project_owner_names "
+                "全部不一致。问集团看板任务的牵头人／项目负责人请改用 "
+                "weekly_group_detail_query 取多值列，或 weekly_task_detail 看它同时返回的两套列，"
+                "不要照本工具这两列作答。"
+            )
         return rows
 
     return _guard("weekly_task_query", work)
@@ -636,17 +651,34 @@ def weekly_aggregate(
             # 模型得再去别处取每组已完成数，两次闸门不同一就全错；且完成数最少
             # 的组不等于完成率最低的组（治理合规组 2/10=20.0% 高于数据基础设施
             # 组 2/15=13.3%，两组已完成都是 2 条）。
+            by_rate = (order_by or "").strip().lower() == "finish_rate"
+            # 占比与累计占比必须服务端算：累计要 SUM() OVER (ORDER BY ...) 的窗口，
+            # 模型拿分组明细凑不出来，只能自己逐行相加，L5-01/L5-02 就是这么错的。
+            # 小数位取 2 而不是 1：累计占比要跟阈值比大小，58.59% 舍成 58.6% 再跟
+            # 55% 比就会串档，而 L5-02 问「前几个组合起来过半吗」的正解正是
+            # 「前 4 组累计 49.22%，未过半」——一位小数会把结论答反。
+            share_cols = (
+                "ROUND(COUNT(*) / SUM(COUNT(*)) OVER () * 100, 2) AS share_pct, "
+                "ROUND(SUM(COUNT(*)) OVER (ORDER BY COUNT(*) DESC, "
+                "IFNULL(NULLIF(TRIM(t.project_group),''),'(未填)')) "
+                "/ SUM(COUNT(*)) OVER () * 100, 2) AS cum_pct, "
+                if not by_rate
+                else ""
+            )
             sql = (
                 "SELECT IFNULL(NULLIF(TRIM(t.project_group),''),'(未填)') AS group_name, "
                 "COUNT(*) AS cnt, "
                 "SUM(t.status = 2) AS finished, "
                 "ROUND(SUM(t.status = 2) / COUNT(*) * 100, 1) AS finish_rate_pct, "
+                f"{share_cols}"
                 "COUNT(DISTINCT NULLIF(TRIM(t.lead_owner_name),'')) AS lead_owner_count, "
                 "COUNT(DISTINCT NULLIF(TRIM(t.project_owner_name),'')) AS project_owner_count "
                 f"FROM task t WHERE {scope} GROUP BY group_name ORDER BY cnt DESC, group_name"
             )
-            if (order_by or "").strip().lower() == "finish_rate":
+            if by_rate:
                 # 「完成率最低/最高的几个组」要按率定序，默认的按任务数排给不出。
+                # 这一档不返回 cum_pct：累计是沿「任务数倒序」这一条序列累加的，
+                # 换成按完成率排之后它在页面上不再单调，留着就是个假信号。
                 direction = "ASC" if ascending else "DESC"
                 sql = sql.replace(
                     "ORDER BY cnt DESC, group_name",
@@ -723,6 +755,17 @@ def weekly_aggregate(
                 "已由服务端算好，不要拿别处取的完成数手工相除；"
                 "完成数最少的组不等于完成率最低的组（治理合规组 2/10=20.0% 高于数据基础设施组 2/15=13.3%）"
             )
+            if not by_rate:
+                caliber += (
+                    "；share_pct 是该组占全部正式任务的比例，cum_pct 是沿本次定序"
+                    "（任务数倒序、并列按组名）逐行累加的累计占比，两列都由服务端算好并保留两位小数——"
+                    "照抄这两列，不要自己逐行相加，也不要改小数位；"
+                    "问「前几个组合起来是否过半」按 cum_pct 首次超过 50 的那一行答："
+                    "前 4 组累计 49.22% 仍未过半（第 5 组才到 58.59%），"
+                    "所以正解是「否，前 4 组占 49.22%」，把 49.22 舍成 49.2 或多算一组都会把结论答反"
+                )
+            else:
+                caliber += "；本档按完成率定序，故不返回 cum_pct（累计占比只在按任务数定序时才单调）"
             if (order_by or "").strip().lower() == "finish_rate":
                 caliber += (
                     f"；本次按 finish_rate_pct {'升序' if ascending else '降序'}定序，"
@@ -5373,7 +5416,10 @@ def weekly_group_stats(scope: str = "owners", top: int = 8, min_rounds: int = 0)
                     "零附件档由 LEFT JOIN 保住（18 条任务，占 46 条中的近四成，丢了分布就变形）；"
                     "各档 tasks 相加等于 46；"
                     "档位不连续是正常的（库里没有 5 个附件的任务，所以 4 之后直接是 6）；"
-                    "这一档是分布，清单在 scope=attachments，不要拿清单的一页去数分布"
+                    "这一档是分布，清单在 scope=attachments，不要拿清单的一页去数分布；"
+                    "反过来也不成立：问「每个任务各有几个附件」要的是一任务一行的清单，"
+                    "请改用 scope=attachments 并把 top 提到 46——本档一行是一个档位而不是一个任务，"
+                    "拿它作答等于把 46 行明细压成几行分布，答的是另一个问题"
                 ),
                 limit=bounded,
             )
@@ -5407,14 +5453,33 @@ def weekly_freshness() -> str:
     """Report data snapshot dates so the agent anchors relative time to data, not wall clock."""
 
     def work() -> dict[str, Any]:
-        return store.fetch(
+        rows = store.fetch(
             "SELECT b.name AS board_name, MAX(t.latest_progress_time) AS latest_progress, "
+            f"DATEDIFF('{store.AS_OF}', MAX(t.latest_progress_time)) AS days_behind, "
             "COUNT(t.id) AS formal_task_count "
             "FROM task_board b "
             f"LEFT JOIN task t ON t.board_id = b.id AND {store.formal_task_clause()} "
             "WHERE b.is_deleted = 0 GROUP BY b.id, b.name ORDER BY b.sort_order",
-            caliber=f"{store.FORMAL_TASK_CALIBER}；相对时间须以此快照锚定",
+            caliber=(
+                f"{store.FORMAL_TASK_CALIBER}；相对时间须以此快照锚定；"
+                "days_behind 是快照日减该看板最新进展时间，由服务端算好；"
+                "问「数据更新到什么时候了」两个数都要报：最新时间点，以及它距快照日几天"
+                "（overall 里给的是全库那一对，各看板另有自己的一对）"
+            ),
         )
+        # 「整个看板的数据更新到什么时候了」问的是全库那一对（最新时间 + 落后天数），
+        # 不是每个看板各自的。分看板行答不了它：两行里挑一行都不对，
+        # 而落后天数此前根本没返回，模型只能答出时间点、漏掉天数（E6-01）。
+        overall = store.fetch(
+            "SELECT MAX(t.latest_progress_time) AS newest, "
+            f"DATEDIFF('{store.AS_OF}', MAX(t.latest_progress_time)) AS days_behind, "
+            "COUNT(*) AS formal_task_count "
+            f"FROM task t WHERE {store.formal_task_clause()}",
+            limit=1,
+        )
+        rows["overall"] = (overall.get("rows") or [{}])[0]
+        rows["as_of"] = store.AS_OF
+        return rows
 
     return _guard("weekly_freshness", work)
 

@@ -94,10 +94,16 @@ async def weekly_aggregate(
 
 
 async def weekly_freshness() -> str:
-    """Report each board's latest progress time and formal task count.
+    """Report each board's latest progress time, how far it lags, and task counts.
 
     Call this before answering any relative-time question ("this week", "recently").
     Anchor to these snapshot times, never to the machine wall clock.
+
+    "数据更新到什么时候了" wants BOTH numbers, not just the timestamp: quote
+    overall.newest together with overall.days_behind (the snapshot date minus that
+    timestamp). The per-board rows carry their own days_behind; overall is the
+    whole-library pair, which is what a question about "整个看板" asks for --
+    picking either board row answers a narrower question.
     """
     return await _call("weekly_freshness", {})
 

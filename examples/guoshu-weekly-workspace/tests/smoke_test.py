@@ -3528,6 +3528,86 @@ async def run() -> int:
         str([r.get("task_id") for r in (group_latest.get("rows") or [])]),
     )
 
+    # ---- 全量两轮后新暴露的四处，期望值同样取自 gold_answer ----
+
+    # L5-01/L5-02：占比与累计占比服务端此前根本没有，模型自己算且取一位小数。
+    shares = await _call(registry, "weekly_aggregate", group_by="project_group")
+    check(
+        "L5-01 各组占比与累计占比逐行等于 gold（两位小数）",
+        [(str(r.get("cnt")), str(r.get("share_pct")), str(r.get("cum_pct"))) for r in (shares.get("rows") or [])][:7]
+        == [
+            ("19", "14.84", "14.84"),
+            ("15", "11.72", "26.56"),
+            ("15", "11.72", "38.28"),
+            ("14", "10.94", "49.22"),
+            ("12", "9.38", "58.59"),
+            ("11", "8.59", "67.19"),
+            ("10", "7.81", "75.00"),
+        ],
+        str([(r.get("group_name"), r.get("share_pct"), r.get("cum_pct")) for r in (shares.get("rows") or [])][:5]),
+    )
+    check(
+        # 49.22 舍成 49.2 不影响「是否过半」，但 58.59 舍成 58.6 再跟阈值比就串档，
+        # L5-02 正是因此把「否」答成了「是」。两位小数是这一族的下限。
+        "L5-02 前 4 组累计 49.22% 未过半，第 5 组才 58.59%，caliber 写明按 cum_pct 答",
+        str((shares.get("rows") or [{}])[3].get("cum_pct")) == "49.22"
+        and str((shares.get("rows") or [{}, {}, {}, {}, {}])[4].get("cum_pct")) == "58.59"
+        and "未过半" in str(shares.get("caliber")),
+        str(shares.get("caliber"))[-190:],
+    )
+    by_rate = await _call(registry, "weekly_aggregate", group_by="project_group", order_by="finish_rate")
+    check(
+        # 累计是沿「任务数倒序」累加的，换成按完成率排之后它不再单调，留着就是假信号。
+        "L5-01 按完成率定序时不返回 cum_pct（换序后累计不再单调）",
+        "cum_pct" not in (by_rate.get("columns") or []),
+        str(by_rate.get("columns")),
+    )
+
+    # E6-01：weekly_freshness 此前不回落后天数，模型只能答出时间点。
+    fresh = await _call(registry, "weekly_freshness")
+    check(
+        "E6-01 freshness 随 overall 给出 newest 2026-08-14 14:00:00 与 days_behind 1",
+        str((fresh.get("overall") or {}).get("newest")) == "2026-08-14 14:00:00"
+        and str((fresh.get("overall") or {}).get("days_behind")) == "1"
+        and str(fresh.get("as_of")) == "2026-08-15",
+        json.dumps(fresh.get("overall"), ensure_ascii=False),
+    )
+    check(
+        "E6-01 各看板行也各带自己的 days_behind",
+        all("days_behind" in r for r in (fresh.get("rows") or [])),
+        str([(r.get("board_name"), r.get("days_behind")) for r in (fresh.get("rows") or [])]),
+    )
+
+    # Q2-03：清单档早有「把 top 提到 46」的提示，但模型选了分布档就看不到，故反向指路。
+    dist = await _call(registry, "weekly_group_stats", scope="attachment_distribution")
+    check(
+        "Q2-03 分布档反向指路到 scope=attachments 且点明要把 top 提到 46",
+        "scope=attachments" in str(dist.get("caliber")) and "top 提到 46" in str(dist.get("caliber")),
+        str(dist.get("caliber"))[-170:],
+    )
+    per_task = await _call(registry, "weekly_group_stats", scope="attachments", top=46)
+    check(
+        "Q2-03 清单档 top=46 给全 46 行，零附件任务在最前（gold 首三条 98/99/100）",
+        str(per_task.get("row_count")) == "46"
+        and [r.get("task_id") for r in (per_task.get("rows") or [])][:3] == [98, 99, 100]
+        and str((per_task.get("rows") or [{}])[0].get("attachments")) == "0",
+        str([(r.get("task_id"), r.get("attachments")) for r in (per_task.get("rows") or [])][:4]),
+    )
+
+    # R8-02：task 行的单值负责人列与集团明细的多值列在 46 条上全部不一致。
+    group_hit = await _call(registry, "weekly_task_query", board="group", keyword="一体化算力网体系建设")
+    check(
+        "R8-02 命中集团看板任务时挂出「别用单值负责人列」的提示",
+        "group_board_owner_note" in group_hit and "lead_owner_names" in str(group_hit.get("group_board_owner_note")),
+        str(group_hit.get("group_board_owner_note"))[:150],
+    )
+    tech_hit = await _call(registry, "weekly_task_query", board="tech", limit=3)
+    check(
+        "R8-02 技术看板不挂该提示（免得给无关问答添噪声）",
+        "group_board_owner_note" not in tech_hit,
+        str(sorted(tech_hit.keys())),
+    )
+
     return report()
 
 
