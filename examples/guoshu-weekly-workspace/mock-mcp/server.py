@@ -2093,6 +2093,7 @@ def weekly_owner_roles(person: str) -> str:
 # 人员维度的聚合口径。每一项都对应一类「让模型自己数人」会数错的问题。
 _PERSON_STATS_SCOPES = (
     "workload",
+    "workload_top",
     "workload_summary",
     "single_task",
     "cross_group",
@@ -2108,9 +2109,14 @@ _PERSON_STATS_SCOPES = (
 )
 
 # 人员所在的列。姓名列与 ID 列口径不同，必须分开问。
+# owner 这一档是「主责人」，落在 owner_user_id 上，与前两档不是同一批人：技术组
+# 去重后 owner_user_id 45 人、project_owner_name 45 人，而 lead_owner_name 只有
+# 12 人（分管领导一人管多条）。oa_biz 题库里的「负责人」指的就是 owner_user_id，
+# 此前没有任何出口能按它计数，问「有多少人当负责人」只能落到 12 那一档答错。
 _PERSON_ROLE_COLUMNS: dict[str, tuple[str, str]] = {
     "lead_owner": ("lead_owner_name", "分管领导（牵头人）"),
     "project_owner": ("project_owner_name", "项目负责人"),
+    "owner": ("owner_user_id", "任务主责人（owner_user_id）"),
 }
 
 
@@ -2119,6 +2125,7 @@ def weekly_person_stats(
     scope: str = "workload",
     role: str = "lead_owner",
     project_group: str = "",
+    board: str = "",
     top: int = 200,
 ) -> str:
     """Aggregate formal tasks by person: workload, cross-group spread, id formats.
@@ -2162,9 +2169,21 @@ def weekly_person_stats(
         column, role_label = _PERSON_ROLE_COLUMNS[role_key]
         bounded = max(1, min(store.MAX_ROWS, int(top)))
         clause = store.formal_task_clause()
+        # 看板闸门：问「技术组看板有多少人当负责人」时全库口径会把集团组的人算进来。
+        # 看板在 task 行上，所以直接落在 board_id 上，不必 JOIN 看板表。
+        board_note = ""
+        if board.strip():
+            board_id = store.resolve_board(board)
+            if board_id is None:
+                return {
+                    "ok": False,
+                    "error": {"code": "board_not_found", "message": f"未匹配到看板：{board}"},
+                }
+            clause = f"{clause} AND t.board_id = {int(board_id)}"
+            board_note = f"；仅看板 {board.strip()}（闸门落在 task.board_id 上）"
         # 姓名为空的行不是「一个叫空的人」，计人头时必须排除，否则人数会多 1。
         named = f"{clause} AND t.{column} IS NOT NULL AND t.{column} <> ''"
-        base = f"{store.FORMAL_TASK_CALIBER}；按「{role_label}」分组，姓名为空的行不计入人头"
+        base = f"{store.FORMAL_TASK_CALIBER}；按「{role_label}」分组，姓名为空的行不计入人头{board_note}"
 
         if key == "workload":
             # 「任务量最大的牵头人是谁」是单数问句，答案是定序后的首行；此前 caliber
@@ -2195,6 +2214,28 @@ def weekly_person_stats(
                 result["tied_at_top"] = tied["value"]
                 result["top_task_count"] = peak
             return result
+
+        if key == "workload_top":
+            # 「谁任务最多」的并列由服务端裁决，不靠 top 截断。workload 档传 top=1
+            # 是硬切（cut）：技术组 10445/10515/u3208/u3214 四人同为 4 条，切完只剩
+            # 首行；本档是 HAVING = MAX（keep_ties），并列全在内。两档都对，取决于
+            # 问句——而这个判断不该让模型在明细上临场做。
+            peak_rows = store.fetch(
+                f"SELECT t.{column} AS person, COUNT(*) AS task_count "
+                f"FROM task t WHERE {named} GROUP BY t.{column} "
+                f"HAVING task_count = (SELECT MAX(g.c) FROM (SELECT COUNT(*) AS c "
+                f"FROM task t2 WHERE {named.replace('t.', 't2.')} GROUP BY t2.{column}) g) "
+                f"ORDER BY person",
+                caliber=(
+                    f"{base}；本档取任务数最多的那一档并保留全部并列（HAVING = MAX）；"
+                    "行数即并列人数，按返回的行数照答，不要只报首行、也不要补列第二名；"
+                    "只要一个人请改用 scope=workload 配 top=1（那是硬切口径，"
+                    "并列会被切掉，两档答的是两个问题）"
+                ),
+                limit=bounded,
+            )
+            peak_rows["tied_at_top"] = peak_rows.get("row_count")
+            return peak_rows
 
         if key == "workload_summary":
             # 平均值必须一次算完：分组后让模型自己求平均，它会拿组内均值当全局均值。

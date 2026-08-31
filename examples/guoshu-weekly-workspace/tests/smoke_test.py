@@ -3608,6 +3608,85 @@ async def run() -> int:
         str(sorted(tech_hit.keys())),
     )
 
+    # ---- oa_biz 题库暴露的缺口：主责人一列此前没有计数出口 ----
+    # 三个角色是三个不同人群：技术组 owner_user_id 45 人、project_owner_name 45 人，
+    # 而 lead_owner_name 只有 12 人。oa_biz 的「负责人」指 owner_user_id，
+    # 此前只能落到 lead_owner 那一档，把 45 答成 12（六道题同一个根因）。
+    owner_sum = await _call(registry, "weekly_person_stats", scope="workload_summary", role="owner", board="tech")
+    owner_first = (owner_sum.get("rows") or [{}])[0]
+    check(
+        "OA-B7-03 技术组主责人 45 人（不是分管领导那 12 人）",
+        str(owner_first.get("people")) == "45" and str(owner_first.get("tasks")) == "82",
+        json.dumps(owner_first, ensure_ascii=False),
+    )
+    check(
+        # gold 1.82 = 82/45。此前落到 lead_owner 档得 6.83，率本身没错、分母错了。
+        "OA-B6-02 技术组平均每主责人 1.82 个任务，服务端算完",
+        str(owner_first.get("avg_tasks_per_person")) == "1.82",
+        json.dumps(owner_first, ensure_ascii=False),
+    )
+    owner_list = await _call(registry, "weekly_person_stats", scope="workload", role="owner", board="tech")
+    check(
+        "OA-V1-01 技术组每主责人各几个任务：45 行，一人一行",
+        str(owner_list.get("row_count")) == "45",
+        f"row_count={owner_list.get('row_count')} has_more={owner_list.get('has_more')}",
+    )
+    owner_top = await _call(registry, "weekly_person_stats", scope="workload", role="owner", board="tech", top=1)
+    check(
+        "OA-V1-04 「谁任务最多」单数问句取首行，并列个数走 tied_at_top",
+        str(owner_top.get("row_count")) == "1" and owner_top.get("tied_at_top") is not None,
+        f"rows={owner_top.get('rows')} tied={owner_top.get('tied_at_top')}",
+    )
+    check(
+        "OA-B7-03 三个角色的人群规模写进 caliber，避免再串列",
+        "主责人" in str(owner_sum.get("caliber")) and "tech" in str(owner_sum.get("caliber")),
+        str(owner_sum.get("caliber"))[:160],
+    )
+    lead_all = await _call(registry, "weekly_person_stats", scope="workload_summary", role="lead_owner")
+    check(
+        # 回归：新增 owner 档与 board 参数不能动到原有两档的全库口径。
+        "回归 lead_owner 全库仍是 128 任务 / 16 人 / 8.00",
+        str((lead_all.get("rows") or [{}])[0].get("people")) == "16"
+        and str((lead_all.get("rows") or [{}])[0].get("avg_tasks_per_person")) == "8.00",
+        json.dumps((lead_all.get("rows") or [{}])[0], ensure_ascii=False),
+    )
+    bad_board = await _call(registry, "weekly_person_stats", scope="workload", role="owner", board="nope")
+    check(
+        "board 传错时明确报 board_not_found，不静默退回全库",
+        bad_board.get("ok") is False and "board_not_found" in str(bad_board.get("error")),
+        json.dumps(bad_board.get("error"), ensure_ascii=False)[:120],
+    )
+
+    # 「谁任务最多」的并列由服务端裁决：同一问法在 oa_biz 里有两套 gold，
+    # 全库那两题用 HAVING = MAX 保并列（2 行），技术组那题用 LIMIT 1 硬切（1 行）。
+    # 模型在明细上判不出该用哪套，所以分成两档、各自把口径写进 caliber。
+    top_all = await _call(registry, "weekly_person_stats", scope="workload_top", role="owner")
+    check(
+        "OA-F1-01/L2-02 全库任务最多保并列：10515 与 u3208 各 7 条，2 行",
+        [(r.get("person"), r.get("task_count")) for r in (top_all.get("rows") or [])] == [("10515", 7), ("u3208", 7)]
+        and str(top_all.get("tied_at_top")) == "2",
+        str([(r.get("person"), r.get("task_count")) for r in (top_all.get("rows") or [])]),
+    )
+    top_tech = await _call(registry, "weekly_person_stats", scope="workload_top", role="owner", board="tech")
+    check(
+        "技术组 keep_ties 档四人并列各 4 条（10445/10515/u3208/u3214）",
+        [r.get("person") for r in (top_tech.get("rows") or [])] == ["10445", "10515", "u3208", "u3214"],
+        str([(r.get("person"), r.get("task_count")) for r in (top_tech.get("rows") or [])]),
+    )
+    cut_tech = await _call(registry, "weekly_person_stats", scope="workload", role="owner", board="tech", top=1)
+    check(
+        # OA-V1-04 的 gold 是 LIMIT 1，硬切档必须仍只回一行，且用 tied_at_top 说明并列。
+        "OA-V1-04 硬切档 top=1 仍是单行 10445，并列数走 tied_at_top=4",
+        [r.get("person") for r in (cut_tech.get("rows") or [])] == ["10445"]
+        and str(cut_tech.get("tied_at_top")) == "4",
+        f"rows={cut_tech.get('rows')} tied={cut_tech.get('tied_at_top')}",
+    )
+    check(
+        "两档在 caliber 里互相指路，免得模型选错并列规则",
+        "top=1" in str(top_tech.get("caliber")) and "并列" in str(top_tech.get("caliber")),
+        str(top_tech.get("caliber"))[:170],
+    )
+
     return report()
 
 

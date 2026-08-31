@@ -21,6 +21,7 @@ async def weekly_person_stats(
     scope: str = "workload",
     role: str = "lead_owner",
     project_group: str = "",
+    board: str = "",
     top: int = 200,
 ) -> str:
     """Aggregate formal tasks by person: workload, cross-group spread, id formats.
@@ -31,7 +32,13 @@ async def weekly_person_stats(
 
     Args:
         scope: workload (tasks per person, ties ordered by name; the reply carries
-            tied_at_top and top_task_count) / workload_summary
+            tied_at_top and top_task_count) / workload_top (the busiest person WITH
+            every tie kept, decided server-side by HAVING = MAX. "谁任务最多" over
+            the tech board is four people at 4 tasks each, so workload + top=1 hard-
+            cuts to one row while this returns all four. Pick by the question: a
+            plain 「谁最多」 wants this one, 「最多的那一个」 wants top=1. The row
+            count IS the answer -- do not trim it to one, and do not pad it with
+            the runner-up) / workload_summary
             (global average, distinct head-count, max and min) / single_task (people
             holding exactly one) / cross_group (people spanning 2+ 专项组, with the
             group list) / dual_role (people who are both 牵头人 and 项目负责人) /
@@ -47,10 +54,22 @@ async def weekly_person_stats(
             people of ONE 专项组, de-duplicated: use this for "标准安全组的牵头人
             都有谁" rather than listing the group's tasks -- 19 tasks there carry
             only 9 distinct 牵头人, so counting task rows over-counts people).
-        role: Person column to group by: lead_owner or project_owner.
+        role: Which person column to group by -- three DIFFERENT populations, not
+            three names for one:
+            owner (owner_user_id, 任务主责人) -- one person per task, 45 distinct
+            on the tech board. This is what a plain 「负责人」 means: "有多少人当
+            负责人"、"谁手里任务最多"、"平均每个负责人几个任务" all read off here.
+            project_owner (project_owner_name) -- also 45 distinct, the named
+            counterpart of the same role.
+            lead_owner (lead_owner_name, 分管领导/牵头人) -- only 12 distinct on
+            the tech board, because one 分管领导 covers many tasks. Answering a
+            「负责人」 question off this column reports 12 where the answer is 45.
         project_group: Required by group_roster, ignored by every other scope.
             Matched exactly; weekly_aggregate group_by="project_group" lists the
             11 valid names.
+        board: Board code or name (tech / group) to scope every count to one
+            board. Needed whenever the question says 「某看板」: the whole-library
+            default mixes both boards' people into one head-count.
         top: Row cap, capped at 200. Match it to the question's number: a singular
             question ("任务量最大的牵头人是谁", "最长的标识是哪一个") is top=1 and
             answers off the single row returned; "前 10 位" is top=10. The workload
@@ -65,5 +84,11 @@ async def weekly_person_stats(
         return _invalid("top must be an integer")
     return await _call(
         "weekly_person_stats",
-        {"scope": scope, "role": role, "project_group": project_group, "top": bounded},
+        {
+            "scope": scope,
+            "role": role,
+            "project_group": project_group,
+            "board": board,
+            "top": bounded,
+        },
     )

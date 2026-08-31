@@ -76,9 +76,57 @@ SNAPSHOT_NOTE = (
 _TABLE_REF = re.compile(r"(?:FROM|JOIN)\s+`?(\w+)`?", re.IGNORECASE)
 _NAMED_PARAM = re.compile(r":(\w+)")
 
+MOCK_AS_OF = "2026-08-15"
+"""The mock's own snapshot date, and the only correct anchor for these answers.
+
+oa_biz_200 ships `params` computed against the real database at 2026-08-18. Passing
+those through verbatim dates the answer three days into the mock's future: E6-01's
+`DATEDIFF(:as_of, MAX(report_time))` yields 17 under 08-18 and 14 under 08-15 off
+the same rows. Any param that names a date anchor is rebound here, and the
+rebinding is recorded per question so a reader can tell an anchored answer from a
+literal one.
+"""
+
+_AS_OF_PARAMS = frozenset({"as_of", "asof", "today", "now", "ref_date", "snapshot"})
+
 
 def tables_used(sql: str) -> set[str]:
     return {name.lower() for name in _TABLE_REF.findall(sql or "")}
+
+
+def audit_caliber(sql: str) -> list[str]:
+    """Flag the formal-scope gates a gold_sql leaves out.
+
+    A reference answer computed without these gates is not a harder version of the
+    same question -- it is a different question. Measured on the first run: of 64
+    questions failing both rounds, 36 have a gap flagged here, against 5 of the 45
+    that pass both. So this is reported per question rather than silently fixed:
+    the answer set is 国数's artefact, and rewriting their SQL would swap one
+    unverifiable key for another. Grading can skip the flagged ones, or a reviewer
+    can decide case by case.
+
+    Two examples of what the gaps do. OA-B7-02 counts `task_progress` with no gate
+    at all and lands on 1068 rows / 83 tasks where the formal caliber holds 943/73.
+    OA-H5-01 filters the denominator by board but not the numerator, so its
+    "coverage" reads 125/82 = 152.4% -- above 100%, which no coverage can be.
+    """
+    text = " ".join((sql or "").split())
+    lowered = text.lower()
+    tables = tables_used(text)
+    gaps: list[str] = []
+    # Only require the task gates when the query actually touches the task domain;
+    # a pure category-tree or board-dictionary query has no task rows to filter.
+    task_scoped = bool(tables & {"task", "task_progress", "task_milestone", "task_year_goal", "task_attachment"})
+    if task_scoped:
+        if "is_deleted" not in lowered:
+            gaps.append("缺软删闸门 is_deleted = 0")
+        if "workflow_status" not in lowered:
+            gaps.append("缺发布闸门 workflow_status = 'published'")
+    if "task_progress" in tables and "is_published" not in lowered:
+        gaps.append("缺进展行发布闸门 is_published = 1")
+    if "task_group_progress_history" in tables and "is_published" not in lowered:
+        gaps.append("缺集团历史行发布闸门 is_published = 1")
+    return gaps
 
 
 def _load_db() -> Any:
@@ -110,7 +158,7 @@ def _is_degenerate(rows: list[dict[str, Any]], columns: list[str], cells: list[l
     return len(rows) == 1 and len(columns) == 1 and cells[0][0] in {"0", "None", ""}
 
 
-def build(source: Path, out: Path) -> int:
+def build(source: Path, out: Path, *, exclude_flagged: bool = False) -> int:
     db = _load_db()
     records = [json.loads(line) for line in source.read_text(encoding="utf-8").splitlines() if line.strip()]
 
@@ -128,9 +176,13 @@ def build(source: Path, out: Path) -> int:
                 continue
             # gold_sql uses :name placeholders; pymysql wants %(name)s.
             bound = _NAMED_PARAM.sub(lambda m: f"%({m.group(1)})s", record["gold_sql"])
+            params = dict(record.get("params") or {})
+            rebound = sorted(k for k in params if k.lower() in _AS_OF_PARAMS)
+            for key in rebound:
+                params[key] = MOCK_AS_OF
             try:
                 cursor = connection.cursor()
-                cursor.execute(bound, record.get("params") or {})
+                cursor.execute(bound, params)
                 rows = cursor.fetchall()
                 cursor.close()
             except Exception as exc:
@@ -143,32 +195,37 @@ def build(source: Path, out: Path) -> int:
                 degenerate.append((record["id"], record["question"][:40]))
                 continue
 
-            kept.append(
-                {
-                    "id": "OA-" + record["id"],
-                    "type_id": record["type_id"],
-                    "category": record["category"] + "（oa_biz）",
-                    "type": record["type"],
-                    "difficulty": DIFFICULTY.get(record["difficulty"], "medium"),
-                    "question": record["question"],
-                    "kind": _classify(rows, columns),
-                    "gold_sql": record["gold_sql"],
-                    "gold_answer": {"columns": columns, "rows": cells},
-                    "gold_row_count": len(rows),
-                    "traps": record.get("traps", []),
-                    "oa_expected": record.get("expected"),
-                    "snapshot_note": SNAPSHOT_NOTE,
-                }
-            )
+            caliber_gaps = audit_caliber(record["gold_sql"])
+            item = {
+                "id": "OA-" + record["id"],
+                "type_id": record["type_id"],
+                "category": record["category"] + "（oa_biz）",
+                "type": record["type"],
+                "difficulty": DIFFICULTY.get(record["difficulty"], "medium"),
+                "question": record["question"],
+                "kind": _classify(rows, columns),
+                "gold_sql": record["gold_sql"],
+                "gold_answer": {"columns": columns, "rows": cells},
+                "gold_row_count": len(rows),
+                "traps": record.get("traps", []),
+                "oa_expected": record.get("expected"),
+                "snapshot_note": SNAPSHOT_NOTE,
+            }
+            if rebound:
+                item["as_of_rebound"] = {"params": rebound, "to": MOCK_AS_OF}
+            if caliber_gaps:
+                item["caliber_gaps"] = caliber_gaps
+            kept.append(item)
     finally:
         connection.close()
 
+    written = [item for item in kept if not item.get("caliber_gaps")] if exclude_flagged else kept
     out.write_text(
-        "\n".join(json.dumps(item, ensure_ascii=False) for item in kept) + "\n",
+        "\n".join(json.dumps(item, ensure_ascii=False) for item in written) + "\n",
         encoding="utf-8",
     )
-    _report(kept, blocked, degenerate, errors, source, out)
-    return 0 if kept and not errors else 1
+    _report(kept, blocked, degenerate, errors, source, out, exclude_flagged=exclude_flagged)
+    return 0 if written and not errors else 1
 
 
 def _report(
@@ -178,9 +235,15 @@ def _report(
     errors: list[tuple[str, str]],
     source: Path,
     out: Path,
+    *,
+    exclude_flagged: bool = False,
 ) -> None:
+    flagged_count = sum(1 for item in kept if item.get("caliber_gaps"))
+    written_count = len(kept) - flagged_count if exclude_flagged else len(kept)
     print(f"源题库 {source}")
-    print(f"入库 {len(kept)} 题 -> {out}")
+    print(f"入库 {written_count} 题 -> {out}")
+    if exclude_flagged:
+        print(f"（--exclude-flagged 生效：另有 {flagged_count} 题因 gold_sql 口径存疑未写入）")
     print(f"因缺 10 张新表跳过 {len(blocked)} 题；mock 无数据剔除 {len(degenerate)} 题；SQL 报错 {len(errors)}")
 
     for label, key in (("类别", "category"), ("难度", "difficulty"), ("形态", "kind")):
@@ -188,6 +251,21 @@ def _report(
         print(f"\n按{label}：")
         for name, count in sorted(counts.items()):
             print(f"  {name:<18} {count}")
+
+    rebound = [item for item in kept if item.get("as_of_rebound")]
+    print(f"\nas_of 重锚到 {MOCK_AS_OF} 的题：{len(rebound)}")
+    for item in rebound:
+        print(f"  {item['id']:<13} params={','.join(item['as_of_rebound']['params'])}")
+
+    flagged = [item for item in kept if item.get("caliber_gaps")]
+    print(f"\ngold_sql 口径存疑的题：{len(flagged)} / {len(kept)}")
+    print("  这些题的参考答案不加正式口径闸门算出，评分时不应据它反推工具有错；")
+    print("  逐题复核后再决定采信或剔出评分集（--exclude-flagged 可直接剔除）。")
+    gap_counts = collections.Counter(gap for item in flagged for gap in item["caliber_gaps"])
+    for gap, count in gap_counts.most_common():
+        print(f"    {gap:<34} {count}")
+    for item in flagged:
+        print(f"  {item['id']:<13} {'; '.join(item['caliber_gaps'])}")
 
     if blocked:
         print("\n卡在缺表的题（按缺哪张表）：")
@@ -207,13 +285,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="用 mock 库重建 oa_biz 题目的参考答案")
     parser.add_argument("--source", default=str(DEFAULT_SOURCE), help="国数给的 oa_biz_200.jsonl")
     parser.add_argument("--out", default=str(DEFAULT_OUT), help="输出的 mock 版答案集")
+    parser.add_argument(
+        "--exclude-flagged",
+        action="store_true",
+        help="不写入 gold_sql 口径存疑的题（缺正式口径闸门），只留可信的那部分",
+    )
     args = parser.parse_args()
 
     source = Path(args.source)
     if not source.exists():
         print(f"源题库不存在：{source}")
         return 2
-    return build(source, Path(args.out))
+    return build(source, Path(args.out), exclude_flagged=args.exclude_flagged)
 
 
 if __name__ == "__main__":
