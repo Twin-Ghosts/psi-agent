@@ -3373,6 +3373,133 @@ async def run() -> int:
         str(sorted(ms_unique.keys())),
     )
 
+    # ---- 六处「跨轮稳定失败」的取数缺陷，期望值全部取自题库 gold_answer ----
+
+    # K2-03：分组轴此前在默认档被静默丢掉，回的是全库 5 个桶而不是各组占比。
+    bare_axis = await _call(registry, "weekly_freshness_distribution", by="project_group")
+    check(
+        "K2-03 单传 by 不再静默退化成全量分档，而是指名该带哪个天数",
+        bare_axis.get("ok") is False
+        and "stale_days" in str(bare_axis.get("error"))
+        and "recent_days" in str(bare_axis.get("error")),
+        json.dumps(bare_axis, ensure_ascii=False)[:200],
+    )
+    stale_axis = await _call(registry, "weekly_freshness_distribution", by="project_group", stale_days=90)
+    check(
+        # gold 首行国家工程办 4/15 = 26.7%；标准安全组 5 条更多但占比更低，
+        # 只给 stale_count 答不了这题。
+        "K2-03 各组滞后占比首行国家工程办 26.7%（条数最多的标准安全组 26.3% 在后）",
+        [(r.get("bucket"), str(r.get("stale_pct"))) for r in (stale_axis.get("rows") or [])][:2]
+        == [("国家工程办", "26.7"), ("标准安全组", "26.3")],
+        str([(r.get("bucket"), r.get("stale_pct")) for r in (stale_axis.get("rows") or [])][:3]),
+    )
+    active_axis = await _call(registry, "weekly_freshness_distribution", by="board", recent_days=90)
+    check(
+        # gold：技术组 61/82 = 74.4% 活跃。问活跃度就得按 active_pct 定序，
+        # 否则首行给的是滞后最多的那端，等于把答案报反。
+        "K1-03 各看板近 90 天活跃度：技术组 61 条 / 74.4%，按活跃端定序",
+        [
+            (r.get("bucket"), str(r.get("active_count")), str(r.get("active_pct")))
+            for r in (active_axis.get("rows") or [])
+        ]
+        == [("集团重点任务调度", "46", "100.0"), ("技术组重点任务进展", "61", "74.4")],
+        str([(r.get("bucket"), r.get("active_count"), r.get("active_pct")) for r in (active_axis.get("rows") or [])]),
+    )
+
+    # K5-01/K5-02：一级分类此前只回 cnt，率要模型自己除，两题都算错。
+    cat_rate = await _call(registry, "weekly_aggregate", group_by="primary_category", order_by="finish_rate")
+    check(
+        "K5-01 一级分类完成率逐档等于 gold，首行国家数据基础设施 45.5%",
+        [str(r.get("finish_rate_pct")) for r in (cat_rate.get("rows") or [])]
+        == ["45.5", "44.4", "30.0", "27.8", "27.3", "21.4", "21.4", "16.7", "15.4", "10.0", "8.3"],
+        str([(r.get("group_name"), r.get("finish_rate_pct")) for r in (cat_rate.get("rows") or [])][:3]),
+    )
+    check(
+        # K5-02 问「关键技术攻关和平台研发比」，gold 27.8% vs 8.3%，
+        # 基线曾答成 40.0% / 37.5% 且高低颠倒。
+        "K5-02 关键技术攻关 18/5/27.8 高于平台研发 12/1/8.3",
+        [
+            (r.get("cnt"), str(r.get("finished")), str(r.get("finish_rate_pct")))
+            for r in (cat_rate.get("rows") or [])
+            if r.get("group_name") in ("关键技术攻关", "平台研发")
+        ]
+        == [(18, "5", "27.8"), (12, "1", "8.3")],
+        str([(r.get("group_name"), r.get("cnt"), r.get("finished")) for r in (cat_rate.get("rows") or [])]),
+    )
+
+    # F2-02/F4-04：并列此前由 caliber 让模型「按并列陈述」，单数问句被答成三人。
+    lead_top = await _call(registry, "weekly_person_stats", scope="workload", top=1)
+    check(
+        "F2-02 任务量最大的牵头人单行吴晓东 14，并列个数作为 tied_at_top 回出",
+        [(r.get("person"), r.get("task_count")) for r in (lead_top.get("rows") or [])] == [("吴晓东", 14)]
+        and str(lead_top.get("tied_at_top")) == "3",
+        f"rows={lead_top.get('rows')} tied={lead_top.get('tied_at_top')}",
+    )
+    lead_ten = await _call(registry, "weekly_person_stats", scope="workload", top=10)
+    check(
+        # F2-01 要前 10 位且并列都在内：修 F2-02 不能把这题打翻。
+        "F2-01 前 10 位仍是 10 行且三个并列 14 都在",
+        str(lead_ten.get("row_count")) == "10"
+        and [r.get("task_count") for r in (lead_ten.get("rows") or [])][:3] == [14, 14, 14],
+        str([(r.get("person"), r.get("task_count")) for r in (lead_ten.get("rows") or [])][:4]),
+    )
+    id_top = await _call(registry, "weekly_person_stats", scope="id_longest", top=1)
+    id_first = (id_top.get("rows") or [{}])[0]
+    check(
+        # 库里存的是双反斜杠（NDG\\emp519），gold 写的是单反斜杠，字面数不可靠：
+        # 断言只钉「首行是 emp519 那个标识、长度 11、并列 4 个」这三件事。
+        "F4-04 最长标识单行 emp519（长 11），另有 3 个等长走 tied_at_top",
+        str(id_top.get("row_count")) == "1"
+        and "emp519" in str(id_first.get("owner_user_id"))
+        and id_first.get("id_length") == 11
+        and str(id_top.get("tied_at_top")) == "4",
+        f"rows={id_top.get('rows')} tied={id_top.get('tied_at_top')}",
+    )
+
+    # D4-04：「补报」此前没有任何出口，模型把 6 轮工具耗尽仍答不出。
+    backfill = await _call(registry, "weekly_progress_coverage", scope="backfill")
+    check(
+        "D4-04 补报 5 对相邻期，与 gold 的期号/上报时间逐条一致",
+        [(r.get("task_name"), r.get("late_filed_version"), r.get("next_version")) for r in (backfill.get("rows") or [])]
+        == [
+            ("行业可信数据空间建设", 10, 11),
+            ("数据资源登记体系建设", 13, 14),
+            ("隐私计算平台自主可控攻关", 17, 18),
+            ("全国一体化算力网调度平台建设", 10, 11),
+            ("金融行业高质量数据集建设", 10, 11),
+        ],
+        str([(r.get("task_name"), r.get("late_filed_version")) for r in (backfill.get("rows") or [])]),
+    )
+    check(
+        # lag_days 是同一行内「上报日 - 周期日」，跟相邻两期谁先谁后是两件事。
+        "D4-04 caliber 点明与 progress_range 的 lag_days 不是一个口径",
+        "lag_days" in str(backfill.get("caliber")),
+        str(backfill.get("caliber"))[:160],
+    )
+
+    # Q1-01/O7-05：gold 按 task_id 排，默认档就是对的；order_by=progress_time
+    # 会返回另一批 8 条（103/128/113/149...），那是另一个问题的答案。
+    group_default = await _call(registry, "weekly_group_detail_query", limit=8)
+    check(
+        "Q1-01 集团明细默认按 task_id 定序，前 8 条即 97-104",
+        [r.get("task_id") for r in (group_default.get("rows") or [])] == [97, 98, 99, 100, 101, 102, 103, 104],
+        str([r.get("task_id") for r in (group_default.get("rows") or [])]),
+    )
+    group_recent = await _call(registry, "weekly_group_detail_query", order_by="progress_time", limit=8)
+    check(
+        "Q1-01 order_by=progress_time 确实是另一批任务，两档不可混用",
+        [r.get("task_id") for r in (group_recent.get("rows") or [])][:3] == [103, 128, 113],
+        str([r.get("task_id") for r in (group_recent.get("rows") or [])][:5]),
+    )
+
+    # R2-01：「最新一期成效」在历史表，不是明细表那个去规范化的当前值。
+    group_latest = await _call(registry, "weekly_group_history", latest_only=True, limit=8)
+    check(
+        "R2-01 集团最新一期成效走 group_history latest_only，前 8 条为 97-104",
+        [r.get("task_id") for r in (group_latest.get("rows") or [])] == [97, 98, 99, 100, 101, 102, 103, 104],
+        str([r.get("task_id") for r in (group_latest.get("rows") or [])]),
+    )
+
     return report()
 
 

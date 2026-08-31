@@ -306,6 +306,16 @@ async def run(args: argparse.Namespace) -> int:
     if args.category:
         wanted = {c.strip().upper() for c in args.category.split(",")}
         questions = [q for q in questions if q["category"][:1].upper() in wanted]
+    if args.ids:
+        # Run only the listed ids. Whether a fix worked is read off whether its
+        # target questions recover across runs, not off the total: the same code
+        # once flipped 28 questions in both directions between two full runs.
+        picked = {q.strip().upper() for q in args.ids.split(",") if q.strip()}
+        questions = [q for q in questions if q["id"].upper() in picked]
+        missing = picked - {q["id"].upper() for q in questions}
+        if missing:
+            print(f"题号不存在：{', '.join(sorted(missing))}", file=sys.stderr)
+            return 2
     if args.limit:
         questions = questions[: args.limit]
     if not questions:
@@ -406,6 +416,7 @@ def main() -> int:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--limit", type=int, default=0, help="只跑前 N 题")
     parser.add_argument("--category", default="", help="只跑指定大类，如 M,N")
+    parser.add_argument("--ids", default="", help="只跑指定题号，如 K5-01,F2-02")
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--report", default="baseline-report.json")
     args = parser.parse_args()

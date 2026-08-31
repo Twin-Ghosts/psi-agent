@@ -58,10 +58,13 @@ async def weekly_group_detail_query(
             contradiction question also collects tasks that are 未开始 and blank,
             which are not contradictory at all.
         order_by: "progress_time" orders by the task's latest progress, newest
-            first, and returns latest_progress_time alongside. Use it whenever the
-            question says 当期 or asks for the first N rows: the default task-id
-            order starts at the board's oldest tasks, so "当期进度成效" plus a
-            "前 5 条" cut returns 5 rows that are not the current ones.
+            first, and returns latest_progress_time alongside. Reach for it only
+            when the question is about recency itself -- "最近报的"、"按上报时间
+            排" -- NOT merely because it says 当期/当前 or asks for the first N
+            rows. Those listings are answered in the default task-id order: the
+            board's own numbering IS the reading order, and re-sorting by progress
+            time returns a different 8 tasks (103/128/113/149... instead of
+            97-104), which is a different question's answer.
         limit: Max rows, capped at 200. The reply carries total_count; when it
             exceeds the rows returned, the listing is short, not the answer.
     """
@@ -156,7 +159,11 @@ async def weekly_group_history(
             the 42 drafts are linked. linked_rows comes back as 0, which means this
             table simply has no link to the submission forms -- report that, do not
             read it as a lookup failure or retry with other parameters.
-        latest_only: Keep only each task's newest published period.
+        latest_only: Keep only each task's newest published period. This is the
+            answer to "集团看板各任务最新一期的进度成效"; the current-effect column
+            on weekly_group_detail_query is a different thing -- it is the
+            denormalised 当前 value, not the newest history period, and the two
+            disagree on some tasks. Ask "最新一期" and you want this flag.
         date_from: Inclusive start on report time, YYYY-MM-DD.
         date_to: Inclusive end on report time, YYYY-MM-DD.
         last_days: Window of N days ending at the snapshot date; 0 disables it.

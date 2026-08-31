@@ -536,7 +536,14 @@ async def weekly_progress_coverage(scope: str = "summary", project_group: str = 
             count, i.e. missing periods) / latest_round (each task's newest
             period with its next_work, one row per task) / missing_next (how many
             tasks left 下一步 blank in their newest period -- only the newest one
-            counts, a gap in the middle does not).
+            counts, a gap in the middle does not) /
+            backfill (补报: the periods whose report_time is LATER than that of the
+            period after them, i.e. a smaller version_no filed afterwards. One row
+            per adjacent pair, with filed_later_by_days computed server-side. This
+            is the only outlet for "有哪些任务出现过补报"; do NOT try to answer it
+            off weekly_progress_range's lag_days, which is "report date minus
+            period date" WITHIN one row and says nothing about which period was
+            filed later).
         project_group: Narrow latest_round / missing_next to one 项目组, for
             "算力网络组各任务下一步做什么". Matched exactly after trimming.
         limit: Max rows for the listing scopes, capped at 200.
@@ -593,6 +600,12 @@ async def weekly_rank(
     Args:
         metric: progress_rounds (已发布进展期数) / milestones / milestones_done /
             attachments / submissions / group_rounds (集团看板成效期数).
+            Every metric here is a per-task COUNT, so this tool answers "谁最多 /
+            谁最少". It does NOT answer "都提交过几轮 / 给我前 N 条", which wants the
+            submission rows themselves (task, round_no, status, submitted_at) --
+            that is weekly_submission_query, optionally with board="group". Ranking
+            that question returns one aggregate row per task and drops round_no
+            entirely, which reads plausible and answers something else.
         mode: cut -- hard-cut to top rows, ties past the boundary excluded;
             keep_ties -- RANK(), every task down to place top, so expect more
             than top rows; per_group -- ROW_NUMBER() per bucket, one row per

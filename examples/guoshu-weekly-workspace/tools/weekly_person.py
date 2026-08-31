@@ -30,7 +30,8 @@ async def weekly_person_stats(
     people by reading rows back is the biggest source of wrong answers here.
 
     Args:
-        scope: workload (tasks per person, ties ordered by name) / workload_summary
+        scope: workload (tasks per person, ties ordered by name; the reply carries
+            tied_at_top and top_task_count) / workload_summary
             (global average, distinct head-count, max and min) / single_task (people
             holding exactly one) / cross_group (people spanning 2+ 专项组, with the
             group list) / dual_role (people who are both 牵头人 and 项目负责人) /
@@ -50,7 +51,13 @@ async def weekly_person_stats(
         project_group: Required by group_roster, ignored by every other scope.
             Matched exactly; weekly_aggregate group_by="project_group" lists the
             11 valid names.
-        top: Row cap, capped at 200.
+        top: Row cap, capped at 200. Match it to the question's number: a singular
+            question ("任务量最大的牵头人是谁", "最长的标识是哪一个") is top=1 and
+            answers off the single row returned; "前 10 位" is top=10. The workload
+            and id_longest scopes also return tied_at_top -- three people tie at 14
+            tasks and four identifiers tie at the longest length, so quote that
+            count if the tie matters, but do NOT expand a singular answer into the
+            whole tied set: that answers a different question.
     """
     try:
         bounded = max(1, min(200, int(top)))

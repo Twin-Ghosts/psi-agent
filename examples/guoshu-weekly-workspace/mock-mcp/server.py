@@ -574,8 +574,14 @@ def weekly_aggregate(
             board_filter = ""
             if board.strip():
                 board_filter = "AND cb.id = %(bid)s"
+            # 完成率与分母同排返回，和 project_group 一档同一个理由：只给 cnt，
+            # 模型得自己定小数位、自己对齐分子分母，K5-01/K5-02 两题都是这么算错的
+            # （一题把 45.5% 答成 67.5%，一题把两档的高低答反）。率一律服务端 ROUND。
             sql = (
-                "SELECT pc.name AS group_name, COUNT(*) AS cnt FROM task t "
+                "SELECT pc.name AS group_name, COUNT(*) AS cnt, "
+                "SUM(t.status = 2) AS finished, "
+                "ROUND(SUM(t.status = 2) / COUNT(*) * 100, 1) AS finish_rate_pct "
+                "FROM task t "
                 "JOIN task_category c ON c.id = t.category_id AND c.is_deleted = 0 "
                 "JOIN task_board cb ON cb.id = c.board_id AND cb.is_deleted = 0 "
                 f"{board_filter} "
@@ -583,6 +589,12 @@ def weekly_aggregate(
                 f"WHERE {store.formal_task_clause()} "
                 "GROUP BY pc.id, pc.name ORDER BY cnt DESC, pc.id"
             )
+            if (order_by or "").strip().lower() == "finish_rate":
+                direction = "ASC" if ascending else "DESC"
+                sql = sql.replace(
+                    "ORDER BY cnt DESC, pc.id",
+                    f"ORDER BY finish_rate_pct {direction}, pc.id",
+                )
         elif group_by == "top_sub_per_primary":
             # 「每个一级分类下任务数最多的二级分类」排的是分类而不是任务：
             # weekly_rank 的 per_group 一组给一个任务，答不了这题。分组轴是一级
@@ -680,8 +692,22 @@ def weekly_aggregate(
             caliber = (
                 f"{store.FORMAL_TASK_CALIBER}；按一级分类（二级分类的 parent_id）汇总，"
                 "不是二级分类；看板过滤落在分类树所属看板上；"
-                "只统计挂到分类树上的任务，未挂分类的任务不进任何一档"
+                "只统计挂到分类树上的任务，未挂分类的任务不进任何一档；"
+                "finished 是该档已完成（status = 2）条数，finish_rate_pct = finished / cnt，"
+                "已由服务端 ROUND 到一位小数，直接引用，不要自己相除或改小数位；"
+                "各档 cnt 相加等于挂了分类的正式任务总数"
             )
+            if (order_by or "").strip().lower() == "finish_rate":
+                caliber += (
+                    f"；本次按 finish_rate_pct {'升序' if ascending else '降序'}定序，"
+                    f"首行即完成率{'最低' if ascending else '最高'}的一级分类，并列按分类 id 定序；"
+                    "「推进最快」问的是完成率而不是任务数，别拿首档任务数当答案"
+                )
+            else:
+                caliber += (
+                    "；本次按任务数定序，问「哪类完成率最高/推进最快」请加 order_by=finish_rate，"
+                    "任务数最多的档未必完成率最高"
+                )
         elif group_by == "top_sub_per_primary":
             caliber = (
                 f"{store.FORMAL_TASK_CALIBER}；每个一级分类只返回任务数最多的那一个二级分类"
@@ -2098,13 +2124,34 @@ def weekly_person_stats(
         base = f"{store.FORMAL_TASK_CALIBER}；按「{role_label}」分组，姓名为空的行不计入人头"
 
         if key == "workload":
-            return store.fetch(
+            # 「任务量最大的牵头人是谁」是单数问句，答案是定序后的首行；此前 caliber
+            # 写「取最多时留意并列」，模型据此把 14 条的三个人全列出来，答成了另一题
+            # （F2-02）。并列不该由模型临场裁决：把并列个数作为数据回出来，
+            # 让它照抄行数并按需提一句「另有 N 人并列」，而不是自行改写答案集合。
+            result = store.fetch(
                 f"SELECT t.{column} AS person, COUNT(*) AS task_count "
                 f"FROM task t WHERE {named} "
                 f"GROUP BY t.{column} ORDER BY task_count DESC, person",
-                caliber=f"{base}；并列按姓名定序，取「最多」时留意并列",
+                caliber=(
+                    f"{base}；按任务数倒序、并列按姓名定序；"
+                    "问「最多的是谁」（单数）传 top=1 按首行答，"
+                    "问「前 N 位」传 top=N 并把并列的一并列出；"
+                    "tied_at_top 是与首行任务数相同的人数，据它补一句「另有并列」即可，"
+                    "不要因为存在并列就改写答案行数"
+                ),
                 limit=bounded,
             )
+            rows = result.get("rows") or []
+            if rows:
+                peak = rows[0].get("task_count")
+                tied = store.scalar(
+                    f"SELECT COUNT(*) FROM (SELECT t.{column} AS person, COUNT(*) AS c "
+                    f"FROM task t WHERE {named} GROUP BY t.{column}) g WHERE g.c = %(peak)s",
+                    {"peak": peak},
+                )
+                result["tied_at_top"] = tied["value"]
+                result["top_task_count"] = peak
+            return result
 
         if key == "workload_summary":
             # 平均值必须一次算完：分组后让模型自己求平均，它会拿组内均值当全局均值。
@@ -2261,17 +2308,35 @@ def weekly_person_stats(
         # 问的是「标识」而不是「任务」：同一个标识挂 3 个任务只算一个标识。
         # 不去重会返回 128 行、同一个 NDG\emp529 重复三次，模型会把「最长的是
         # 哪一个」答成一串重复项，也数不出到底有几个并列。
-        return store.fetch(
+        # 与 workload 同一个毛病：caliber 让「按并列陈述」，模型就把 4 个等长标识
+        # 全列出来，而问句「最长的是哪一个」是单数（F4-04）。并列个数照样作为数据回。
+        longest = store.fetch(
             "SELECT t.owner_user_id, CHAR_LENGTH(t.owner_user_id) AS id_length, "
             "COUNT(*) AS task_count "
             f"FROM task t WHERE {clause} AND t.owner_user_id IS NOT NULL AND t.owner_user_id <> '' "
             "GROUP BY t.owner_user_id ORDER BY id_length DESC, t.owner_user_id",
             caliber=(
                 f"{store.FORMAL_TASK_CALIBER}；一行一个去重后的标识，task_count 是该标识挂了几个任务；"
-                "按标识字符长度倒序；长度相同的多个标识属并列，取「最长」时按并列陈述"
+                "按标识字符长度倒序、等长按标识定序；"
+                "问「最长的是哪一个」（单数）传 top=1 按首行答；"
+                "tied_at_top 是与首行等长的标识个数，据它补一句「另有并列」即可，"
+                "不要因为存在并列就改写答案行数"
             ),
             limit=bounded,
         )
+        id_rows = longest.get("rows") or []
+        if id_rows:
+            peak_len = id_rows[0].get("id_length")
+            tied_ids = store.scalar(
+                "SELECT COUNT(*) FROM (SELECT t.owner_user_id FROM task t "
+                f"WHERE {clause} AND t.owner_user_id IS NOT NULL AND t.owner_user_id <> '' "
+                "AND CHAR_LENGTH(t.owner_user_id) = %(len)s "
+                "GROUP BY t.owner_user_id) g",
+                {"len": peak_len},
+            )
+            longest["tied_at_top"] = tied_ids["value"]
+            longest["max_id_length"] = peak_len
+        return longest
 
     return _guard("weekly_person_stats", work)
 
@@ -2346,6 +2411,7 @@ _COVERAGE_SCOPES = (
     "version_gaps",
     "latest_round",
     "missing_next",
+    "backfill",
 )
 
 # 「最新一期」的定序键：version_no 大者为新，同期再按 id 兜底，两级都要。
@@ -2877,6 +2943,34 @@ def weekly_progress_coverage(scope: str = "summary", project_group: str = "", li
             )
             rows["total_count"] = total["value"]
             return rows
+
+        if key == "backfill":
+            # 「补报」= 期次小的那一期反而提交得更晚，判据是相邻两期的 report_time
+            # 逆序（p.version_no + 1 = n.version_no 且 p.report_time > n.report_time）。
+            # 此前没有任何出口能取到它：progress_range 的 lag_days 是「上报日减周期日」
+            # ——同一行内的滞后，跟相邻两期谁先谁后是两件事，用它答会答成另一题。
+            # 两期都要过发布闸门，否则草稿期会混进来充当「更晚的那一期」。
+            return store.fetch(
+                "SELECT t.id AS task_id, t.task_name, p.version_no AS late_filed_version, "
+                "p.report_time, n.version_no AS next_version, n.report_time AS next_report_time, "
+                "DATEDIFF(p.report_time, n.report_time) AS filed_later_by_days "
+                "FROM task_progress p "
+                "JOIN task_progress n ON n.task_id = p.task_id "
+                "AND n.version_no = p.version_no + 1 AND n.is_published = 1 "
+                "JOIN task t ON t.id = p.task_id "
+                f"WHERE {clause} AND p.is_published = 1 AND p.report_time > n.report_time "
+                "ORDER BY t.id",
+                caliber=(
+                    f"{store.FORMAL_TASK_CALIBER}；仅已发布进展（两期都要 is_published = 1）；"
+                    "判据是相邻两期上报时间逆序：期号 late_filed_version 的上报时间"
+                    "晚于它的下一期 next_version，即这一期是事后补报的；"
+                    "filed_later_by_days 是晚了多少天，由服务端算好；"
+                    "一对相邻期一行，行数即补报次数；"
+                    "这与 weekly_progress_range 的 lag_days（同一行内「上报日 - 周期日」）"
+                    "不是一个口径，那个答不了「哪期反而报得更晚」"
+                ),
+                limit=bounded,
+            )
 
         if key == "publish_split":
             # 「多少已发布、多少还没发布」要的是一行三个数。summary 只给已发布那
@@ -3611,7 +3705,16 @@ def weekly_freshness_distribution(
                     "error": {"code": "invalid_argument", "message": "天数必须为正整数"},
                 }
             bounded = max(1, min(store.MAX_ROWS, int(limit)))
-            if recent_days:
+            axis_key = (by or "").strip().lower()
+            if axis_key and axis_key not in _STALE_AXES:
+                return {
+                    "ok": False,
+                    "error": {
+                        "code": "unsupported_group_by",
+                        "message": f"不支持的分组轴：{by}；支持 {', '.join(sorted(_STALE_AXES))}",
+                    },
+                }
+            if recent_days and not axis_key:
                 # 「最近一周更新过」不加 status 过滤：问的是有没有报进展，
                 # 不是任务在不在办。
                 return store.fetch(
@@ -3636,23 +3739,17 @@ def weekly_freshness_distribution(
                 "(t.latest_progress_time IS NULL OR t.latest_progress_time < DATE_SUB(%(as_of)s, INTERVAL %(d)s DAY))"
             )
             params = {"as_of": store.AS_OF, "d": days}
+            window_note = (
+                f"活跃 = latest_progress_time 落在近 {days} 天内，其余（含从未上报）算滞后"
+                if recent_days
+                else f"滞后超过 {days} 天，含从未上报（latest_progress_time 为 NULL）"
+            )
             note = (
                 f"{store.FORMAL_TASK_CALIBER}；在办即 status IN (0, 1)（0 未开始同样在办）；"
-                f"滞后超过 {days} 天，含从未上报（latest_progress_time 为 NULL）；"
-                f"{store.as_of_caliber()}"
+                f"{window_note}；{store.as_of_caliber()}"
             )
-            axis_key = (by or "").strip().lower()
             if axis_key:
-                chosen = _STALE_AXES.get(axis_key)
-                if chosen is None:
-                    return {
-                        "ok": False,
-                        "error": {
-                            "code": "unsupported_group_by",
-                            "message": f"不支持的分组轴：{by}；支持 {', '.join(sorted(_STALE_AXES))}",
-                        },
-                    }
-                axis, extra = chosen
+                axis, extra = _STALE_AXES[axis_key]
                 # 「哪个组滞后占比最高」只给 stale_count 答不了：标准安全组 5 条最多，
                 # 但它有 19 个任务，占比 26.3% 低于国家工程办的 4/15=26.7%。分母与
                 # 占比必须与计数同排返回，否则模型只能拿别处的任务数手工除，一错就
@@ -3663,6 +3760,15 @@ def weekly_freshness_distribution(
                     if in_flight
                     else "；含该组全部正式任务，不分是否在办（要只看在办请加 in_flight=true）"
                 )
+                # 两端同表返回，但排序必须跟着问句走：问「活跃度」按 active_pct 倒序，
+                # 问「滞后占比」按 stale_pct 倒序。首行即答案，排错端等于把末位当第一。
+                active_end = bool(recent_days)
+                order_col = "active_pct" if active_end else "stale_pct"
+                end_note = (
+                    f"；本次按 recent_days={days} 问的是活跃那一端，已按 active_pct 倒序，首行即活跃占比最高的组"
+                    if active_end
+                    else "；问「占比最高的组」按 stale_pct 排序的首行答，条数最多的那组未必占比最高"
+                )
                 return store.fetch(
                     f"SELECT {axis} AS bucket, COUNT(*) AS total, "
                     f"SUM({stale}) AS stale_count, "
@@ -3671,13 +3777,12 @@ def weekly_freshness_distribution(
                     f"ROUND((COUNT(*) - SUM({stale})) / COUNT(*) * 100, 1) AS active_pct "
                     f"FROM task t {extra}"
                     f"WHERE {store.formal_task_clause()}{gate} "
-                    f"GROUP BY {axis} ORDER BY stale_pct DESC, bucket",
+                    f"GROUP BY {axis} ORDER BY {order_col} DESC, bucket",
                     params,
                     caliber=(
                         note + gate_note + "；total 是该组分母，stale_pct = stale_count / total，"
                         "active_count / active_pct 是同一分母下报过进展的那一侧（两者互补，相加为 100）；"
-                        "占比由服务端算，不要拿滞后条数跟别处的任务数手工相除；"
-                        "问「占比最高的组」按 stale_pct 排序的首行答，条数最多的那组未必占比最高"
+                        "占比由服务端算，不要拿滞后条数跟别处的任务数手工相除" + end_note
                     ),
                     limit=bounded,
                 )
@@ -3769,6 +3874,33 @@ def weekly_freshness_distribution(
                 ),
                 limit=limit,
             )
+        # by 只在 stale_days / recent_days 那一档有算法支撑（占比要分母）。此前
+        # 单传 by 会走到下面的全量分档，分组轴被静默丢掉：问「哪个组滞后占比最高」
+        # 拿回的是全库 5 个桶，模型只能从别处的任务数手工相除，一错就全错。
+        # 与其猜一个默认天数，不如明确指出该带哪个参数——K2-03 正是这么失分的。
+        axis_only = (by or "").strip().lower()
+        if axis_only:
+            if axis_only not in _STALE_AXES:
+                return {
+                    "ok": False,
+                    "error": {
+                        "code": "unsupported_group_by",
+                        "message": f"不支持的分组轴：{by}；支持 {', '.join(sorted(_STALE_AXES))}",
+                    },
+                }
+            return {
+                "ok": False,
+                "error": {
+                    "code": "invalid_argument",
+                    "message": (
+                        f"by={axis_only} 需要与 stale_days 或 recent_days 同用："
+                        "分组档回的是各组滞后/活跃的条数与占比，必须先有天数才有口径。"
+                        "问「哪个组滞后占比最高」传 stale_days=90，"
+                        "问「各组近 N 天活跃度」传 recent_days=90；"
+                        "只要分档桶（30/90/180/从未）请不要传 by。"
+                    ),
+                },
+            }
         # 「在办任务从来没报过进展时间」问的是在办那一档，全量分档给的是 9，
         # 含一条已完成的（任务 88），答在办就多了一条。in_flight 把闸门加在
         # 服务端，别再靠 stale_days=99999 这种取巧凑出 8。

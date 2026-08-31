@@ -61,12 +61,16 @@ async def weekly_aggregate(
             the question, not missing from the data. Ignored for workflow_status,
             whose reply also carries a totals block with the unpublished count
             and the published share already computed.
-        order_by: "finish_rate" re-orders the project_group breakdown by
-            completion rate. The rows always carry finished and finish_rate_pct
-            next to cnt, but the default ordering is by task count, off which
-            "完成率最低的 3 个组" cannot be read. Fewest finished is not lowest
-            rate: 治理合规组 2 of 10 = 20.0% sits ABOVE 数据基础设施组 2 of 15 =
-            13.3% though both finished 2.
+        order_by: "finish_rate" re-orders the project_group and primary_category
+            breakdowns by completion rate. Both carry finished and
+            finish_rate_pct next to cnt, already rounded on the server -- quote
+            the column, do not divide the counts yourself. The default ordering
+            is by task count, off which "完成率最低的 3 个组" and "哪类推进最快"
+            cannot be read: the biggest bucket is not the fastest one. 关键技术攻关
+            leads on task count with 18 yet finishes 27.8%, while 国家数据基础设施
+            finishes 45.5% on 11. Fewest finished is likewise not lowest rate:
+            治理合规组 2 of 10 = 20.0% sits ABOVE 数据基础设施组 2 of 15 = 13.3%
+            though both finished 2.
         ascending: True with order_by="finish_rate" puts the lowest rate first,
             which is what "完成率最低" asks for.
     """
