@@ -197,8 +197,8 @@ Mac 上手动确认，**CI 无法覆盖**：
 与 Windows 完全一致，无额外步骤：
 
 1. 改 `.github/inno-setup/haitun.iss` 的 `MyAppVersion`，推 `main`
-2. `PyInstaller` workflow 同时产出 `haitun-agent-installers`（Windows 三包）和
-   `haitun-agent-macos`（dmg）
+2. `PyInstaller` workflow 同时产出 `haitun-agent-installers`（Windows 三包）、
+   `haitun-agent-macos`（只有 dmg）和 `haitun-agent-macos-version`（只有版本文件）
 3. `Publish Haitun Installer to OSS` 校验两平台版本号一致，上传四个包，最后写
    `haitun-version.txt` 和 `msys-version.txt`
 

@@ -282,6 +282,48 @@ def test_boundary_keeps_filing_apart_from_completion() -> None:
     assert "todo-completion-standard" in body, "must route completion questions away"
 
 
+def test_separates_itself_from_the_todo_management_system() -> None:
+    """The filing layer and the delivery layer share one board — conflating them misjudges.
+
+    Both this skill and the company-todo-* trio act on the same board in the same cycle.
+    Two specific collisions have to stay written down, because each one silently produces
+    a wrong verdict rather than an error:
+
+    - mentor's sign-off exists in two places (this skill's board column vs the trio's
+      ledger 打分/评语). Reading one as the other means judging 「写得对不对」 by
+      「活干得怎么样」, or vice versa.
+    - the trio's audit fires at the same minute as this skill's reminder.
+    """
+    section = _section("与 TODO 管理体系的分工")
+    for skill in ("company-todo-sync", "company-todo-audit", "company-todo-review"):
+        assert skill in section, f"must delimit itself against {skill}"
+    # the two-layer split: filing side vs execution side
+    assert "填报侧" in section and "执行侧" in section, "must name which side each layer owns"
+    # neither direction of the equivalence may be asserted
+    assert "填得规范不等于做完了" in section, "format compliance is not delivery"
+    # the mentor marker lives in two places; conflating them is the silent misread
+    assert "mentor check 列" in section and "台账" in section, (
+        "must keep the board check column apart from the ledger score/comment"
+    )
+
+
+def test_reminder_schedule_collision_with_audit_is_recorded() -> None:
+    """Same cron minute as todo-cycle-audit: both wake the session onto the same board."""
+    body = _body()
+    assert "30 14 * * 1,3,5" in body, "must record the colliding cron"
+    assert "company-todo-audit" in body, "must name the skill it collides with"
+    params = _section("参数段")
+    assert 'schedule_manage(action="list")' in params or 'action="list"' in params, (
+        "must tell the reader to check for the existing schedule before creating"
+    )
+
+
+def test_card_dsl_is_cited_as_the_same_engine_idea() -> None:
+    """card-dsl is now in main, so the shared 「vocabulary + engine」 claim is checkable."""
+    block = _subsection("当前是哪一份 schema", within=_section("五段结构"))
+    assert "card-dsl" in block, "must cite card-dsl as the same engine/definition split"
+
+
 def test_neighbour_skills_route_into_this_one() -> None:
     """Both adjacent entry points must know this skill exists, or the seam leaks."""
     fill_check = _body("company-todo-fill-check")

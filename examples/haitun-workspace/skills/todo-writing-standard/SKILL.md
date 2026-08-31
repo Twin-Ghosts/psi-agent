@@ -35,7 +35,36 @@ category: productivity
   [`feishu-todo-board-sync`](../feishu-todo-board-sync/SKILL.md)。那是文档到表的搬运,
   本文是零散输入到规范内容的组织。
 - 发 todo 卡片、勾选卡片 → [`feishu-todo-card`](../feishu-todo-card/SKILL.md)。
+- 派发 todo 卡与飞书任务、写 mentor 台账、判闭环回流、收 mentor 打分 →
+  TODO 管理体系三件套,见下面的分工。
 - 请假是否合规、报销能不能放行 → [`admin-finance-governance`]。
+
+## 与 TODO 管理体系的分工
+
+仓里另有一套 TODO 管理体系三件套,和本文**管的是同一张看板表的不同环节**,别混用:
+
+| | 本文 `todo-writing-standard` | 体系三件套 |
+|---|---|---|
+| 管什么 | **内容怎么写、写没写、写得规不规范** | 派发、交付、评价、闭环 |
+| 权威载体 | 看板表(填报文本本身) | Bitable 台账 + 飞书任务 |
+| 产出 | 规范内容草稿、违规报告、提醒 | todo 卡、飞书任务、台账行、打分 |
+| 判定 | 填报是否合规(格式/按时/按量) | 是否闭环(五要素) |
+
+- [`company-todo-sync`](../company-todo-sync/SKILL.md) — 采集看板表并派发卡与任务(`0 15 * * 1,3,5`)。
+- [`company-todo-audit`](../company-todo-audit/SKILL.md) — 按闭环五要素判上周期、未闭环回流(`30 14 * * 1,3,5`)。
+- [`company-todo-review`](../company-todo-review/SKILL.md) — mentor 打分评语回写台账与 wiki。
+
+**顺序**:本文的检查判「这一期填得合不合规」,体系的 audit 判「上一期的活闭环没有」。
+本文在**填报侧**(表上的文本),体系在**执行侧**(任务与台账)。同一期里两者都跑,互不替代:
+填得规范不等于做完了,做完了也不等于填得规范。
+
+**两处口径不要互相覆盖**:
+
+- **mentor 的复核**有两套标记,分属两层,别拿一套去判另一套:本文只认**看板表上的 mentor check 列**
+  (复核「这一期填报写得对不对」);体系的 audit 认**台账里的 `mentor打分` / `mentor评语`**
+  (评价「这条活干得怎么样」)。台账有打分不代表看板表上有 check,反之亦然。
+- **定时撞点**:体系的 audit 是 `30 14 * * 1,3,5`,与本文参数段的 14:30 提醒同一分钟 ——
+  建任务前先 `schedule_manage(action="list")`,把本文的提醒挪开几分钟。
 
 ## 五段结构:哪一段会变,哪一段不许变
 
@@ -64,9 +93,10 @@ category: productivity
 增加跟进与验收环节 —— 那一天的正确改法是:**换 schema 段、规则集段加跟进/验收条目,
 引擎段一字不动,不新增 skills**。若换内容结构就得再堆一个 skill,说明做成了特化而非扩展。
 
-与既有资产同源:引擎通用、场景差异全部收进可替换的定义,这与「卡片 = 词汇表 + 渲染引擎」是同一
-思想(TODO 管理 = schema + 规则集 + 引擎)。「小方案」的内容结构与方案 SOP 同源,后续共享同一套
-schema 机制,而不是各堆一个 skill。
+与既有资产同源:引擎通用、场景差异全部收进可替换的定义,这与
+[`card-dsl`](../card-dsl/SKILL.md) 的「卡片 = 词汇表(XML 元素) + 渲染引擎(`feishu_card_render`)」
+是同一思想(TODO 管理 = schema + 规则集 + 引擎):业务只声明「有什么」,协议与流程限制全部由引擎
+消化。「小方案」的内容结构与方案 SOP 同源,后续共享同一套 schema 机制,而不是各堆一个 skill。
 
 ### 按需下沉(不预先建设)
 
@@ -219,6 +249,12 @@ schedule_manage(action="create", schedule_name="todo-check",
 
 两条都要走 `fire=prompt`(默认):提醒要先查表和请假才知道催谁,检查要读表做结构判定,
 都需要模型参与 —— `fire=tool` 是直接调一个工具、不过模型,套不进来。
+
+**14:30 与 `company-todo-audit` 的 `todo-cycle-audit`(`30 14 * * 1,3,5`)是同一分钟。**
+两者 `schedule_name` 不同,不会互相覆盖,但会同时叫醒会话、都去读同一张看板表。
+建之前先 `schedule_manage(action="list")` 看那条在不在:在的话把本文的提醒挪开几分钟
+(改参数段的时间点即可,例如 `25 14`),别让两个 prompt-fire 任务撞在一起。
+两套体系的关系见 [与 TODO 管理体系的分工](#与-todo-管理体系的分工)。
 
 **cron 用调度器时区解释,不是裸机墙钟。** 建完立刻 `action="view"` 核一遍写进去的 cron 与
 下次触发时间;时区没配对会整体偏移(仓里踩过 `once_at` 按裸机墙钟读、与调度器时区差 8h 的坑)。

@@ -102,8 +102,11 @@ case "$INTERVAL" in ''|*[!0-9]*) INTERVAL=24 ;; esac
 printf 'HAITUN_UPDATE_BASE_URL=%s\nHAITUN_UPDATE_INTERVAL_HOURS=%s\n' \
     "$BASE_URL" "$INTERVAL" >"$CONTENTS/Resources/haitun-workspace/haitun-update.conf"
 printf '%s\n' "$VERSION" >"$CONTENTS/Resources/haitun-workspace/haitun-version.txt"
-# Published alongside the dmg so oss-publish.yml has the same version file
-# Windows produces.
+# Pipeline metadata, not part of the install: oss-publish.yml reads it to check
+# both platforms agree on the version. It leaves this job in its own artifact
+# (`haitun-agent-macos-version`) so the downloadable `haitun-agent-macos` holds
+# nothing but the dmg. The copy written above, inside the bundle, is a different
+# thing -- the updater reads that one to know what it is running.
 printf '%s\n' "$VERSION" >"$OUT_DIR/haitun-version.txt"
 
 # ---- signing (only when a certificate is configured) ----

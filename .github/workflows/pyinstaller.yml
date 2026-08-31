@@ -315,12 +315,23 @@ jobs:
         run: |
           chmod +x dist-bin/psi-agent
           bash .github/macos/build-dmg.sh
+      # 只放 dmg。这个 artifact 是「给人下载去装的东西」, 从 Actions 页面下下来解开
+      # 应该就是一个安装包, 不该再多一个文件让人猜它是不是要一起拷走。
+      # `haitun-version.txt` 是发布流水线的元数据 (oss-publish 用它核对两平台版本
+      # 号是否一致), 与安装无关, 拆到下面单独一个 artifact。
       - uses: actions/upload-artifact@v7
         with:
           name: haitun-agent-macos
-          path: |
-            macos-dist/HaiTun_Agent.dmg
-            macos-dist/haitun-version.txt
+          path: macos-dist/HaiTun_Agent.dmg
+      # 版本号元数据单独一个 artifact, 只给 oss-publish.yml 消费。
+      #
+      # 不设 `if: always()`: 版本文件由 build-dmg.sh 在成功路径上写出, 构建挂了就
+      # 该缺席 —— oss-publish 那边下载失败会让整条 publish 红, 这正是要的效果
+      # (见 oss-publish.yml 里"两平台共用版本文件"那段注释)。
+      - uses: actions/upload-artifact@v7
+        with:
+          name: haitun-agent-macos-version
+          path: macos-dist/haitun-version.txt
       # if: always() so the Gatekeeper verdict survives a failed build -- that is
       # exactly the case you need it in.
       - uses: actions/upload-artifact@v7
