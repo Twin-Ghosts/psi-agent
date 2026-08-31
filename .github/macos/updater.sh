@@ -155,7 +155,7 @@ apply_update() {
 
 # ---- watch mode ----
 watch_loop() {
-    local local_version remote_version tmp_dmg answer helper
+    local local_version remote_version tmp_dmg answer helper http_code curl_status
     [ -n "$BASE_URL" ] || { log "watch: no base url, updater idle"; return 0; }
 
     while :; do
@@ -182,10 +182,21 @@ watch_loop() {
         esac
 
         tmp_dmg="$(mktemp -d /tmp/haitun-update.XXXXXX)/$DMG_NAME"
-        if ! curl -fsSL --max-time 1800 -o "$tmp_dmg" "$BASE_URL/$DMG_NAME" 2>/dev/null; then
-            log "watch: download failed, opening browser"
-            osascript -e 'display dialog "自动下载失败，将打开浏览器下载页面。" with title "更新失败" buttons {"好"} default button "好" with icon caution' >/dev/null 2>&1 || true
-            open "$BASE_URL/$DMG_NAME" 2>/dev/null || true
+        # Record the HTTP status. Without it a 404 (object never published), a dead
+        # network and a timeout all log the same "download failed" line, and the
+        # only way to tell them apart is to probe the bucket by hand -- which is
+        # exactly what happened on 2026-08-28.
+        http_code="$(curl -fsSL --max-time 1800 -o "$tmp_dmg" \
+            -w '%{http_code}' "$BASE_URL/$DMG_NAME" 2>/dev/null)"
+        curl_status=$?
+        if [ "$curl_status" -ne 0 ]; then
+            log "watch: download failed (curl exit $curl_status, http ${http_code:-none}) $BASE_URL/$DMG_NAME"
+            # Open nothing. There is no download page to send anyone to: the dmg url
+            # answers NoSuchKey when the object is missing, and the bucket root
+            # answers AccessDenied (both measured 2026-08-28) -- either way the user
+            # lands on raw XML, which is worse than no browser at all. Show the url
+            # in the dialog instead, so it can be copied or reported as-is.
+            osascript -e "display dialog \"自动下载失败。\n\n下载地址：$BASE_URL/$DMG_NAME\n\n请稍后重试，或联系管理员确认该版本是否已发布。\" with title \"更新失败\" buttons {\"好\"} default button \"好\" with icon caution" >/dev/null 2>&1 || true
             continue
         fi
 
