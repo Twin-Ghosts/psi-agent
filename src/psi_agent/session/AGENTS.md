@@ -21,7 +21,7 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 | | 约定 |
 |--|------|
 | **唯一写入方** | 仅 `SessionAgent.run`（对话整轮）和 `SessionAgent.handle_event`（事件匹配与触发器执行）经 `runtime_scope`。禁止 Gateway / Channel / AI / 测试外业务代码自行 `set_*` |
-| **`get_session_id()`** | 仅 **workspace 工具**需要「当前会话 id」时（如 `todo`、fusion memory）。框架内部用 `Conversation.session_id` / 显式参数 |
+| **`get_session_id()`** | 仅 **workspace 工具**需要「当前会话 id」时（如 `todo`、fusion memory、飞书授权续跑）。框架内部用 `Conversation.session_id` / 显式参数。工具起的后台任务里也读得到（`asyncio.create_task` 建任务那刻复制 ContextVar），这是「脱离本轮后还能找回原 session」的依据——见下方「续跑一个回合」 |
 | **`get_workspace()` / `get_agent()`** | 仅 **workspace 工具**在解析相对路径、找 agent 包根时（`write`/`bash`/`read` 等）。**框架核心**（`SessionAgent` / registries / Gateway / Channel）一律用构造时的 `workspace_path` / `agent_path` 或 REST 入参，**禁止**回读 ContextVar |
 | **Tool AI socket bridge** | `current_tool_ai_socket()` 仅在 `SessionAgent` 实际 await workspace tool 的区间返回当前 AI socket，并用 token 复位；它供 `run_flow` 创建受限的临时 Step Session，不进入 tool schema，也不能传播 API key/provider 配置。 |
 | **禁止扩进 ContextVar 的** | AppData / 记忆区根、API key、provider、Gateway listen、任意「方便全局拿一下」的配置——这些走显式字段 / DI / CLI |
@@ -85,6 +85,22 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 - Channel 请求中除 `messages` 外的不认识参数全部透传到 AI 层（`extra_params`）。
 - AI 返回多 choice 时报错（`finish_reason="error"`），0 choice 作为心跳跳过。
 - AI 返回非 200 或 `finish_reason="error"` 时，错误信息不写入 conversation history，且通过 turn 快照回滚机制保证本轮用户消息也不落盘。
+
+### 卡片回调直调短路（`_try_direct_card_dispatch`）
+
+确定性飞书卡片回调（tick/untick/打分等）**不跑 LLM 轮次**，在步骤 3 之前由 Session 直接执行 handler 工具。触发条件**全部满足**才短路，任何一条不满足都回落普通 AI 轮次（与改动前行为等价）：
+
+- 整条 user 消息都是 `<feishu_card_action>` 封装（无其他正文）；
+- 每个 payload 的 `dispatch.matched is True`（**信任边界**：`/chat/completions` 无鉴权，不校验 matched 等于把「以任意身份执行任意卡片工具」开放成纯文本注入面；matched 缺失/非 true 一律回落）；
+- `dispatch.handler` 命中已注册工具，且该工具签名接收 `card_action_json`。
+
+直调路径与普通回合的**刻意差异**（别当成 bug 修回去）：
+
+1. 跳过 `run_before_turn` / `system_prompt.ensure` / turn context——零模型回合，无需提示词；
+2. 跳过 pending schedule 的 peek/clear——pending 的 `schedule.display` 顺延到下一个普通回合交付（延迟非丢失）；
+3. 跳过 end-of-turn 的 schedule registry 刷新——顺延（延迟非丢失）；
+4. 用户消息与 `[card direct] handler: …` 的 assistant 行照常写入 history（Gateway `/history` 可见）；成功时 yield 单条 `NO_REPLY` chunk（Channel 对卡片回调流静默吞掉），失败时 yield 短文案 chunk（异常细节只进日志，不把 repr 直出对话）；
+5. 直调回合同样经 `_finish(COMPLETED, MODEL_COMPLETED, None, 0)` 落终态——`run.result` 为 None 会被 `handle_request` 记成 "failed or abandoned"，成功直调必须带终态。
 
 ## System prompt 生命周期
 
@@ -376,6 +392,22 @@ provider 只认 `reasoning_content`（any-llm 的 `REASONING_FIELD_NAMES` 首项
 - Schedule 响应的 content 和 reasoning 各自存在于各自的消息周期，不会交错
 - 多个 schedule 可以并发 sleep，但通过 lock 串行触发
 - 每个 schedule 在加载时独立处理——IO 错误、YAML 解析问题、cron 验证失败都只跳过该 schedule
+
+## 续跑一个回合（`live_agent.py`）
+
+有些活干不完在开始它的那一轮里：飞书授权就是标准例子——授权码何时回来取决于用户何时点「同意授权」，所以等待被交给一个脱离本轮的后台任务（`_feishu_auth_watch.py`），本轮立刻收尾。等它成功时，用户真正要的那件事（把文档建在他名下）还没做，而**已经没有轮次可以做了**：后台任务没有模型、没有工具循环、没有对话。
+
+从后台发一条「授权成功」不能填这个洞——它告诉用户发生了什么，却把原始请求永久留在上一轮没人做；而且机器人自己发的消息不会重新进入 session，没有任何东西会把活捡回来。缺的不是一条消息，而是**一个回合**。
+
+`live_agent` 就是这道窄缝：`serve_session` 期间按 session id 注册活着的 `SessionAgent`，脱离轮次的活用 `resume_session_turn(session_id, content)` 起一轮普通回合。刻意**不做**成通用的「随处跑 agent」：
+
+- **按 session id 索引，不设全局「当前 agent」**：Gateway 一进程多 Session，全局量会续跑到最后注册的那个。调用方传自己从 `runtime_context.get_session_id()` 拿到的 id
+- **注册与「正在服务」同生命周期**（`register` 是上下文管理器）：过期句柄会续跑一个没人听的对话
+- **续跑照样拿 `agent._lock`**：续跑不是特权。真用户的轮次在跑就等它，跳锁会让两轮交错写同一份 conversation
+- **投递是调用方的事**：这里 yield 的 chunk 没人在流式接收（不是任何请求打开的轮次），所以续跑那一轮要说话必须调 `feishu_message_send` 之类的工具——与 `fire: prompt` 的 schedule 同理（见上节）
+- **`kind` 缺省 `trigger.silent`（刻意为之，勿"改成 `chat` 让它显示出来"）**：续跑是**带外回合**，与 trigger / silent schedule 同类，所以注入的 `<event>` 块和它的回答都不进 Gateway `/history` 的聊天气泡。给 `chat` 会有两处后果——那段给模型的指令正文会像用户亲手打的一样出现在记录里，而回合已经用工具把话说过一遍了，气泡是第二遍。要让回答进 Web Console 就显式传 `trigger.display`（`response_kind` 与 user 行的 `kind` 同值，与 `_fire_prompt` 一致）
+- 起不了回合时（无在服务的 live agent）返回 `False`，调用方必须退回它力所能及的方式（通常一条通知），否则活会被静默丢掉
+- **续跑那一轮跑在调用方的 task 里**：飞书授权的情形是跑在 watcher 的 `asyncio.Task` 内，所以那一轮再次发起授权时会走到 `_feishu_auth_watch.forget_and_wait`，即「取消自己所在的 task」。当前这是安全的——`forget_and_wait` 把 `CancelledError` 一并 suppress 掉（实测取消在它自己的 `await task` 处交付并被吞掉，回合照常跑完）。**改动那处 suppress 时要连带想到这条自指路径**
 
 ## Event / Trigger 协议（触发器）
 

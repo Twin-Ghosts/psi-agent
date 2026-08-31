@@ -30,12 +30,34 @@ import _feishu_impl as _f
 
 
 async def feishu_sheet_read(token: str, range: str, max_chars: int = 20000, user_key: str = "") -> str:
-    """Read one range of a spreadsheet as rows of plain-text cells.
+    """Read one **narrow, already-located** range of a spreadsheet as plain-text cells.
+
+    ⚠️ 事实问答禁用本工具:「谁的 mentor」「谁做了什么」「有几个人」「对比多少」
+    这类问题必须用 ``feishu_sheet_find_columns``(定位表头列)+ ``feishu_sheet_read_grid``
+    (分块读,直到 ``has_more`` 为 false)。本工具按字符预算截断(默认 20000 字符),
+    富文本表格前几行就可能截断,后面的行整段丢失——用残缺数据下结论是已实测的
+    高频事故。本工具只适合读一个已知的小范围(找某人的行、检查某个单元格)。
 
     Use this instead of ``feishu_doc_read(file_type="sheet")`` when you need a
     specific area rather than the whole workbook — e.g. scan just the name column
     to find which row a person is on, or check whether one target cell is already
     filled before overwriting it.
+
+    **Not for reading a whole board.** This stops at ``max_chars`` and drops the
+    remaining rows wholesale, returning ``truncated: true`` — on a real 列=日期、行=人
+    board that is the normal outcome, not an edge case. Two rules follow:
+
+    - **A wide range is the wrong first move.** Locate first (name column →
+      person's row number; header row → target column letter), then read just that
+      cell or row. To walk a whole sheet, use ``feishu_sheet_read_grid``, which pages
+      with ``has_more`` / ``next_start_row`` instead of dropping rows.
+    - **Never conclude from a ``truncated: true`` result.** The rows that were cut are
+      absent, not empty — treating them as blank reports people as not having filled
+      anything when their row was never read. Re-read narrower, or switch to
+      ``feishu_sheet_read_grid``, before saying anything about who filled what.
+    - **Raising ``max_chars`` is not the fix.** It is capped internally at the
+      per-result limit, so a bigger number changes nothing about what comes back.
+      Narrow the range or page with ``feishu_sheet_read_grid`` instead.
 
     Cells that are mentions (``@somebody``) or styled rich text are flattened to
     their visible text, so a name column reads as ``"张三"`` rather than raw JSON.
@@ -46,13 +68,21 @@ async def feishu_sheet_read(token: str, range: str, max_chars: int = 20000, user
             ``GET /open-apis/wiki/v2/spaces/get_node`` and use its ``obj_token``.
         range: Range to read, e.g. ``"SHEET_ID!A1:H30"`` or just ``"SHEET_ID"``
             for the sheet's used range.
-        max_chars: Stop after roughly this many characters of cell text (0 = no
-            limit). Guards against pulling a huge board into the conversation.
+        max_chars: Stop after roughly this many characters of cell text. Capped
+            internally at the per-result limit, and ``0`` means "that cap" rather
+            than "unlimited" — **raising this above the cap does nothing**, since a
+            result over the limit is cut on the wire regardless. The effective value
+            is echoed as ``max_chars_effective`` when a read is truncated. To get
+            more data, narrow the range or page with ``feishu_sheet_read_grid``.
         user_key: The sender's open_id (from ``<feishu_context>``). Reads try the bot's
             tenant token first and only fall back to this user's identity when the bot
             is denied — pass it whenever the sheet may be user-owned.
     """
-    return _f.dumps_result(await _f.read_sheet_range_impl(token, range, max_chars, user_key))
+    outcome = await _f.read_sheet_range_impl(token, range, max_chars, user_key)
+    if outcome.get("ok"):
+        # 列字母表头 + 行号首列内嵌:对齐由数据自证,LLM 不用手数。
+        outcome = _f._label_grid(outcome)
+    return _f.dumps_result(outcome)
 
 
 async def feishu_sheet_write(token: str, range: str, values_json: str, user_key: str = "", identity: str = "") -> str:

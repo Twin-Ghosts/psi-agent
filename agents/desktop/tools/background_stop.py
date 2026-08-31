@@ -35,7 +35,43 @@ async def background_list(workspace: str = "") -> str:
         workspace: Registry workspace. Empty = current workspace.
 
     Returns:
-        JSON with ok, processes list (process_id, pid, alive, command, …).
+        JSON with ok, processes list (process_id, pid, alive, command, log_path, …).
     """
     result = await _reg.list_processes(workspace_raw=workspace)
+    return json.dumps(result, ensure_ascii=False)
+
+
+async def background_output(
+    process_id: str,
+    workspace: str = "",
+    tail_lines: int = 200,
+    max_chars: int = 20000,
+) -> str:
+    """Read the output a background process has produced so far.
+
+    Use this to run work that would blow past the ``bash`` timeout: start it
+    with ``background_start``, then poll here. Long API paging loops belong on
+    this path — a foreground ``bash`` call that exceeds its limit is killed and
+    tells you nothing about how far it got.
+
+    Output is a snapshot while ``alive`` is true; call again to see more. It
+    stays readable after the process exits, so this also answers "what did it
+    finish with?".
+
+    Args:
+        process_id: Id returned from ``background_start``.
+        workspace: Registry workspace. Empty = current workspace.
+        tail_lines: Return only the last N lines (0 = all). The end is where a
+            long run stopped, which is the part worth reading.
+        max_chars: Cap on returned characters, applied after ``tail_lines``.
+
+    Returns:
+        JSON with ok, alive, output, total_lines, omitted_leading_lines, log_path.
+    """
+    result = await _reg.read_output(
+        process_id=process_id,
+        workspace_raw=workspace,
+        tail_lines=tail_lines,
+        max_chars=max_chars,
+    )
     return json.dumps(result, ensure_ascii=False)

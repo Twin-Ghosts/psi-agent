@@ -13,7 +13,7 @@ import subprocess
 import sys
 import uuid
 from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -48,6 +48,33 @@ def resolve_workspace(raw: str) -> anyio.Path:
 
 def registry_path(workspace: anyio.Path) -> anyio.Path:
     return workspace / ".psi" / "background" / "registry.json"
+
+
+# A ``process_id`` reaches us from the model and becomes a *filename*, so it is
+# validated rather than sanitized: quietly rewriting it would let two different
+# ids collapse onto one log, and `..` would walk out of the directory.
+_ID_SAFE = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+
+
+def invalid_process_id(process_id: str) -> str:
+    """Return why *process_id* is unusable as a log filename, or ``""``."""
+    if process_id in (".", ".."):
+        return "process_id must not be '.' or '..'"
+    bad = sorted(set(process_id) - _ID_SAFE)
+    if bad:
+        return f"process_id may only contain letters, digits, '.', '_' and '-'; found {''.join(bad)!r}"
+    return ""
+
+
+def log_path_for(workspace: anyio.Path, process_id: str) -> anyio.Path:
+    """Where a background process's combined output lands.
+
+    Derived from the id alone, never read out of the registry: a finished
+    process is pruned from the registry by ``_prune_dead_unlocked``, and
+    "it finished, show me what it produced" is the common case — so the
+    output has to stay reachable after the record is gone.
+    """
+    return workspace / ".psi" / "background" / f"{process_id}.log"
 
 
 def _pool_key(workspace: anyio.Path) -> str:
@@ -228,24 +255,44 @@ async def _terminate_pid(pid: int) -> None:
             return
 
 
-async def _spawn_detached(argv: list[str], *, cwd: str) -> Any:
-    logger.debug(f"background spawning cwd={cwd!r} argv={argv!r}")
-    if sys.platform == "win32":
+def _open_log_sink(log_file: Path) -> Any:
+    """Open *log_file* as the child's stdout/stderr sink.
+
+    A plain OS file handle, not a pipe: the parent must not have to stay
+    around draining it. That is the whole point of a detached process —
+    a pipe with nobody reading it fills its buffer and blocks the child
+    somewhere around 64KB, which for a paging script means it stalls
+    partway through and looks like a hang.
+    """
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    return log_file.open("wb")
+
+
+async def _spawn_detached(argv: list[str], *, cwd: str, log_file: Path) -> Any:
+    logger.debug(f"background spawning cwd={cwd!r} argv={argv!r} log={str(log_file)!r}")
+    sink = await anyio.to_thread.run_sync(_open_log_sink, log_file)
+    try:
+        if sys.platform == "win32":
+            return await anyio.open_process(
+                argv,
+                cwd=cwd,
+                stdout=sink,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_BREAKAWAY_FROM_JOB,
+            )
         return await anyio.open_process(
             argv,
             cwd=cwd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=sink,
+            stderr=subprocess.STDOUT,
             start_new_session=True,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_BREAKAWAY_FROM_JOB,
         )
-    return await anyio.open_process(
-        argv,
-        cwd=cwd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    finally:
+        # Ours to close once the child has inherited it; the child keeps
+        # writing through its own copy of the descriptor.
+        with suppress(OSError):
+            sink.close()
 
 
 async def _read_registry(path: anyio.Path) -> dict[str, Any]:
@@ -341,9 +388,18 @@ async def start_process(
 
     workdir = cwd.strip() or _default_cwd(workspace)
     bg_id = process_id.strip() or f"bg-{uuid.uuid4().hex[:16]}"
+    if reason := invalid_process_id(bg_id):
+        return {
+            "ok": False,
+            "status": "failed",
+            "message": reason,
+            "process_id": "",
+            "pid": 0,
+        }
 
+    log_file = Path(str(log_path_for(workspace, bg_id)))
     try:
-        process = await _spawn_detached(argv, cwd=workdir)
+        process = await _spawn_detached(argv, cwd=workdir, log_file=log_file)
     except Exception as exc:
         logger.warning(f"background spawn failed: {exc}")
         return {
@@ -357,12 +413,16 @@ async def start_process(
     pid = int(process.pid or 0)
     await anyio.sleep(0.2)
     if not _pid_alive(pid):
+        # Report the log even here: a command that dies on startup usually
+        # printed the reason, and this used to surface as a bare "exited
+        # immediately" with the explanation discarded to DEVNULL.
         return {
             "ok": False,
             "status": "failed",
-            "message": "process exited immediately after spawn",
+            "message": "process exited immediately after spawn — read log_path for its output",
             "process_id": bg_id,
             "pid": pid,
+            "log_path": str(log_file),
         }
 
     now = _iso(_utc_now())
@@ -375,6 +435,7 @@ async def start_process(
         "argv": argv,
         "workspace": str(workspace),
         "created_at": now,
+        "log_path": str(log_file),
     }
 
     async def _register(registry: dict[str, Any]) -> None:
@@ -386,16 +447,17 @@ async def start_process(
 
     await _update_registry(workspace, _register)
 
-    logger.info(f"background started process_id={bg_id!r} pid={pid} shell={shell_name!r}")
+    logger.info(f"background started process_id={bg_id!r} pid={pid} shell={shell_name!r} log={str(log_file)!r}")
     return {
         "ok": True,
         "status": "running",
-        "message": "started",
+        "message": f"started — read its output with background_output({bg_id!r})",
         "process_id": bg_id,
         "pid": pid,
         "shell": shell_name,
         "cwd": workdir,
         "workspace": str(workspace),
+        "log_path": str(log_file),
     }
 
 
@@ -462,6 +524,7 @@ async def list_processes(*, workspace_raw: str = "") -> dict[str, Any]:
                     "cwd": rec.get("cwd", ""),
                     "shell": rec.get("shell", ""),
                     "created_at": rec.get("created_at", ""),
+                    "log_path": rec.get("log_path", ""),
                 }
             )
         rows.sort(key=lambda row: str(row.get("created_at", "")))
@@ -475,3 +538,79 @@ async def list_processes(*, workspace_raw: str = "") -> dict[str, Any]:
         "workspace": str(workspace),
         "processes": rows,
     }
+
+
+async def read_output(
+    *,
+    process_id: str,
+    workspace_raw: str = "",
+    tail_lines: int = 200,
+    max_chars: int = 20000,
+) -> dict[str, Any]:
+    """Read what a background process has written so far.
+
+    Reads the log by *id*, not through the registry, because a finished
+    process is pruned from the registry the next time anything touches it —
+    and "it finished, what did it produce?" is exactly when this is called.
+    ``alive`` therefore reports process state independently of whether a
+    record still exists.
+
+    The tail is taken rather than the head: a long run's useful end is where
+    it stopped, and the beginning is usually setup noise.
+    """
+    workspace = resolve_workspace(workspace_raw)
+    pid_key = process_id.strip()
+    if not pid_key:
+        return {"ok": False, "message": "process_id must not be empty", "process_id": ""}
+    if reason := invalid_process_id(pid_key):
+        return {"ok": False, "message": reason, "process_id": pid_key}
+
+    log_file = log_path_for(workspace, pid_key)
+    record = await _lookup_record(workspace, pid_key)
+    pid = _registry_pid(record) if record else 0
+    alive = _pid_alive(pid) if pid else False
+
+    if not await log_file.exists():
+        return {
+            "ok": False,
+            "message": (
+                f"no output log for {pid_key!r}. Either the id is wrong, or it was started "
+                "before output capture existed — check background_list."
+            ),
+            "process_id": pid_key,
+            "alive": alive,
+            "log_path": str(log_file),
+        }
+
+    raw = await log_file.read_text(encoding="utf-8", errors="replace")
+    lines = raw.splitlines()
+    truncated_lines = max(0, len(lines) - tail_lines) if tail_lines > 0 else 0
+    text = "\n".join(lines[-tail_lines:]) if tail_lines > 0 else raw
+
+    truncated_chars = 0
+    if max_chars > 0 and len(text) > max_chars:
+        truncated_chars = len(text) - max_chars
+        text = text[-max_chars:]
+
+    return {
+        "ok": True,
+        "process_id": pid_key,
+        "pid": pid,
+        # Still running: the output is a snapshot and reading again will show more.
+        "alive": alive,
+        "log_path": str(log_file),
+        "total_lines": len(lines),
+        "omitted_leading_lines": truncated_lines,
+        "omitted_leading_chars": truncated_chars,
+        "output": text,
+    }
+
+
+async def _lookup_record(workspace: anyio.Path, process_id: str) -> dict[str, Any] | None:
+    """Fetch a registry record without pruning — reading must not mutate state."""
+    registry = await _read_registry(registry_path(workspace))
+    processes = registry.get("processes")
+    if not isinstance(processes, dict):
+        return None
+    rec = processes.get(process_id)
+    return rec if isinstance(rec, dict) else None

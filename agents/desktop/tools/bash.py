@@ -6,8 +6,8 @@ import os
 import shutil
 from pathlib import Path
 
+import _proc_run
 import _runtime_paths as _paths
-import anyio
 
 
 def _find_bash() -> str | None:
@@ -55,17 +55,30 @@ async def bash(command: str, timeout_seconds: int = 30) -> str:
     env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
     cwd = _paths.workspace_dir()
 
-    try:
-        with anyio.fail_after(timeout_seconds):
-            result = await anyio.run_process([bash, "-lc", command], check=False, env=env, cwd=cwd)
-    except TimeoutError:
-        return f"[Error] Command timed out after {timeout_seconds}s: {command}"
+    result = await _proc_run.run_capturing(
+        [bash, "-lc", command],
+        timeout_seconds=timeout_seconds,
+        env=env,
+        cwd=cwd,
+    )
+    combined = (result.stdout + result.stderr).rstrip()
 
-    out = result.stdout.decode("utf-8", errors="replace")
-    err = result.stderr.decode("utf-8", errors="replace")
-    combined = (out + err).rstrip()
+    if result.timed_out:
+        # Report the partial output rather than dropping it: a bare "timed out"
+        # tells the agent nothing about where the command stalled, and the only
+        # thing it can do with that is retry at a higher limit. Real sessions
+        # show the same command retried at 60/90/100/120/180s for that reason.
+        head = f"[Error] Command timed out after {timeout_seconds}s: {command}"
+        if result.orphaned:
+            head += "\n[Warning] The process survived termination and may still be running."
+        if not combined:
+            return f"{head}\n(no output was produced before the timeout)"
+        return f"{head}\n--- output produced before the timeout ---\n{combined}"
 
     if result.returncode != 0:
         combined += f"\n[Exit code: {result.returncode}]"
+        return combined.lstrip("\n")
 
-    return combined or "(no output)"
+    # Succeeding silently and producing nothing are different outcomes; the old
+    # shared "(no output)" made the agent re-run commands to tell them apart.
+    return combined or "(exit code 0, no output)"

@@ -27,6 +27,12 @@ async def background_start(
     available, else PowerShell). The process keeps running after the tool returns;
     call ``background_stop`` with the returned ``process_id`` when done.
 
+    Use this for work that would exceed the ``bash`` timeout — long API paging
+    loops especially, since a foreground call that hits its limit is killed and
+    reports nothing about how far it got. Output (stdout+stderr merged) is
+    captured to ``log_path``; read it with ``background_output(process_id)``,
+    which also works after the process exits.
+
     Args:
         command: Shell command string to run in the background.
         cwd: Working directory. Empty = workspace root.

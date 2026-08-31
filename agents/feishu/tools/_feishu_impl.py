@@ -107,7 +107,8 @@ _AUTH_PROMPT = (
     "1. tier=card —— 卡片授权, 用户点一下就好. **这一轮立刻收尾**, 别等待、也别再把链接"
     "当文本发一遍; 等飞书把点击回调给你 (一条 <feishu_card_action>, dispatch.handler 是 "
     "feishu_auth_collect), **那一轮**调 feishu_auth_collect (用回调 value 里的 user_key) —— "
-    "它把等待放到后台, 那一轮同样立刻收尾, 码到了后台自己换 token 并私聊告知用户.\n"
+    "它把等待放到后台, 那一轮同样立刻收尾 (**别播报等待状态**), 码到了后台自己换 token, "
+    "然后自动起一轮把原来那件事做完并回话.\n"
     "2. tier=link_auto —— 网站授权但不用复制 code. 把 authorize_url 发给用户后**这一轮收尾**, "
     "请他点完「同意授权」回你一句; 那一轮再调 feishu_auth_check 查一眼即可完成. 想让码自己回来"
     "不用用户再回话, 就在发完链接那一轮调 feishu_auth_collect (不阻塞). 无论哪条路都别在工具里"
@@ -985,6 +986,27 @@ from _feishu.drive import (  # noqa: E402,F401
     export_doc_impl,
     get_message_image_impl,
 )
+from _feishu.leave import (  # noqa: E402,F401
+    _APPROVED,
+    _DATE_FORMATS,
+    _MAX_INSTANCES,
+    _MAX_SPAN_DAYS,
+    _build_list_instances_request,
+    _epoch_ms,
+    _leave_span,
+    _list_instance_codes,
+    _overlap_days,
+    _parse_date,
+    _range_bounds,
+    _wanted_names,
+    _widgets,
+    query_leave_impl,
+)
+from _feishu.mentor_ledger import (  # noqa: E402,F401
+    _LEDGER_SCHEMA_FIELDS,
+    _build_list_tables_request,
+    mentor_ledger_ensure_impl,
+)
 from _feishu.message import (  # noqa: E402,F401
     _ANNOUNCEMENT_ERROR_HINTS,
     _AT_TAG_RE,
@@ -1088,6 +1110,7 @@ from _feishu.sheet import (  # noqa: E402,F401
     _build_sheet_values_request,
     _build_sheet_write_request,
     _flatten_sheet_cell,
+    _label_grid,
     _parse_values_json,
     _read_sheet,
     _sheet_result,
