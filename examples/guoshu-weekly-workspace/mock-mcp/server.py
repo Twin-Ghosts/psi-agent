@@ -3769,7 +3769,7 @@ def weekly_freshness_distribution(
                     if active_end
                     else "；问「占比最高的组」按 stale_pct 排序的首行答，条数最多的那组未必占比最高"
                 )
-                return store.fetch(
+                grouped = store.fetch(
                     f"SELECT {axis} AS bucket, COUNT(*) AS total, "
                     f"SUM({stale}) AS stale_count, "
                     f"ROUND(SUM({stale}) / COUNT(*) * 100, 1) AS stale_pct, "
@@ -3782,10 +3782,26 @@ def weekly_freshness_distribution(
                     caliber=(
                         note + gate_note + "；total 是该组分母，stale_pct = stale_count / total，"
                         "active_count / active_pct 是同一分母下报过进展的那一侧（两者互补，相加为 100）；"
-                        "占比由服务端算，不要拿滞后条数跟别处的任务数手工相除" + end_note
+                        "占比由服务端算，不要拿滞后条数跟别处的任务数手工相除；"
+                        "各列合计取 totals 里的 stale_total / active_total / task_total，"
+                        "不要自己把一列加一遍——列到十来行时手工求和会与自己的表对不上" + end_note
                     ),
                     limit=bounded,
                 )
+                # 合计也由服务端给：C3-04 的表格逐行都对（3+5+1+2+2+1+2+1+1 = 18），
+                # 模型却在结论里把合计写成 19，自己的表和自己的合计对不上。
+                # 与「率一律服务端 ROUND」同一个理由——凡是要跨行做算术的，服务端做完。
+                sums = store.fetch(
+                    f"SELECT COUNT(*) AS task_total, SUM({stale}) AS stale_total, "
+                    f"COUNT(*) - SUM({stale}) AS active_total, "
+                    f"COUNT(DISTINCT {axis}) AS group_total "
+                    f"FROM task t {extra}"
+                    f"WHERE {store.formal_task_clause()}{gate}",
+                    params,
+                    limit=1,
+                )
+                grouped["totals"] = (sums.get("rows") or [{}])[0]
+                return grouped
             total = store.scalar(
                 f"SELECT COUNT(*) FROM task t WHERE {store.formal_task_clause()} AND {in_progress} AND {stale}",
                 params,

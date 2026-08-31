@@ -82,6 +82,7 @@ class Outcome:
     elapsed: float
     rounds: int
     tools_used: list[str] = field(default_factory=list)
+    trace: list[str] = field(default_factory=list)
 
 
 class Upstream:
@@ -154,8 +155,15 @@ async def answer_question(
     schemas: list[dict[str, Any]],
     system_prompt: str,
     question: str,
+    trace: list[str] | None = None,
 ) -> tuple[str, int, list[str]]:
-    """Run one question through the agent loop. Returns (answer, rounds, tools)."""
+    """Run one question through the agent loop. Returns (answer, rounds, tools).
+
+    ``trace`` collects the actual call text (``tool(args)``) plus the final answer.
+    Tool NAMES alone cannot tell a right call from a wrong one: every prompt-side
+    failure here was the right tool carrying the wrong argument, so diagnosing one
+    off the name list means guessing.
+    """
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": question},
@@ -167,6 +175,8 @@ async def answer_question(
         message = choice["message"]
         calls = message.get("tool_calls") or []
         if not calls:
+            if trace is not None:
+                trace.append((message.get("content") or "").strip()[:600])
             return (message.get("content") or "").strip(), round_index + 1, used
         messages.append(
             {
@@ -178,6 +188,8 @@ async def answer_question(
         for call in calls:
             name = call["function"]["name"]
             used.append(name)
+            if trace is not None:
+                trace.append(f"{name}({(call['function'].get('arguments') or '{}').strip()[:220]})")
             func = registry.get(name)
             if func is None:
                 result = json.dumps({"ok": False, "error": {"code": "no_such_tool", "message": name}})
@@ -337,9 +349,10 @@ async def run(args: argparse.Namespace) -> int:
         nonlocal done
         async with limiter:
             begin = time.monotonic()
+            trace: list[str] | None = [] if args.trace else None
             try:
                 actual, rounds, used = await answer_question(
-                    upstream, registry, schemas, system_prompt, item["question"]
+                    upstream, registry, schemas, system_prompt, item["question"], trace
                 )
                 spent = time.monotonic() - begin
                 if rounds >= MAX_TOOL_ROUNDS and not actual:
@@ -360,6 +373,7 @@ async def run(args: argparse.Namespace) -> int:
                     elapsed=spent,
                     rounds=rounds,
                     tools_used=used,
+                    trace=trace or [],
                 )
             )
             done += 1
@@ -396,6 +410,7 @@ async def run(args: argparse.Namespace) -> int:
                         "elapsed": round(r.elapsed, 2),
                         "rounds": r.rounds,
                         "tools": r.tools_used,
+                        "trace": r.trace,
                     }
                     for r in results
                 ],
@@ -417,6 +432,7 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0, help="只跑前 N 题")
     parser.add_argument("--category", default="", help="只跑指定大类，如 M,N")
     parser.add_argument("--ids", default="", help="只跑指定题号，如 K5-01,F2-02")
+    parser.add_argument("--trace", action="store_true", help="报告里记下每次工具调用的实际入参")
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--report", default="baseline-report.json")
     args = parser.parse_args()

@@ -3406,6 +3406,34 @@ async def run() -> int:
         str([(r.get("bucket"), r.get("active_count"), r.get("active_pct")) for r in (active_axis.get("rows") or [])]),
     )
 
+    # C3-04：调用对、表格逐行也对，模型却把合计写成 19（真值 18）。跨行算术一律服务端做完。
+    inflight_axis = await _call(
+        registry,
+        "weekly_freshness_distribution",
+        by="project_group",
+        stale_days=90,
+        in_flight=True,
+    )
+    inflight_rows = inflight_axis.get("rows") or []
+    check(
+        "C3-04 在办口径下国家工程办 3 条（不限状态是 4 条），标准安全组 5 条",
+        {r.get("bucket"): str(r.get("stale_count")) for r in inflight_rows}.get("国家工程办") == "3"
+        and {r.get("bucket"): str(r.get("stale_count")) for r in inflight_rows}.get("标准安全组") == "5",
+        str([(r.get("bucket"), r.get("stale_count")) for r in inflight_rows][:4]),
+    )
+    check(
+        "C3-04 totals 给出合计，且与逐行相加一致（18），免得模型自己求和写成 19",
+        str((inflight_axis.get("totals") or {}).get("stale_total")) == "18"
+        and sum(int(r.get("stale_count")) for r in inflight_rows) == 18
+        and str((inflight_axis.get("totals") or {}).get("task_total")) == "92",
+        json.dumps(inflight_axis.get("totals"), ensure_ascii=False),
+    )
+    check(
+        "C3-04 caliber 指明合计取 totals，不要自己把一列加一遍",
+        "stale_total" in str(inflight_axis.get("caliber")),
+        str(inflight_axis.get("caliber"))[-170:],
+    )
+
     # K5-01/K5-02：一级分类此前只回 cnt，率要模型自己除，两题都算错。
     cat_rate = await _call(registry, "weekly_aggregate", group_by="primary_category", order_by="finish_rate")
     check(
