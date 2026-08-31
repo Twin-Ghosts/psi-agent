@@ -261,22 +261,27 @@ async def test_auth_routes_survive_desktop_coexistence() -> None:
     带着有效 cookie 拿 401、点登出 sid 不被撤。这个用例用 path 冲突检测代替真装配
     (真装配要 SessionManager + task group), 判据是同一 (method, path) 不许出现两次。
     """
+
+    async def _stub(_request: web.Request) -> web.StreamResponse:
+        return web.Response()
+
+    def _key(route: web.AbstractRoute) -> tuple[str, str]:
+        # add_get/add_post 建出的 route 必有 resource; 判据要的就是它的 canonical。
+        assert route.resource is not None
+        return route.method, str(route.resource.canonical)
+
     app = web.Application()
     # 先按 desktop 那边的现状占位 —— 只列与飞书可能相撞的那些。
     for path in ("/auth/status", "/auth/me", "/auth/devices"):
-        app.router.add_get(path, lambda r: web.Response())
+        app.router.add_get(path, _stub)
     for path in ("/auth/logout", "/auth/send-code", "/auth/verify", "/auth/complete", "/auth/bind"):
-        app.router.add_post(path, lambda r: web.Response())
-    taken = {(r.method, str(r.resource.canonical)) for r in app.router.routes()}
+        app.router.add_post(path, _stub)
+    taken = {_key(r) for r in app.router.routes()}
 
     app["feishu_auth"] = FeishuAuth(app_id="cli_x", app_secret="s")
     register_auth_routes(app)
 
-    mine = [
-        (r.method, str(r.resource.canonical))
-        for r in app.router.routes()
-        if getattr(r.handler, "__module__", "").endswith("feishu._routes")
-    ]
+    mine = [_key(r) for r in app.router.routes() if getattr(r.handler, "__module__", "").endswith("feishu._routes")]
     assert mine, "飞书的路由一条都没贴上, 说明这个用例的判据失效了"
     collided = [k for k in mine if k in taken]
     assert collided == [], f"与 desktop 撞了: {collided} —— 撞了就会被静默遮蔽, 换个前缀"

@@ -37,10 +37,14 @@ _AI_KEYS = ("api_key", "base_url", "provider", "model")
 
 
 def test_default_ai_id_is_the_configured_one() -> None:
-    """``FeishuManager.default_ai_id`` 就是注入的 ``feishu_ai_id``, 不是别的来源。"""
-    fm = FeishuManager(_sm=None, _ai_id="ai-bot")  # type: ignore[arg-type]
+    """``FeishuManager.default_ai_id`` 就是注入的 ``feishu_ai_id``, 不是别的来源。
+
+    ``_sm=None`` 是刻意的: 本判据只读 ``_ai_id``, 传真 SessionManager 会把「没碰过它」
+    这件事藏起来。抑制注释必须写成 ``ty: ignore`` —— ty 不认 mypy 的 ``type: ignore``。
+    """
+    fm = FeishuManager(_sm=None, _ai_id="ai-bot")  # ty: ignore[invalid-argument-type]
     assert fm.default_ai_id == "ai-bot"
-    assert FeishuManager(_sm=None).default_ai_id == ""  # type: ignore[arg-type]
+    assert FeishuManager(_sm=None).default_ai_id == ""  # ty: ignore[invalid-argument-type]
 
 
 @pytest.mark.anyio

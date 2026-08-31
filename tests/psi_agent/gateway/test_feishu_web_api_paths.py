@@ -248,10 +248,12 @@ async def test_no_path_is_router_404_on_a_live_gateway() -> None:
             async with ClientSession(timeout=timeout) as http:
                 for entry in _M.load_manifest():
                     url = base_url + entry.probe_path()
-                    kwargs: dict[str, object] = {}
+                    # Any 而非 object: ``**kwargs`` 展开时会去比对 request() 的每一个具名
+                    # 参数, object 于是对着二十多个参数各报一次不兼容。
+                    kwargs: dict[str, Any] = {}
                     if entry.method in ("POST", "PUT", "PATCH"):
                         kwargs["json"] = {}
-                    async with http.request(entry.method, url, **kwargs) as resp:  # type: ignore[arg-type]
+                    async with http.request(entry.method, url, **kwargs) as resp:
                         body = await resp.text()
                     rows.append(
                         {

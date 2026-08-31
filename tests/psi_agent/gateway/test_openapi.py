@@ -9,7 +9,7 @@ from psi_agent.gateway.feishu._openapi import FEISHU_PATHS, FEISHU_SCHEMAS, OAUT
 
 
 def test_openapi_router_contract_uses_current_fields_only() -> None:
-    spec = cast(dict[str, Any], OPENAPI_SPEC)
+    spec = OPENAPI_SPEC
     paths = spec["paths"]
     schemas = spec["components"]["schemas"]
 

@@ -38,7 +38,7 @@ import os
 import secrets
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from aiohttp import ClientError, ClientSession, ClientTimeout
 from loguru import logger
@@ -196,14 +196,16 @@ class FeishuAuth:
         """
         if not isinstance(payload, dict):
             raise AuthError(f"Feishu {what} response is not a JSON object")
-        code = payload.get("code")
+        # isinstance 只窄化到 dict[Unknown, Unknown]; 键是 JSON 对象的键, 必为 str。
+        body = cast(dict[str, Any], payload)
+        code = body.get("code")
         if code not in (0, None):
-            msg = payload.get("msg") or payload.get("error_description") or payload.get("error") or ""
+            msg = body.get("msg") or body.get("error_description") or body.get("error") or ""
             raise AuthError(f"Feishu {what} rejected (code={code}): {msg}")
         # v2 token 接口失败时给 ``error``/``error_description`` 而不带 ``code``。
-        if code is None and payload.get("error"):
-            raise AuthError(f"Feishu {what} rejected: {payload.get('error_description') or payload['error']}")
-        return payload
+        if code is None and body.get("error"):
+            raise AuthError(f"Feishu {what} rejected: {body.get('error_description') or body['error']}")
+        return body
 
     def issue(self, identity: Identity) -> str:
         """签发登录态, 返回高熵 sid (放 HttpOnly cookie, 不可猜)。"""

@@ -69,6 +69,10 @@ def owns_session(open_id: str, session_id: str, workspace: str, fm: FeishuManage
     return _same_path(workspace, fm.workspace_for(open_id))
 
 
-def visible_sessions(open_id: str, sessions: Sequence[SessionLike], fm: FeishuManager) -> list[SessionLike]:
-    """从全量 session 里筛出 *open_id* 可见的那些, 保持入参顺序。"""
+def visible_sessions[S: SessionLike](open_id: str, sessions: Sequence[S], fm: FeishuManager) -> list[S]:
+    """从全量 session 里筛出 *open_id* 可见的那些, 保持入参顺序。
+
+    泛型而非固定 ``SessionLike``: 这是个筛子, 元素原样出去。写死协议类型会把调用方的
+    ``SessionInfo`` 擦成协议, 下游要 ``SessionInfo`` 的地方就得靠抑制注释放行。
+    """
     return [s for s in sessions if owns_session(open_id, s.id, s.workspace or "", fm)]

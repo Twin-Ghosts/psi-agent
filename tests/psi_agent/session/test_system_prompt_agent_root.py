@@ -15,6 +15,7 @@ from typing import Any
 import anyio
 import pytest
 
+from psi_agent.session.conversation import Conversation
 from psi_agent.session.system_prompt import SystemPrompt
 
 AGENT_ROOT = Path("X:/relocated/agent-package")
@@ -61,15 +62,31 @@ async def turn_context_builder() -> str:
 """
 
 
-class _Conv:
-    """Minimal Conversation stand-in for ``SystemPrompt.ensure``."""
+class _Conv(Conversation):
+    """真 ``Conversation``, 只补一个读 system 的快捷方式。
+
+    原先是个独立的替身类, 但 ``ensure()`` 收的是 ``Conversation``, 替身要么骗过类型检查
+    要么被报不兼容; 而 ``path=None`` 的 ``Conversation`` 本身就不落盘, 没有需要替掉的
+    东西。
+    """
 
     def __init__(self, messages: list[dict[str, Any]]) -> None:
-        self.messages = messages
-        self.system: str | None = None
+        super().__init__(messages=messages)
 
-    def replace_system(self, prompt: str) -> None:
-        self.system = prompt
+    @property
+    def system(self) -> str | None:
+        if not self.messages or self.messages[0].get("role") != "system":
+            return None
+        return str(self.messages[0]["content"])
+
+
+def _hook_globals(sp: SystemPrompt, name: str) -> Any:
+    """读 hook 所在模块的全局变量 —— 判据靠它看 hook 记下了什么。
+
+    ``_builder`` 的声明类型是 ``Callable[..., Any]``, 协议类型上没有 ``__globals__``;
+    运行时它恒是动态加载模块里的一个真函数。抑制注释集中在这一处, 而不是散在每个用例里。
+    """
+    return sp._builder.__globals__[name]  # ty: ignore[unresolved-attribute]
 
 
 async def _workspace(root: Path, source: str) -> Path:
@@ -90,7 +107,7 @@ async def test_every_hook_receives_the_loaded_agent_root(tmp_path: Path) -> None
     await sp.run_before_turn({"content": "hi"})
     await sp.run_after_turn({"content": "u"}, {"content": "a"})
 
-    module = sp._builder.__globals__["recorded"]
+    module = _hook_globals(sp, "recorded")
     assert set(module) == {"builder", "checker", "turn_context", "before_turn", "after_turn"}
     assert set(module.values()) == {str(ws)}
 
@@ -104,7 +121,7 @@ async def test_injected_root_wins_over_module_file(tmp_path: Path) -> None:
         agent_path=AGENT_ROOT,
     )
     await sp.ensure(_Conv([]))
-    assert sp._builder.__globals__["recorded"]["builder"] == str(AGENT_ROOT)
+    assert _hook_globals(sp, "recorded")["builder"] == str(AGENT_ROOT)
 
 
 @pytest.mark.anyio
@@ -117,7 +134,7 @@ async def test_hooks_without_agent_raw_are_called_unchanged(tmp_path: Path) -> N
     await sp.ensure(conv)
     assert conv.system == "LEGACY"
     assert await sp.turn_context() == "LEGACY_TC"
-    assert sp._builder.__globals__["calls"] == [()]
+    assert _hook_globals(sp, "calls") == [()]
 
 
 @pytest.mark.anyio
