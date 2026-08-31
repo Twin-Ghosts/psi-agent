@@ -18,7 +18,16 @@ export default defineConfig(({ mode }) => {
     server: {
       // 5174 已被 ToC 的 spa-v2 占用, ToB 用 5173。
       port: 5173,
-      strictPort: false,
+      // **必须 true**。false(vite 的默认值)时端口被占**不报错**, 静默换到下一个空闲端口
+      // (5173 → 5174 → 5175 ...), 而文档、书签、AGENTS.md 里写的都还是 5173。5173 上活着的
+      // 那个**别的** dev server(最常见来源: 另一个 worktree 里忘关的 ``npm run dev`` ——
+      // Windows 上关终端不一定收走 node 进程)继续应答: 页面能开、功能能用, 但改本 worktree
+      // 的前端**永远看不到变化**, 因为你看的是另一棵树的源码。唯一线索是 vite 日志里
+      // ``Port 5173 is in use, trying another one...`` 那行, 常被 npm 输出刷掉。
+      // 表现与上面那个 proxy key 的坑几乎一样(都是「dev server 看着正常但改前端不生效」),
+      // 成因却完全不同 —— 实测踩过, 见 ``test_feishu_web_dev_strict_port.py``。
+      // true 让端口被占时**启动即失败**, 而不是静默错位到另一棵树。
+      strictPort: true,
       // 必须显式写 127.0.0.1: vite 默认只监听 ``[::1]``, 于是验收里那个
       // ``http://127.0.0.1:5173`` 直接连不上 (curl 返回 000)，而日志打的是
       // ``localhost``, 看不出差别 —— 实测踩过。
