@@ -7,7 +7,7 @@ type Status = "loading" | "ready" | "failed";
 /**
  * 登录态。顺序: 先问 ``/auth/me``(已有 cookie 就免了一次 JSAPI) → 否则走免登。
  *
- * 失败**一定**留一个可见的 ``retry`` —— code 只活 3 分钟, 用户从后台切回来时上一个 code
+ * 失败**一定**留一个可见的 ``retry`` —— code 只活 5 分钟, 用户从后台切回来时上一个 code
  * 大概率已过期, 没有重试入口就只能刷页面。
  */
 export function useAuth() {
