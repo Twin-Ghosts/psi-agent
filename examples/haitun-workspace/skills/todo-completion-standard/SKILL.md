@@ -26,6 +26,10 @@ category: knowledge-base
 - 把个人 ToDoList 搬进团队看板 → [`feishu-todo-board-sync`]（那个 skill 只搬运，不判完成度）。
 - 判**谁没填**（表里的空白格子算不算缺写）→ [`company-todo-fill-check`]。那是「填没填」，
   本文是「填了的做完没」，见下面的分界。
+- 判**写得规不规范**（三层结构、必含要素、deadline、条数上限），或帮成员把零散任务组织成规范
+  todo list → [`todo-writing-standard`]。那是「怎么写、写没写、写得对不对」，与完成度无关：
+  一条写得完全合规的 TODO 可以毫无进展，一条写得潦草的也可能早已闭环，**别拿格式合规当完成度
+  证据**，反向亦然。
 - 判请假是否合规、报销能不能放行 → [`admin-finance-governance`]。
 - 评估某人能力成长阶段 → [`project-deep-learning`]。完成度是事实判定，不是绩效评价。
 
