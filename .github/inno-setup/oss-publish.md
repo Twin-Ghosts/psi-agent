@@ -3,7 +3,7 @@
 ## 发版流程
 
 1. 修改 `.github/inno-setup/haitun.iss` 里的 `MyAppVersion`，推送 `main`。
-2. `PyInstaller` workflow 构建两平台安装包，产出两个 artifact：
+2. `PyInstaller` workflow 构建两平台安装包，产出三个 artifact：
    - `haitun-agent-installers`（Windows）内含：
      - `HaiTun_Agent_Setup.exe`（完整包）
      - `HaiTun_Agent_App_Setup.exe`（海豚组件包）
@@ -11,7 +11,13 @@
      - `haitun-version.txt` / `msys-version.txt`
    - `haitun-agent-macos`（macOS arm64）内含：
      - `HaiTun_Agent.dmg`
+   - `haitun-agent-macos-version` 内含：
      - `haitun-version.txt`
+
+   macOS 侧的版本文件单独成一个 artifact：`haitun-agent-macos` 是拿去装的东西，
+   解开就只有一个安装包；版本号是发布流水线自己核对用的元数据，不跟安装包混在
+   一起。Windows 侧沿用一个 artifact，是因为它本来就是「三个安装包 + 两个版本
+   文件」的组合下载，没有「解开只应有一个文件」的预期。
 3. `Publish Haitun Installer to OSS` workflow 检测该 commit 是否改动了 `haitun.iss`：
    - 如果 OSS 上的 `haitun-version.txt` 已等于本次版本，跳过；
    - 否则校验两平台版本号一致，按顺序上传四个安装包，最后上传

@@ -107,6 +107,10 @@ jobs:
       # macOS 的 dmg 来自**同一个 workflow run** (pyinstaller.yml 的
       # `haitun-macos-dmg` job), 所以能共用 run-id 一次取到。
       #
+      # dmg 和版本号是**两个 artifact**: `haitun-agent-macos` 是给人下载去装的,
+      # 里面只该有安装包; 版本号是流水线自己用的元数据, 走
+      # `haitun-agent-macos-version`。两个都下到同一个目录, 下游路径不变。
+      #
       # 这里刻意不设 `continue-on-error`: 两平台共用 `haitun-version.txt`,
       # 而这个文件是发布闸门 (OSS 版本 == 本次版本 → 跳过上传)。若 mac 缺席也
       # 照发, 版本文件会被写成新版, 下一次 run 就把 macOS 永久闸掉 —— 于是
@@ -116,6 +120,15 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: haitun-agent-macos
+          path: installer-macos
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download macOS version metadata
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: haitun-agent-macos-version
           path: installer-macos
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
