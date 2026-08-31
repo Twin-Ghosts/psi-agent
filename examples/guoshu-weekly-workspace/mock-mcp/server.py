@@ -1229,6 +1229,7 @@ def weekly_attachment_stats(
     date_from: str = "",
     task: str = "",
     top: int = 200,
+    include_informal: bool = False,
 ) -> str:
     """Aggregate attachments: size totals, file types, uploaders, soft-delete audit.
 
@@ -1255,6 +1256,13 @@ def weekly_attachment_stats(
             task_id as a plain foreign key, so a task outside the formal set
             still has attachments, and gating here would silently answer 0.
         top: Row cap for the listing scopes.
+        include_informal: True drops the formal-task gate and counts the whole
+            attachment table (510 live rows) instead of only attachments hanging
+            off formal tasks (454). Both readings are legitimate -- "how many
+            attachments are there in total" means the table, "how many do the
+            formal tasks have" means the gated set -- so the default stays gated
+            and this opens the other door explicitly. Ignored when task is set,
+            which is already ungated on purpose.
     """
 
     def work() -> dict[str, Any]:
@@ -1299,10 +1307,29 @@ def weekly_attachment_stats(
                 "本档不加正式任务闸门——附件挂在外键上，任务未过 R-01 时它的附件依然存在，"
                 "加闸门会把真实条数静默答成 0"
             )
+        elif include_informal:
+            # 「附件表里一共多少个」问的是整张表，不是正式任务的那一部分。两个数
+            # 都是合法读法，差额是任务闸门吃掉的 56 行（510 全表 / 454 正式），
+            # 所以不翻默认值，只在明确要全表时开这个口，并把两个数一起给出。
+            gate = "1 = 1"
+            live_caliber = (
+                "全表口径：只按 a.is_deleted = 0（附件行软删），不加正式任务闸门；"
+                "本档 510 个活跃附件，加闸门（任务未删除且 workflow_status = 'published'）是 454 个，"
+                "差额 56 个挂在非正式任务上；"
+                "问「附件表里一共」用本档，问「正式任务有多少附件」用 include_informal = False"
+            )
         else:
             gate = store.formal_task_clause()
-            live_caliber = f"{store.FORMAL_TASK_CALIBER} 且 a.is_deleted = 0（任务闸门 + 附件行软删两道）"
-        live = f"FROM task_attachment a JOIN task t ON t.id = a.task_id WHERE {gate} AND a.is_deleted = 0"
+            live_caliber = (
+                f"{store.FORMAL_TASK_CALIBER} 且 a.is_deleted = 0（任务闸门 + 附件行软删两道）；"
+                "本档 454 个；整张附件表的活跃行是 510 个，要那个数请传 include_informal = True"
+            )
+        # 全表口径必须连 JOIN 一起放开：光把闸门改成 1 = 1 还差 3 行，因为
+        # INNER JOIN 自己就会丢掉孤儿附件（task_id 匹配不到任何任务）。
+        # 507 + 3 孤儿 = 510，字节 2163753344 + 9162752 = 2172916096。
+        # 改 LEFT JOIN 而不是去掉 JOIN，是为了让别的分档继续能用 t 别名。
+        join_kind = "LEFT JOIN" if (include_informal and scoped_task is None) else "JOIN"
+        live = f"FROM task_attachment a {join_kind} task t ON t.id = a.task_id WHERE {gate} AND a.is_deleted = 0"
         size_note = "file_size 单位是字节，bytes 列为权威值，MB 列由服务端换算仅供参考"
         # 关联去向的分档表达式，三处口径必须一致，抽出来共用。
         link_case = (
@@ -3964,6 +3991,7 @@ def weekly_year_goal_stats(
     top: int = 8,
     in_progress_only: bool = False,
     board: str = "",
+    include_informal: bool = False,
 ) -> str:
     """Aggregate annual-goal coverage: which years are set, and who is missing one.
 
@@ -3981,6 +4009,13 @@ def weekly_year_goal_stats(
             "在办任务还没定目标" -- otherwise 已完成 / 已暂停 tasks inflate the gap list.
         board: Board code or name to scope every scope to. "集团看板哪些任务没设目标"
             needs it: without it the gap list spans both boards and is a different set.
+        include_informal: True drops the formal-task gate so ``by_year`` and
+            ``span`` count the whole goal table (387 rows) instead of only goals
+            on formal tasks (313). Use it for "目标表里一共多少条年度目标"; keep the
+            default for "正式任务设了多少目标", which is the reporting caliber.
+            ``coverage`` / ``missing`` / ``missing_by_group`` ignore it -- those
+            measure a GAP against the formal task set, and widening the
+            denominator to deleted and unpublished tasks makes the gap meaningless.
     """
 
     def work() -> dict[str, Any]:
@@ -4000,8 +4035,29 @@ def weekly_year_goal_stats(
                 "error": {"code": "invalid_argument", "message": f"口径 {key} 需要指定 year"},
             }
         bounded = max(1, min(store.MAX_ROWS, int(top)))
-        clause = store.formal_task_clause()
-        base = store.FORMAL_TASK_CALIBER
+        # 缺口类口径（coverage / missing / missing_by_group）永远按正式任务算：
+        # 它们量的是「正式任务里有多少没设目标」，把分母放宽到已删除、未发布的
+        # 任务上，这个缺口就不成立了。只有 by_year / span 这类纯计数才给全表出口。
+        gap_scope = key in ("coverage", "missing", "missing_by_group")
+        whole_table = include_informal and not gap_scope
+        if whole_table:
+            # 目标表没有孤儿行（全表 387 = INNER JOIN 后 387），所以放开闸门就够，
+            # 不必像附件表那样改 LEFT JOIN。
+            clause = "1 = 1"
+            base = (
+                "全表口径：不加正式任务闸门，统计整张 task_year_goal；"
+                "本档 387 条目标，加闸门（任务未删除且 workflow_status = 'published'）是 313 条，"
+                "差额 74 条挂在非正式任务上；"
+                "问「正式任务设了多少目标」请用 include_informal = False（对外周报口径）"
+            )
+        else:
+            clause = store.formal_task_clause()
+            base = store.FORMAL_TASK_CALIBER
+            if include_informal and gap_scope:
+                base += (
+                    "；本档量的是正式任务的目标缺口，include_informal 对它无效"
+                    "（放宽分母会把已删除、未发布的任务算进缺口，缺口即失去意义）"
+                )
         board_params: dict[str, Any] = {}
         if board.strip():
             board_id = store.resolve_board(board)

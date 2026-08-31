@@ -32,7 +32,7 @@ Usage:
     python tests/build_oa_answers.py --out other.jsonl
 """
 
-# ruff: noqa: RUF001, RUF003  中文口径文案与注释里的全角标点是给人看的正文, 不能换成半角。
+# ruff: noqa: RUF001, RUF002  中文口径文案与文档串里的全角标点是给人看的正文, 不能换成半角。
 # ruff: noqa: T201  这是命令行脚本, stdout 就是它的输出通道。
 from __future__ import annotations
 
@@ -70,8 +70,7 @@ MOCK_TABLES = frozenset(
 DIFFICULTY = {"简单": "easy", "中等": "medium", "困难": "hard"}
 
 SNAPSHOT_NOTE = (
-    "答案由 gold_sql 在本地 mock 库(锚 2026-08-15)执行得出；"
-    "原 expected 按国数真实库 2026-08-18 快照，两者不可互换"
+    "答案由 gold_sql 在本地 mock 库(锚 2026-08-15)执行得出；原 expected 按国数真实库 2026-08-18 快照，两者不可互换"
 )
 
 _TABLE_REF = re.compile(r"(?:FROM|JOIN)\s+`?(\w+)`?", re.IGNORECASE)

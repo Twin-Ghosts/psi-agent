@@ -53,6 +53,7 @@ async def weekly_year_goal_stats(
     in_progress_only: bool = False,
     board: str = "",
     top: int = 8,
+    include_informal: bool = False,
 ) -> str:
     """Aggregate annual-goal coverage: which years are set, and who lacks a goal.
 
@@ -75,6 +76,13 @@ async def weekly_year_goal_stats(
             Use it for "某看板哪些任务没设目标" rather than filtering the
             whole-library rows by eye, which silently drops the total_count.
         top: Row cap for the listing scopes.
+        include_informal: True makes by_year and span count the whole goal table
+            (387 rows) instead of only goals on formal tasks (313). Use it for
+            "目标表里一共多少条年度目标"; keep the default for "正式任务设了多少
+            目标", which is the reporting caliber. coverage / missing /
+            missing_by_group ignore it -- they measure a gap against the formal
+            task set, and widening the denominator to deleted and unpublished
+            tasks would make that gap meaningless.
     """
     try:
         bounded = max(1, min(200, int(top)))
@@ -93,6 +101,7 @@ async def weekly_year_goal_stats(
             "in_progress_only": bool(in_progress_only),
             "board": board,
             "top": bounded,
+            "include_informal": bool(include_informal),
         },
     )
 

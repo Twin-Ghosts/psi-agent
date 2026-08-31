@@ -656,7 +656,13 @@ async def weekly_attachment_query(task: str = "", board: str = "", limit: int = 
     return await _call("weekly_attachment_query", {"task": task, "board": board, "limit": bounded})
 
 
-async def weekly_attachment_stats(scope: str = "summary", date_from: str = "", task: str = "", top: int = 200) -> str:
+async def weekly_attachment_stats(
+    scope: str = "summary",
+    date_from: str = "",
+    task: str = "",
+    top: int = 200,
+    include_informal: bool = False,
+) -> str:
     """Aggregate attachments: size totals, file types, uploaders, soft-delete audit.
 
     weekly_attachment_query caps at 200 rows, so counting or summing by reading
@@ -684,6 +690,13 @@ async def weekly_attachment_stats(scope: str = "summary", date_from: str = "", t
             off task_id as a plain foreign key), so a task that
             weekly_task_detail rejects as task_not_formal still answers here.
         top: Row cap, capped at 200.
+        include_informal: True counts the whole attachment table (510 live rows)
+            instead of only attachments on formal tasks (454). Both readings are
+            legitimate -- "how many attachments are there in total" means the
+            table, "how many do the formal tasks have" means the gated set, which
+            is the reporting caliber and stays the default. The 56-row gap sits on
+            non-formal tasks, and 3 of the 510 are orphans whose task_id matches
+            no task at all. Ignored when task is set, which is already ungated.
     """
     try:
         bounded = max(1, min(200, int(top)))
@@ -691,7 +704,13 @@ async def weekly_attachment_stats(scope: str = "summary", date_from: str = "", t
         return _invalid("top must be an integer")
     return await _call(
         "weekly_attachment_stats",
-        {"scope": scope, "date_from": date_from, "task": task, "top": bounded},
+        {
+            "scope": scope,
+            "date_from": date_from,
+            "task": task,
+            "top": bounded,
+            "include_informal": bool(include_informal),
+        },
     )
 
 
