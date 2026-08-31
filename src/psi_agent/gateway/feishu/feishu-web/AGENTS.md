@@ -128,6 +128,87 @@ vite 的原因。
 - 助手真的回话。本机注册的是假 `api_key`, 发消息后助手侧会报错 —— 不影响上面几条, 那些
   判据只看**用户自己那句话**落在哪个会话里。
 
+## 本地与云上的分叉点(逐条)
+
+上面那节说的是「本地这套东西能验到什么」。这一节说的是**两套拓扑本身的差别** —— 本地全通
+但云上 404 这类失败就出在这里, 不在任何一处代码里。
+
+云上是 Caddy 占 80/443 → 反代 `127.0.0.1:8090` 的 `oauth-proxy.py`(**白名单**反代) →
+gateway 容器。本地是浏览器 → vite dev server(proxy) → gateway, **直连, 没有白名单**。
+
+| 分叉点 | 本地 | 云上 | 本地能不能验 |
+| --- | --- | --- | --- |
+| 路径可达性 | 直连 gateway, 前端打什么都通 | 过白名单反代, `ALLOWED_PATHS` 少一条即 404 | **不能**。本地永远碰不到, 只能靠清单核对(见下) |
+| 身份 | `PSI_FEISHU_DEV_OPEN_ID` 旁路, 后端直接发 sid | 真免登: JSAPI `code` → `user_access_token` → `open_id` | **不能**。本机没有 JSAPI, 整条换取链一次没跑 |
+| 静态资源 | `npm run dev`, vite 服务源码 + HMR | gateway `add_static` 服务 `dist/` | 能验 dev 一侧; `dist/` 一侧要 `npm run build` 后开 `:8765/feishu-web/index.html` |
+| 挂了哪几面 | 文档里的起法是 `--gateway feishu` **单挂** | `launch-gateway.sh` **两面全挂** | 能验, 但**默认起法与云上不同**, 见下面那条 |
+| 跨身份隔离 | 造不出第二个身份(旁路只认一个环境变量) | 真实多用户 | **不能**, 靠 `test_feishu_identity.py` + 云上真机 |
+
+### `/workspace/*` 归 desktop 那面 —— 单挂时本地就 404
+
+`GET /workspace/file` 与 `POST /workspace/reveal`(交付物抽屉在打)的 handler 住在
+`gateway/desktop/_routes.py`, **不在** `feishu/_routes.py` 里。于是:
+
+- `--gateway feishu` 单挂(上面「本地开发怎么起」里的起法): 这两条**路由不存在**, 实测
+  `404 text/plain`。
+- `--gateway desktop feishu` 两面全挂(**生产就是这样**): 实测 `400`(缺 `path` 参数),
+  路由在。
+
+危险在于这两种 404 长得不一样但都是 404: 一个是本地少挂一面, 一个是云上白名单缺条, 排查
+时容易认错。想让本地拓扑贴近生产就两面都写:
+
+```bash
+psi-agent gateway --gateway desktop feishu --listen http://127.0.0.1:8765
+```
+
+归属由 `test_workspace_paths_need_the_desktop_surface` 钉住 —— 哪天 handler 搬了家,
+那条会红, 提醒回来改这张表。
+
+## 路径清单: 挡「本地全通、云上全 404」
+
+前端会打的后端路径有一份**从源码提取**的清单: `api-paths.json`(19 条), 生成与消费都走
+`scripts/feishu_web_paths.py`。
+
+**不人手维护**是关键: 前端加一个端点没人会想起来更新清单, 而漂移的表现恰好就是云上 404。
+
+```bash
+python scripts/feishu_web_paths.py --check         # 清单与源码是否一致
+python scripts/feishu_web_paths.py --regenerate    # 前端改了端点, 重新生成
+python scripts/feishu_web_paths.py --probe http://127.0.0.1:8765   # 逐条打, 找 404
+python scripts/feishu_web_paths.py --print-shell > check-feishu-web-paths.sh
+```
+
+判据在 `tests/psi_agent/gateway/test_feishu_web_api_paths.py`, **双向**绑住:
+
+- 前端多打一条而清单没更新 → 红。
+- 清单多一条而前端已不打 → 也红(少了这条, 从清单里删一条不会被发现, 而被删的那条恰好就是
+  不会去核对白名单的那条)。
+- 有人在**第三个文件**里直接 `fetch(` → 红。提取器只读 `src/api.ts` 与
+  `src/services/chatStream.ts`, 多一个发请求的文件它不报错、只是少提一条: 清单齐全、测试
+  全绿、云上照旧 404。
+
+**判据是路由存在性, 不是状态码为 200。** `/feishu/*` 一族未登录是 **401**, 写成 `== 200`
+会因为没带身份而假红; 拿哨兵 id 打 `/sessions/{id}/todos` 回的是 handler 自己判出的 404
+(`application/json`), 与「路由不存在」的 404(aiohttp 的 `text/plain` `404: Not Found`)
+必须分开 —— `classify()` 就是这条判据。**只看状态码会让 `/sessions/<id>/*` 一族全报假
+FAIL**, 实测踩过(5 条)。
+
+### 上云前怎么用
+
+`--print-shell` 生成的脚本路径**内联**, 部署机上不需要 python 或 jq:
+
+```bash
+python scripts/feishu_web_paths.py --print-shell > check-feishu-web-paths.sh
+# 拷到部署机, 对着 oauth-proxy 那一跳跑
+bash check-feishu-web-paths.sh http://127.0.0.1:8090
+```
+
+FAIL 的行就是要和 `oauth-proxy.py` 的 `ALLOWED_PATHS` 逐条比对的路径。部署卡(`c6e60`)里
+「放行路径 200/4xx、未放行必须 404」那个 for 循环**复用这一份清单**, 不要另写第二份。
+
+**这份东西只读不改。** 白名单该放行哪些、`/sessions/{id}/chat` 这条能驱动 agent 执行工具
+要不要暴露, 都是负责人拍的方案, 不在这里决定。
+
 ## 三个静默坑(都实测踩过)
 
 - **`vite.config.ts` 的 proxy key `'/feishu'` 是前缀匹配, 会把 `/feishu-web/` 一起吞掉。**
