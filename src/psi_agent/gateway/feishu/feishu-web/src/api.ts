@@ -108,6 +108,14 @@ function asList<T>(data: T[] | { value?: T[] }): T[] {
 export interface Me {
   open_id: string;
   name: string;
+  /**
+   * 这个身份是后端 ``PSI_FEISHU_DEV_OPEN_ID`` 旁路发的 —— 页面据此挂告警条。
+   *
+   * **只由后端给**, 前端不构造也不传。生产响应里没有这个字段(后端只在为真时带上),
+   * 所以缺省即 false。判据放后端是因为刷新页面走 ``getMe()``, 前端那次不经过登录分支,
+   * 记不住自己是怎么登进来的。
+   */
+  via_dev_bypass?: boolean;
 }
 
 /** appID 从后端取, 不写死在前端 —— 换应用/换租户只改部署参数。 */

@@ -12,6 +12,12 @@
  * PR 755 的免登分支永不执行(它引的 SDK 不存在), 每次都掉进写死了一个真实 open_id 的
  * fallback, 上云后所有访问者都是同一个人。
  *
+ * ``FeishuAuthUnavailable`` 是**调用方的分支判据**
+ * ------------------------------------------------
+ * ``useAuth`` 只在收到这个类型时才去试后端的开发旁路。所以「拿不到 code 的能力不可用」
+ * 一律用这个类型, 而「能力在但这一次失败了」(用户拒绝授权、code 过期)用普通 ``Error``
+ * —— 后者重试有意义, 前者重试也没用。抛错顺序同样吃劲, 见 ``requestFeishuCode``。
+ *
  * ``code`` 有效期 3 分钟且只能用一次 —— 所以每次登录都重新取, 绝不缓存。
  */
 
@@ -56,8 +62,17 @@ function viaRequestAuthCode(appId: string): Promise<string> {
 
 /** 取一次性登录 code。*appId* 由后端 ``GET /feishu/app-id`` 提供, 不写死。 */
 export async function requestFeishuCode(appId: string): Promise<string> {
-  if (!appId) throw new Error("后端未配置飞书 App ID, 无法免登");
+  // ``sdkReady()`` **必须先于** app_id 检查。两个理由:
+  //
+  // 1. 顺序上「有没有 JSAPI」比「后端配没配」更根本 —— 不在飞书客户端内时, app_id 配得
+  //    再全也拿不到 code, 报「后端未配置 App ID」是指错了地方。
+  // 2. 反过来写会让**本地开发的默认组合**(app_id 为空 + 不在飞书客户端内)抛普通
+  //    ``Error``, 于是调用方 ``useAuth`` 的 ``err instanceof FeishuAuthUnavailable`` 判假,
+  //    开发旁路整段被跳过, 页面停在「登录失败: 后端未配置飞书 App ID, 无法免登」。实测
+  //    踩过, 而且只有这一个组合会踩(app_id 非空时抛的就是 ``FeishuAuthUnavailable``,
+  //    类型对), 所以它藏得住 —— 别再把这两行换回去。
   await sdkReady();
+  if (!appId) throw new Error("后端未配置飞书 App ID, 无法免登");
   const requestAccess = window.tt?.requestAccess;
   if (!requestAccess) return viaRequestAuthCode(appId); // JSSDK 版本过低
 

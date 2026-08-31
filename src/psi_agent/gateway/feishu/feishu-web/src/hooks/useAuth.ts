@@ -42,6 +42,9 @@ export function useAuth() {
         // 不在飞书客户端内: 试一次后端的开发旁路。它只有在后端显式设了
         // PSI_FEISHU_DEV_OPEN_ID 时才会成功, 默认配置下照样失败 —— 所以这不是
         // 「静默冒充身份」, 身份完全由后端决定。
+        // ``requestFeishuCode`` 的抛错顺序决定这个分支够不着还是够得着: 它必须先
+        // ``sdkReady()`` 再查 app_id, 否则本地开发的默认组合(app_id 空 + 客户端外)抛的是
+        // 普通 Error, 这里判假, 整段旁路被跳过。见那边的注释。
         if (err instanceof FeishuAuthUnavailable) {
           const dev = await loginDevBypass().catch(() => null);
           if (dev && alive) {

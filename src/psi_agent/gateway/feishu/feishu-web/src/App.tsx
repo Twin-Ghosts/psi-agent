@@ -56,15 +56,44 @@ function LoginGate({
   );
 }
 
+/**
+ * 开发旁路告警条 —— 当前身份是后端 ``PSI_FEISHU_DEV_OPEN_ID`` 发的, 不是真免登。
+ *
+ * 为什么值得占一条通栏: 旁路态与真免登态页面原本长得一模一样, 有人在旁路态下把功能测完
+ * 会以为自己验过了免登链路(而那一环本机根本没有 JSAPI, 压根没跑)。后端每次登录打
+ * WARNING, 但只有看日志的人能看见。判据来自后端的 ``via_dev_bypass``, 前端不自己推断。
+ */
+function DevBypassBanner({ openId }: { openId: string }) {
+  return (
+    <div className="ht-dev-bypass" role="status">
+      <strong>开发旁路身份: {openId}</strong>
+      <span>
+        后端 PSI_FEISHU_DEV_OPEN_ID 已开启, 这不是真的飞书免登 —— 免登链路本机测不了。
+      </span>
+    </div>
+  );
+}
+
 export function App() {
   const auth = useAuth();
   if (auth.status !== "ready") {
     return <LoginGate status={auth.status} error={auth.error} onRetry={auth.retry} />;
   }
-  return <AuthedApp userName={auth.me?.name || ""} />;
+  return (
+    <AuthedApp
+      userName={auth.me?.name || ""}
+      devBypassOpenId={auth.me?.via_dev_bypass ? auth.me.open_id : ""}
+    />
+  );
 }
 
-function AuthedApp({ userName }: { userName: string }) {
+function AuthedApp({
+  userName,
+  devBypassOpenId,
+}: {
+  userName: string;
+  devBypassOpenId: string;
+}) {
   const [view, setView] = useState<View>("tasks");
   const [input, setInput] = useState("");
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
@@ -143,6 +172,8 @@ function AuthedApp({ userName }: { userName: string }) {
 
   return (
     <div className="ht-app">
+      {/* 两个视图共用这层 wrapper, 所以告警条挂这里就在任务列表和会话里都在。 */}
+      {devBypassOpenId ? <DevBypassBanner openId={devBypassOpenId} /> : null}
       {view === "tasks" ? (
         <main className="ht-desktop">
           {listError ? <div className="ht-error" role="alert">{listError}</div> : null}

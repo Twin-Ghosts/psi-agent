@@ -48,12 +48,83 @@
 
 ```bash
 npm ci        # 按 package-lock.json 装依赖 (可复现)
-npm run dev   # http://127.0.0.1:5173
+npm run dev   # http://127.0.0.1:5173/feishu-web/
 npm run build # tsc --noEmit 后 vite build → dist/
 ```
 
 dev 期间要连的 gateway 默认是 `http://127.0.0.1:8765`, 用环境变量 `GATEWAY_ORIGIN`
 覆盖。
+
+## 本地开发怎么起
+
+**两个进程**, 缺一个都跑不起来。
+
+**1. gateway** —— 开开发旁路, 不配 app_id:
+
+```bash
+cd <repo root>
+PSI_FEISHU_DEV_OPEN_ID=ou_devtest_001 PYTHONPATH=src \
+  python -c "from psi_agent.cli import main; main()" \
+  gateway --gateway feishu --listen http://127.0.0.1:8765
+```
+
+- `--listen` **必须带 `http://`**。裸 `127.0.0.1:8765` 会掉进 Unix-socket 分支, 在 Windows 上
+  直接 `ValueError`(见 `_sockets.py` 的 `create_site`)。
+- 不带 `--listen` 时监听的是**随机高位端口**, 启动日志末行的 `Gateway listening on ...` 才是
+  真实地址。这时 vite 那边要把 `GATEWAY_ORIGIN` 指到那个端口:
+  `GATEWAY_ORIGIN=http://127.0.0.1:<随机端口> npm run dev`。固定 8765 省掉这一步。
+- 同时起两个 gateway 要给不同的 `--socket-path`, 否则 scheduler Session 撞同一个管道名。
+
+**2. vite dev server**:
+
+```bash
+cd src/psi_agent/gateway/feishu/feishu-web
+npm ci && npm run dev   # → http://127.0.0.1:5173/feishu-web/
+```
+
+浏览器开 **`http://127.0.0.1:5173/feishu-web/`**(带 `base` 前缀, 少了它 302)。改前端文案
+不用刷页面, HMR 会自己更新。
+
+`psi_feishu_sid` 是 `HttpOnly; SameSite=Lax; Path=/`, 经 proxy 后**能**带上, 不需要额外配
+`cookieDomainRewrite`: 5173 与 8765 同为 `127.0.0.1`, 只有端口不同, 而 cookie 不按端口隔离,
+`SameSite=Lax` 也只管站点不管端口。实测过。
+
+不想起 vite 也行: `npm run build` 后直接开 `http://127.0.0.1:8765/feishu-web/index.html`,
+gateway 自己 `add_static` 服务 `dist/`。代价是每改一行都要重新 build —— 这正是本地开发要
+vite 的原因。
+
+## 本地能验什么、不能验什么
+
+**能验**:
+
+- 开发旁路进得去(直接进会话列表), 页面顶部有「开发旁路身份: ou_xxx」告警条。
+- 多会话互不串味: 建多个会话各发一句, 切换与刷新后各自只显示自己那句。
+- 不设 `PSI_FEISHU_DEV_OPEN_ID` 时页面显示「请在飞书客户端内打开」而不是静默进入。
+- proxy + cookie + HMR 这条链路。
+
+**不能验**(别假装验过):
+
+- **飞书客户端内的 `tt.requestAccess`**。本机浏览器没有 JSAPI, `window.h5sdk` 不存在,
+  `code → user_access_token → open_id` 整条真免登链路一次都没跑。控制台那句
+  `【H5-JS-SDK】: cannot find pc bridge` 就是它不在的证据。只能上云在真机验。
+- **跨身份隔离**。旁路身份由后端的一个环境变量决定, 且 `POST /feishu/auth/login` 忽略 body
+  里的 `open_id`(那是安全前提), 所以本机造不出第二个身份。这条靠
+  `tests/psi_agent/gateway/test_feishu_identity.py` 与
+  `tests/integration/test_feishu_web_sessions.py`(两个 sid 两个身份)加云上真机。
+- 助手真的回话。本机注册的是假 `api_key`, 发消息后助手侧会报错 —— 不影响上面几条, 那些
+  判据只看**用户自己那句话**落在哪个会话里。
+
+## 两个静默坑(都实测踩过)
+
+- **`vite.config.ts` 的 proxy key `'/feishu'` 是前缀匹配, 会把 `/feishu-web/` 一起吞掉。**
+  本应用的 `base` 恰好也以 `/feishu` 开头, 于是前端路径连 `/@vite/client` 一起被代理到
+  gateway: 打开 5173 拿到的是 gateway 里**上一次 build 的 dist**, 热更新永远不生效, 而
+  `/feishu-web/` 带斜杠时 aiohttp 的 `show_index=False` 还会回 **403**。两个表现都不像
+  「代理配错了」。现在那条 key 是正则 `'^/feishu(?!-web)'`, **别改回字符串**。
+- **旁路的类型判据**: `requestFeishuCode()` 里 `sdkReady()` 必须先于 app_id 检查。反过来写
+  时「app_id 为空 + 不在飞书客户端内」(正是本地开发的默认组合)抛的是普通 `Error`, 而
+  `useAuth` 的退路只认 `FeishuAuthUnavailable`, 于是旁路整段被跳过, 页面停在「登录失败:
+  后端未配置飞书 App ID」。只有这一个组合会踩, 所以它藏得住。
 
 ## 两条容易踩的约定
 
