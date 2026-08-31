@@ -13,13 +13,6 @@
  * 拿全量。
  */
 
-export interface AiInfo {
-  id: string;
-  provider: string;
-  model: string;
-  base_url?: string;
-}
-
 export interface SessionInfo {
   id: string;
   backend_type?: string;
@@ -109,11 +102,14 @@ export interface Me {
   open_id: string;
   name: string;
   /**
-   * 这个身份是后端 ``PSI_FEISHU_DEV_OPEN_ID`` 旁路发的 —— 页面据此挂告警条。
+   * 这个身份是后端 ``PSI_FEISHU_DEV_OPEN_ID`` 旁路发的。
    *
    * **只由后端给**, 前端不构造也不传。生产响应里没有这个字段(后端只在为真时带上),
-   * 所以缺省即 false。判据放后端是因为刷新页面走 ``getMe()``, 前端那次不经过登录分支,
-   * 记不住自己是怎么登进来的。
+   * 所以缺省即 false。
+   *
+   * 页面**不再用它渲染任何东西** —— 旁路提示已挪到 gateway 启动日志(见 App.tsx 的注释)。
+   * 保留在类型里是因为它确实在响应形状里, 声明成可选字段与后端一致; 想加回页面提示前先
+   * 读那段注释。
    */
   via_dev_bypass?: boolean;
 }
@@ -146,10 +142,24 @@ export async function logout(): Promise<void> {
   await requestJson<unknown>("/feishu/auth/logout", jsonPost({}));
 }
 
-// ---- GET /ais ----------------------------------------------------------
+// ---- GET /feishu/defaults ----------------------------------------------
 
-export async function listAis(): Promise<AiInfo[]> {
-  return asList(await requestJson<AiInfo[] | { value?: AiInfo[] }>("/ais"));
+/**
+ * 建会话该挂哪个 AI —— 后端给的唯一答案(Gateway 的 ``--feishu-ai-id``), 空串表示部署没配。
+ *
+ * **前端不打 ``GET /ais``, 也不该有 AI 列表的概念。** 原先的写法是 `listAis()` 取
+ * `ais[0].id`: 生产上恰好只有一条 AI 所以看着没错, 但 appdata 里存了多条时数组顺序无保证,
+ * 网页应用会静默用上一个与机器人不同的模型。让后端只给一个 id, 「两侧模型不一致」就在结构上
+ * 不可能发生, 而不是靠纪律。
+ *
+ * 也**不做兜底**: 拿不到就报错。悄悄换个模型比直接报错难查得多。
+ *
+ * 飞书这条线是 ToB —— AI 由部署者定死, B 端用户不该看见也不该改。ToC 的 `spa-v2` 那边用户
+ * 自带 key, 有配置页, 是另一件事, 别把那套搬过来。
+ */
+export async function getFeishuDefaultAiId(): Promise<string> {
+  const data = await requestJson<{ ai_id?: string }>("/feishu/defaults");
+  return data.ai_id || "";
 }
 
 // ---- /feishu/sessions ---------------------------------------------------

@@ -24,8 +24,12 @@
 ``PSI_FEISHU_DEV_OPEN_ID`` 旁路
 -------------------------------
 本机开发时飞书客户端外没有 JSAPI, 于是留一个环境变量旁路。**默认不设置即完全不可用**,
-且启用时每次登录打 WARNING —— PR 755 的教训是一个写死的真实 open_id 上云后让所有访问者
-变成同一个人。旁路只能由部署者显式打开, 代码里不留任何默认身份。
+PR 755 的教训是一个写死的真实 open_id 上云后让所有访问者变成同一个人。旁路只能由部署者
+显式打开, 代码里不留任何默认身份。
+
+痕迹分两处, 都是 WARNING: ``warn_if_dev_bypass_enabled()`` 在 Gateway 装配飞书这条线时打
+一次(**开发者启动时就能看见**), ``_routes._auth_feishu`` 在每次旁路登录时打一次(旁路**实际
+被用了**的痕迹)。``dev_open_id()`` 本身纯读不打日志 —— 读值与留痕是两件事。
 """
 
 from __future__ import annotations
@@ -65,10 +69,13 @@ class Identity:
     的判断, 前端只读不写** —— 与本模块的安全前提一致: 前端伪造不出身份, 也伪造不出「这
     是不是真身份」。
 
-    为什么要它: 旁路态与真免登态在页面上原本长得一模一样, 有人在旁路态下测完会以为自己
-    验过了真免登。后端每次登录打 WARNING 只有看日志的人能看见; 这个字段让页面也能挂一条
-    可见的告警条。**刷新页面后仍然准** 是关键 —— 刷新走的是 ``/feishu/auth/me`` 读 cookie,
-    前端那次不经过登录分支, 自己记不住来路, 只有登录态里存着才问得出来。
+    为什么保留: 它是**响应形状的一部分**(``login`` 与 ``me`` 共用, 见
+    ``_routes._identity_payload``), 也是「这个登录态是不是真身份」在服务端的唯一记录 ——
+    任何要区分两者的调用方都只能问它。前端曾用它渲染一条常驻告警条, 那条通栏已撤(提示
+    改在启动期日志), 但字段与形状约定不动: 撤掉一个渲染用法不等于这个判断没人要了。
+
+    **刷新页面后仍然准** 是它非得存在登录态里的原因 —— 刷新走 ``/feishu/auth/me`` 读
+    cookie, 那一次不经过登录分支, 来路只有服务端记着才问得出来。
     """
 
     open_id: str
@@ -82,13 +89,30 @@ def dev_open_id() -> str:
     每次调用都重读环境变量而不缓存: 与 ``external_sessions()`` 同一个理由 —— 换来
     「改了 env 重启进程即生效」这条最简单的运维语义。
 
-    非空时打 WARNING: 这是唯一一处旁路开关, 打日志是为了让「谁在生产环境开了旁路」
-    这件事不会悄悄溜过去 (PR 755 的教训)。
+    **纯读, 不打日志。** 原先它自己在非空时打 WARNING, 于是「读一下这个值」与「留一条
+    告警」绑成了一件事: 调用方无从选择, 而 ``_auth_feishu`` 里得留一条注释提醒后人别再打
+    第二遍。告警现在由两个调用点各自显式打 (见 ``warn_if_dev_bypass_enabled`` 与
+    ``_routes._auth_feishu``), 谁在什么时机留痕因此看得见。
     """
-    value = (os.environ.get(DEV_OPEN_ID_ENV, "") or "").strip()
+    return (os.environ.get(DEV_OPEN_ID_ENV, "") or "").strip()
+
+
+def warn_if_dev_bypass_enabled() -> str:
+    """**启动期**告警: 旁路开着就打一条 WARNING 并回那个 open_id, 没开则一声不响回空串。
+
+    由 ``register_feishu_routes`` 在装配飞书这条线时调一次。为什么需要它: 旁路此前唯一的
+    痕迹是**每次登录**那条 WARNING —— 启动时什么都不打, 于是「这个进程开着旁路」这件事在
+    没人登录之前完全不可见。页面上那条常驻告警条已经撤掉(开发者启动时看见就够了, 不必占
+    着每个用户的一条通栏), 撤掉之后启动期这条就是开发者唯一的提示, 缺了它等于没提示。
+
+    带上 open_id 本身: 旁路的危害正是「所有访问者都变成这一个人」(PR 755), 看不到是谁就
+    判断不了严重程度。
+    """
+    value = dev_open_id()
     if value:
         logger.warning(
-            "FeishuAuth dev bypass is ENABLED via {}={} -- do not use in production",
+            "FeishuAuth dev bypass is ENABLED at startup via {}={} -- every visitor becomes "
+            "this identity; do not use in production",
             DEV_OPEN_ID_ENV,
             value,
         )

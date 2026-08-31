@@ -30,7 +30,7 @@ Gateway 进程
 │   ├── spa/             — Vue 3 SPA v1 前端项目 (Vite + SFC)
 │   └── spa-v2/          — React SPA v2（默认）
 ├── feishu/            — **ToB 专属层**（`FeishuManager` + `/feishu/*`，`OAuthRelay` + `/oauth/*`）
-│   ├── _routes.py       — `register_feishu_routes()` + `/feishu/*`（`route` `routes` 免登 `auth/*` `app-id` 按身份过滤的 `sessions`/`titles`/`summaries`） + `/oauth/callback` `/oauth/code`
+│   ├── _routes.py       — `register_feishu_routes()` + `/feishu/*`（`route` `routes` 免登 `auth/*` `app-id` `defaults` 按身份过滤的 `sessions`/`titles`/`summaries`） + `/oauth/callback` `/oauth/code`
 │   ├── OAuthRelay       — OAuth 回调中继（state → code 一次性信箱，免用户手工复制授权码）
 │   └── feishu-web/      — ToB 前端（Vite + React 19）；**当前只是脚手架，零业务**
 └── _openapi*.py       — OpenAPI schema：公共片段在骨架，两份产品片段在各自子包，装配留骨架
@@ -72,7 +72,7 @@ A5 把模块文件搬进两个子包后，这条曾**不成立**：两个 `regis
 | `desktop/_spa_shell.py` | SPA 外壳注入 — `DEFAULT_APP_NAME`、`inject_app_name()`、`read_spa_index_template()`；`GET /spa/index.html` 替换 `__GATEWAY_APP_NAME__` |
 | `server.py` | aiohttp Application + **骨架**装配 `create_core_app()`（内核 manager + 两条线都要的路由，**不认识**飞书/托盘/盘符/登录）与核心 handler（`/ais` `/routers` `/sessions*` `/titles*` `/summaries*` `/defaults` `/openapi.json`，与 `_openapi_core.py` 的 path 集合同源）。旧的单个 `create_app()` 收 17 个参数并**无条件**建 `FeishuManager` 与 `WorkspaceManager` —— 桌面端容器里建飞书管理器、飞书容器里建 Windows 盘符枚举器 |
 | `desktop/_routes.py` | **ToC 装配** `register_desktop_routes()` + ToC 专属 handler（SPA 外壳与静态、`/ui/*`、`/workspace/*`、`/auth/*` 与 `_refresh_free_models`）。A7 从 `server.py` 搬来：装配函数留在骨架里时，骨架必须反向 import 6 个本包符号 + 飞书 1 个，「骨架不认识产品线」只剩纪律没有结构 |
-| `feishu/_routes.py` | **ToB 装配** `register_feishu_routes()` + `/feishu/*` 一族 handler（`route` `routes`、免登 `auth/login` `auth/me` `auth/logout`、`app-id`、按身份过滤的 `sessions`/`titles`/`summaries`）。A7 同上从 `server.py` 搬来。**免登三条必须带 `/feishu/` 前缀**：裸 `/auth/me` `/auth/logout` 被 `desktop/` 占着，同 app 重复注册不报错、先注册者胜出，占了就静默失效 |
+| `feishu/_routes.py` | **ToB 装配** `register_feishu_routes()` + `/feishu/*` 一族 handler（`route` `routes`、免登 `auth/login` `auth/me` `auth/logout`、`app-id`、`defaults`、按身份过滤的 `sessions`/`titles`/`summaries`）。A7 同上从 `server.py` 搬来。**免登三条必须带 `/feishu/` 前缀**：裸 `/auth/me` `/auth/logout` 被 `desktop/` 占着，同 app 重复注册不报错、先注册者胜出，占了就静默失效。`defaults` 只回 `{ai_id}`（= `--feishu-ai-id`）：网页应用与机器人共用一个模型的唯一来源，前端因此不碰 `/ais`。装配时还会检查 `PSI_FEISHU_DEV_OPEN_ID` 打一条**启动期** WARNING（页面上那条常驻通栏已撤） |
 | `desktop/_workspace_manager.py` | 目录浏览 + 快捷路径列表 + cwd 查询 |
 | `desktop/spa/` | Vue 3 SPA v1（对话气泡），构建输出 `spa/dist/`；路径 `/spa/` |
 | `desktop/spa-v2/` | React SPA v2（任务工作台 + 宝箱），构建输出 `spa-v2/dist/`；**默认** `GET /` → `/spa-v2/`（无 dist 时回退 v1） |
@@ -422,7 +422,7 @@ Gateway：``list_segments`` / ``get_segment`` 只读；``set_segment_label`` 允
 
 **字段**：
 - `_sm: SessionManager` — 复用其 spawn/查询能力管理 Session 生命周期
-- `_ai_id: str` — 飞书 Session 默认挂载的 AI 实例 id（`register_feishu_routes(..., feishu_ai_id=...)` 注入，来自 `Gateway.feishu_ai_id`）
+- `_ai_id: str` — 飞书 Session 默认挂载的 AI 实例 id（`register_feishu_routes(..., feishu_ai_id=...)` 注入，来自 `Gateway.feishu_ai_id`）。经只读属性 `default_ai_id` 对外暴露，`GET /feishu/defaults` 读的就是它 —— 网页应用与机器人的模型因此出自同一个字段
 - `_workspace_root: str` — 各会话独立 workspace 的父目录（来自 `Gateway.feishu_workspace_root`；空则以 cwd 为父）
 - `_routes: dict[str, str]` — 路由键 → session_id 映射（内存态）
 - `_lock: anyio.Lock` — 首次路由才走，频率低，可接受串行

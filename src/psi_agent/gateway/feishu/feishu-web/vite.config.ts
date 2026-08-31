@@ -26,7 +26,11 @@ export default defineConfig(({ mode }) => {
       proxy: {
         // 每一项都对应后端已存在的路由 (``gateway`` 下的 add_get/add_post/add_delete)。
         '/defaults': gateway,
-        '/ais': gateway,
+        // **``/ais`` 有意不在这里。** 骨架确实有这条路由, 但本前端不该有「AI 列表」的概念:
+        // 建会话挂哪个 AI 由后端 ``GET /feishu/defaults`` 给唯一答案(见 ``api.ts`` 里
+        // ``getFeishuDefaultAiId``)。留着这条代理, 谁再写回一个 ``/ais`` 调用就能在 dev 里
+        // 静默跑通, 于是「网页应用与机器人用不同模型」又回到靠纪律拦。删掉它, 那种调用在
+        // 本地就直接不通。
         // ``/sessions/{id}/chat`` 是 SSE, 必须关掉缓冲否则流式变成一次性返回。
         '/sessions': { target: gateway, changeOrigin: true, ws: false },
         '/titles': gateway,

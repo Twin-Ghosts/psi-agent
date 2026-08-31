@@ -27,6 +27,67 @@
 3. **第一版只做私聊**, 群聊 session (`feishu-chat-*`) 不显示。过滤精确到只滤群聊 ——
    用 `!startsWith('feishu-')` 会把私聊一起滤掉, 与决定 2 冲突。
 
+## 模型: 用机器人那一个, 网页应用不选
+
+**网页应用没有「模型」这个概念。** 建会话挂哪个 AI 由后端 `GET /feishu/defaults` 给唯一
+答案 —— 值就是 gateway 启动时的 `--feishu-ai-id`, 与机器人侧 `FeishuManager` 的缺省 AI 同
+一个字段。机器人与网页应用本来就是**同一个 gateway 进程**, 于是两侧模型必然一致。
+
+- **前端不打 `GET /ais`, 也不该有 AI 列表的概念。** 原先的写法是取 `ais[0].id`: 生产上恰好
+  只有一条 AI 所以看着没错, 但 appdata 里存了多条时数组顺序无保证, 网页应用会**静默**用上
+  一个和机器人不同的模型 —— 会话照样能建能聊, 没有任何报错。`listAis` 已从前端彻底删掉
+  (`vite.config.ts` 的 `/ais` 代理也一并删了), 目的是让这件事在结构上不可能, 不是靠纪律。
+- **端点只下发 id**, 不给 `api_key`/`base_url`/`provider`/`model` 任何一项。
+- **没有兜底。** 拿不到就报错: 兜底触发就意味着悄悄换了模型, 静默走偏比直接报错难查。
+- **不要做配置模型的页面或引导。** 飞书这条线是 ToB, AI 由部署者定死, B 端用户不该看见也
+  不该改。ToC 的 `spa-v2` 那边用户自带 key、有配置页, 是另一件事, 别把那套搬过来。
+- `--feishu-ai-id` 默认空。空的时候**不能建会话是正确行为**, 页面显示的是「本次部署未配置
+  AI 实例…请联系管理员为 Gateway 配置 `--feishu-ai-id`」—— 指向部署配置, 不是让用户自己去
+  配模型。页面不崩、会话列表照常显示。
+
+判据在 `tests/psi_agent/gateway/test_feishu_defaults.py`(含「多条 AI 且指定的那条不是第一
+条」这个唯一能暴出原缺陷的形状)。
+
+### 本地怎么造一个 AI 实例
+
+本机起 gateway 时 `/ais` 是**空的** —— 生产那份 appdata 在服务器上, 本机没有。所以本地开发
+要自己造一份: AI 实例持久化在 `{appdata}/state/latest.json` 的 `ais` 数组, gateway 启动时从
+`--appdata` 复原, `--feishu-ai-id` 只是**指名用哪一个, 它不创建 AI**。
+
+照着敲(三步, `<...>` 全是占位符, 别把真 key 写进仓库或文档):
+
+```bash
+cd <repo root>
+export PYTHONPATH=src
+export DEV_APPDATA="$PWD/.tmp-dev/appdata"   # 随便一个本地目录, 别用真实 AppData
+
+# 1. 起 gateway (第一次会建空 appdata)
+PSI_FEISHU_DEV_OPEN_ID=ou_devtest_001 \
+  python -c "from psi_agent.cli import main; main()" \
+  gateway --gateway feishu --listen http://127.0.0.1:8765 \
+  --appdata "$DEV_APPDATA" --feishu-ai-id dev-ai \
+  --feishu-workspace-root "$PWD/.tmp-dev/ws"
+
+# 2. 另开一个终端, POST 一条 AI 进去。id 必须与 --feishu-ai-id 一致。
+curl -X POST http://127.0.0.1:8765/ais -H 'Content-Type: application/json' -d '{
+  "id": "dev-ai",
+  "provider": "<provider>",
+  "model": "<model>",
+  "api_key": "<your-own-key>",
+  "base_url": "<https://your-endpoint>"
+}'
+
+# 3. 核对: 这里回的必须是 dev-ai
+curl http://127.0.0.1:8765/feishu/defaults
+```
+
+AI 落进 `$DEV_APPDATA/state/latest.json` 后就**持久**了 —— 之后每次带同一个 `--appdata`
+启动, 第 2 步不用再做。想复现「多条 AI」的场景就多 POST 几条不同 id, 再确认
+`/feishu/defaults` 回的仍是 `--feishu-ai-id` 那一条。
+
+**生产那把真 key 一个字符都不许进仓库。** 上面全是占位符, 本地用你自己的 key; 也不要在文档
+或代码里写死具体模型名。
+
 ## 身份与免登
 
 - 免登走官方 JSSDK: `index.html` 同步引 `h5-js-sdk-1.5.35.js` → `h5sdk.ready` →
@@ -65,8 +126,12 @@ dev 期间要连的 gateway 默认是 `http://127.0.0.1:8765`, 用环境变量 `
 cd <repo root>
 PSI_FEISHU_DEV_OPEN_ID=ou_devtest_001 PYTHONPATH=src \
   python -c "from psi_agent.cli import main; main()" \
-  gateway --gateway feishu --listen http://127.0.0.1:8765
+  gateway --gateway feishu --listen http://127.0.0.1:8765 \
+  --appdata "$PWD/.tmp-dev/appdata" --feishu-ai-id dev-ai
 ```
+
+- `--appdata` 与 `--feishu-ai-id` 是**建会话必需**的: 少了它们 `/feishu/defaults` 回空串,
+  页面会说「本次部署未配置 AI 实例」。先按上面「本地怎么造一个 AI 实例」那三步造一条。
 
 - `--listen` **必须带 `http://`**。裸 `127.0.0.1:8765` 会掉进 Unix-socket 分支, 在 Windows 上
   直接 `ValueError`(见 `_sockets.py` 的 `create_site`)。
@@ -97,7 +162,11 @@ vite 的原因。
 
 **能验**:
 
-- 开发旁路进得去(直接进会话列表), 页面顶部有「开发旁路身份: ou_xxx」告警条。
+- 开发旁路进得去(直接进会话列表)。**提示在 gateway 启动日志里, 不在页面上** —— 启动时那条
+  `FeishuAuth dev bypass is ENABLED at startup via PSI_FEISHU_DEV_OPEN_ID=ou_xxx` 就是它。
+  页面上原先那条常驻通栏已撤: 旁路只在本机开发时开着, 而开发者就是启动 gateway 的人, 启动
+  时喊一声就够, 不必占每个用户的一条通栏。每次旁路登录另有一条 WARNING(旁路**实际被用了**
+  的痕迹), 与启动那条并存。
 - 多会话互不串味: 建多个会话各发一句, 切换与刷新后各自只显示自己那句。
 - 不设 `PSI_FEISHU_DEV_OPEN_ID` 时页面显示「请在飞书客户端内打开」而不是静默进入。
 - proxy + cookie + HMR 这条链路。
