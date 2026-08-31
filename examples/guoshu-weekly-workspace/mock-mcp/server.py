@@ -1058,6 +1058,87 @@ def weekly_workflow_query(
                     "message": f"不支持的口径：{scope}；支持 {', '.join(s or '(空)' for s in _WORKFLOW_SCOPES)}",
                 },
             }
+        if scope_key in ("by_node", "by_operator", "log_span", "opinion_count"):
+            # 这四档是「审批表本身有多大」，故不加任务闸门。动作挂在 task_id 外键上，
+            # 但问「审批一共走过哪些环节、各几次」问的是日志规模，跟任务还在不在办
+            # 没关系——与里程碑 deleted 那一档同一个道理（问的是表本身）。
+            # 三档口径实测差得不少，所以每次都把三个总数一起回出，让口径可核对：
+            # 裸表 1613 / 加软删 1578 / 加双闸门 1519（提交单是 470 / 462 / 438）。
+            # 问「某个任务的审批走到哪了」才要闸门档，见 by_node_action 与 recent。
+            gated = store.scalar(
+                "SELECT COUNT(*) FROM task_workflow_action a JOIN task t ON t.id = a.task_id "
+                f"WHERE {store.formal_task_clause()}"
+            )
+            soft = store.scalar(
+                "SELECT COUNT(*) FROM task_workflow_action a JOIN task t ON t.id = a.task_id WHERE t.is_deleted = 0"
+            )
+            raw_total = store.scalar("SELECT COUNT(*) FROM task_workflow_action")
+            tiers = {
+                "raw_table": raw_total["value"],
+                "soft_deleted_gate": soft["value"],
+                "formal_task_gate": gated["value"],
+            }
+            tier_note = (
+                f"；本档为裸表口径（不加任务闸门），本档的答案就是 {tiers['raw_table']}——"
+                "回答时以它为主结论，不要改用下面两个对照数；"
+                f"另两档仅供口径对照：加软删闸门 {tiers['soft_deleted_gate']}、"
+                f"加正式任务双闸门 {tiers['formal_task_gate']}（都在 caliber_tiers 里）；"
+                "问「审批表有多少条 / 走过哪些环节」用本档，"
+                "问「某个任务或某看板的审批」请改用 scope=by_node_action 或 recent（那两档带闸门）"
+            )
+            if scope_key == "by_node":
+                out = store.fetch(
+                    "SELECT a.node_type, COUNT(*) AS cnt FROM task_workflow_action a "
+                    "GROUP BY a.node_type ORDER BY cnt DESC, a.node_type",
+                    caliber=(
+                        "按审批节点 node_type 分档，一节点一行；各档相加等于动作总数"
+                        + tier_note
+                        + "；与 by_node_action 不是一档：那一档按 node_type + action 两维分，"
+                        "同一个 approved 在 audit / leader / sign 各计一次，答「哪个节点驳回得多」"
+                    ),
+                    limit=bounded_flow,
+                )
+            elif scope_key == "by_operator":
+                # 「审批环节都是谁在操作、各几次」此前没有出口：by_node_action 只按节点分，
+                # 模型只能答「无法给出每人操作次数」。经办人计数必须服务端聚合——
+                # 57 人而清单封顶 200 行，翻明细数人次必然错。
+                out = store.fetch(
+                    "SELECT a.operator_name, COUNT(*) AS cnt FROM task_workflow_action a "
+                    "WHERE a.operator_name IS NOT NULL AND a.operator_name <> '' "
+                    "GROUP BY a.operator_name ORDER BY cnt DESC, a.operator_name",
+                    caliber=(
+                        "按经办人 operator_name 分组计动作次数，一人一行，行数即经办人数；"
+                        "问「谁经办得最多」取首行（榜首 孙立群 244 次，与第二名 93 差距很大，"
+                        "无并列），问「各操作了几次」按 total_count 逐条列全" + tier_note
+                    ),
+                    limit=bounded_flow,
+                )
+                out["total_count"] = store.scalar(
+                    "SELECT COUNT(DISTINCT a.operator_name) FROM task_workflow_action a "
+                    "WHERE a.operator_name IS NOT NULL AND a.operator_name <> ''"
+                )["value"]
+            elif scope_key == "log_span":
+                out = store.fetch(
+                    "SELECT MIN(a.created_at) AS first_at, MAX(a.created_at) AS last_at, "
+                    "COUNT(*) AS actions FROM task_workflow_action a",
+                    caliber="审批动作日志的时间跨度与总条数，一次给全" + tier_note,
+                    limit=1,
+                )
+            else:
+                # R-04/R-14：意见正文按权限遮蔽，但「留了几条意见」只是存在性计数，
+                # 不外泄任何正文，所以这一档不受权限影响。
+                out = store.fetch(
+                    "SELECT COUNT(*) AS cnt FROM task_workflow_action a "
+                    "WHERE a.opinion IS NOT NULL AND a.opinion <> ''",
+                    caliber=(
+                        "统计 opinion 非空的动作条数（只数存在性，不返回意见正文，"
+                        "故不受 R-04/R-14 遮蔽影响）；意见非空 1455 条少于动作总数，"
+                        "差额是没写意见的那些动作，不是漏数" + tier_note
+                    ),
+                    limit=1,
+                )
+            out["caliber_tiers"] = tiers
+            return out
         if scope_key == "by_node_action":
             # node_type 与 action 是两列，必须两维一起分档：同一个 approved
             # 在 audit / leader / sign 三个节点各有一份，只按 action 分会把
@@ -1657,6 +1738,53 @@ def weekly_submission_query(
             }
 
         bounded_sub = max(1, min(store.MAX_ROWS, int(limit)))
+
+        if scope_key in ("by_status", "table_total"):
+            # 这两档问的是「提交单表本身有多大 / 各状态各多少」，故连软删闸门也不加。
+            # 提交单是审批表里的一行事实，跟它挂的任务后来有没有被软删无关——
+            # 与 by_kind 的区别就在这里：那一档答「任务域内的提交单」，本档答「表里的」。
+            # 三档实测：裸表 470 / 加软删 462 / 加正式任务双闸门 438。
+            sub_raw = store.scalar("SELECT COUNT(*) FROM task_workflow_submission")
+            sub_soft = store.scalar(
+                "SELECT COUNT(*) FROM task_workflow_submission s JOIN task t ON t.id = s.task_id WHERE t.is_deleted = 0"
+            )
+            sub_gated = store.scalar(
+                "SELECT COUNT(*) FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+                f"WHERE {store.formal_task_clause()}"
+            )
+            sub_tiers = {
+                "raw_table": sub_raw["value"],
+                "soft_deleted_gate": sub_soft["value"],
+                "formal_task_gate": sub_gated["value"],
+            }
+            sub_note = (
+                f"；本档为裸表口径（连软删闸门都不加），本档的答案就是 {sub_tiers['raw_table']}——"
+                "回答时以它为主结论，不要改用下面两个对照数；"
+                f"另两档仅供口径对照：加软删闸门 {sub_tiers['soft_deleted_gate']}、"
+                f"加正式任务双闸门 {sub_tiers['formal_task_gate']}（都在 caliber_tiers 里）；"
+                "问「一共提交过几张单 / 各是什么状态」用本档，"
+                "问「某任务或某人的提交单」用默认清单档（那一档带软删闸门）"
+            )
+            if scope_key == "table_total":
+                out = store.fetch(
+                    "SELECT COUNT(*) AS cnt, COUNT(DISTINCT s.task_id) AS tasks, "
+                    "MAX(s.round_no) AS max_round FROM task_workflow_submission s",
+                    caliber="提交单表的总条数、涉及任务数与最大轮次" + sub_note,
+                    limit=1,
+                )
+            else:
+                out = store.fetch(
+                    "SELECT s.status, COUNT(*) AS cnt FROM task_workflow_submission s "
+                    "GROUP BY s.status ORDER BY s.status",
+                    caliber=(
+                        "按提交单自身状态分档，一状态一行，各档相加等于表内总数；"
+                        "状态值域不含 approved（published 才是已发布），"
+                        "用 approved 做过滤筛不掉任何行" + sub_note
+                    ),
+                    limit=bounded_sub,
+                )
+            out["caliber_tiers"] = sub_tiers
+            return out
 
         if scope_key == "by_kind":
             # 提交单一律只加软删闸门，不加任务发布闸门：在途任务的提交单同样是
@@ -2516,7 +2644,16 @@ _LATEST_PROGRESS_CTE = (
 
 # 动作日志的聚合口径。日志 1578 条而清单封顶 200 行，所以「各节点各动作多少条」
 # 和「人均多少次动作」都必须服务端算完再回，模型翻明细自己数必然只数到第一页。
-_WORKFLOW_SCOPES = ("", "by_node_action", "actions_per_task", "recent")
+_WORKFLOW_SCOPES = (
+    "",
+    "by_node_action",
+    "actions_per_task",
+    "recent",
+    "by_node",
+    "by_operator",
+    "log_span",
+    "opinion_count",
+)
 
 # 提交单的附加口径。空串走通用清单；两个 external 口径专门回答 O2OA 外部标识
 # （o2_process_id / o2_work_id / o2_task_id）填得全不全，这三列此前没有任何
@@ -2524,6 +2661,8 @@ _WORKFLOW_SCOPES = ("", "by_node_action", "actions_per_task", "recent")
 _SUBMISSION_SCOPES = (
     "",
     "by_kind",
+    "by_status",
+    "table_total",
     "inflight_count",
     "inflight_by_board",
     "inflight_by_kind",

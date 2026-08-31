@@ -3687,6 +3687,89 @@ async def run() -> int:
         str(top_tech.get("caliber"))[:170],
     )
 
+    # ---- 审批表「裸表口径」四档 + 提交单两档 ----
+    # 这批 oa_biz 题问的是审批表本身有多大（走过哪些环节、谁经办得最多、留了几条
+    # 意见），跟任务还在不在办无关——与里程碑 deleted 那一档同一个道理。工具此前
+    # 只有带闸门的档，差额稳定：动作 1613 vs 1578，提交单 470 vs 462。
+    by_node = await _call(registry, "weekly_workflow_query", scope="by_node")
+    check(
+        "OA-I1-02/U12-02 审批环节逐档等于 gold（fill 468 起，五档）",
+        [(r.get("node_type"), r.get("cnt")) for r in (by_node.get("rows") or [])]
+        == [("fill", 468), ("audit", 422), ("leader", 409), ("admin", 158), ("sign", 156)],
+        str([(r.get("node_type"), r.get("cnt")) for r in (by_node.get("rows") or [])]),
+    )
+    check(
+        # 三档口径一起回出，口径才可核对而不是靠猜。
+        "审批动作三档口径随 caliber_tiers 返回：裸表 1613 / 软删 1578 / 双闸门 1519",
+        by_node.get("caliber_tiers") == {"raw_table": 1613, "soft_deleted_gate": 1578, "formal_task_gate": 1519},
+        json.dumps(by_node.get("caliber_tiers"), ensure_ascii=False),
+    )
+    by_op = await _call(registry, "weekly_workflow_query", scope="by_operator")
+    check(
+        "OA-I2-02/U12-05 经办人首行孙立群 244，共 57 人（此前无出口）",
+        [(r.get("operator_name"), r.get("cnt")) for r in (by_op.get("rows") or [])][:2]
+        == [("孙立群", 244), ("吴晓东", 93)]
+        and str(by_op.get("total_count")) == "57",
+        f"first={(by_op.get('rows') or [{}])[0]} total={by_op.get('total_count')}",
+    )
+    span = await _call(registry, "weekly_workflow_query", scope="log_span")
+    span_first = (span.get("rows") or [{}])[0]
+    check(
+        "OA-I1-03 日志跨度 2025-01-07 ~ 2026-08-15，共 1613 条",
+        str(span_first.get("actions")) == "1613"
+        and str(span_first.get("first_at")) == "2025-01-07 11:00:00"
+        and str(span_first.get("last_at")) == "2026-08-15 10:05:00",
+        json.dumps(span_first, ensure_ascii=False),
+    )
+    op_cnt = await _call(registry, "weekly_workflow_query", scope="opinion_count")
+    check(
+        # 只数存在性、不回正文，所以不受 R-04/R-14 遮蔽影响。
+        "OA-M4-02 有意见的动作 1455 条，且只计数不外泄正文",
+        str((op_cnt.get("rows") or [{}])[0].get("cnt")) == "1455"
+        and "opinion" not in str((op_cnt.get("rows") or [{}])[0].keys()),
+        json.dumps((op_cnt.get("rows") or [{}])[0], ensure_ascii=False),
+    )
+    sub_total = await _call(registry, "weekly_submission_query", scope="table_total")
+    check(
+        "OA-U12-01 提交单表 470 张（加软删是 462，加双闸门 438）",
+        str((sub_total.get("rows") or [{}])[0].get("cnt")) == "470"
+        and sub_total.get("caliber_tiers") == {"raw_table": 470, "soft_deleted_gate": 462, "formal_task_gate": 438},
+        json.dumps(sub_total.get("caliber_tiers"), ensure_ascii=False),
+    )
+    sub_status = await _call(registry, "weekly_submission_query", scope="by_status")
+    check(
+        "OA-I4-01/U12-04 提交单状态七档等于 gold（published 408）",
+        [(r.get("status"), r.get("cnt")) for r in (sub_status.get("rows") or [])]
+        == [
+            ("cancelled", 1),
+            ("pending_audit", 21),
+            ("pending_fill", 3),
+            ("pending_leader", 15),
+            ("published", 408),
+            ("rejected", 13),
+            ("signing", 9),
+        ],
+        str([(r.get("status"), r.get("cnt")) for r in (sub_status.get("rows") or [])]),
+    )
+    check(
+        "状态档点明 approved 不在值域内（用它过滤筛不掉任何行）",
+        "approved" in str(sub_status.get("caliber")),
+        str(sub_status.get("caliber"))[:150],
+    )
+    # 回归：新增裸表档不能动到原有带闸门的两档。
+    by_na = await _call(registry, "weekly_workflow_query", scope="by_node_action")
+    check(
+        "回归 by_node_action 仍是软删档，各档相加 1578",
+        sum(int(r.get("action_count")) for r in (by_na.get("rows") or [])) == 1578,
+        f"sum={sum(int(r.get('action_count')) for r in (by_na.get('rows') or []))}",
+    )
+    by_kind = await _call(registry, "weekly_submission_query", scope="by_kind")
+    check(
+        "回归 by_kind 仍是软删档，两档相加 462",
+        sum(int(r.get("submission_count")) for r in (by_kind.get("rows") or [])) == 462,
+        str([(r.get("submission_kind"), r.get("submission_count")) for r in (by_kind.get("rows") or [])]),
+    )
+
     return report()
 
 

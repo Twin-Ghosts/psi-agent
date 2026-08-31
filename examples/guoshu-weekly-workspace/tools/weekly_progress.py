@@ -317,6 +317,22 @@ async def weekly_workflow_query(
             plain log is ordered by task id, so the newest action sits in the
             middle of the page and cannot be identified. Combine it with
             action="rejected" and limit to take the newest N rejections.
+            Four further scopes report the LOG ITSELF and so carry no task gate --
+            an approval action is a fact about the approval table, not about
+            whether its task is still in flight. Each returns caliber_tiers with
+            all three totals (raw table 1613 / soft-delete gate 1578 / formal-task
+            gate 1519) so the caliber can be checked rather than guessed:
+            "by_node" counts each 审批节点 once, five rows -- this is
+            "审批走过哪些环节 / 各几次", a different question from by_node_action,
+            which splits one node across its actions.
+            "by_operator" counts actions per 经办人 and carries total_count (57
+            people). Use it for "谁经办得最多" (孙立群, 244) and for "各操作了几次";
+            the listing cannot be hand-counted at 57 rows against a 200-row cap.
+            "log_span" gives first_at / last_at / total in one row.
+            "opinion_count" counts actions carrying a non-empty opinion (1455). It
+            counts existence only and returns no opinion text, so the R-04/R-14
+            masking does not apply to it.
+            Pick a gated scope instead whenever the question names a task or board.
         limit: Max rows to return, capped at 200. With scope="recent" this is how
             many of the newest actions you want (e.g. 8).
     """
@@ -372,6 +388,15 @@ async def weekly_submission_query(
             at 200, so a hand count sees only the first page. This scope keeps the
             soft-delete gate only; adding the publish gate would shrink it to
             310/128 and drop the forms belonging to the 22 unpublished tasks.
+            Two scopes report the submission TABLE itself and so carry no gate at
+            all -- a submitted form is a fact about the approval table, whatever
+            later happened to its task. Both return caliber_tiers with all three
+            totals (raw table 470 / soft-delete gate 462 / formal-task gate 438):
+            "table_total" gives the row count, distinct tasks and max round_no;
+            "by_status" breaks the table down by the form's own status, one row per
+            status, summing to the raw total. Use these for "一共提交过几张审批单"
+            and "审批单现在都是什么状态"; use the plain listing when the question
+            names a task or a person.
             "inflight_count" returns the in-flight total (61) and the tasks holding
             them; "inflight_by_board" splits that by board and status (rejected is
             one of the in-flight states -- omitting it undercounts every board);
