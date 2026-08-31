@@ -2,13 +2,23 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   createSession,
   deleteSession,
+  getFeishuDefaultAiId,
   getSessionHistory,
-  listAis,
   listSessions,
   listTitles,
   setTitle,
   type SessionInfo,
 } from "../api";
+
+/**
+ * 部署没配 AI 时的文案 —— 指向**部署配置**, 不是让用户自己去配模型。
+ *
+ * 飞书是 ToB: AI 由部署者用 `--feishu-ai-id` 定死, B 端用户既看不见也改不了, 所以这条提示
+ * 必须让人去找管理员, 而不是去找一个并不存在的设置页。旧文案「没有可用模型, 无法新建会话」
+ * 读起来像用户自己该去配点什么。
+ */
+const NO_AI_CONFIGURED =
+  "本次部署未配置 AI 实例, 无法新建会话。请联系管理员为 Gateway 配置 --feishu-ai-id。";
 
 /**
  * 会话列表 + 标题 + 当前选中会话。
@@ -35,22 +45,25 @@ export function useSessions() {
     }
   }, []);
 
-  // 首屏: 会话列表 + 可用模型。模型只用于新建会话时挑 backend_id。
+  // 首屏: 会话列表 + 后端指定的缺省 AI (新建会话时的 backend_id)。
+  //
+  // **只认后端 ``/feishu/defaults`` 给的那一个 id**, 前端不挑也不兜底 —— 兜底触发就意味着
+  // 网页应用悄悄换了个与机器人不同的模型, 静默走偏比直接报错难查。拿不到就留空, 由 create
+  // 报 NO_AI_CONFIGURED, 会话列表本身照常显示。
   useEffect(() => {
     void (async () => {
       await refresh();
       try {
-        const ais = await listAis();
-        if (ais.length) setDefaultAiId(ais[0].id);
+        setDefaultAiId(await getFeishuDefaultAiId());
       } catch {
-        // 模型列表拿不到不该挡住会话列表, 新建会话时再报。
+        // 这一条拿不到不该挡住会话列表, 新建会话时再报。
       }
     })();
   }, [refresh]);
 
   const create = useCallback(async () => {
     if (!defaultAiId) {
-      setError("没有可用模型, 无法新建会话");
+      setError(NO_AI_CONFIGURED);
       return "";
     }
     try {

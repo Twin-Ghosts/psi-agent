@@ -112,6 +112,19 @@ class FeishuManager:
         """内部别名 —— 既有 5 处调用点不动, 实现见 ``session_id_for``。"""
         return self.session_id_for(key)
 
+    @property
+    def default_ai_id(self) -> str:
+        """机器人侧 ``route()`` 在请求不带 ``ai_id`` 时会用的那个实例 id (即 ``--feishu-ai-id``)。
+
+        **公开是为了让网页应用与机器人共用同一个答案**: ``GET /feishu/defaults`` 读的就是
+        这里, 于是两侧的模型出自同一个字段, 而不是各自去 ``GET /ais`` 里挑。读属性而不是
+        让路由层碰 ``_ai_id``: 私有字段一旦被外部读, 「缺省值住哪」就有了第二个知情者。
+
+        空串表示部署没配 —— 与 ``route()`` 里 ``resolved_ai`` 为空时抛 ValueError 是同一件
+        事的两种表达: 机器人侧当场报错, 网页侧由前端显示成可读提示。
+        """
+        return self._ai_id
+
     def workspace_for(self, key: str) -> str:
         """每个路由键得到独立子目录 (root 空则以 cwd 为父)。
 

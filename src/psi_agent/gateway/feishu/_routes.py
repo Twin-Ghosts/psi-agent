@@ -25,7 +25,13 @@ from typing import Any
 from aiohttp import web
 from loguru import logger
 
-from psi_agent.gateway.feishu._auth import AuthError, FeishuAuth, Identity, dev_open_id
+from psi_agent.gateway.feishu._auth import (
+    AuthError,
+    FeishuAuth,
+    Identity,
+    dev_open_id,
+    warn_if_dev_bypass_enabled,
+)
 from psi_agent.gateway.feishu._feishu_manager import FeishuManager
 from psi_agent.gateway.feishu._identity import owns_session, visible_sessions
 from psi_agent.gateway.feishu._oauth_manager import OAuthRelay
@@ -132,10 +138,17 @@ async def _auth_feishu(request: web.Request) -> web.Response:
         code = str(body.get("code") or "")
 
     if not code:
-        # dev_open_id() 自己就打 WARNING (Task 3 已实现), 这里不要再打第二遍:
-        # 同一次旁路登录刷两条同义告警, 只会让真正的告警更难被看见。
         bypass = dev_open_id()
         if bypass:
+            # **每次旁路登录都留一条**, 与启动期那条 (``warn_if_dev_bypass_enabled``) 并存,
+            # 是有意的重复: 启动那条只说明「开机时开关是开的」, 这条才是**实际被用了**的痕迹
+            # —— 谁、什么时候借旁路进来的。生产上旁路默认关着, 这行一次都不会打, 所以「刷日志」
+            # 的代价在生产等于零; 而万一被误开, 刷出来的量正是要的信号, 不是噪音。
+            # ``dev_open_id()`` 现在是纯读, 不再替调用方打日志, 故这里显式打。
+            logger.warning(
+                "Feishu login via DEV BYPASS as {} -- not a real Feishu identity",
+                bypass,
+            )
             return _issue_login(
                 Identity(open_id=bypass, name=bypass, via_dev_bypass=True),
                 auth,
@@ -208,6 +221,28 @@ async def _feishu_app_id(request: web.Request) -> web.Response:
     """
     auth: FeishuAuth = request.app["feishu_auth"]
     return _json({"app_id": auth.app_id})
+
+
+async def _feishu_defaults(request: web.Request) -> web.Response:
+    """``GET /feishu/defaults`` —— 网页应用建会话该挂哪个 AI: ``{ai_id}``, 就一个字段。
+
+    **值是 Gateway 启动时的 ``--feishu-ai-id``**, 与机器人侧 ``FeishuManager._ai_id``
+    同一个来源(下面那行 ``fm.default_ai_id``), 于是「网页应用和机器人用不同模型」在结构上
+    不可能发生。前端原先自己打 ``GET /ais`` 取 ``ais[0]``: 生产上恰好只有一条 AI 所以看着
+    没错, 而 appdata 里存了多条时数组顺序无保证, 网页应用会**静默**用上另一个模型。判据
+    因此必须由后端给, 不是前端挑。
+
+    **只下发 id**: ``api_key``/``base_url``/``provider``/``model`` 一个都不给。前端不需要
+    它们(建会话只传 ``backend_id``), 而下发即等于把部署者的凭证摊给每个 B 端访问者。
+
+    未配置时回空串而非 404 —— 与 ``/feishu/app-id`` 同一个取舍: 前端据此显示「部署没配 AI」
+    这条可读的提示, 而不是撞一个语义不明的 404。空串是**正确**的部署态表达, 不是错误。
+
+    不做鉴权: 内容是部署者自己定的一个实例 id, 不含凭证也不含任何用户数据, 与
+    ``/feishu/app-id`` 同级。
+    """
+    fm: FeishuManager = request.app["fm"]
+    return _json({"ai_id": fm.default_ai_id})
 
 
 def _require_identity(request: web.Request) -> Identity:
@@ -459,9 +494,21 @@ def register_feishu_routes(
     # 必须是服务端 (放前端等于公开 secret)。OAuthRelay 那条路径**照旧不碰 token**,
     # 两者互不影响。
     app["feishu_auth"] = FeishuAuth(app_id=feishu_app_id, app_secret=feishu_app_secret)
+    # 开发旁路开着就在**启动期**喊一声。挂在这里的理由: 本函数是「装配飞书这条线」唯一的
+    # 入口, 于是这条告警的可达性与旁路的可达性是同一个条件 —— 不挂飞书的进程压根没有
+    # ``/feishu/auth/login``, 也就不该报旁路。
+    #
+    # 页面上那条常驻告警条已撤 (开发者启动时看见就够, 不必占每个用户一条通栏), 撤掉之后
+    # 这里就是开发者唯一的提示。**先前根本没有启动期提示**: 唯一的痕迹是每次登录那条
+    # WARNING, 所以「只删前端」会让旁路在没人登录前完全不可见。
+    warn_if_dev_bypass_enabled()
     register_auth_routes(app)
     app.router.add_post("/feishu/route", _feishu_route)
     app.router.add_get("/feishu/routes", _list_feishu_routes)
+    # 网页应用的缺省 AI。**贴在这里而不是 register_auth_routes 里**: 它读 ``app["fm"]``,
+    # 而那个函数刻意不建 FeishuManager (单测只贴登录四条)。挂在那边的表现是单测里
+    # ``app["fm"]`` KeyError → 500。
+    app.router.add_get("/feishu/defaults", _feishu_defaults)
     # 按身份过滤的会话一族。**骨架 ``/sessions`` 一族不动** —— ToC 的 spa-v2 用的是那批,
     # 改它的语义会波及一面不相干的 gateway。这里是飞书链上单独的一层, 默认拒绝(401)。
     app.router.add_get("/feishu/sessions", _web_list_sessions)
