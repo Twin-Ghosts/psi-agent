@@ -2,10 +2,13 @@
  * 数据层 —— 只封装**后端确实存在**的路由。
  *
  * 判据是 ``gateway`` 下的 ``add_get/add_post/add_delete`` 声明, 不是 PR 里写了什么:
- * PR 版打的 ``POST /auth/feishu`` 全库零实现 (唯一命中是文档里那句「不做」)。
+ * PR 版打的那条免登路由曾全库零实现 (唯一命中是文档里那句「不做」)。
  *
  * 飞书免登已落地(任务 5fef7): ``login`` / ``getMe`` / ``logout`` 打的是
- * ``gateway/feishu/_routes.py`` 里的 ``/auth/*``。会话一族走 ``/feishu/sessions`` 而非裸
+ * ``gateway/feishu/_routes.py`` 里的 ``/feishu/auth/*`` —— **不是裸 ``/auth/*``**: desktop
+ * 那条产品线已占了 ``/auth/me`` 与 ``/auth/logout``, 同进程装配下先注册者胜出, 打裸路由
+ * 会打到 desktop 的 handler 上(有效 cookie 也回 401, 登出还不生效)。会话一族走
+ * ``/feishu/sessions`` 而非裸
  * ``/sessions``: 后者不按身份过滤, 在浏览器侧 filter 只是显示过滤, 谁都能直接打裸路由
  * 拿全量。
  */
@@ -114,7 +117,7 @@ export async function getFeishuAppId(): Promise<string> {
 }
 
 export async function login(code: string): Promise<Me> {
-  return requestJson<Me>("/auth/feishu", jsonPost({ code }));
+  return requestJson<Me>("/feishu/auth/login", jsonPost({ code }));
 }
 
 /**
@@ -124,15 +127,15 @@ export async function login(code: string): Promise<Me> {
  * 真实 open_id 的做法是两件事: 这里前端没有任何身份信息可伪造。
  */
 export async function loginDevBypass(): Promise<Me> {
-  return requestJson<Me>("/auth/feishu", jsonPost({}));
+  return requestJson<Me>("/feishu/auth/login", jsonPost({}));
 }
 
 export async function getMe(): Promise<Me> {
-  return requestJson<Me>("/auth/me");
+  return requestJson<Me>("/feishu/auth/me");
 }
 
 export async function logout(): Promise<void> {
-  await requestJson<unknown>("/auth/logout", jsonPost({}));
+  await requestJson<unknown>("/feishu/auth/logout", jsonPost({}));
 }
 
 // ---- GET /ais ----------------------------------------------------------

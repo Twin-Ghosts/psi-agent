@@ -111,7 +111,7 @@ def current_identity(request: web.Request) -> Identity | None:
 
 
 async def _auth_feishu(request: web.Request) -> web.Response:
-    """``POST /auth/feishu`` —— body ``{code}`` → ``{open_id, name}`` + 登录 cookie。
+    """``POST /feishu/auth/login`` —— body ``{code}`` → ``{open_id, name}`` + 登录 cookie。
 
     **body 里的 ``open_id`` 一律忽略**: 身份只能是 ``code`` 换回来的。前端传了也不看,
     这是本端点的安全前提。
@@ -149,7 +149,7 @@ def _issue_login(identity: Identity, auth: FeishuAuth) -> web.Response:
     """签发登录 cookie 并回身份。
 
     ``auth`` 必填而非可选: 两个调用点 (正常登录与开发旁路) 都必须签 cookie, 漏签的表现
-    是登录看着成功、下一秒 ``/auth/me`` 401 —— 可选参数只会让这种漏法静默通过。
+    是登录看着成功、下一秒 ``/feishu/auth/me`` 401 —— 可选参数只会让这种漏法静默通过。
     """
     resp = _json({"open_id": identity.open_id, "name": identity.name})
     resp.set_cookie(
@@ -326,9 +326,18 @@ def register_auth_routes(app: web.Application) -> web.Application:
     与 ``register_feishu_routes`` 分开是为了让单测能只贴这几条 —— 那边会建
     ``FeishuManager``, 要求一个真的 ``SessionManager`` 与 task group。
     """
-    app.router.add_post("/auth/feishu", _auth_feishu)
-    app.router.add_get("/auth/me", _auth_me)
-    app.router.add_post("/auth/logout", _auth_logout)
+    # **全部挂在 ``/feishu/`` 前缀下**, 一条都不占裸 ``/auth/*``: desktop 那条产品线
+    # (``desktop/_routes.py``, ``authm`` 非 None 时) 已经注册了 ``GET /auth/me`` 与
+    # ``POST /auth/logout``, 而 ``authm`` 默认就非 None (``resolve_endpoint()`` 有内置
+    # 默认域名, 只有显式 ``PSI_AUTH_ENDPOINT=""`` 才关掉)。aiohttp 对同 path 的两次
+    # ``add_get`` **不报错**, 各建一个 resource 并由先注册者胜出 —— 于是同进程装配下
+    # (``gateway/__init__.py`` 先 desktop 后 feishu) 飞书这两条会永不执行: 实测有效
+    # cookie 打 ``/auth/me`` 得 401 (desktop 不认飞书 sid) 而 ``/feishu/sessions`` 得
+    # 200, 登出则走 desktop、飞书 sid 不被 revoke、cookie 不被清。加前缀是唯一让两条
+    # 产品线都能在一个进程里活着的改法。
+    app.router.add_post("/feishu/auth/login", _auth_feishu)
+    app.router.add_get("/feishu/auth/me", _auth_me)
+    app.router.add_post("/feishu/auth/logout", _auth_logout)
     app.router.add_get("/feishu/app-id", _feishu_app_id)
     return app
 

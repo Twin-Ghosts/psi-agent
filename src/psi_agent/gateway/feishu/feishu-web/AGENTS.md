@@ -30,7 +30,7 @@
 ## 身份与免登
 
 - 免登走官方 JSSDK: `index.html` 同步引 `h5-js-sdk-1.5.35.js` → `h5sdk.ready` →
-  `tt.requestAccess({appID, scopeList: [], ...})` 拿 code → `POST /auth/feishu`。
+  `tt.requestAccess({appID, scopeList: [], ...})` 拿 code → `POST /feishu/auth/login`。
   两级退路见 `src/services/feishuAuth.ts` 模块头 (JSSDK 旧 / 客户端旧 `errno===103`)。
 - **appID 从后端 `GET /feishu/app-id` 取, 不写死在前端。**
 - **open_id 由后端向飞书换回来**, 前端传什么都不看。登录态是 HttpOnly cookie

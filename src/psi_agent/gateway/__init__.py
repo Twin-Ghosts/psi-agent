@@ -80,7 +80,7 @@ class Gateway:
     """飞书自建应用的 App ID (CLI 参数 > ``PSI_FEISHU_APP_ID`` 环境变量)。
 
     网页应用免登要用它: 前端经 ``GET /feishu/app-id`` 取, 再传给 ``tt.requestAccess``;
-    后端拿它 + secret 把 code 换成 ``user_access_token``。空 = 未配, ``/auth/feishu``
+    后端拿它 + secret 把 code 换成 ``user_access_token``。空 = 未配, ``/feishu/auth/login``
     返回 400 (而非 500), 前端显示「未配置免登」。
     """
 

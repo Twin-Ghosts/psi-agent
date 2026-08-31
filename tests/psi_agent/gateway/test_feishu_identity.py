@@ -51,10 +51,18 @@ def test_owns_web_uuid_session_by_workspace(tmp_path: str) -> None:
 
 
 def test_group_session_never_owned(tmp_path: str) -> None:
-    """群聊第一版不显示 —— 即便 workspace 在自己名下也不算自己的。"""
+    """群聊第一版不显示 —— 即便 workspace 在自己名下也不算自己的。
+
+    第二条断言传的是 **alice 本人的** workspace, 这才是真正吃劲的那条: 传群自己的
+    workspace 时 ``_same_path`` 早就返回 False 了, 群过滤根本没成为决定因素(实测:
+    把 ``is_group_session`` 分支删掉, 只有本人 workspace 这条会红)。
+    可达性: ``/feishu/route`` 接受 body 里的 ``workspace``, 群会话的 workspace 是可以
+    落到某人目录下的 —— 那时挡住多人群聊上下文的就只剩这行过滤。
+    """
     fm = FeishuManager(_sm=_NO_SM, _workspace_root=str(tmp_path))
     ws = fm.workspace_for("chat:oc_room")
     assert owns_session("ou_alice", "feishu-chat-oc_room", ws, fm) is False
+    assert owns_session("ou_alice", "feishu-chat-oc_room", fm.workspace_for("ou_alice"), fm) is False
 
 
 def test_empty_open_id_owns_nothing(tmp_path: str) -> None:
@@ -73,6 +81,9 @@ def test_visible_sessions_filters(tmp_path: str) -> None:
         _S("uuid-1", ws_a),
         _S("feishu-ou_bob", ws_b),
         _S("feishu-chat-oc_room", ws_room),
+        # 群会话的 workspace 落在 alice 名下: 唯一挡它的就是群过滤那行。少了这行,
+        # 上面那条 ws_room 的群会话靠 workspace 不等也会被滤掉, 于是过滤形同虚设。
+        _S("feishu-chat-oc_inroom", ws_a),
     ]
     got = [s.id for s in visible_sessions("ou_alice", rows, fm)]
     assert got == ["feishu-ou_alice", "uuid-1"]

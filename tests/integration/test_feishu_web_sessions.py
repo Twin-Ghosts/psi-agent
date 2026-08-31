@@ -15,6 +15,14 @@ from psi_agent.runtime._title_manager import TitleManager
 from tests.integration.test_gateway import _start_app_on_free_port
 
 
+async def _rows(http: ClientSession, base_url: str, cookies: dict[str, str]) -> list[dict[str, object]]:
+    """读某个身份可见的会话列表 —— 用来拿到「别人的」workspace 真值做劫持尝试。"""
+    async with http.get(f"{base_url}/feishu/sessions", cookies=cookies) as resp:
+        assert resp.status == 200
+        rows: list[dict[str, object]] = await resp.json()
+        return rows
+
+
 @pytest.mark.anyio
 async def test_feishu_web_sessions_are_isolated_per_identity(tmp_path: str) -> None:
     """A 看不到 B 的会话; 直取 B 的 history 被拒; 多会话共享 workspace 而各有 jsonl。"""
@@ -100,17 +108,33 @@ async def test_feishu_web_sessions_are_isolated_per_identity(tmp_path: str) -> N
                 b_sid = (await resp.json())["id"]
             created.append(b_sid)
 
-            # A 的列表: 3 个自建 + 机器人那条(带角标), 无群聊, 无 B 的。
+            # A 传 body 里的 id/workspace 一律不采信 —— 否则 A 发 B 的 workspace 就能把
+            # 会话建到 B 的目录里, 而 owns_session 按 workspace 认主, 这条会话随后归 B
+            # 所有、出现在 B 的列表里(共享 B 的文件与交付物)。派生只认 cookie 里的身份。
+            b_ws = next(r["workspace"] for r in await _rows(http, base_url, ck_b))
+            async with http.post(
+                f"{base_url}/feishu/sessions",
+                json={"backend_id": "ai1", "id": "hijacked-id", "workspace": b_ws},
+                cookies=ck_a,
+            ) as resp:
+                assert resp.status == 201
+                hijack = await resp.json()
+            created.append(hijack["id"])
+            assert hijack["id"] != "hijacked-id"  # body 的 id 没被采信
+            assert hijack["workspace"] != b_ws  # body 的 workspace 没被采信
+            assert hijack["workspace"] in workspaces  # 仍落在 A 自己那个共享目录里
+
+            # A 的列表: 3 个自建 + 上面那条 + 机器人那条(带角标), 无群聊, 无 B 的。
             async with http.get(f"{base_url}/feishu/sessions", cookies=ck_a) as resp:
                 assert resp.status == 200
                 rows = await resp.json()
             ids = {r["id"] for r in rows}
-            assert ids == {*created[:3], bot_sid}
+            assert ids == {*created[:3], hijack["id"], bot_sid}
             assert group_sid not in ids
             assert b_sid not in ids
             assert [r["from_im"] for r in rows if r["id"] == bot_sid] == [True]
 
-            # B 的列表里只有 B 自己那条。
+            # B 的列表里只有 B 自己那条 —— 上面 A 那次劫持尝试没有落进 B 名下。
             async with http.get(f"{base_url}/feishu/sessions", cookies=ck_b) as resp:
                 assert {r["id"] for r in await resp.json()} == {b_sid}
 

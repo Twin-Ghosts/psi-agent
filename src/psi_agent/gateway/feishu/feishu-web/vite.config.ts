@@ -32,11 +32,11 @@ export default defineConfig(({ mode }) => {
         '/titles': gateway,
         '/summaries': gateway,
         '/workspace': gateway,
-        // 飞书免登(任务 5fef7 已落地): ``/auth/feishu`` ``/auth/me`` ``/auth/logout``, 全部是
-        // 一次性 JSON 请求/响应, 不是 SSE, 用普通字符串写法即可。
-        '/auth': gateway,
-        // ``/feishu/*``(``_routes.py`` 里的 ``register_feishu_routes``): app-id、按身份过滤的
-        // sessions/titles/summaries、以及 ``/feishu/route`` ``/feishu/routes`` 都是普通 JSON。
+        // 注意**没有** ``/auth``: 飞书免登的三条已挪到 ``/feishu/auth/*`` 前缀下(裸
+        // ``/auth/me`` ``/auth/logout`` 被 desktop 那条产品线占着, 同进程装配下先注册者
+        // 胜出), 所以下面那条 ``/feishu`` 已经把免登一起代理了。
+        // ``/feishu/*``(``_routes.py`` 里的 ``register_feishu_routes``): 免登三条、app-id、
+        // 按身份过滤的 sessions/titles/summaries、``/feishu/route`` ``/feishu/routes`` 都是普通 JSON。
         // 聊天流式仍然打骨架的 ``/sessions/{id}/chat``(上面那条), ``/feishu`` 下**没有**注册
         // 任何 SSE 端点, 所以不需要 ``{ target, changeOrigin, ws: false }`` 的特殊处理。
         '/feishu': gateway,
