@@ -136,7 +136,10 @@ async def _auth_feishu(request: web.Request) -> web.Response:
         # 同一次旁路登录刷两条同义告警, 只会让真正的告警更难被看见。
         bypass = dev_open_id()
         if bypass:
-            return _issue_login(Identity(open_id=bypass, name=bypass), auth)
+            return _issue_login(
+                Identity(open_id=bypass, name=bypass, via_dev_bypass=True),
+                auth,
+            )
         return _error("missing code", status=400)
 
     try:
@@ -157,7 +160,7 @@ def _issue_login(identity: Identity, auth: FeishuAuth) -> web.Response:
     ``auth`` 必填而非可选: 两个调用点 (正常登录与开发旁路) 都必须签 cookie, 漏签的表现
     是登录看着成功、下一秒 ``/feishu/auth/me`` 401 —— 可选参数只会让这种漏法静默通过。
     """
-    resp = _json({"open_id": identity.open_id, "name": identity.name})
+    resp = _json(_identity_payload(identity))
     resp.set_cookie(
         SID_COOKIE,
         auth.issue(identity),
@@ -168,11 +171,24 @@ def _issue_login(identity: Identity, auth: FeishuAuth) -> web.Response:
     return resp
 
 
+def _identity_payload(identity: Identity) -> dict[str, Any]:
+    """身份的线上表示。``login`` 与 ``me`` 共用一个形状。
+
+    ``via_dev_bypass`` 只在为真时出现: 生产响应里因此**没有**这个字段, 前端 `!!data
+    .via_dev_bypass` 天然是 false。合成一个函数是因为两个端点必须给出同一形状 —— 刷新页面
+    走的是 ``me``, 只有 ``login`` 带这个字段的话, 告警条会在刷新后消失。
+    """
+    data: dict[str, Any] = {"open_id": identity.open_id, "name": identity.name}
+    if identity.via_dev_bypass:
+        data["via_dev_bypass"] = True
+    return data
+
+
 async def _auth_me(request: web.Request) -> web.Response:
     identity = current_identity(request)
     if identity is None:
         return _error("not logged in", status=401)
-    return _json({"open_id": identity.open_id, "name": identity.name})
+    return _json(_identity_payload(identity))
 
 
 async def _auth_logout(request: web.Request) -> web.Response:

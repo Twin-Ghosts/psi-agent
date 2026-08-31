@@ -3795,3 +3795,23 @@ button {
   text-align: center;
   padding: 2rem;
 }
+
+/* ---------- dev bypass banner ----------
+   开发旁路告警条。用 --fs-gold 而不是 --fs-coral: 珊瑚色在本表里是「出错了」, 而旁路不是
+   错误, 是「你现在测的不是真身份」。通栏 + sticky 是有意的 —— 这条的全部价值就是不容易被
+   忽略, 缩成角标就等于没有。 */
+.ht-dev-bypass {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--fs-gold);
+  background: #fdf6e3;
+  color: #6b4c00;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}

@@ -59,10 +59,21 @@ class AuthError(Exception):
 
 @dataclass
 class Identity:
-    """后端认定的身份。只有这两个字段是业务需要的。"""
+    """后端认定的身份。前两个字段是业务需要的, 第三个只为了让前端能显示告警。
+
+    ``via_dev_bypass`` 标记这个身份是不是 ``PSI_FEISHU_DEV_OPEN_ID`` 旁路发的。**它是后端
+    的判断, 前端只读不写** —— 与本模块的安全前提一致: 前端伪造不出身份, 也伪造不出「这
+    是不是真身份」。
+
+    为什么要它: 旁路态与真免登态在页面上原本长得一模一样, 有人在旁路态下测完会以为自己
+    验过了真免登。后端每次登录打 WARNING 只有看日志的人能看见; 这个字段让页面也能挂一条
+    可见的告警条。**刷新页面后仍然准** 是关键 —— 刷新走的是 ``/feishu/auth/me`` 读 cookie,
+    前端那次不经过登录分支, 自己记不住来路, 只有登录态里存着才问得出来。
+    """
 
     open_id: str
     name: str
+    via_dev_bypass: bool = False
 
 
 def dev_open_id() -> str:

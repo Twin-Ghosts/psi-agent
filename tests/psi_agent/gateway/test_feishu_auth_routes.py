@@ -192,6 +192,51 @@ async def test_forged_code_is_4xx_not_500(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 @pytest.mark.anyio
+async def test_dev_bypass_is_flagged_on_login_and_me(monkeypatch: pytest.MonkeyPatch) -> None:
+    """旁路身份必须在 ``login`` **和** ``me`` 两处都带 ``via_dev_bypass``。
+
+    ``me`` 那半边是真吃劲的: 刷新页面走的是 ``me`` 读 cookie, 前端那次不经过登录分支,
+    自己记不住来路。只有 ``login`` 带这个字段的话, 页面上的告警条会在刷新后消失 —— 而
+    「刷新后列表和历史都还在」正是验收要求的操作, 于是最容易在旁路态下误以为验过了免登
+    的那一刻, 恰好是告警条不在的那一刻。
+    """
+    monkeypatch.setenv(DEV_OPEN_ID_ENV, "ou_devtest_001")
+    client = await _client(_app(FeishuAuth()))
+    try:
+        resp = await client.post("/feishu/auth/login", json={})
+        assert resp.status == 200
+        assert (await resp.json())["via_dev_bypass"] is True
+
+        # 不重新登录, 只带上一步签发的 cookie —— 模拟刷新页面。
+        resp = await client.get("/feishu/auth/me")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["open_id"] == "ou_devtest_001"
+        assert body["via_dev_bypass"] is True
+    finally:
+        await client.close()
+
+
+@pytest.mark.anyio
+async def test_real_identity_is_not_flagged_as_bypass() -> None:
+    """真身份**不带** ``via_dev_bypass`` —— 否则生产页面会长期挂一条假告警。
+
+    告警条只有在「平时不出现」时才有意义: 天天都在的告警等于没有。这里用 ``issue()``
+    直接签一个真身份 (与 ``identity_from_code`` 的产物同一个 ``Identity`` 默认值), 判据是
+    响应里压根没有这个 key, 不只是它为假。
+    """
+    auth = FeishuAuth(app_id="cli_x", app_secret="s")
+    sid = auth.issue(Identity(open_id="ou_alice", name="Alice"))
+    client = await _client(_app(auth))
+    try:
+        resp = await client.get("/feishu/auth/me", cookies={SID_COOKIE: sid})
+        assert resp.status == 200
+        assert await resp.json() == {"open_id": "ou_alice", "name": "Alice"}
+    finally:
+        await client.close()
+
+
+@pytest.mark.anyio
 async def test_app_id_endpoint_never_leaks_secret() -> None:
     client = await _client(_app(FeishuAuth(app_id="cli_x", app_secret="super-secret")))
     try:

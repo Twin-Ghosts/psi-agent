@@ -39,7 +39,15 @@ export default defineConfig(({ mode }) => {
         // 按身份过滤的 sessions/titles/summaries、``/feishu/route`` ``/feishu/routes`` 都是普通 JSON。
         // 聊天流式仍然打骨架的 ``/sessions/{id}/chat``(上面那条), ``/feishu`` 下**没有**注册
         // 任何 SSE 端点, 所以不需要 ``{ target, changeOrigin, ws: false }`` 的特殊处理。
-        '/feishu': gateway,
+        //
+        // **必须是这条正则, 不能写成 ``'/feishu'``**: 字符串 key 在 vite 里是**前缀**匹配,
+        // 而本应用的 ``base`` 恰好是 ``/feishu-web/`` —— 也以 ``/feishu`` 开头。写成字符串
+        // 时整个前端路径连同 ``/@vite/client`` 一起被代理到 gateway, dev server 于是一行自己
+        // 的东西都不服务: 打开 5173 拿到的是 gateway 里**上一次 build 的 dist**, 热更新永远
+        // 不生效, 而且 ``/feishu-web/`` 带斜杠时 aiohttp 的 ``show_index=False`` 直接回 403。
+        // 两个表现都不像「代理配错了」, 所以这个坑很能藏 —— 实测踩过。
+        // ``^`` 开头的 key 被 vite 当正则, 负向前查把 ``-web`` 摘出去。
+        '^/feishu(?!-web)': gateway,
       },
     },
   }
