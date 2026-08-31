@@ -159,9 +159,7 @@ def test_frontend_has_no_ai_list_concept() -> None:
     """
     src = _WEB / "src"
     assert src.is_dir(), f"找不到前端源码目录 {src}"
-    files = sorted(p for p in src.rglob("*.ts") if p.is_file()) + sorted(
-        p for p in src.rglob("*.tsx") if p.is_file()
-    )
+    files = sorted(p for p in src.rglob("*.ts") if p.is_file()) + sorted(p for p in src.rglob("*.tsx") if p.is_file())
     assert files, "一个前端源文件都没扫到, 本用例的判据失效了"
 
     offenders: list[str] = []

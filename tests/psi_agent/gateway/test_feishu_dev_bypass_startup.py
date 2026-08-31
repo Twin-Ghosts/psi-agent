@@ -72,9 +72,7 @@ async def _assemble_feishu(tmp_path: str) -> None:
 
 
 @pytest.mark.anyio
-async def test_startup_warns_when_dev_bypass_enabled(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+async def test_startup_warns_when_dev_bypass_enabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """设了 ``PSI_FEISHU_DEV_OPEN_ID`` → 装配时就有一条带 open_id 的 WARNING。
 
     页面通栏撤掉之后这是开发者唯一的提示, 缺了它旁路就完全静默 (删掉
@@ -93,9 +91,7 @@ async def test_startup_warns_when_dev_bypass_enabled(
 
 
 @pytest.mark.anyio
-async def test_startup_is_silent_when_dev_bypass_absent(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+async def test_startup_is_silent_when_dev_bypass_absent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """没设就一声不响 —— 生产上这条不该出现, 否则告警天天在就等于没有。"""
     monkeypatch.delenv(DEV_OPEN_ID_ENV, raising=False)
     cap = _Captured()
@@ -160,7 +156,7 @@ def test_frontend_no_longer_renders_a_bypass_banner() -> None:
     assert "devBypassOpenId" not in app_tsx, "prop 链还在"
     # 样式类只允许出现在注释里(说明它撤了), 不能再有选择器。
     assert ".ht-dev-bypass {" not in css, "样式选择器还在"
-    assert "className=\"ht-dev-bypass\"" not in app_tsx
+    assert 'className="ht-dev-bypass"' not in app_tsx
 
 
 def test_backend_via_dev_bypass_field_is_kept() -> None:

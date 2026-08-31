@@ -61,9 +61,7 @@ async def test_resolve_default_agent_soft_haitun_workspace(tmp_path: Path, monke
 
 
 @pytest.mark.anyio
-async def test_resolve_default_agent_short_name_under_agents(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_resolve_default_agent_short_name_under_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``--default-agent desktop`` selects ``agents/desktop``, not ``./desktop``."""
     monkeypatch.chdir(tmp_path)
     agent = tmp_path / "agents" / "desktop"
@@ -72,9 +70,7 @@ async def test_resolve_default_agent_short_name_under_agents(
 
 
 @pytest.mark.anyio
-async def test_resolve_default_agent_unknown_short_name_raises(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_resolve_default_agent_unknown_short_name_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Was the silent bug: an unknown value used to resolve to ``{cwd}/{value}``."""
     monkeypatch.chdir(tmp_path)
     await anyio.Path(tmp_path / "agents" / "feishu").mkdir(parents=True)

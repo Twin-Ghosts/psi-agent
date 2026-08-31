@@ -24,14 +24,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-FEISHU_WEB = (
-    Path(__file__).resolve().parents[3]
-    / "src"
-    / "psi_agent"
-    / "gateway"
-    / "feishu"
-    / "feishu-web"
-)
+FEISHU_WEB = Path(__file__).resolve().parents[3] / "src" / "psi_agent" / "gateway" / "feishu" / "feishu-web"
 VITE_CONFIG = FEISHU_WEB / "vite.config.ts"
 
 

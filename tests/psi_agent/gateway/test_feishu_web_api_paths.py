@@ -185,11 +185,7 @@ async def test_every_manifest_path_is_a_registered_route() -> None:
     async with anyio.create_task_group() as tg:
         app = await _both_surfaces_app(tg)
         registered = _canonical_routes(app)
-        unmatched = [
-            entry
-            for entry in _M.load_manifest()
-            if (entry.method, _normalize(entry.path)) not in registered
-        ]
+        unmatched = [entry for entry in _M.load_manifest() if (entry.method, _normalize(entry.path)) not in registered]
         tg.cancel_scope.cancel()
     assert unmatched == [], (
         f"前端会打这些路径, 但两面全挂的 app 里没有对应路由: {_fmt(unmatched)}。\n"
@@ -304,10 +300,7 @@ def test_every_manifest_path_is_proxied_by_the_dev_server() -> None:
     uncovered = []
     for entry in _M.load_manifest():
         probe = entry.probe_path()
-        hit = any(
-            (re.match(key, probe) is not None) if key.startswith("^") else probe.startswith(key)
-            for key in keys
-        )
+        hit = any((re.match(key, probe) is not None) if key.startswith("^") else probe.startswith(key) for key in keys)
         if not hit:
             uncovered.append(entry)
     assert uncovered == [], (
