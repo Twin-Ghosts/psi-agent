@@ -71,10 +71,12 @@ def test_feishu_web_base_is_not_proxied() -> None:
     probe = f"{base.rstrip('/')}/index.html"
 
     for key in _proxy_keys():
-        if key.startswith("^"):
-            hit = re.match(key, probe) is not None
-        else:
-            hit = probe.startswith(key)
+        # vite 的 proxy key 有两种写法: '^' 开头是正则, 其余是前缀匹配。
+        hit = (
+            re.match(key, probe) is not None
+            if key.startswith("^")
+            else probe.startswith(key)
+        )
         assert not hit, (
             f"前端自己的路径 {probe!r} 命中了 proxy key {key!r} —— "
             "它会被代理到 gateway, dev server 于是不服务源码(热更新失效)。"

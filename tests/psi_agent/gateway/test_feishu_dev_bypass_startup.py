@@ -22,7 +22,12 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from loguru import logger
 
-from psi_agent.gateway.feishu._auth import DEV_OPEN_ID_ENV, FeishuAuth, dev_open_id
+from psi_agent.gateway.feishu._auth import (
+    DEV_OPEN_ID_ENV,
+    FeishuAuth,
+    Identity,
+    dev_open_id,
+)
 from psi_agent.gateway.feishu._routes import register_auth_routes, register_feishu_routes
 from psi_agent.gateway.server import create_core_app
 from psi_agent.runtime._ai_manager import AIManager
@@ -164,7 +169,5 @@ def test_backend_via_dev_bypass_field_is_kept() -> None:
     它是 ``login``/``me`` 响应形状的一部分, 也是「这个登录态是不是真身份」在服务端的唯一
     记录。这条与 ``test_feishu_auth_routes.py`` 里那两条形状用例一起守着它。
     """
-    from psi_agent.gateway.feishu._auth import Identity
-
     assert Identity(open_id="x", name="x").via_dev_bypass is False
     assert Identity(open_id="x", name="x", via_dev_bypass=True).via_dev_bypass is True
