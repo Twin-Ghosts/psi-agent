@@ -85,6 +85,20 @@ npm ci && npm run dev   # → http://127.0.0.1:5173/feishu-web/
 浏览器开 **`http://127.0.0.1:5173/feishu-web/`**(带 `base` 前缀, 少了它 302)。改前端文案
 不用刷页面, HMR 会自己更新。
 
+**启动日志末行的 `Local:` 必须是 `5173`。** 不是就别往下走 —— 见下面第三个静默坑。
+`strictPort: true` 已经让端口被占时**启动即失败**(`Error: Port 5173 is already in use`),
+这时不要换端口凑合, 先把占着 5173 的进程收掉:
+
+```bash
+# Windows: 找出占用者(常是另一个 worktree 里忘关的 npm run dev)
+netstat -ano | grep ":5173" | grep LISTEN   # 末列是 PID
+powershell "Get-CimInstance Win32_Process -Filter 'ProcessId=<PID>' | %{\$_.CommandLine}"
+taskkill /F /PID <PID>
+```
+
+真要同时开两棵树, 用 `npm run dev -- --port 5273` 并把浏览器地址一起改掉,
+**别**把 `strictPort` 改回 `false`。
+
 `psi_feishu_sid` 是 `HttpOnly; SameSite=Lax; Path=/`, 经 proxy 后**能**带上, 不需要额外配
 `cookieDomainRewrite`: 5173 与 8765 同为 `127.0.0.1`, 只有端口不同, 而 cookie 不按端口隔离,
 `SameSite=Lax` 也只管站点不管端口。实测过。
@@ -114,13 +128,28 @@ vite 的原因。
 - 助手真的回话。本机注册的是假 `api_key`, 发消息后助手侧会报错 —— 不影响上面几条, 那些
   判据只看**用户自己那句话**落在哪个会话里。
 
-## 两个静默坑(都实测踩过)
+## 三个静默坑(都实测踩过)
 
 - **`vite.config.ts` 的 proxy key `'/feishu'` 是前缀匹配, 会把 `/feishu-web/` 一起吞掉。**
   本应用的 `base` 恰好也以 `/feishu` 开头, 于是前端路径连 `/@vite/client` 一起被代理到
   gateway: 打开 5173 拿到的是 gateway 里**上一次 build 的 dist**, 热更新永远不生效, 而
   `/feishu-web/` 带斜杠时 aiohttp 的 `show_index=False` 还会回 **403**。两个表现都不像
   「代理配错了」。现在那条 key 是正则 `'^/feishu(?!-web)'`, **别改回字符串**。
+- **`strictPort: false` 会让 dev server 静默换端口, 于是 5173 上是别人的代码。** vite 的默认
+  值就是 `false`: 端口被占**不报错**, 自己挪到下一个空闲端口(5173 → 5174 → 5175 ...), 而
+  文档、书签、本文件里写的都还是 5173。5173 上活着的那个**别的** dev server(最常见来源:
+  另一个 worktree 里忘关的 `npm run dev` —— Windows 上关终端不一定收走 node 进程)照旧应答:
+  **页面能开、功能能用、改前端永远不生效**, 因为你看的是另一棵树的源码。唯一线索是 vite 日志
+  里 `Port 5173 is in use, trying another one...` 那行, 常被 npm 的输出刷掉。
+  与上一条的表现几乎一模一样, 成因完全不同 —— 上一条错在**服务什么内容**, 这条错在
+  **服务在哪个端口**。现在 `strictPort: true`, **别改回 `false`**。
+  判据: `tests/psi_agent/gateway/test_feishu_web_dev_strict_port.py`。
+  确认自己连的是哪棵树(编译产物里带绝对路径, 一眼看出):
+
+  ```bash
+  curl -s http://127.0.0.1:5173/feishu-web/src/components/tasks-view.tsx | grep -o '_jsxFileName = "[^"]*"'
+  ```
+
 - **旁路的类型判据**: `requestFeishuCode()` 里 `sdkReady()` 必须先于 app_id 检查。反过来写
   时「app_id 为空 + 不在飞书客户端内」(正是本地开发的默认组合)抛的是普通 `Error`, 而
   `useAuth` 的退路只认 `FeishuAuthUnavailable`, 于是旁路整段被跳过, 页面停在「登录失败:
