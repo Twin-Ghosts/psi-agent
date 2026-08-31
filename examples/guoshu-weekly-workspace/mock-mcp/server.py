@@ -2619,6 +2619,7 @@ _COVERAGE_SCOPES = (
     "unpublished",
     "unpublished_by_task",
     "pending_review",
+    "latest_unpublished",
     "never_reported",
     "version_gaps",
     "latest_round",
@@ -2833,6 +2834,9 @@ _MILESTONE_DIMENSIONS: dict[str, str] = {
     "task_status": "任务状态",
     # 任务分类树的一级。与 category（里程碑自己的类别文本）是两个维度，别混。
     "primary_category": "任务一级分类",
+    # 填报人。此前没有这一维，问「里程碑都是谁报的、各几条」只能答不可答。
+    "reporter_id": "填报人",
+    "owner_id": "责任人",
 }
 
 _MILESTONE_STATS_SCOPES = ("summary", "by_dimension", "deleted", "fully_deleted", "per_task", "mismatch")
@@ -3271,6 +3275,42 @@ def weekly_progress_coverage(scope: str = "summary", project_group: str = "", li
             )
             rows["total_count"] = total["value"]
             return rows
+
+        if key == "latest_unpublished":
+            # 「最新写的那版进展还没对外发布」问的是每任务最大 version_no 那一版的
+            # 发布位。与 pending_review 是两个口径：那一档只取 status = 1 待审核的
+            # 58 行，而最新版未发布共 72 行——差的 14 行是草稿或驳回，同样没对外，
+            # 只是不在审核中。也不是 unpublished 那 123 行（含被更新版覆盖的旧版，
+            # 那些任务对外看到的已经是更新的一期，不属于本问）。
+            latest_total = store.scalar(
+                "SELECT COUNT(*) FROM task_progress p JOIN task t ON t.id = p.task_id "
+                "JOIN (SELECT task_id, MAX(version_no) AS mx FROM task_progress GROUP BY task_id) z "
+                "ON z.task_id = p.task_id AND z.mx = p.version_no "
+                f"WHERE {clause} AND p.is_published = 0",
+            )
+            latest_rows = store.fetch(
+                "SELECT t.id AS task_id, t.task_name, p.version_no AS latest_version, "
+                "p.status AS progress_status, p.report_time, "
+                "(SELECT MAX(q.version_no) FROM task_progress q "
+                "WHERE q.task_id = t.id AND q.is_published = 1) AS public_version "
+                "FROM task_progress p JOIN task t ON t.id = p.task_id "
+                "JOIN (SELECT task_id, MAX(version_no) AS mx FROM task_progress GROUP BY task_id) z "
+                "ON z.task_id = p.task_id AND z.mx = p.version_no "
+                f"WHERE {clause} AND p.is_published = 0 ORDER BY t.id",
+                caliber=(
+                    f"{store.FORMAL_TASK_CALIBER}；每任务只看它最大 version_no 那一版，"
+                    "该版 is_published = 0 即「最新写的这版还没对外发布」，共 72 条；"
+                    "progress_status 说明它卡在哪一档（0 草稿 / 1 待审核 / 2 驳回 / 3 通过）；"
+                    "与 scope=pending_review 的 58 条不是一个口径——那一档只取待审核，"
+                    "本档把草稿与驳回也算进来（都没对外）；"
+                    "也不是 scope=unpublished 的 123 行：那含被更新版覆盖的旧版，"
+                    "那些任务对外看到的已是更新一期，不属于本问；"
+                    "public_version 为空表示该任务一期都没对外发布过"
+                ),
+                limit=bounded,
+            )
+            latest_rows["total_count"] = latest_total["value"]
+            return latest_rows
 
         if key == "pending_review":
             # 「有哪些任务存在待审核的进展、但对外看到的还是上一期」：要的是清单
@@ -4583,7 +4623,9 @@ def weekly_milestone_stats(
             top bucket is a 23-way tie at 6) / ``mismatch`` (task status vs
             milestone status disagreements).
         by: Dimension for ``by_dimension``: year / category / group_name / status
-            / task_status.
+            / task_status / primary_category / reporter_id / owner_id.
+            reporter_id answers "里程碑都是谁报的 / 各几条" (47 people); owner_id is
+            the responsible party, a different column and a different question.
         year: Restrict to one milestone year; 0 covers all.
         category: Restrict to one milestone category.
         min_total: For ``by_dimension``, drop buckets below this count. Inclusive.

@@ -3770,6 +3770,48 @@ async def run() -> int:
         str([(r.get("submission_kind"), r.get("submission_count")) for r in (by_kind.get("rows") or [])]),
     )
 
+    # ---- 里程碑填报人维度 + 最新版未发布口径 ----
+    # OA-H5-03「里程碑都是谁报的」此前没有这一维，模型只能答不可答。
+    ms_reporter = await _call(registry, "weekly_milestone_stats", scope="by_dimension", by="reporter_id", top=200)
+    check(
+        "OA-H5-03 里程碑按填报人分 47 行，首行 u3208 报 31 条",
+        str(ms_reporter.get("row_count")) == "47"
+        and [(r.get("bucket"), r.get("total")) for r in (ms_reporter.get("rows") or [])][:2]
+        == [("u3208", 31), ("10515", 25)],
+        str([(r.get("bucket"), r.get("total")) for r in (ms_reporter.get("rows") or [])][:3]),
+    )
+    ms_cat = await _call(registry, "weekly_milestone_stats", scope="by_dimension", by="category")
+    check(
+        "回归里程碑 category 轴仍是 6 档（新增维度不影响原有轴）",
+        str(ms_cat.get("row_count")) == "6",
+        f"row_count={ms_cat.get('row_count')}",
+    )
+
+    # OA-C6-01「最新写的那版进展还没对外发布」= 每任务最大 version_no 那版未发布。
+    # 三档口径挨得很近，差额都是真实的语义差别，不能互相代答。
+    latest_unpub = await _call(registry, "weekly_progress_coverage", scope="latest_unpublished", limit=200)
+    check(
+        "OA-C6-01 最新版未发布 72 条（含草稿与驳回，都没对外）",
+        str(latest_unpub.get("total_count")) == "72" and str(latest_unpub.get("row_count")) == "72",
+        f"total={latest_unpub.get('total_count')} rows={latest_unpub.get('row_count')}",
+    )
+    check(
+        "OA-C6-01 每行带 progress_status，说明卡在哪一档",
+        all("progress_status" in r for r in (latest_unpub.get("rows") or [])),
+        str([(r.get("latest_version"), r.get("progress_status")) for r in (latest_unpub.get("rows") or [])][:3]),
+    )
+    check(
+        "OA-C6-01 caliber 把 58 / 72 / 123 三档差别写明，防止互相代答",
+        "58" in str(latest_unpub.get("caliber")) and "123" in str(latest_unpub.get("caliber")),
+        str(latest_unpub.get("caliber"))[:180],
+    )
+    pending = await _call(registry, "weekly_progress_coverage", scope="pending_review", limit=200)
+    check(
+        "回归 pending_review 仍是 58 条（只取待审核那一档）",
+        str(pending.get("total_count")) == "58",
+        f"total={pending.get('total_count')}",
+    )
+
     return report()
 
 

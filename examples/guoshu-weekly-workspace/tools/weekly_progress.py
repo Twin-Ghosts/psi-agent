@@ -542,6 +542,14 @@ async def weekly_progress_coverage(scope: str = "summary", project_group: str = 
             进展、但对外看到的还是上一期". 58 rows over 47 tasks; a NULL
             public_version means the very first period is still in review, so
             nothing is public yet) /
+            latest_unpublished (each task's NEWEST period, kept only when that
+            period is still unpublished -- 72 rows, the answer to "最新写的那版进展
+            还没对外发布". Three nearby calibers, do not swap them: this one spans
+            draft, in-review and rejected alike, because none of them are public;
+            pending_review keeps only the 58 in review; unpublished counts 123 rows
+            and includes superseded older versions, whose tasks already show a
+            newer period publicly. Each row carries progress_status so the reply
+            can say which stage it is stuck at) /
             unpublished_by_task (tasks whose submission form IS published while
             progress rows are still unpublished, counted per task in PERIODS:
             version_no is de-duplicated, so this is "几期" and not "几行") /

@@ -133,7 +133,12 @@ async def weekly_milestone_stats(
             milestones, so "里程碑最多的任务是哪条" is the first row alone) /
             mismatch (task status vs milestone status disagreements).
         by: Dimension for by_dimension: year / category / group_name / status /
-            task_status / primary_category. The last one groups by the task's
+            task_status / primary_category / reporter_id / owner_id.
+            reporter_id answers "里程碑都是谁报的 / 各几条" -- 47 filers, counted
+            server-side; owner_id is the responsible party, a different column
+            answering a different question. Do not read either off the milestone
+            listing: it caps at 200 rows against 602 milestones.
+            primary_category groups by the task's
             top-level category (t.category_id's parent -- task categories only go
             two levels deep) and is NOT the same axis as category, which is the
             milestone row's own label. "哪个一级分类的里程碑完成率最高" is 改革与治理

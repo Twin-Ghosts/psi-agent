@@ -94,7 +94,7 @@ def tables_used(sql: str) -> set[str]:
     return {name.lower() for name in _TABLE_REF.findall(sql or "")}
 
 
-def audit_caliber(sql: str) -> list[str]:
+def audit_caliber(sql: str, question: str = "") -> list[str]:
     """Flag the formal-scope gates a gold_sql leaves out.
 
     A reference answer computed without these gates is not a harder version of the
@@ -126,7 +126,81 @@ def audit_caliber(sql: str) -> list[str]:
         gaps.append("缺进展行发布闸门 is_published = 1")
     if "task_group_progress_history" in tables and "is_published" not in lowered:
         gaps.append("缺集团历史行发布闸门 is_published = 1")
+    gaps.extend(_audit_fanout(text, lowered, tables, question))
     return gaps
+
+
+_ONE_TO_MANY = frozenset(
+    {
+        "task_progress",
+        "task_milestone",
+        "task_year_goal",
+        "task_attachment",
+        "task_workflow_action",
+        "task_workflow_submission",
+        "task_group_progress_history",
+    }
+)
+"""Child tables holding many rows per task, so a JOIN to them multiplies task rows."""
+
+
+def _audit_fanout(text: str, lowered: str, tables: set[str], question: str = "") -> list[str]:
+    """Flag a COUNT(*) over a one-to-many JOIN, i.e. rows counted as tasks.
+
+    The gate audit above cannot see this one: the SQL can carry every gate and
+    still answer the wrong question. Four measured cases, all asking 「多少个任务」
+    and all landing on the row count instead:
+
+      OA-C2-02  「当期一共有多少个任务报了进展」   943 rows vs   73 tasks
+      OA-G3-02  「两处都写了年度目标的任务多少个」 313 rows vs  128 tasks
+      OA-K3-03  「定了目标又报了进展的任务多少个」 186 rows vs   73 tasks
+      OA-H5-01  技术组里程碑覆盖率                125/82 = 152.4%, above 100%
+
+    Each needs COUNT(DISTINCT t.id) where it wrote COUNT(*). Reported, not
+    rewritten -- same reason as the gates: the answer set is 国数's artefact.
+    """
+    if not (tables & _ONE_TO_MANY):
+        return []
+    joins_task = " join task " in lowered or "from task " in lowered
+    if not joins_task:
+        return []
+    # A plain COUNT(*) is only suspect when nothing else de-duplicates the rows.
+    counts_rows = "count(*)" in lowered
+    dedupes = "count(distinct" in lowered or "group by" in lowered
+    # "asks about tasks" can only be judged from the question text: the SQL holds no
+    # Chinese at all. An earlier draft searched the SQL for these words, so none of
+    # the four known cases could ever match.
+    # Match on 任务 plus a counting word rather than on fixed phrases: OA-K3-03
+    # separates 任务 from 多少个 with a comma, which no phrase list anticipated.
+    asks_tasks = "任务" in question and any(word in question for word in ("多少", "几个", "几条"))
+    if counts_rows and asks_tasks and not dedupes:
+        return ["COUNT(*) 落在一对多 JOIN 上，问的是任务数却在数行数（应为 COUNT(DISTINCT t.id)）"]
+    return []
+
+
+def audit_answer(rows: list[dict[str, Any]]) -> list[str]:
+    """Flag reference answers that are impossible on their face.
+
+    Checked against the computed values rather than the SQL, because that is where
+    it shows: OA-H5-01's coverage reads 125/82 = 152.4%, and no coverage can exceed
+    100%. Its numerator counts every task holding a milestone library-wide while its
+    denominator counts only the tech board, so the two are not the same population.
+    A ratio audit on the SQL text kept missing this -- the denominator subquery sits
+    before the ROUND in the select list, so any "is the numerator gated" heuristic
+    read the denominator's own filter and passed.
+    """
+    flagged: list[str] = []
+    for row in rows:
+        for name, value in row.items():
+            if not any(token in str(name).lower() for token in ("pct", "rate", "percent", "ratio")):
+                continue
+            try:
+                number = float(value)
+            except TypeError, ValueError:
+                continue
+            if number > 100:
+                flagged.append(f"{name} = {value} 超过 100%，分子与分母口径不同源")
+    return flagged
 
 
 def _load_db() -> Any:
@@ -195,7 +269,8 @@ def build(source: Path, out: Path, *, exclude_flagged: bool = False) -> int:
                 degenerate.append((record["id"], record["question"][:40]))
                 continue
 
-            caliber_gaps = audit_caliber(record["gold_sql"])
+            caliber_gaps = audit_caliber(record["gold_sql"], record.get("question", ""))
+            caliber_gaps.extend(audit_answer(rows))
             item = {
                 "id": "OA-" + record["id"],
                 "type_id": record["type_id"],
