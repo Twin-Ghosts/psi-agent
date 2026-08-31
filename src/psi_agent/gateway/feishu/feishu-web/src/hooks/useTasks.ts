@@ -69,6 +69,7 @@ export function useTasks(sessions: SessionInfo[], titles: Record<string, string>
           // 给会话视图。后端补上「按会话列交付物」的路由后在这里接。
           files: [],
           newDeliverables: [],
+          fromIm: session.from_im === true,
         }),
       ),
     [sessions, titles, summaries, todos, segments],

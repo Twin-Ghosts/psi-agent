@@ -45,6 +45,8 @@ export interface TaskSource {
   segments: TodoSegmentSummary[];
   files: string[];
   newDeliverables: string[];
+  /** 会话是否来自 IM(``from_im``)。 */
+  fromIm: boolean;
 }
 
 export function buildTask(src: TaskSource): Task {
@@ -67,6 +69,11 @@ export function buildTask(src: TaskSource): Task {
     updated: relativeTime(latest?.updated_at),
     files: src.files,
     steps: [],
+    fromIm: src.fromIm,
+    // 上下文将满只对 IM 那条有意义: 网页新建的会话各有独立 jsonl, 不会替别人长。
+    // 判据先用「历史消息条数」的替身 —— 后端目前不下发 token 用量, 故以 ``from_im``
+    // 为唯一触发条件, 提示文案写成「这条会话与飞书对话共用, 会一直变长」。
+    contextWarning: src.fromIm,
   };
 }
 

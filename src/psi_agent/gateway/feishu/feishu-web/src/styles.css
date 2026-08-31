@@ -483,6 +483,25 @@ button {
   gap: 8px;
 }
 
+/* 「来自飞书对话」角标 —— 与 IM 共通的那条会话。 */
+.ht-badge-im {
+  display: inline-block;
+  margin-left: 0.5rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  background: #e8f1ff;
+  color: #2b5fa8;
+  font-size: 0.72rem;
+  vertical-align: middle;
+}
+
+.ht-card-hint {
+  margin: 0.4rem 0 0;
+  color: #8a6d3b;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
 .ht-cell-progress small {
   color: var(--fs-muted);
   font-size: 11px;
@@ -3763,4 +3782,16 @@ button {
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* ---------- login gate ---------- */
+.ht-login-gate {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  min-height: 100vh;
+  text-align: center;
+  padding: 2rem;
 }

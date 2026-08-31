@@ -173,6 +173,18 @@ class Gateway:
     feishu_workspace_root: str = ""
     """Parent dir for per-conversation Feishu workspaces. Empty = Gateway process cwd."""
 
+    # 网页应用免登要用这对凭证: 前端经 ``GET /feishu/app-id`` 取 app_id, 传给
+    # ``tt.requestAccess`` 换 code; 后端再拿 app_id + secret 把 code 换成
+    # ``user_access_token``。**secret 永不下发前端** —— 那个端点只回 app_id。
+    #
+    # 与 channel 侧读的是同一对凭证 (同一个自建应用), 但两个进程各自读环境变量, 不互相
+    # 传递。未配时 ``/feishu/auth/login`` 回 400 而非 500, 前端显示「未配置免登」。
+    feishu_app_id: str = ""
+    """Feishu app ID for web-app SSO (CLI > env ``PSI_FEISHU_APP_ID``). Empty = SSO off (400)."""
+
+    feishu_app_secret: str = ""
+    """Feishu app secret (CLI > env ``PSI_FEISHU_APP_SECRET``). Server-side only, never sent to the client."""
+
     # 非空值两形解析 (见 ``_defaults.resolve_default_agent``): 先试值本身是目录, 再试
     # ``agents/<值>``, 都不是则**报错退出**。原先第一档不查存在性, ``--default-agent desktop``
     # 静默指向 ``{cwd}/desktop`` —— 启动期不碰这个路径, 日志干净端口正常, 错要等建 Session
@@ -383,6 +395,8 @@ class Gateway:
                     app,
                     feishu_ai_id=self.feishu_ai_id,
                     feishu_workspace_root=self.feishu_workspace_root,
+                    feishu_app_id=self.feishu_app_id or os.environ.get("PSI_FEISHU_APP_ID", ""),
+                    feishu_app_secret=self.feishu_app_secret or os.environ.get("PSI_FEISHU_APP_SECRET", ""),
                 )
                 # ``GET /`` 的兜底链住在 ToC 那边 (spa-v2 → spa)。只挂飞书时那条链没注册,
                 # 根路径得自己交代去处, 否则用户访问裸地址拿到 404 还以为服务没起来。

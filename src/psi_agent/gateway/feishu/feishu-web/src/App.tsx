@@ -6,6 +6,7 @@ import { DeliveryPreviewModal } from "./components/delivery-preview-modal";
 import { NewDeliveriesPanel } from "./components/new-deliveries-panel";
 import { TaskFocusDetails } from "./components/task-focus-details";
 import { TasksView } from "./components/tasks-view";
+import { useAuth } from "./hooks/useAuth";
 import { useChatTurn } from "./hooks/useChatTurn";
 import { useSessionHistory, useSessions } from "./hooks/useSessions";
 import { useTasks } from "./hooks/useTasks";
@@ -21,9 +22,49 @@ type View = "tasks" | "chat";
  * 这里只做「哪个视图 + 谁连谁」。PR 版是 829 行的单文件, 登录、会话列表、历史加载、
  * 流式收发、任务过滤全在一个组件里互相串状态, 所以整体重做而不是搬。
  *
- * 还没有登录 —— 飞书免登与身份隔离归任务 5fef7。当前按单用户跑, 就是本机 gateway 的行为。
+ * 登录: ``useAuth`` 走飞书 JSSDK 免登, 未就绪时渲染 ``LoginGate`` 而非放行。会话列表走
+ * ``/feishu/sessions``(服务端按身份过滤), 「新建任务」开的是全新 session + 全新 jsonl。
  */
+
+/**
+ * 登录门禁。免登失败时给**可见的重试入口** —— code 只活几分钟, 从后台切回来时上一个
+ * 大概率已过期; 没有重试按钮用户只能刷页面。绝不静默放行成某个默认身份。
+ */
+function LoginGate({
+  status,
+  error,
+  onRetry,
+}: {
+  status: string;
+  error: string;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="ht-app ht-login-gate">
+      {status === "loading" ? (
+        <p>正在通过飞书登录…</p>
+      ) : (
+        <>
+          <p role="alert">登录失败: {error || "未知原因"}</p>
+          <p className="ht-card-hint">请在飞书客户端内打开本应用。若已在客户端内, 点下方重试。</p>
+          <button type="button" className="ht-btn" onClick={onRetry}>
+            重试登录
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function App() {
+  const auth = useAuth();
+  if (auth.status !== "ready") {
+    return <LoginGate status={auth.status} error={auth.error} onRetry={auth.retry} />;
+  }
+  return <AuthedApp userName={auth.me?.name || ""} />;
+}
+
+function AuthedApp({ userName }: { userName: string }) {
   const [view, setView] = useState<View>("tasks");
   const [input, setInput] = useState("");
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
@@ -133,7 +174,7 @@ export function App() {
           <div className="ht-focus-split">
             <ChatView
               messages={turn.messages}
-              userName=""
+              userName={userName}
               input={input}
               sending={turn.sending}
               error={turn.error || history.error}

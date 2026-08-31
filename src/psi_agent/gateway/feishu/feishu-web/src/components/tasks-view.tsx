@@ -65,7 +65,17 @@ export function TasksView(props: TasksViewProps) {
                 {filtered.length === 0 && <tr><td colSpan={7} className="ht-table-empty">没有找到匹配的任务</td></tr>}
                 {filtered.map((t) => (
                   <tr key={t.id} onClick={() => onSelect(t.id)} aria-selected={selected?.id === t.id}>
-                    <td><div className="ht-cell-main"><strong>{t.title}</strong><em>{t.sop}</em></div></td>
+                    <td>
+                      <div className="ht-cell-main">
+                        <strong>{t.title}</strong>
+                        {t.fromIm && (
+                          <span className="ht-badge-im" title="这条会话与飞书 IM 里的对话共通, 双向可见">
+                            来自飞书对话
+                          </span>
+                        )}
+                        <em>{t.sop}</em>
+                      </div>
+                    </td>
                     <td>{statusPill(t.status)}</td>
                     <td><div className="ht-cell-progress"><div className="ht-bar"><i style={{ width: `${t.progress}%` }} /></div><small>{t.progress}%</small></div></td>
                     <td><span className="ht-cell-sop"><Workflow size={12} />{t.sop}</span></td>
@@ -87,6 +97,11 @@ export function TasksView(props: TasksViewProps) {
                 <div className="ht-section-label"><span>当前任务</span><span className="ht-version">{selected.sop}</span></div>
                 <h3>{selected.title}</h3>
                 <p>{selected.owner} · {selected.updated}</p>
+                {selected.contextWarning && (
+                  <p className="ht-card-hint">
+                    这条会话与飞书对话共用同一份上下文, 会越来越长。建议点上方「新建任务」开一个新会话。
+                  </p>
+                )}
                 <div className="ht-bar" role="progressbar" aria-valuenow={selected.progress} aria-valuemin={0} aria-valuemax={100}><i style={{ width: `${selected.progress}%` }} /></div>
                 <div className="ht-steps">{selected.steps.map((s, i) => <div key={i} className={`ht-step ${s.s}`}><span>{s.s === "done" ? <Check size={12} /> : i + 1}</span><em>{s.t}</em></div>)}</div>
                 <div className="ht-actions">

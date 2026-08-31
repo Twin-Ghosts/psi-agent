@@ -6,6 +6,7 @@ import {
   listAis,
   listSessions,
   listTitles,
+  setTitle,
   type SessionInfo,
 } from "../api";
 
@@ -53,7 +54,13 @@ export function useSessions() {
       return "";
     }
     try {
+      // 不传 id → 后端发新 uuid → 新 jsonl。这是「网页里能开多个会话」的全部机制。
       const info = await createSession(defaultAiId);
+      // 先落一个占位标题: 首轮结束后 App.tsx 会用首句 prompt 派生的标题覆盖它。没有占位
+      // 的话列表里会是一排「未命名任务」, 多会话反而更难用。
+      const placeholder = `新会话 ${new Date().toLocaleString("zh-CN", { hour12: false })}`;
+      await setTitle(info.id, placeholder).catch(() => undefined);
+      setTitles((prev) => ({ ...prev, [info.id]: placeholder }));
       await refresh();
       setCurrentId(info.id);
       return info.id;

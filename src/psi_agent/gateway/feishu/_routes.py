@@ -20,15 +20,21 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 from aiohttp import web
 from loguru import logger
 
+from psi_agent.gateway.feishu._auth import AuthError, FeishuAuth, Identity, dev_open_id
 from psi_agent.gateway.feishu._feishu_manager import FeishuManager
+from psi_agent.gateway.feishu._identity import owns_session, visible_sessions
 from psi_agent.gateway.feishu._oauth_manager import OAuthRelay
-from psi_agent.gateway.server import _error, _json
+from psi_agent.gateway.server import _error, _json, _read_json, _session_data
+from psi_agent.runtime._history_manager import HistoryManager
 from psi_agent.runtime._scheduler_manager import SchedulerManager
-from psi_agent.runtime._session_manager import SessionManager
+from psi_agent.runtime._session_manager import SessionInfo, SessionManager
+from psi_agent.runtime._summary_manager import SummaryManager
+from psi_agent.runtime._title_manager import TitleManager
 
 
 async def _feishu_route(request: web.Request) -> web.Response:
@@ -93,6 +99,253 @@ async def _feishu_route(request: web.Request) -> web.Response:
 async def _list_feishu_routes(request: web.Request) -> web.Response:
     fm: FeishuManager = request.app["fm"]
     return _json([asdict(r) for r in fm.list_routes()])
+
+
+SID_COOKIE = "psi_feishu_sid"
+"""登录态 cookie 名。``HttpOnly`` 是要点: 页面脚本读不到它, XSS 也偷不走登录态。"""
+
+
+def current_identity(request: web.Request) -> Identity | None:
+    """当前请求的身份, 未登录返回 None。
+
+    唯一来源是 ``HttpOnly`` cookie 里的 sid —— **不读 body/query 里的 open_id**。
+    前端能伪造任何字段, 但伪造不出一个签发过的高熵 sid。会话过滤路由 (见下) 全部
+    经由本函数取身份, 于是「谁在问」只有一个判据。
+    """
+    auth: FeishuAuth = request.app["feishu_auth"]
+    return auth.lookup(request.cookies.get(SID_COOKIE, ""))
+
+
+async def _auth_feishu(request: web.Request) -> web.Response:
+    """``POST /feishu/auth/login`` —— body ``{code}`` → ``{open_id, name}`` + 登录 cookie。
+
+    **body 里的 ``open_id`` 一律忽略**: 身份只能是 ``code`` 换回来的。前端传了也不看,
+    这是本端点的安全前提。
+
+    ``PSI_FEISHU_DEV_OPEN_ID`` 设了才有开发旁路, 且每次打 WARNING。默认不设置 → 无 code
+    就是 400。
+    """
+    auth: FeishuAuth = request.app["feishu_auth"]
+    body = await _read_json(request)
+    code = ""
+    if isinstance(body, dict):
+        code = str(body.get("code") or "")
+
+    if not code:
+        # dev_open_id() 自己就打 WARNING (Task 3 已实现), 这里不要再打第二遍:
+        # 同一次旁路登录刷两条同义告警, 只会让真正的告警更难被看见。
+        bypass = dev_open_id()
+        if bypass:
+            return _issue_login(Identity(open_id=bypass, name=bypass), auth)
+        return _error("missing code", status=400)
+
+    try:
+        identity = await auth.identity_from_code(code)
+    except AuthError as e:
+        # 伪造/过期 code, 或 Gateway 未配凭证 —— 都是 4xx, 不是 500。
+        logger.info(f"Feishu login rejected: {e}")
+        return _error(str(e), status=400)
+    except Exception as e:
+        logger.error(f"Unexpected error during Feishu login: {e!r}")
+        return _error("login failed", status=500)
+    return _issue_login(identity, auth)
+
+
+def _issue_login(identity: Identity, auth: FeishuAuth) -> web.Response:
+    """签发登录 cookie 并回身份。
+
+    ``auth`` 必填而非可选: 两个调用点 (正常登录与开发旁路) 都必须签 cookie, 漏签的表现
+    是登录看着成功、下一秒 ``/feishu/auth/me`` 401 —— 可选参数只会让这种漏法静默通过。
+    """
+    resp = _json({"open_id": identity.open_id, "name": identity.name})
+    resp.set_cookie(
+        SID_COOKIE,
+        auth.issue(identity),
+        httponly=True,
+        samesite="Lax",
+        path="/",
+    )
+    return resp
+
+
+async def _auth_me(request: web.Request) -> web.Response:
+    identity = current_identity(request)
+    if identity is None:
+        return _error("not logged in", status=401)
+    return _json({"open_id": identity.open_id, "name": identity.name})
+
+
+async def _auth_logout(request: web.Request) -> web.Response:
+    auth: FeishuAuth = request.app["feishu_auth"]
+    auth.revoke(request.cookies.get(SID_COOKIE, ""))
+    resp = _json({"status": "ok"})
+    resp.del_cookie(SID_COOKIE, path="/")
+    return resp
+
+
+async def _feishu_app_id(request: web.Request) -> web.Response:
+    """前端免登要的 appID —— **只给 app_id, 永不给 app_secret**。
+
+    前端因此不必写死 appID (PR 755 把它连同一个真实 open_id 一起硬编码在前端, 上云后
+    所有访问者都变成同一个人)。未配置时返回空串而非 404: 前端据此显示「未配置免登」
+    这条可读的提示, 而不是撞一个语义不明的 404。
+    """
+    auth: FeishuAuth = request.app["feishu_auth"]
+    return _json({"app_id": auth.app_id})
+
+
+def _require_identity(request: web.Request) -> Identity:
+    """取当前身份, 未登录抛 ``PermissionError`` (由各 handler 映射成 401)。
+
+    **默认拒绝**是本组路由与骨架 ``/sessions`` 的关键差别: 骨架那条无身份即返回全量,
+    于是漏传身份的后果是「泄漏」; 这里漏传的后果是 401。
+    """
+    identity = current_identity(request)
+    if identity is None:
+        raise PermissionError("not logged in")
+    return identity
+
+
+def _web_session_data(info: SessionInfo, *, from_im: bool) -> dict[str, Any]:
+    """骨架的 ``_session_data`` 再加一个 ``from_im`` —— 前端据此打「来自飞书对话」角标。
+
+    角标本身是产品决定二: IM 里那条 session 在网页里正常显示、可续聊, 但用户要能看出
+    它与 IM 共通 (在里面发言 IM 侧也看得到)。
+    """
+    data = _session_data(info)
+    data["from_im"] = from_im
+    return data
+
+
+async def _web_list_sessions(request: web.Request) -> web.Response:
+    """``GET /feishu/sessions`` —— 只回当前身份可见的私聊会话。
+
+    与骨架 ``GET /sessions`` 的关系: 骨架那条**语义一行不改**(ToC 的 spa-v2 在用), 本条
+    是飞书链上单独包的一层。过滤在**服务端**做 —— PR 755 在浏览器里 filter, 那只是显示
+    过滤, 谁都能直接打裸路由拿全量。
+    """
+    try:
+        identity = _require_identity(request)
+    except PermissionError as e:
+        return _error(str(e), status=401)
+    fm: FeishuManager = request.app["fm"]
+    sm: SessionManager = request.app["sm"]
+    bot_sid = fm.session_id_for(identity.open_id)
+    rows = visible_sessions(identity.open_id, await sm.list_all(), fm)
+    return _json([_web_session_data(r, from_im=r.id == bot_sid) for r in rows])
+
+
+async def _web_create_session(request: web.Request) -> web.Response:
+    """``POST /feishu/sessions`` —— 开一个**全新**会话: 新 uuid + 新 jsonl。
+
+    两条产品决定都落在这里:
+
+    * **不传 ``id``** 给 ``SessionManager.create`` → 它走 ``id or _new_uuid()`` 发新 uuid,
+      于是历史落到一个**新的** ``{appdata}/histories/<uuid>.jsonl``。这正是「飞书机器人
+      开不了新会话、上下文一直往同一个文件里长」的解法。
+    * **workspace 由 ``fm.workspace_for(open_id)`` 派生** → 同一个人的多个会话落**同一个**
+      目录 (决定一)。不这么做的话每开一个会话就多一个空目录、交付物散落。派生绝不在此
+      处重拼: 私聊侧 ``-`` 转义漏掉会让 open_id 为 ``chat-oc_x`` 的人与群 ``oc_x`` 撞进
+      同一个目录。
+    """
+    try:
+        identity = _require_identity(request)
+    except PermissionError as e:
+        return _error(str(e), status=401)
+    fm: FeishuManager = request.app["fm"]
+    sm: SessionManager = request.app["sm"]
+    schedm: SchedulerManager = request.app["schedm"]
+    body = await _read_json(request) or {}
+    backend_id = str(body.get("backend_id") or body.get("ai_id") or "")
+    try:
+        info = await sm.create(
+            backend_type="ai",
+            backend_id=backend_id,
+            workspace=fm.workspace_for(identity.open_id),
+            agent=str(body.get("agent") or ""),
+        )
+        await schedm.ensure(info.workspace, ai_id=info.backend_id, agent=info.agent)
+    except (TypeError, ValueError, KeyError) as e:
+        return _error(str(e), status=400)
+    except LookupError as e:
+        return _error(str(e), status=404)
+    return _json(_web_session_data(info, from_im=False), status=201)
+
+
+async def _web_get_history(request: web.Request) -> web.Response:
+    """``GET /feishu/sessions/{id}/history`` —— 只给自己的会话。
+
+    别人的/群聊的 → 403 而非内容; 不存在的 → 404。先查存在性再判归属: 反过来会让
+    「不存在」与「不属于你」都返回 403, 前端分不出「会话被删了」和「越权」。
+    """
+    try:
+        identity = _require_identity(request)
+    except PermissionError as e:
+        return _error(str(e), status=401)
+    fm: FeishuManager = request.app["fm"]
+    sm: SessionManager = request.app["sm"]
+    hm: HistoryManager = request.app["hm"]
+    session_id = request.match_info["session_id"]
+    try:
+        workspace = sm.get_workspace(session_id)
+    except LookupError:
+        return _error(f"Session '{session_id}' not found", status=404)
+    if not owns_session(identity.open_id, session_id, workspace, fm):
+        return _error("forbidden", status=403)
+    messages = await hm.get(workspace, session_id, appdata=str(request.app.get("appdata") or ""))
+    return _json(messages)
+
+
+async def _web_owned_ids(request: web.Request) -> set[str]:
+    """当前身份可见的 session id 集合 —— titles/summaries 过滤共用。"""
+    identity = _require_identity(request)
+    fm: FeishuManager = request.app["fm"]
+    sm: SessionManager = request.app["sm"]
+    return {s.id for s in visible_sessions(identity.open_id, await sm.list_all(), fm)}
+
+
+async def _web_list_titles(request: web.Request) -> web.Response:
+    """``GET /feishu/titles`` —— 标题表里只留自己会话的键。
+
+    不过滤的话标题本身就是泄漏: 它是首句 prompt 派生的, 等于把别人问了什么摊出来。
+    """
+    try:
+        owned = await _web_owned_ids(request)
+    except PermissionError as e:
+        return _error(str(e), status=401)
+    tm: TitleManager = request.app["tm"]
+    return _json({k: v for k, v in tm.get_all().items() if k in owned})
+
+
+async def _web_list_summaries(request: web.Request) -> web.Response:
+    try:
+        owned = await _web_owned_ids(request)
+    except PermissionError as e:
+        return _error(str(e), status=401)
+    sum_m: SummaryManager = request.app["sum_m"]
+    return _json({k: v for k, v in sum_m.get_all().items() if k in owned})
+
+
+def register_auth_routes(app: web.Application) -> web.Application:
+    """把登录四条路由贴到 *app*。
+
+    与 ``register_feishu_routes`` 分开是为了让单测能只贴这几条 —— 那边会建
+    ``FeishuManager``, 要求一个真的 ``SessionManager`` 与 task group。
+    """
+    # **全部挂在 ``/feishu/`` 前缀下**, 一条都不占裸 ``/auth/*``: desktop 那条产品线
+    # (``desktop/_routes.py``, ``authm`` 非 None 时) 已经注册了 ``GET /auth/me`` 与
+    # ``POST /auth/logout``, 而 ``authm`` 默认就非 None (``resolve_endpoint()`` 有内置
+    # 默认域名, 只有显式 ``PSI_AUTH_ENDPOINT=""`` 才关掉)。aiohttp 对同 path 的两次
+    # ``add_get`` **不报错**, 各建一个 resource 并由先注册者胜出 —— 于是同进程装配下
+    # (``gateway/__init__.py`` 先 desktop 后 feishu) 飞书这两条会永不执行: 实测有效
+    # cookie 打 ``/auth/me`` 得 401 (desktop 不认飞书 sid) 而 ``/feishu/sessions`` 得
+    # 200, 登出则走 desktop、飞书 sid 不被 revoke、cookie 不被清。加前缀是唯一让两条
+    # 产品线都能在一个进程里活着的改法。
+    app.router.add_post("/feishu/auth/login", _auth_feishu)
+    app.router.add_get("/feishu/auth/me", _auth_me)
+    app.router.add_post("/feishu/auth/logout", _auth_logout)
+    app.router.add_get("/feishu/app-id", _feishu_app_id)
+    return app
 
 
 _OAUTH_DONE_HTML = (
@@ -168,6 +421,8 @@ def register_feishu_routes(
     *,
     feishu_ai_id: str = "",
     feishu_workspace_root: str = "",
+    feishu_app_id: str = "",
+    feishu_app_secret: str = "",
 ) -> web.Application:
     """ToB: 飞书会话 → Session 的路由表。
 
@@ -182,11 +437,25 @@ def register_feishu_routes(
     sm: SessionManager = app["sm"]
     app["fm"] = FeishuManager(_sm=sm, _ai_id=feishu_ai_id, _workspace_root=feishu_workspace_root)
     app["openapi_feishu"] = True
+    # 网页应用免登。**Gateway 从此持有 app_secret** —— 与 ``_oauth_manager`` 模块头那句
+    # 「Gateway 侧刻意不碰 token 交换: 不知道 app_secret」是一次有意的变更, 不是疏漏:
+    # 免登必须由后端拿 code 去换 token, 换的动作只能发生在知道 secret 的一侧, 而这一侧
+    # 必须是服务端 (放前端等于公开 secret)。OAuthRelay 那条路径**照旧不碰 token**,
+    # 两者互不影响。
+    app["feishu_auth"] = FeishuAuth(app_id=feishu_app_id, app_secret=feishu_app_secret)
+    register_auth_routes(app)
     app.router.add_post("/feishu/route", _feishu_route)
     app.router.add_get("/feishu/routes", _list_feishu_routes)
-    # ``/oauth/*`` 归本包(取件方全在 ToB 一侧), 但注册与产品线开关解耦 —— 见
-    # ``register_oauth_routes``。在此处调用是为了让 ``both`` 组合的注册顺序与拆分前
-    # 逐条不变; 幂等由调用方保证 (``Gateway.run`` 只在不挂飞书时自己调)。
+    # 按身份过滤的会话一族。**骨架 ``/sessions`` 一族不动** —— ToC 的 spa-v2 用的是那批,
+    # 改它的语义会波及一面不相干的 gateway。这里是飞书链上单独的一层, 默认拒绝(401)。
+    app.router.add_get("/feishu/sessions", _web_list_sessions)
+    app.router.add_post("/feishu/sessions", _web_create_session)
+    app.router.add_get("/feishu/sessions/{session_id}/history", _web_get_history)
+    app.router.add_get("/feishu/titles", _web_list_titles)
+    app.router.add_get("/feishu/summaries", _web_list_summaries)
+    # ``/oauth/*`` 归本包(取件方全在 ToB 一侧), 但注册与 ``--gateway`` 解耦 —— 见
+    # ``register_oauth_routes``。在此处调用是为了让两面全挂时的注册顺序与拆分前逐条不变;
+    # 幂等由调用方保证 (``Gateway.run`` 只在不挂飞书时自己调)。
     register_oauth_routes(app)
 
     # ToB 前端的静态挂载点 —— 写法参照 ToC 侧两个 ``add_static``, 但存在性判断用同步的

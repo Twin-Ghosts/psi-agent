@@ -151,7 +151,9 @@ src/
         │   ├── spa/                # Vue 3 SPA v1（Vite + SFC）
         │   └── spa-v2/             # React SPA v2（任务工作台；默认 GET /）
         └── feishu/                  # **ToB 专属层**
-            ├── _routes.py          # register_feishu_routes + /feishu/route /feishu/routes /feishu-web/；register_oauth_routes + /oauth/callback /oauth/code
+            ├── _routes.py          # register_feishu_routes + /feishu/*（含免登 /feishu/auth/*、按身份过滤的 /feishu/sessions 一族）+ /feishu-web/；register_oauth_routes + /oauth/callback /oauth/code
+            ├── _auth.py            # FeishuAuth — code → user_access_token（app_secret 不下发前端）
+            ├── _identity.py        # 请求身份解析（open_id → 会话可见性过滤）
             ├── _feishu_manager.py  # FeishuManager — 飞书 open_id → Session 路由
             ├── _oauth_manager.py   # OAuthRelay — OAuth 回调中继（免手抄授权码；取件方全在 ToB 一侧）
             └── _openapi.py         # ToB path 片段（FEISHU_PATHS /feishu/*）+ OAUTH_PATHS（/oauth/*，与 --gateway 正交）

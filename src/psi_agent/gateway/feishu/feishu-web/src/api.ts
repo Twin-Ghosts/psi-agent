@@ -2,9 +2,15 @@
  * 数据层 —— 只封装**后端确实存在**的路由。
  *
  * 判据是 ``gateway`` 下的 ``add_get/add_post/add_delete`` 声明, 不是 PR 里写了什么:
- * PR 版打的 ``POST /auth/feishu`` 全库零实现 (唯一命中是文档里那句「不做」), 所以这里
- * 没有任何登录相关函数。飞书免登 (JSSDK 换 code、身份隔离) 归任务 5fef7, 落地后在这里
- * 补 login 一族即可 —— 本文件的其余部分不受影响。
+ * PR 版打的那条免登路由曾全库零实现 (唯一命中是文档里那句「不做」)。
+ *
+ * 飞书免登已落地(任务 5fef7): ``login`` / ``getMe`` / ``logout`` 打的是
+ * ``gateway/feishu/_routes.py`` 里的 ``/feishu/auth/*`` —— **不是裸 ``/auth/*``**: desktop
+ * 那条产品线已占了 ``/auth/me`` 与 ``/auth/logout``, 同进程装配下先注册者胜出, 打裸路由
+ * 会打到 desktop 的 handler 上(有效 cookie 也回 401, 登出还不生效)。会话一族走
+ * ``/feishu/sessions`` 而非裸
+ * ``/sessions``: 后者不按身份过滤, 在浏览器侧 filter 只是显示过滤, 谁都能直接打裸路由
+ * 拿全量。
  */
 
 export interface AiInfo {
@@ -21,6 +27,8 @@ export interface SessionInfo {
   workspace?: string;
   agent?: string;
   ai_id?: string;
+  /** 是否 IM 里那条会话(``feishu-<open_id>``) —— 列表上打「来自飞书对话」角标。 */
+  from_im?: boolean;
 }
 
 export interface HistoryMessage {
@@ -95,23 +103,57 @@ function asList<T>(data: T[] | { value?: T[] }): T[] {
   return Array.isArray(data) ? data : data.value || [];
 }
 
+// ---- 免登 / 身份 -------------------------------------------------------
+
+export interface Me {
+  open_id: string;
+  name: string;
+}
+
+/** appID 从后端取, 不写死在前端 —— 换应用/换租户只改部署参数。 */
+export async function getFeishuAppId(): Promise<string> {
+  const data = await requestJson<{ app_id?: string }>("/feishu/app-id");
+  return data.app_id || "";
+}
+
+export async function login(code: string): Promise<Me> {
+  return requestJson<Me>("/feishu/auth/login", jsonPost({ code }));
+}
+
+/**
+ * 无 code 登录 —— 只有后端设了 ``PSI_FEISHU_DEV_OPEN_ID`` 才会成功, 否则 400。
+ *
+ * 身份由**后端**的环境变量决定, 前端不传也不能传 open_id。这与 PR 755 那个前端写死
+ * 真实 open_id 的做法是两件事: 这里前端没有任何身份信息可伪造。
+ */
+export async function loginDevBypass(): Promise<Me> {
+  return requestJson<Me>("/feishu/auth/login", jsonPost({}));
+}
+
+export async function getMe(): Promise<Me> {
+  return requestJson<Me>("/feishu/auth/me");
+}
+
+export async function logout(): Promise<void> {
+  await requestJson<unknown>("/feishu/auth/logout", jsonPost({}));
+}
+
 // ---- GET /ais ----------------------------------------------------------
 
 export async function listAis(): Promise<AiInfo[]> {
   return asList(await requestJson<AiInfo[] | { value?: AiInfo[] }>("/ais"));
 }
 
-// ---- /sessions ---------------------------------------------------------
+// ---- /feishu/sessions ---------------------------------------------------
 
 export async function listSessions(): Promise<SessionInfo[]> {
-  return asList(await requestJson<SessionInfo[] | { value?: SessionInfo[] }>("/sessions"));
+  // 过滤路由: 只回当前身份的私聊会话。裸 ``/sessions`` 不按身份过滤, 前端不再用它。
+  return asList(await requestJson<SessionInfo[] | { value?: SessionInfo[] }>("/feishu/sessions"));
 }
 
 export async function createSession(backendId: string): Promise<SessionInfo> {
-  return requestJson<SessionInfo>(
-    "/sessions",
-    jsonPost({ backend_type: "ai", backend_id: backendId, workspace: "" }),
-  );
+  // **不传 id** → 后端发新 uuid → 新 jsonl。workspace 由后端按 open_id 派生, 前端不传。
+  return requestJson<SessionInfo>("/feishu/sessions", jsonPost({ backend_id: backendId }));
 }
 
 export async function deleteSession(id: string): Promise<void> {
@@ -120,7 +162,7 @@ export async function deleteSession(id: string): Promise<void> {
 
 export async function getSessionHistory(id: string): Promise<HistoryMessage[]> {
   const data = await requestJson<HistoryMessage[] | { value?: HistoryMessage[] }>(
-    `/sessions/${encodeURIComponent(id)}/history`,
+    `/feishu/sessions/${encodeURIComponent(id)}/history`,
   );
   return asList(data);
 }
@@ -128,7 +170,7 @@ export async function getSessionHistory(id: string): Promise<HistoryMessage[]> {
 // ---- 标题 / 摘要 -------------------------------------------------------
 
 export async function listTitles(): Promise<Record<string, string>> {
-  return requestJson<Record<string, string>>("/titles");
+  return requestJson<Record<string, string>>("/feishu/titles");
 }
 
 export async function generateTitle(
@@ -143,7 +185,11 @@ export async function generateTitle(
 }
 
 export async function listSummaries(): Promise<Record<string, string>> {
-  return requestJson<Record<string, string>>("/summaries");
+  return requestJson<Record<string, string>>("/feishu/summaries");
+}
+
+export async function setTitle(id: string, title: string): Promise<void> {
+  await requestJson<unknown>("/titles", jsonPost({ id, title }));
 }
 
 // ---- todo (任务进度的数据源) -------------------------------------------

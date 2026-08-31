@@ -464,3 +464,12 @@ def test_private_space_unset_is_noop(tmp_path: str, monkeypatch: pytest.MonkeyPa
     fm = FeishuManager(_sm=_NO_SM, _ai_id="ai1", _workspace_root=str(tmp_path))
 
     assert fm._workspace_for("ou_secret") == os.path.join(str(tmp_path), "ou_secret")
+
+
+def test_public_derivation_escapes_dash(tmp_path: str) -> None:
+    """私聊侧 ``-`` 必须转义: 否则 open_id 为 ``chat-oc_x`` 的人与群 ``oc_x`` 撞同一个 id。"""
+    fm = FeishuManager(_sm=_NO_SM, _workspace_root=str(tmp_path))
+    assert fm.session_id_for("chat-oc_x") == "feishu-chat_oc_x"
+    assert fm.session_id_for("chat:oc_x") == "feishu-chat-oc_x"
+    assert fm.session_id_for("chat-oc_x") != fm.session_id_for("chat:oc_x")
+    assert fm.workspace_for("chat-oc_x") != fm.workspace_for("chat:oc_x")
