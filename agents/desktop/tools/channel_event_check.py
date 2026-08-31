@@ -22,7 +22,10 @@ from typing import Any
 
 import _runtime_paths as _paths
 
-from psi_agent.channel._event_defs import load_channel_event_defs
+# Aliased under a leading underscore: the loader treats every public async
+# name in this module as a tool, and this helper's ``Path`` parameter is not a
+# JSON-Schema type, so exposing it would fail signature conversion.
+from psi_agent.channel._event_defs import load_channel_event_defs as _load_channel_event_defs
 from psi_agent.channel._event_shapes import describe_shape, non_null_paths, plainify
 
 # platform_event → (SDK module suffix, class name, sample event body).
@@ -235,7 +238,7 @@ def _as_subscript(path: str) -> str:
 async def _load_defs() -> list[Any]:
     """Load the same definitions the live Channel loads, from the agent root."""
     agent_root = await _paths.resolve_agent().resolve()
-    return await load_channel_event_defs(Path(str(agent_root)), "feishu")
+    return await _load_channel_event_defs(Path(str(agent_root)), "feishu")
 
 
 def _render_list(defs: list[Any]) -> str:
