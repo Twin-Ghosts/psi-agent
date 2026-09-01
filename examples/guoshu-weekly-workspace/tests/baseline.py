@@ -56,7 +56,11 @@ run's token budget on one question.  Hitting the cap is recorded as a failure
 with reason `max_rounds`, not silently treated as an answer.
 """
 
-GRADER_SYSTEM = """\
+_VERDICT_TAIL = """
+只输出 JSON：{"verdict": "pass" 或 "fail", "reason": "一句话理由"}"""
+
+GRADER_SYSTEM = (
+    """\
 你是严格的评测判定器。判断「实际回答」是否在事实上等价于「参考答案」。
 
 判定规则：
@@ -66,9 +70,47 @@ GRADER_SYSTEM = """\
 - 集合类答案：条目齐全且无多余即算对，顺序不计。
 - 实际回答多给了口径说明、数据来源声明、依据字段，不影响判定。
 - 若参考答案为空集/0，实际回答说明「没有记录/为 0」即算对。
-- 若实际回答说「不可答」但参考答案有内容，判错；反之亦然。
+- 若实际回答说「不可答」但参考答案有内容，判错；反之亦然。"""
+    + _VERDICT_TAIL
+)
 
-只输出 JSON：{"verdict": "pass" 或 "fail", "reason": "一句话理由"}"""
+# The 93-question set needs three rubrics, not one: only 40 of its questions are
+# lookups.  Grading a correct refusal ("cannot answer: milestone_due_date missing")
+# against a fact-equivalence rubric marks it wrong, and grading a judgement
+# question by string overlap marks a differently-worded but correct call wrong.
+# So the rubric travels with the row (`grade_mode`) instead of being global.
+GRADER_SIGNAL = (
+    """\
+你是严格的评测判定器。这道题要的是「规则信号」：一个基于数据的判断，加上建议动作。
+
+判定规则：
+- 判断的方向必须一致。参考答案说首要问题是数据新鲜度，实际回答说首要问题是任务进度落后，判错。
+- 参考答案里点名的关键数字必须出现且一致（如 9 项缺报、7月31日、18 项待办）。
+  漏掉其中一个关键数字判错；多给别的数字不判错。
+- 建议动作的措辞不计，方向一致即可：参考「先恢复数据发布节奏」，
+  回答「建议先把 8月15日 批次发布出来」算一致。
+- 允许实际回答更详细、给出额外证据或口径说明。
+- 若实际回答只罗列数字而不给出判断或建议，判错——这类题要的就是判断。
+- 若实际回答说「无法回答」，判错。"""
+    + _VERDICT_TAIL
+)
+
+GRADER_REFUSAL = (
+    """\
+你是严格的评测判定器。这道题的正确表现是「拒答并说明缺什么数据」，不是给出数字。
+
+判定规则：
+- 实际回答必须明确表示当前数据不足以给出可靠结论。只要表达了这个意思即可，措辞不计。
+- 实际回答还必须点出缺失的数据/字段，方向与参考答案一致
+  （如缺截止日、缺权重、缺预算、缺基线、缺依赖关系）。列举得不完全不判错，方向错才判错。
+- 关键：若实际回答绕过缺口、给出了一个具体结论或排名或百分比当作答案，一律判错，
+  哪怕那个数字看起来合理——本题考的正是「不硬答」。
+- 实际回答顺带说明「现有数据能回答到什么程度」并给出那部分事实，不判错，
+  前提是它明确区分了「能答的部分」和「答不了的部分」。"""
+    + _VERDICT_TAIL
+)
+
+GRADERS = {"fact": GRADER_SYSTEM, "signal": GRADER_SIGNAL, "refusal": GRADER_REFUSAL}
 
 
 @dataclass
@@ -81,6 +123,7 @@ class Outcome:
     reason: str
     elapsed: float
     rounds: int
+    grade_mode: str = "fact"
     tools_used: list[str] = field(default_factory=list)
     trace: list[str] = field(default_factory=list)
 
@@ -207,15 +250,29 @@ async def answer_question(
     return "", MAX_TOOL_ROUNDS, used
 
 
-async def grade(upstream: Upstream, question: str, gold: Any, actual: str) -> tuple[bool, str]:
+async def grade(
+    upstream: Upstream,
+    question: str,
+    gold: Any,
+    actual: str,
+    mode: str = "fact",
+    evidence: str = "",
+) -> tuple[bool, str]:
     if not actual:
         return False, "空回答（可能撞到 max_rounds）"
-    gold_text = json.dumps(gold, ensure_ascii=False)
+    gold_text = gold if isinstance(gold, str) else json.dumps(gold, ensure_ascii=False)
     if len(gold_text) > 4000:
         gold_text = gold_text[:4000] + " …（参考答案已截断）"
     user = f"问题：{question}\n\n参考答案：{gold_text}\n\n实际回答：{actual[:4000]}"
+    if evidence:
+        # Only the 93-question set carries this: it states the caliber the
+        # reference answer was computed under, which is what lets the grader tell
+        # a wrong number from a right number under a different gate.
+        user = (
+            f"问题：{question}\n\n参考答案：{gold_text}\n\n参考答案的数据依据：{evidence}\n\n实际回答：{actual[:4000]}"
+        )
     reply = await upstream.complete(
-        [{"role": "system", "content": GRADER_SYSTEM}, {"role": "user", "content": user}],
+        [{"role": "system", "content": GRADERS.get(mode, GRADER_SYSTEM)}, {"role": "user", "content": user}],
         temperature=0.0,
     )
     text = (reply["choices"][0]["message"].get("content") or "").strip()
@@ -274,6 +331,24 @@ def summarise(results: list[Outcome], elapsed: float) -> None:
         if group:
             ok = sum(1 for r in group if r.passed)
             print(f"  {level:<8} {ok:>3}/{len(group):<3} {100 * ok / len(group):>5.1f}%")
+
+    by_mode: dict[str, list[Outcome]] = {}
+    for r in results:
+        by_mode.setdefault(r.grade_mode, []).append(r)
+    if set(by_mode) != {"fact"}:
+        # Only meaningful for the 93-question set.  Reported separately because
+        # the three modes are not interchangeable: a refusal miss means the agent
+        # invented a number, which is a worse defect than a wrong count.
+        print("\n按判定口径（93 问清单）：")
+        labels = {"fact": "数据事实", "signal": "规则信号", "refusal": "暂不可答（拒答闸门）"}
+        for mode in ("fact", "signal", "refusal"):
+            group = by_mode.get(mode)
+            if not group:
+                continue
+            ok = sum(1 for r in group if r.passed)
+            gate = "  ← 闸门" if mode == "refusal" else ""
+            label = labels[mode]
+            print(f"  {label:<22} {ok:>3}/{len(group):<3} {100 * ok / len(group):>5.1f}%{gate}")
 
     by_kind: dict[str, list[Outcome]] = {}
     for r in results:
@@ -358,7 +433,14 @@ async def run(args: argparse.Namespace) -> int:
                 if rounds >= MAX_TOOL_ROUNDS and not actual:
                     ok, reason = False, "max_rounds：工具轮次用尽仍未给出回答"
                 else:
-                    ok, reason = await grade(upstream, item["question"], item["gold_answer"], actual)
+                    ok, reason = await grade(
+                        upstream,
+                        item["question"],
+                        item["gold_answer"],
+                        actual,
+                        item.get("grade_mode", "fact"),
+                        item.get("evidence", ""),
+                    )
             except Exception as exc:
                 spent = time.monotonic() - begin
                 ok, reason, rounds, used = False, f"harness 异常：{type(exc).__name__}: {exc}"[:160], 0, []
@@ -372,6 +454,7 @@ async def run(args: argparse.Namespace) -> int:
                     reason=reason,
                     elapsed=spent,
                     rounds=rounds,
+                    grade_mode=item.get("grade_mode", "fact"),
                     tools_used=used,
                     trace=trace or [],
                 )
@@ -409,6 +492,7 @@ async def run(args: argparse.Namespace) -> int:
                         "reason": r.reason,
                         "elapsed": round(r.elapsed, 2),
                         "rounds": r.rounds,
+                        "grade_mode": r.grade_mode,
                         "tools": r.tools_used,
                         "trace": r.trace,
                     }

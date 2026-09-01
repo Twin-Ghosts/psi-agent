@@ -14,6 +14,7 @@ reach this layer directly.
 # ruff: noqa: RUF001  中文口径文案里的全角标点是给模型看的字面量, 不能换成半角。
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -57,7 +58,10 @@ SENSITIVE_FIELDS = frozenset({"review_comment", "opinion"})
 
 SNAPSHOT_NOTE = "演示数据（weekly_mock 自建库），非集团真实周报"
 
-AS_OF = "2026-08-15"
+DEFAULT_AS_OF = "2026-08-15"
+"""Anchor used unless ``GUOSHU_AS_OF`` overrides it."""
+
+AS_OF = os.environ.get("GUOSHU_AS_OF", "").strip() or DEFAULT_AS_OF
 """The snapshot's "today" -- every relative time window is measured from here.
 
 Not ``CURDATE()``, and this is the whole point.  The data stops at
@@ -68,7 +72,17 @@ this as the ``now_instead_of_as_of`` trap.
 
 Fixing the anchor on the service side also removes the model's ability to get it
 wrong: it never has to know today's date, and cannot substitute its own.
+
+Why this is an env knob and not a constant: the two answer sets we grade against
+were built against *different* snapshot days.  The 396-question set binds
+2026-08-15; the 93-question 全量问题清单 binds 2026-08-17, and 10 of the 396
+change answers between the two (E6-01 days_behind 1 vs 3, E6-03 23 rows vs 14,
+R6-04 lag_days 16 vs 18, ...).  Hardcoding either day silently fails the other
+set, so the anchor moves with the harness instead of the code.
 """
+
+if not _DATE_RE.match(AS_OF):
+    raise ValueError(f"GUOSHU_AS_OF 必须是 YYYY-MM-DD，收到 {AS_OF!r}")
 
 
 def as_of_caliber() -> str:

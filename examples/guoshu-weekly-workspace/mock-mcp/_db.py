@@ -20,7 +20,12 @@ from pymysql.cursors import DictCursor
 DB_HOST = os.environ.get("GUOSHU_WEEKLY_MYSQL_HOST", "127.0.0.1")
 DB_PORT = int(os.environ.get("GUOSHU_WEEKLY_MYSQL_PORT", "3306"))
 DB_USER = os.environ.get("GUOSHU_WEEKLY_MYSQL_USER", "weekly_ro")
-DB_PASSWORD = os.environ.get("GUOSHU_WEEKLY_MYSQL_PASSWORD", "weekly-ro-2026")
+DB_PASSWORD = os.environ.get("GUOSHU_WEEKLY_MYSQL_PASSWORD", "")
+"""No default: this source ships without credentials.
+
+Set GUOSHU_WEEKLY_MYSQL_PASSWORD before starting the service. A working default
+left in source is how a demo password ends up in a production checkout.
+"""
 DB_NAME = os.environ.get("GUOSHU_WEEKLY_MYSQL_DB", "weekly_mock")
 
 DSN_DESCRIPTION = f"mysql://{DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME}"

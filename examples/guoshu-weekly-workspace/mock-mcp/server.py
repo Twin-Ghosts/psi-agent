@@ -2591,7 +2591,7 @@ _PROGRESS_DATE_FIELDS: dict[str, str] = {
 # 「最后一批 17 条」——O7-03 的 6 轮正是耗在这个岔口上。
 _SHORT_WINDOW_HINT = (
     "；本次窗口内 0 行不是「没人报进展」：进展行按月上报（progress_date 最新一批是 2026-07-31，"
-    "距快照日 2026-08-15 已 15 天），任何短于半月的窗口在 task_progress 上必然为空。"
+    f"距快照日 {store.AS_OF} 已有半月上下），任何短于半月的窗口在 task_progress 上必然为空。"
     "问「最近一周哪些任务更新了进展」问的是任务上的 latest_progress_time（逐条更新），"
     "请改用 weekly_freshness_distribution recent_days=7（得 23 条）；"
     "也不要退而报「最新一批进展」的 17 条，那是 2026-07-31 那一期的期数，答的是另一个问题"
