@@ -289,6 +289,20 @@ results. The first eligible learning turn is warmed after the answer; subsequent
 turns may use a validated cache or live advice, and ordinary failures degrade to the normal
 answer path. The supervisor workspace has no lifecycle hooks or tools, preventing recursion.
 
+**The child-supervisor spawn is off by default** (`PSI_HAITUN_SUPERVISOR_CHILD`, unset = off).
+`SupervisorManager.ensure_supervisor()` returns `None` before touching `_dependencies()`, so
+no child process is started and no socket is waited on; `supervise()` degrades to
+`empty_advice()` and `render_advice_prompt()` renders nothing for it. Measured in production
+on 2026-09-01: 251 before-turn hook timeouts, 240 children started, **0** `handle ready` and
+**0** `readiness check failed` — both mutually exclusive branches at zero, i.e. it never
+reached a verdict, because `<agents-parent>/haitun-supervisor-workspace` is not deployed at
+the path `ensure_supervisor` computes. The wait cost a fixed 30s per eligible turn (the
+kernel's `system_before_turn` timeout), 33.7% of a short turn's p50, booked as
+"unattributed" because it happens before the session lock. Re-enable only once that child
+workspace is actually deployed **and** `wait_fn` has a real readiness predicate; the check is
+that `handle ready` becomes non-zero. Pinned by
+`tests/integration/test_haitun_supervisor_child_disabled.py`.
+
 The following remain deliberately included as **future-extension hooks** and are **NOT**
 invoked by the current framework — do not "clean them up" as dead code:
 
