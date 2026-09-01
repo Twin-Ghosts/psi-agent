@@ -38,7 +38,7 @@ Gateway 上有一批**一行鉴权都没有**的路由, 与飞书网页应用的
 
 | 路由 | 危害 |
 | --- | --- |
-| `POST /sessions/{id}/chat` | 直接驱动 agent 执行工具, 含 bash |
+| `POST /sessions/{id}/chat` | 直接驱动 agent 执行工具, 含 bash。**带鉴权的对等物 `/feishu/sessions/{id}/chat` 是放行的**, 裸的这条不放行 |
 | `POST /sessions` | 建 Session |
 | `GET /sessions` `GET /sessions/{id}/history` | 读任意会话历史 |
 | `GET /workspace/file` | 读 workspace 里的文件 |
@@ -50,7 +50,7 @@ Gateway 上有一批**一行鉴权都没有**的路由, 与飞书网页应用的
 
 ### 改白名单前先看判据
 
-`tests/deploy/test_oauth_proxy.py`(15 条)双向钉住:
+`tests/deploy/test_oauth_proxy.py`(20 条)双向钉住:
 
 - 该放行的没放行 → 红(清单来自 `feishu-web/api-paths.json`, 前端加端点会被发现);
 - 不该放行的放行了 → 红(`test_core_routes_stay_blocked` 逐条列了上表那些);
@@ -77,12 +77,28 @@ PYTHONPATH=src .venv/Scripts/python.exe -m pytest -o testpaths= --no-cov tests/d
 3. `/feishu-web/` 的静态产物能加载(依赖 Gateway 侧 `dist/` 存在, 不存在时 `add_static`
    静默跳过)。
 
-### 一条已知的设计边界: 响应不流式
+### 放行范围里有 SSE, 转发层因此是流式的
 
-本代理把上游响应**一次读完再回**(`await resp.read()`), 不是边收边转。今天放行的路径里
-没有一条是流式的 —— 前端唯一走流的是 `chatStream.ts`, 它打 `POST /sessions/{id}/chat`,
-而那条刻意不放行。
+`POST /feishu/sessions/{session_id}/chat`(带鉴权的聊天流, 能驱动 agent 执行工具)**在放行
+范围内**, 它是一条 SSE。
 
-**所以哪天要放行 chat 一族, 光往 `ALLOWED_PATHS` 加一条是不够的**: SSE 会被这里缓冲成
-「等全部生成完才一次性吐给浏览器」, 表现是打字机效果消失、长回答疑似卡死。那时要改成
-`web.StreamResponse` 边收边写。记在这里, 因为这个缺陷加白名单时看不出来。
+它不是被单独加进白名单的, 而是**被前缀捎带进来的**: `ALLOWED_PREFIXES` 里的
+`/feishu/sessions/` 原本是为 `GET /feishu/sessions/{id}/history` 加的, `startswith` 把同一
+前缀下的 chat 一起放行了。这一点值得留意 —— 往那个前缀下加路由**不需要动白名单就会自动
+对公网可达**, 加的时候要自己判断该不该暴露。
+
+于是转发层用 `web.StreamResponse` 边收边转(`_relay`), 不是把 body 读完再回。三处硬要求,
+每处都有判据:
+
+| 要求 | 写错的表现 | 判据 |
+| --- | --- | --- |
+| 逐块转发, 不自己攒缓冲 | 打字机效果消失, 长回答疑似卡死 | `test_sse_chunks_arrive_before_upstream_finishes` |
+| 不设 `Content-Length`, 交给 chunked | 截断, 或客户端等永远补不齐的字节 | `test_sse_response_has_no_content_length` |
+| 响应头在 `prepare()` **之前**写完 | `Set-Cookie` 静默丢失, 登录不上 | `test_set_cookie_survives_streaming` |
+
+超时也跟着改了: `ClientTimeout` **不设 `total`**。`total` 管的是「从发出到响应体读完」的
+整段时间, 对 SSE 就是一条硬性寿命 —— 原先的 `total=15` 会让生成超过 15 秒的长回答从中间
+断掉(实测: 客户端收到前几个 event 后拿到 `ClientPayloadError`, 等不到 `[DONE]`), 而短回答
+一切正常, 所以这个缺陷很容易漏。改用 `sock_connect` + `sock_read` 两个闸, 它们量的都是
+**间隔**而非总时长, 上游真卡死时仍能断开。由
+`test_upstream_timeout_has_no_total_deadline` 钉住。

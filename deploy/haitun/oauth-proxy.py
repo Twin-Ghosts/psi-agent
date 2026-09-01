@@ -13,7 +13,9 @@ Gateway 自身还挂着 /sessions、/titles、/workspace、/chat/completions 这
 1. **OAuth 回调落地** —— 用户点完飞书授权, 回调自己落到 Gateway, 不必从地址栏手抄
    code。/oauth/code 也必须放行: 工具侧用同一个基址轮询取件(见
    agents/feishu/tools/_oauth_receiver.py 的 _wait_for_code), 少放一条等于没接通。
-2. **飞书网页应用** —— /feishu-web/ 的静态产物 + /feishu/* 那一族 API。
+2. **飞书网页应用** —— /feishu-web/ 的静态产物 + /feishu/* 那一族 API, 其中
+   POST /feishu/sessions/{id}/chat 是一条 **SSE**(带鉴权的聊天流)。所以转发层必须边收边
+   转, 见 _relay。
 
 ## 头转发是这个代理最容易出错的地方
 
@@ -68,6 +70,11 @@ ALLOWED_PATHS = frozenset(
 #   * /feishu-web/ 的产物文件名带内容 hash, 每次 build 都变。
 #   * /feishu/sessions/ 下是 /{session_id}/history, session id 是运行期生成的。
 #
+# **这个前缀是会捎带的**: /feishu/sessions/ 下现在还住着 POST /{id}/chat(带鉴权的聊天流,
+# 能驱动 agent 执行工具), 它不是被单独加进来的, 是 startswith 一起放行的。往这个前缀下加
+# 路由**不动白名单就自动对公网可达** —— 加的时候要自己判断该不该暴露。chat 那条还带来一
+# 个硬要求: 它是 SSE, 转发必须流式(见 _relay)。
+#
 # 前缀必须以 / 结尾: 否则 /feishu 会把 /feishudlfjk 一起吃掉。匹配前路径已被
 # _normalized_path 归一化并挡掉 .., 所以 /feishu-web/../sessions 过不来。
 ALLOWED_PREFIXES = ("/feishu-web/", "/feishu/sessions/")
@@ -95,7 +102,15 @@ _REQUEST_PASSTHROUGH_HEADERS = frozenset({"Cookie", "Content-Type", "Accept"})
 # 着成功但旧 cookie 还在。Content-Type 单独走 web.Response 的参数。
 _RESPONSE_PASSTHROUGH_HEADERS = frozenset({"Set-Cookie", "Location", "Cache-Control"})
 
-_UPSTREAM_TIMEOUT = aiohttp.ClientTimeout(total=15)
+# 上游超时。**total 必须是 None**: 放行范围里有 SSE(见 _relay), 而 total 管的是「从发出
+# 到响应体读完」的整段时间 —— 原先那个 total=15 会把任何超过 15 秒的聊天流从中间掐断,
+# 表现是长回答生成到一半连接断掉, 而短回答一切正常。
+#
+# 换成两个分别的闸, 它们都不随响应时长增长:
+#   * sock_connect —— 连不上上游要快速失败, 不是干等。
+#   * sock_read    —— 两次收到数据之间的最长间隔。上游卡死时仍然能断开, 但只要它还在
+#                     吐 event(gateway 的 SSE 有 keepalive)就一直续下去。
+_UPSTREAM_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=300)
 
 
 def _upstream() -> str:
@@ -170,19 +185,42 @@ async def _forward(request: web.Request) -> web.StreamResponse:
             data=body or None,
             allow_redirects=False,
         ) as resp:
-            raw = await resp.read()
-            content_type = resp.headers.get("Content-Type", "text/plain")
-            out = web.Response(
-                status=resp.status,
-                body=raw,
-                content_type=content_type.split(";")[0],
-            )
-            for name in _RESPONSE_PASSTHROUGH_HEADERS:
-                for value in resp.headers.getall(name, ()):
-                    out.headers.add(name, value)
-            return out
+            return await _relay(request, resp)
     except aiohttp.ClientError:
         return web.Response(status=502, text="Bad Gateway\n")
+
+
+async def _relay(request: web.Request, resp: aiohttp.ClientResponse) -> web.StreamResponse:
+    """把上游响应**边收边转**给客户端。
+
+    用 StreamResponse 而非把 body 读完再回, 因为放行范围里已经有 SSE:
+    POST /feishu/sessions/{id}/chat(带鉴权的聊天流)被 ALLOWED_PREFIXES 里的
+    /feishu/sessions/ 覆盖。一次读完的写法会把 SSE 憋成「等全部生成完才一次吐出」——
+    打字机效果消失, 长回答表现为疑似卡死。
+
+    三个要点:
+
+    * **不自己设 Content-Length。** 转发的时候根本不知道总长度。让 aiohttp 按 chunked
+      发(不给 content_length 即是), 自己算一个必然错: 短了截断, 长了客户端等一段永远
+      补不齐的字节。上游若给了 Content-Length 也不照搬 —— 我们逐块写, 由本进程的传输
+      编码说话。
+    * **响应头必须在 prepare() 之前写完。** prepare 之后再 add 是**静默无效**的(头已经
+      上路了), 表现是 Set-Cookie 丢失、登录不上。
+    * **不自己加缓冲。** 逐块 write 之后不 drain 成大块; iter_any() 给多少写多少。
+    """
+    out = web.StreamResponse(status=resp.status)
+    content_type = resp.headers.get("Content-Type", "text/plain")
+    out.content_type = content_type.split(";")[0]
+    for name in _RESPONSE_PASSTHROUGH_HEADERS:
+        for value in resp.headers.getall(name, ()):
+            out.headers.add(name, value)
+    await out.prepare(request)
+    # iter_any(): 上游给多少就转多少, 不按固定块大小攒 —— 攒够才发就等于又加了一层
+    # 缓冲, SSE 的每个 event 会卡在里面。
+    async for chunk in resp.content.iter_any():
+        await out.write(chunk)
+    await out.write_eof()
+    return out
 
 
 async def _on_startup(app: web.Application) -> None:

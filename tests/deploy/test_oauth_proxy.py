@@ -88,9 +88,16 @@ class _Upstream:
     set_cookies: list[str] = field(default_factory=list)
     status: int = 200
     body: bytes = b'{"ok":true}'
+    #: 非空则按 SSE 流式响应, 逐块写。每块之间等 `release` 被 set。
+    sse_chunks: list[bytes] = field(default_factory=list)
+    #: 第一块写完后置位 —— 判据据此知道「上游已经吐了第一块」。
+    first_chunk_sent: asyncio.Event = field(default_factory=asyncio.Event)
+    #: 判据 set 它之后上游才写剩下的块。**流式的判据全靠这个闩**: 缓冲实现要等上游
+    #: 写完才回, 而上游在这里等判据, 判据在等第一块 —— 死等到超时, 于是缓冲必被抓住。
+    release: asyncio.Event = field(default_factory=asyncio.Event)
 
 
-async def _upstream_handler(request: web.Request) -> web.Response:
+async def _upstream_handler(request: web.Request) -> web.StreamResponse:
     up: _Upstream = request.app["state"]
     up.hits.append(
         _Hit(
@@ -101,10 +108,29 @@ async def _upstream_handler(request: web.Request) -> web.Response:
             headers=dict(request.headers),
         )
     )
+    if up.sse_chunks:
+        return await _upstream_sse(request, up)
     resp = web.Response(status=up.status, body=up.body, content_type="application/json")
     for cookie in up.set_cookies:
         # 逐条 add 而非 set —— 要在一个响应里造出多条 Set-Cookie。
         resp.headers.add("Set-Cookie", cookie)
+    return resp
+
+
+async def _upstream_sse(request: web.Request, up: _Upstream) -> web.StreamResponse:
+    """按 SSE 逐块写 —— 真 gateway 的 `_serve_chat_sse` 就是这个形状。"""
+    resp = web.StreamResponse(status=up.status, headers={"Content-Type": "text/event-stream"})
+    for cookie in up.set_cookies:
+        resp.headers.add("Set-Cookie", cookie)
+    await resp.prepare(request)
+    first, *rest = up.sse_chunks
+    await resp.write(first)
+    up.first_chunk_sent.set()
+    # 判据放行前不写第二块。缓冲的转发层会卡在这里等不到, 从而超时变红。
+    await up.release.wait()
+    for chunk in rest:
+        await resp.write(chunk)
+    await resp.write_eof()
     return resp
 
 
@@ -439,5 +465,122 @@ async def test_every_frontend_feishu_path_is_allowed(monkeypatch: pytest.MonkeyP
             path = entry["path"].replace("{param}", "probe-id")
             resp = await rig.client.request(entry["method"], path)
             assert resp.status == 200, f"{entry['method']} {path} 未放行, 实得 {resp.status}"
+    finally:
+        await rig.client.close()
+
+
+async def test_sse_chunks_arrive_before_upstream_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SSE 必须**边收边转**: 上游还没写完, 客户端就该收到前面的块。
+
+    这一条是 `POST /feishu/sessions/{id}/chat`(带鉴权的聊天流)的判据。它被
+    `/feishu/sessions/` 这个前缀覆盖 —— 那个前缀本是为 `/{id}/history` 加的,
+    `startswith` 把 chat 一起放行了, 所以流式在这一跳是**已经在用**的能力, 不是预留。
+
+    **判据不能只断言最终内容对**: 缓冲实现(`await resp.read()` 一次读完再回)最终吐出
+    的字节与流式**一模一样**, 断言内容相等测不出任何东西。这里用一个闩把两者分开:
+    上游写完第一块就停下等 `release`, 而判据在读到第一块之后才 set 它。于是
+
+      * 流式: 第一块立刻到 → 判据放行 → 上游写完剩下的 → 通过。
+      * 缓冲: 转发层要等上游 EOF 才回, 上游在等 `release`, 判据在等第一块 —— 三方
+        死等, `asyncio.timeout` 到点变红。
+
+    这是「断言真的吃劲」唯一的写法: 缓冲下**不可能**通过。
+    """
+    rig = await _rig(monkeypatch)
+    rig.upstream.sse_chunks = [b"data: first\n\n", b"data: second\n\n", b"data: [DONE]\n\n"]
+    try:
+        resp = await rig.client.post("/feishu/sessions/s-1/chat", json={"chunks": "hi"})
+        assert resp.status == 200
+        assert resp.headers["Content-Type"].startswith("text/event-stream")
+
+        # 上游此刻已写第一块、正卡在 release 上。转发层若缓冲, 这里读不到东西。
+        async with asyncio.timeout(5):
+            first = await resp.content.readuntil(b"\n\n")
+        assert first == b"data: first\n\n"
+        assert not rig.upstream.release.is_set(), "上游还没被放行, 却已经写完了 —— 闩没生效"
+
+        # 确认到这一步上游确实还没写完 —— 「提前到达」才有意义。
+        rig.upstream.release.set()
+        async with asyncio.timeout(5):
+            rest = await resp.content.read()
+        assert b"data: second" in rest
+        assert b"data: [DONE]" in rest
+    finally:
+        await rig.client.close()
+
+
+async def test_sse_response_has_no_content_length(monkeypatch: pytest.MonkeyPatch) -> None:
+    """流式响应不许带 `Content-Length` —— 长度此时还不知道。
+
+    自己算一个长度出来必然是错的(要么截断、要么客户端等一段永远补不齐的字节), 正确做法
+    是交给 chunked 传输编码。这条与上面那条分开: 内容分块到达了、头却算错了, 浏览器一样
+    显示不出来。
+    """
+    rig = await _rig(monkeypatch)
+    rig.upstream.sse_chunks = [b"data: a\n\n", b"data: [DONE]\n\n"]
+    rig.upstream.release.set()  # 本条不量时序, 直接放行
+    try:
+        resp = await rig.client.post("/feishu/sessions/s-1/chat", json={"chunks": "hi"})
+        assert resp.status == 200
+        assert "Content-Length" not in resp.headers
+        assert resp.headers.get("Transfer-Encoding") == "chunked"
+    finally:
+        await rig.client.close()
+
+
+def test_upstream_timeout_has_no_total_deadline() -> None:
+    """上游超时不许设 `total` —— 那是「这条流总共能活多久」。
+
+    `ClientTimeout(total=...)` 管的是从发出到响应体**读完**的整段时间, 对 SSE 就成了
+    一条硬性寿命。原先是 `total=15`: 短回答一切正常, 而生成超过 15 秒的长回答会在中途
+    断掉。已实测复现: 造一条每秒一个 event 的流配 `total=3`, 客户端收到 `data: 0/1/2`
+    之后拿到 `ClientPayloadError`, 永远等不到 `[DONE]`。
+
+    `sock_read` 必须仍在: 上游真卡死(一直不吐字节)时还要能断开, 否则连接泄漏。它量的是
+    **两次数据之间**的间隔, 不随流的总时长增长, 所以不会掐断长回答。
+
+    **这是一条配置断言, 不是端到端判据。** 端到端量它需要一条真的跑够 15 秒的流, 那会
+    让用例集慢一个数量级; 把超时 patch 小再量则是在测 aiohttp 遵守 `total`、而不是测我们
+    没有设它。所以这里直接钉住那个属性, 端到端的证据是上面那次手工复现。
+    """
+    assert _M._UPSTREAM_TIMEOUT.total is None, "设了 total 就是给 SSE 定了寿命"
+    assert _M._UPSTREAM_TIMEOUT.sock_read is not None, "sock_read 不能一起丢, 否则上游卡死时连接泄漏"
+
+
+async def test_set_cookie_survives_streaming(monkeypatch: pytest.MonkeyPatch) -> None:
+    """流式路径上 `Set-Cookie` 也要回传。
+
+    改成 `StreamResponse` 后响应头必须在 `prepare()` **之前**写好 —— prepare 之后再 add
+    是静默无效的(头已经上路了)。缓冲实现那边这条本来是好的, 所以这是改造引入的新风险,
+    不是原有判据的重复。
+    """
+    rig = await _rig(monkeypatch)
+    rig.upstream.sse_chunks = [b"data: a\n\n", b"data: [DONE]\n\n"]
+    rig.upstream.release.set()
+    rig.upstream.set_cookies = ["psi_feishu_sid=stream-sid; HttpOnly; Path=/", "psi_x=1; Path=/"]
+    try:
+        resp = await rig.client.post("/feishu/sessions/s-1/chat", json={"chunks": "hi"})
+        assert resp.status == 200
+        got = resp.headers.getall("Set-Cookie")
+        assert len(got) == 2, f"流式路径上 Set-Cookie 应有 2 条, 实收 {len(got)}: {got}"
+    finally:
+        await rig.client.close()
+
+
+async def test_feishu_chat_path_is_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`POST /feishu/sessions/{id}/chat` 在放行范围内, 而裸的那条仍然不在。
+
+    两条断言必须同时成立: 带鉴权的对等物放行、无鉴权的裸路由挡住。只断言前者的话, 哪天
+    有人把裸的那条也加进白名单, 这里不会响。
+    """
+    rig = await _rig(monkeypatch)
+    try:
+        resp = await rig.client.post("/feishu/sessions/s-1/chat", json={"chunks": "hi"})
+        assert resp.status == 200, "带鉴权的聊天流应放行"
+        resp = await rig.client.post("/sessions/s-1/chat", json={"chunks": "hi"})
+        assert resp.status == 404, "无鉴权的裸聊天流不许放行"
+        assert [h.path for h in rig.upstream.hits] == ["/feishu/sessions/s-1/chat"]
     finally:
         await rig.client.close()
