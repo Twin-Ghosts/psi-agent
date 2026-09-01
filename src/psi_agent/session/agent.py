@@ -816,6 +816,16 @@ class SessionAgent:
                                         r[idx] = f"Error: Tool '{fn}' not found"
                                         logger.error(f"Tool not found: {fn!r}")
                                     else:
+                                        # ** elapsed_ms 就记在结果行上 **: 工具在一个 task
+                                        # group 里**并发**执行, 所以「Executing tool」与
+                                        # 「Tool result」在日志里是交错的 —— 靠配对时间戳
+                                        # 反推单个工具的耗时会把别人的等待算进来, 并发度一
+                                        # 高就彻底错。测量点与被测区间同在一个函数里, 这个
+                                        # 数就不可能配错对。
+                                        #
+                                        # ``anyio.current_time`` 是单调时钟 (与 wall clock
+                                        # 无关), 校时不会让耗时变成负数。
+                                        started = anyio.current_time()
                                         try:
                                             token = _CURRENT_TOOL_AI_SOCKET.set(self._ai_client.ai_socket)
                                             try:
@@ -823,10 +833,19 @@ class SessionAgent:
                                             finally:
                                                 _CURRENT_TOOL_AI_SOCKET.reset(token)
                                             r[idx] = str(raw)
-                                            logger.info(f"Tool result ({fn!r}): {str(raw)[:1000]!r}")
+                                            elapsed_ms = int((anyio.current_time() - started) * 1000)
+                                            logger.info(
+                                                f"Tool result ({fn!r}) elapsed_ms={elapsed_ms}: {str(raw)[:1000]!r}"
+                                            )
                                         except Exception as e:
                                             r[idx] = f"Error executing tool '{fn}': {e}"
-                                            logger.error(f"Tool execution error ({fn!r}): {e!r}")
+                                            # 失败也带耗时: 「工具卡了 30 秒才超时」与「立刻
+                                            # 报参数错」是两种完全不同的故障, 少了这个数就得
+                                            # 靠猜。
+                                            elapsed_ms = int((anyio.current_time() - started) * 1000)
+                                            logger.error(
+                                                f"Tool execution error ({fn!r}) elapsed_ms={elapsed_ms}: {e!r}"
+                                            )
 
                                 async with anyio.create_task_group() as tg:
                                     for i, _tc, func_name, args, argument_error in tool_args:

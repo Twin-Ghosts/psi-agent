@@ -95,6 +95,22 @@ Anthropic→OpenAI 格式转换由 any-llm-sdk 自动完成，包括 `thinking_d
 - **SSE 层**（`response.prepare()` 之后）：`make_error_chunk()` 构造 error chunk → `finish_reason="error"`（psi-agent 内部扩展，非 OpenAI 标准；构造函数在 `psi_agent/protocol.py`，前缀 `[Upstream Error]: ` 由本层拼好后传入）
 - **取消/断开安全**：上游 stream 在 `finally` 中用 `anyio.CancelScope(shield=True)` 调 `stream.aclose()` 关闭（`getattr` 守卫兼容无 `aclose` 的流），确保客户端断开 / 进程关闭被 cancel 时不泄露上游连接
 
+## 回合标记（模型耗时的权威判据）
+
+`handle_chat_completions` 的两端是**模型墙上时间的唯一权威来源**，都是 INFO（生产钉死 INFO，放 DEBUG 等于没做）：
+
+| 标记 | 时机 |
+|---|---|
+| `ai-turn open` | 请求体解析成功、即将转发上游 |
+| `ai-turn close elapsed_ms=<N> outcome=<结局>` | 唯一出口。`outcome` ∈ `ok` / `upstream_error` / `client_disconnect` / `prepare_failed` |
+| `ai-turn rejected` | 请求体没解析出来。**没有配对的 open**，不进配平计数 |
+
+- **两端计数必须相等**，用例钉住了包括 `response.prepare` 失败在内的每条 return 路径。三条终态日志收成一条出口，于是「配平」只需数两个词，将来多一种结局也不会让脚本漏计一个 close。
+- **不要去补 `agent.py` 的标记。** 实测 2,331 个回合里 241 个（10%）只有 AI 侧、没有 agent 侧标记，据此算出模型耗时占比 39.2%，正确值 63.4%——差 24 个百分点且系统性偏低（掉的那批恰好是走特殊分支的慢回合）。选这一侧作权威是因为**配平在这里是结构性的**：所有上游调用必经这个 handler，open/close 各一次可由一个函数的控制流锁死；放在 `agent.py` 要靠人自觉，下次新加分支又会静默失衡。另外这两端量的正是想要的东西（上游墙上时间），`agent.py` 那一对还含 Session 自己的历史读写。
+- `"Sending request to AI via AiClient"` 保留用于观测**发起**，不得用来配对算耗时。
+- 每行还带**会话 id**（第三列，见根 `AGENTS.md`「日志约定」）。值取自请求体 `routing.session_id`——AI 是 socket 后面另一个进程，Session 侧 ContextVar 过不来。
+- 改这几个标记文本要同步 `scripts/latency-probe/parse.py`（它按 logger 名 + 消息文本匹配，刻意不含行号）。
+
 ## Context Compaction
 
 AI 层强制 `stream_options={"include_usage": True}` 获取上游 token 用量。当 `chunk.usage.prompt_tokens > max_context_tokens`（0 禁用），在上游 stream 结束后发送 **额外 SSE 事件** 通知 Session 触发 compaction。

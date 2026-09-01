@@ -9,11 +9,36 @@ from aiohttp import web
 from any_llm.api import ChatCompletionChunk, acompletion
 from loguru import logger
 
+from psi_agent._session_context import session_id_scope
 from psi_agent.protocol import make_compaction_signal, make_error_chunk
 
 # Raised from 1000 so a long ``content`` no longer pushes sibling keys out of
 # the line. ``_describe_delta`` is the actual safeguard — see below.
 _CHUNK_LOG_LIMIT = 8000
+
+# ── 回合标记: 模型墙上时间的**权威**判据 ──────────────────────────────────────
+#
+# 这两端 (open / close) 的计数必须相等, 用例钉住了包括 ``response.prepare`` 失败在内
+# 的每条 return 路径。
+#
+# **不要去改用 agent.py 那侧的标记, 也不要去补它。** 实测 2,331 个回合里有 241 个
+# (10%) 只有 AI 侧标记而没有 agent 侧, 据此算出的模型耗时占比是 39.2%, 而正确值是
+# 63.4% —— 差 24 个百分点, 且系统性偏低: 掉的那批恰好是走特殊分支的慢回合。
+#
+# 选这一侧作权威, 三个理由:
+#   1. **配平在这里是结构性保证。** 所有上游调用都必经这个 handler, 于是 open 一次、
+#      close 一次可以由一个函数的控制流锁死, 并被用例断言。放在 agent.py 则要靠人自
+#      觉, 下次新加一个分支又会静默失衡。
+#   2. **这两端量的正好是想要的东西** —— 上游墙上时间。agent.py 那一对还会把 Session
+#      自己的历史读写与落盘算进去。
+#   3. ``"Sending request to AI via AiClient"`` 保留用于观测**发起**, 但不得用来配对
+#      算耗时。
+#
+# 改这几个字符串, 要同步 ``scripts/latency-probe/parse.py``。
+_TURN_MARKER_OPEN = "ai-turn open"
+_TURN_MARKER_CLOSE = "ai-turn close"
+# 请求体都没解析出来的那类, 刻意用第三个词: 它没有配对的 open, 不该混进配平计数。
+_TURN_MARKER_REJECTED = "ai-turn rejected"
 
 # Every field a provider might carry reasoning in, plus the ones we consume.
 # ``session/ai_client.py`` reads ``reasoning`` only, so a provider emitting
@@ -139,17 +164,38 @@ def _describe_messages(messages: Any) -> str:
 
 
 async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
-    logger.info("Received chat completion request")
+    """一次上游调用的入口 —— 顺带把这一回合的会话 id 绑上, 供日志归属。
+
+    会话 id 只能从请求体 ``routing.session_id`` 取: AI 是 socket 后面另一个 aiohttp
+    进程, Session 那边的 ContextVar 过不来。
+    """
     try:
         body: dict[str, Any] = await request.json()
-        logger.debug(f"Request body: {json.dumps(body, ensure_ascii=False)[:_CHUNK_LOG_LIMIT]}")
     except Exception as e:
-        logger.error(f"Failed to parse request body: {e!r}")
+        # 刻意用第三个标记词: 它没有配对的 open, 不该混进配平计数 —— 但也不能不记,
+        # 否则「上游一直没被调用」与「请求根本没进来」在日志里长得一样。
+        logger.error(f"{_TURN_MARKER_REJECTED} unparseable body: {e!r}")
         # OpenAI-compatible error response.
         return web.json_response(
             {"error": {"message": str(e), "type": "invalid_request_error", "param": None, "code": 400}},
             status=400,
         )
+
+    routing = body.get("routing")
+    turn_session_id = ""
+    if isinstance(routing, dict):
+        raw_sid = routing.get("session_id")
+        if isinstance(raw_sid, str):
+            turn_session_id = raw_sid.strip()
+
+    with session_id_scope(turn_session_id):
+        return await _forward_chat_completion(request, body)
+
+
+async def _forward_chat_completion(request: web.Request, body: dict[str, Any]) -> web.StreamResponse:
+    logger.info(_TURN_MARKER_OPEN)
+    logger.debug(f"Request body: {json.dumps(body, ensure_ascii=False)[:_CHUNK_LOG_LIMIT]}")
+    turn_started = anyio.current_time()
 
     provider = request.app["provider"]
     model = request.app["model"]
@@ -200,6 +246,9 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
         await response.prepare(request)
     except Exception:
         logger.warning("Client disconnected before SSE response prepared")
+        # 这条早退分支原先只有上面那句 warning、没有任何 close —— 它是 open/close 计数
+        # 不配平的第二个来源 (另一个是 agent.py 侧的标记本就不全)。
+        logger.info(f"{_TURN_MARKER_CLOSE} elapsed_ms=0 outcome=prepare_failed")
         return response
 
     logger.debug(f"Forwarding to upstream: provider={provider!r}, model={model!r}, base_url={base_url!r}")
@@ -284,10 +333,14 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
                     except Exception as close_err:
                         logger.warning(f"Failed to close upstream stream: {close_err}")
 
+    # 三条终态日志收成一条出口: 结局进 ``outcome=`` 字段, 于是「配平」只需数两个词,
+    # 不必知道有几种收尾方式 —— 将来多一种结局也不会让脚本漏计一个 close。
     if client_gone:
-        logger.info("Request cancelled by client disconnect")
+        outcome = "client_disconnect"
     elif upstream_error:
-        logger.info("Request completed with upstream error")
+        outcome = "upstream_error"
     else:
-        logger.info("Request completed successfully")
+        outcome = "ok"
+    elapsed_ms = int((anyio.current_time() - turn_started) * 1000)
+    logger.info(f"{_TURN_MARKER_CLOSE} elapsed_ms={elapsed_ms} outcome={outcome}")
     return response
