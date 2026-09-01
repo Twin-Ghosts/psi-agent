@@ -46,6 +46,11 @@ _COMPRESSION = "gz"
 
 _SESSION_EXTRA_KEY = "psi_session"
 
+# 文件 sink 对**未列进 PSI_DEBUG_MODULES 的模块**的级别下限。见 ``_setup_debug_file_sink``
+# 里那段注释: 这里曾是 ``False`` (整段关掉), 代价是开着定向 DEBUG 排查时, 别的模块的告警
+# 一条都不落盘。
+_UNLISTED_FLOOR = "WARNING"
+
 # Session id column. Deliberately **inside the shared ``_FORMAT``**, i.e. it goes
 # to stderr as well as the DEBUG file: production runs INFO on stderr, and one
 # container multiplexes ~67 Sessions into that single stream. Without this column
@@ -202,9 +207,13 @@ def _setup_debug_file_sink() -> int | None:
         debug_log_path(),
         level="DEBUG",
         format=_FORMAT,
-        # ``False`` for everything unlisted — a bare dict would still let
-        # records from other modules through at the sink's own level.
-        filter={"": False, **dict.fromkeys(modules, "DEBUG")},
+        # 根规则 ``""`` 管的是**未列出**的模块。刻意是 ``_UNLISTED_FLOOR`` 而不是
+        # ``False``: ``False`` 把未列模块**整段**关掉(不是只关 DEBUG), 于是这个文件
+        # 里除白名单外一个字都没有。实测代价 —— 生产 14.5 万行里 ``FeishuManager``
+        # 零命中, 「adopt 了哪个 session、workspace 对不对」在线上完全查不到, 而那正是
+        # 一次排查要的东西。WARNING 起的记录是**告警**, 量小且恰恰是出事时要看的;
+        # DEBUG/INFO 仍按白名单收, ``PSI_DEBUG_MODULES`` 控量的语义一字不改。
+        filter={"": _UNLISTED_FLOOR, **dict.fromkeys(modules, "DEBUG")},
         rotation=_ROTATION,
         retention=_RETENTION,
         compression=_COMPRESSION,

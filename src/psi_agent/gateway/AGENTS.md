@@ -436,11 +436,24 @@ Gateway：``list_segments`` / ``get_segment`` 只读；``set_segment_label`` 允
 **route(open_id, *, chat_id="", chat_type="", ai_id=None, workspace=None) → (channel_socket, session_id) 流程**（持 lock）：
 1. `route_key()`（共享模块）定键 → `_session_id` 派生 sid；键为空 → `raise ValueError`（群聊不要求 `open_id`，私聊要求）
 2. 命中 `_routes` 且 `_sm.has(sid)` → 直接返回 `get_socket`
-3. 否则 `_sm.has(sid)`（重启后 Session 被 state 恢复，或 SPA 侧同名建过）→ **adopt** 该 Session，写回 `_routes`
+3. 否则 `_sm.has(sid)`（重启后 Session 被 state 恢复，或 SPA 侧同名建过）→ **adopt** 该 Session，写回 `_routes`；adopt 前先比一次 workspace，不符则打 WARNING（见下）
 4. 否则 `mkdir(workspace)` + `_sm.create(ai_id=ai_id or _ai_id, id=sid, workspace=ws)`；捕获 `ValueError("already exists")` 竞态 → 回退 `get_socket`
 5. `ai_id` 最终为空 → `raise ValueError`（handler 转 400）
 
 **内存态自愈（有意为之）**：`_routes` 不持久化。因 session_id 由路由键确定性派生，Gateway 重启后 Session 经 state 恢复，下次 `route()` 走 adopt 分支自愈，无需额外持久化。
+
+**⚠ adopt 只自愈路由表，不自愈 workspace —— 错的 workspace 会自我延续、永不自愈。** 上面第 3 步在第 4 步的 `ws = workspace or self._workspace_for(key)` **之前**就 return 了，所以 adopt **直接继承已存在 Session 的 workspace**，`workspace_for` 压根不被调用。〔对照实验坐实〕喂一个 workspace 指向根目录的已存在 session，adopt 继承根目录、spawn 不发生；同一份代码在干净状态下走 spawn 则正确派生到 `<root>/<open_id>`。
+
+〔生产实测〕63 个飞书会话里 **15 个**的 workspace 指向 `/workspace` **根目录**而非各自子目录，其中 14 个是 `feishu-ou_*` 形状（本该有自己的目录，抽查 7 个那些目录**一个都不存在**）。后果：这 14 个人的 agent 产出全写进全公司可见的公共区，根目录已散着约 290 个混放文件。
+
+因此 adopt 前有一次一致性校验（`_warn_if_workspace_drifted`）：
+
+- 实际 workspace 与 `workspace_for(key)` **相同 → 什么都不打**。63 个会话里 48 个是健康的，每次 route 都留一行等于把真告警淹掉。
+- **不同 → 一条 WARNING**，带齐四个字段：`key=` / `session=` / `actual_workspace=` / `expected_workspace=`。四个缺一不可——没有键不知道是谁，没有 session_id 没法去 `/sessions` 核对，只印一个路径则看不出哪个才是错的、该改成什么。两个路径用引号夹而非 `!r`（Windows 上 repr 把 `\` 转义成 `\\`，印出来没法复制去 `ls`）。
+- **仍然照旧 adopt**，不抛错也不改 workspace。纠正存量是一个**独立决定**：那 14 个会话的历史与产出都在旧目录里，悄悄换目录等于让用户以为文件丢了。
+- 比较走 `_same_workspace`（normcase/normpath/abspath 三层），不是裸 `==`：尾斜杠 / `.` 段 / Windows 大小写指的是同一个目录，按字符串比会报出一片纯噪音。`_identity._same_path` 转发到同一个函数——归属判定（判错=陌生人互看对话）与错位告警问的是同一个问题，各留一份实现迟早在某一支上分歧。
+
+用例见 `tests/psi_agent/gateway/test_feishu_workspace_drift.py`（阳性 1 条 + 阴性 4 条：健康私聊、群聊 `chat-<chat_id>`、私密区 `.private/<open_id>`、同目录的不同写法）。**初始成因仍未定**：`route()` 这条路吃不到 `--default-workspace` 兜底（它的 `ws` 永远非空），所以另有一条拿 `feishu-ou_*` 形状 id 建 session 却不给 workspace 的路径；堵法见 `runtime/AGENTS.md` 的 workspace 判据。
 
 **list_routes() → list[FeishuRoute]**：`[{open_id, chat_id, session_id}]`，供观测（`GET /feishu/routes`）。群聊记录填 `chat_id` 而 `open_id` 留空，私聊反之——一条记录只有一个键有值。
 

@@ -26,6 +26,8 @@ Three mechanisms live here:
 
 from __future__ import annotations
 
+import os
+
 import anyio
 import platformdirs
 from loguru import logger
@@ -58,6 +60,40 @@ async def ensure_workspace_dir(path: str) -> str:
     ws = anyio.Path(path.strip())
     await ws.mkdir(parents=True, exist_ok=True)
     return str(await ws.resolve())
+
+
+def is_strictly_under(path: str, root: str) -> bool:
+    """*path* 是否**严格位于** *root* 之内 (纯路径运算, 不碰磁盘)。
+
+    「严格」= 不含 *root* 自己。刻意如此: 生产上那 15 个错状态会话的 workspace 指的正是
+    ``/workspace`` 根目录本身, 把 root 算作「在 root 之下」会让判据对真正发生过的那个错法
+    完全无效。
+
+    三条都不能用裸字符串:
+
+    * ``..`` 必须先归一化 —— ``<root>/../elsewhere`` 的字面量以 root 开头, 归一化后并不在
+      root 里。
+    * ``<root>-evil`` 是同前缀的**兄弟**目录, 裸 ``startswith(root)`` 会放它过去。判据因此
+      比的是 ``os.path.relpath`` 的结果, 而不是前缀。
+    * Windows 上大小写与分隔符差异指同一处, 故 ``normcase``。
+
+    不用 ``os.path.realpath``: 这些路径**可能不存在**(那 14 个会话的 ``ou_*`` 目录抽查 7 个
+    一个都没有), 且 realpath 会 stat 磁盘 —— 本判定必须纯。代价是符号链接不被解析, 于是
+    一条指向 root 外的软链能骗过判据; 这里不追这个, 判据治的是「静默吃兜底」而非对抗攻击者
+    (能在容器里布软链的人已经有文件系统写权限了)。
+    """
+    if not path or not root:
+        return False
+    a = os.path.normcase(os.path.normpath(os.path.abspath(path)))
+    b = os.path.normcase(os.path.normpath(os.path.abspath(root)))
+    if a == b:
+        return False
+    try:
+        rel = os.path.relpath(a, b)
+    except ValueError:
+        # Windows 上跨盘符 (``C:`` vs ``D:``) 算不出相对路径 —— 那本就不在 root 里。
+        return False
+    return not rel.startswith(os.pardir + os.sep) and rel != os.pardir
 
 
 async def _agent_short_name_choices(root: anyio.Path) -> list[str]:
