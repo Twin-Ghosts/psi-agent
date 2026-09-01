@@ -8,7 +8,7 @@ from typing import Any
 import anyio
 from loguru import logger
 
-from psi_agent._workspace_paths import ensure_workspace_dir
+from psi_agent._workspace_paths import ensure_workspace_dir, is_strictly_under
 from psi_agent.runtime._ai_manager import AIManager
 from psi_agent.runtime._manager import (
     _ensure_socket_dir,
@@ -91,6 +91,12 @@ class SessionManager:
     _default_agent: str = ""
     _default_workspace: str = ""
     _appdata: str = ""
+    # 「id 以 X 开头的 Session, 其 workspace 必须显式给且落在 Y 之下」这条判据的两个参数。
+    # 两者都留空 → 判据完全不存在 (见 ``_check_workspace_guard``)。**刻意是注入的参数而不是
+    # 写死的 "feishu-"**: 内核不该认识产品名, 仓库已有「微内核反向依赖产品层硬编码」的账。
+    # 唯一的生产填充点是 ``Gateway.run``。
+    _guarded_id_prefix: str = ""
+    _guarded_workspace_root: str = ""
 
     async def create(
         self,
@@ -103,6 +109,7 @@ class SessionManager:
         agent: str = "",
         active_schedules: tuple[str, ...] = (),
         deactive_schedules: tuple[str, ...] = (),
+        skip_workspace_guard: bool = False,
     ) -> SessionInfo:
         """Spawn a Session.
 
@@ -116,8 +123,16 @@ class SessionManager:
         blacklist subtracting first). The fully activated Session is created by
         ``SchedulerManager``, deduplicated per workspace and hidden from SPA /
         state. Ordinary callers pass neither argument.
+
+        *skip_workspace_guard* 只给 **state 恢复**用 (``Gateway.run``): 恢复是把已经存在的
+        东西重新拉起来, 不是创建。生产上有 14 个会话的 workspace 就是根目录, 拿判据去挡它们
+        等于把这些人**迁移**掉 —— 详见 ``_check_workspace_guard``。
         """
         session_id = id or _new_uuid()
+        # 判据必须在下一行那个 ``or`` 兜底**之前** —— 兜底一旦生效, 「调用方到底给没给
+        # workspace」这个信息就永久丢了, 那正是 14 个会话落进公共区时发生的事。
+        if not skip_workspace_guard:
+            self._check_workspace_guard(session_id, workspace)
         workspace = workspace.strip() or self._default_workspace or os.getcwd()
         # Intentional: GET /defaults only announces the path; mkdir here at
         # Session create / start-chat so Haitun open does not leave an empty
@@ -185,6 +200,39 @@ class SessionManager:
             f"-> {backend_type} {backend_id!r} agent={agent!r} workspace={workspace!r}"
         )
         return info
+
+    def _check_workspace_guard(self, session_id: str, workspace: str) -> None:
+        """受管前缀的 Session: workspace 必须显式给, 且严格落在受管 root 之下, 否则拒绝创建。
+
+        治的是 15 个飞书会话把 workspace 指到 ``/workspace`` 根目录、14 个人的 agent 产出全
+        写进全公司可见公共区(根目录已散着约 290 个混放文件)这件事的**初始成因**。成因那条路径
+        本身仍未定 —— ``FeishuManager.route`` 吃不到下面那个兜底(它的 ws 永远非空), 所以另有
+        一条拿 ``feishu-ou_*`` 形状 id 建 session 却不给 workspace 的路径。**不去猜是谁写的**:
+        判据放在这里, 所有建 session 的路径都必经此处, 于是不管那条路径是谁都过不去。
+
+        为什么是「拒绝」而不是「兜底到派生值」: 这里算不出派生值 —— 内核不知道 ``ou_*`` /
+        ``chat-*`` / ``.private/*`` 三条规则(那是 ``FeishuManager.workspace_for`` 的事), 顺手
+        编一个只会造出第四种目录形状。而报错会当场指出是哪个调用点漏了参数, 这正是成因未定时
+        最需要的信息。
+
+        两个字段任一为空 → 判据不存在, 直接返回。「默认关」是判据的**缺席**而非一个配置值。
+        """
+        prefix = self._guarded_id_prefix
+        root = self._guarded_workspace_root
+        if not prefix or not root or not session_id.startswith(prefix):
+            return
+        given = workspace.strip()
+        if not given:
+            raise ValueError(
+                f"Session '{session_id}' needs an explicit workspace under '{root}': "
+                "refusing to fall back to the default workspace, which would put this "
+                "session's output in the shared root directory"
+            )
+        if not is_strictly_under(given, root):
+            raise ValueError(
+                f"Session '{session_id}' workspace '{given}' is not strictly under '{root}': "
+                "refusing to create it there"
+            )
 
     def resolve_backend_socket(self, backend_type: str, backend_id: str) -> str:
         if backend_type == "ai":

@@ -274,7 +274,7 @@ Gateway 一个进程复用约 67 个 Session，它们的日志在同一个 `dock
 
 | 环境变量 | 作用 |
 |---|---|
-| `PSI_DEBUG_MODULES` | 模块名白名单，逗号或分号分隔。**留空即不安装文件 sink**，行为与没有此功能时逐字节一致 |
+| `PSI_DEBUG_MODULES` | 模块名白名单，逗号或分号分隔，控的是**哪些模块的 DEBUG/INFO** 进文件。**留空即不安装文件 sink**，行为与没有此功能时逐字节一致。装上之后，**未列出**的模块仍有 WARNING 起的下限（见约束 7） |
 | `PSI_DEBUG_LOG_PATH` | 显式落盘文件路径（可选），优先于下面的推导。可含 `{pid}` 占位符，由本项目替换 |
 
 落盘路径优先级：`PSI_DEBUG_LOG_PATH` → `PSI_APPDATA/logs/psi-debug-<pid>.log` → `platformdirs` 用户数据目录。轮转参数写死在 `_logging.py`：**每份 20 MB、保留 10 份、gz 压缩**，即单进程磁盘上限约 200 MB。
@@ -285,7 +285,7 @@ Gateway 一个进程复用约 67 个 Session，它们的日志在同一个 `dock
 PSI_DEBUG_MODULES=psi_agent.ai.server,psi_agent.channel._core
 ```
 
-六条约束，改动前请先读：
+七条约束，改动前请先读：
 
 1. **stderr 级别绝不受这个变量影响。** 部署环境的 docker log driver 是 `json-file` 且 **opts 为空——即 `docker logs` 那份没有任何轮转**。所以定向 DEBUG 只进文件 sink，让 `docker logs` 的量保持不变。别把定向 DEBUG 接回 stderr。
 2. **`setup_logging` 里 `logger.remove()` 必须先于文件 sink 安装。** 裸 `remove()` 会清掉**所有** handler；顺序颠倒会在装完文件 sink 后立刻把它删掉，而守卫 `_file_handler_id` 已置位，于是整个进程再也装不上——且不报错。已有回归测试钉住。
@@ -294,6 +294,8 @@ PSI_DEBUG_MODULES=psi_agent.ai.server,psi_agent.channel._core
 5. **一个进程一个文件，文件名带 PID。** 一个容器里常有多个 psi-agent 进程：生产的 `launch-gateway.sh` 是 `psi-agent gateway` 与 `psi-agent channel feishu` 并排跑，而要观测的两个模块恰好分居其中。共用一个路径会**丢行**——`enqueue=True` 只在单进程内串行化，轮转后落败的一方还会继续往被改名的 inode 里写。实测两进程写 600 行、轮转都没触发，磁盘上只剩 586 行。PID 由本项目自己拼进文件名：loguru 的 file sink **只替换 `{time}`**（见 `loguru._file_sink.FileSink._create_path`），路径里留个 `{process}` 会在首次写入时 `KeyError`。
 
 6. **文件 sink 用 `delay=True`，不写就不建文件。** `PSI_DEBUG_MODULES` 是白名单，而**每个** psi-agent 进程都会装这个 sink，绝大多数进程一辈子发不出一条命中的 DEBUG——于是每个 PID 留一个 0 字节文件。实测 `.psi/appdata/logs/` 下攒了 **824 个空文件**，`ls` 都不可用，真正有内容的那几份反而找不着。`delay=True` 把 `open()` 推到第一条记录，治的是源头。清**存量**用 `psi-agent logs`（`--dry-run` 只数不删）：只删 `st_size == 0` 的 `psi-debug-*.log`，有内容的绝不碰，`.log.gz` 不在匹配范围内。刻意做成显式命令而非 `setup_logging` 里的自动动作——多进程容器里另一个进程可能刚 `open()` 完还没写第一行，那时它合法地就是 0 字节。
+
+7. **filter 的根规则 `""` 是 `_UNLISTED_FLOOR = "WARNING"`，不是 `False`。** loguru 的 `False` 把未列模块**整段**关掉（不是只关 DEBUG），于是这个文件里除白名单外一个字都没有。实测代价：生产 14.5 万行定向 DEBUG 里 `FeishuManager` **零命中**——那个模块的 WARNING 无处可落，排查飞书 workspace 错位时只能靠猜。WARNING 起的记录是**告警**，量小且恰恰是出事时要看的。`PSI_DEBUG_MODULES` 控 DEBUG/INFO 量的语义一字未改，只是未列模块从「全禁」变成「WARNING 起」。用例 `tests/psi_agent/test_logging_warning_floor.py` 两条：未列模块的 WARNING/ERROR 必须落盘 + 未列模块的 DEBUG/INFO 仍被挡且已列模块的 DEBUG 仍收（第二条是反向控制，防着有人图省事把下限调成 `DEBUG`）。
 
 **隐私风险（开启前必读）**：`psi-debug-<pid>.log` 里会有**真实对话内容与用户 open_id**，且刻意**不做脱敏**——打码与“看模型原始输出”直接矛盾，自我对话本身就是要看的东西。纪律：默认关闭；**查完即关**；文件不得复制出生产机、不得贴入工单或聊天；只在需要的那一个容器开。磁盘上限按**进程**算，不是按容器：gateway 容器有两个进程，开一个容器就是约 400 MB；生产一机 7 容器全开会到 2.8 G 量级。靠 `retention=10` 自动删除旧文件兜底。
 
