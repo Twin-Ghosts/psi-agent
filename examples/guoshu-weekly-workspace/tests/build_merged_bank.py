@@ -468,6 +468,17 @@ CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
             "参考答案应与该凭证下可取到的数据一致（全部替换为 [按权限不展示]）"
         ),
     },
+    ("nl2sql", "F2-02"): {
+        "override_gold": {
+            "columns": ["lead_owner_name", "task_count"],
+            "rows": [["吴晓东", "14"], ["张国栋", "14"], ["李建华", "14"]],
+        },
+        "note": (
+            "gold 只取 LIMIT 1（吴晓东），但榜首 3 人并列各 14 条（工具返回 tied_at_top=3，"
+            "规则 41：问「最……的」取首行但并列要在文字里说明）；参考答案改为 3 行并列，"
+            "与工具的并列口径一致"
+        ),
+    },
     ("nl2sql", "D4-01"): {
         "recompute_sql": (
             "SELECT p.version_no, p.progress_date, p.latest_progress AS this_round, "
