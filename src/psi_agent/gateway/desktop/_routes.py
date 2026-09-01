@@ -81,6 +81,7 @@ async def _handle_spa_v2_index(request: web.Request) -> web.Response:
         headers={"Cache-Control": "no-store"},
     )
 
+
 async def _handle_favicon(request: web.Request) -> web.FileResponse:
     favicon_path: str = request.app["favicon_path"]
     logger.debug(f"Serving favicon from {favicon_path!r}")
