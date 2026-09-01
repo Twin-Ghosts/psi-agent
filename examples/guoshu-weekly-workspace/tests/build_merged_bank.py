@@ -468,6 +468,82 @@ CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
             "参考答案应与该凭证下可取到的数据一致（全部替换为 [按权限不展示]）"
         ),
     },
+    ("nl2sql", "D4-01"): {
+        "recompute_sql": (
+            "SELECT p.version_no, p.progress_date, p.latest_progress AS this_round, "
+            "COALESCE(prev.latest_progress, '') AS prev_round FROM task_progress p "
+            "JOIN task t ON t.id = p.task_id "
+            "LEFT JOIN task_progress prev ON prev.task_id = p.task_id AND prev.version_no = p.version_no - 1 "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' "
+            "AND t.task_name = '隐私计算平台自主可控攻关' AND p.version_no IN (16, 17, 18) "
+            "ORDER BY p.version_no DESC"
+        ),
+        "note": (
+            "gold 的 this_round/prev_round 用 LEFT(40) 截断（如「…可用性58%」只剩「…可」），"
+            "判定器拿截断文本与完整回答比对必然失败；改为完整文本"
+        ),
+    },
+    ("nl2sql", "Q3-03"): {
+        "recompute_sql": (
+            "SELECT d.task_id, t.task_name, d.lead_owner_names, "
+            "(CHAR_LENGTH(d.lead_owner_names) - CHAR_LENGTH(REPLACE(REPLACE(d.lead_owner_names, ',', ''), '；', '')) + 1) AS lead_count "
+            "FROM task_group_detail d JOIN task t ON t.id = d.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' "
+            "AND d.lead_owner_names IS NOT NULL AND d.lead_owner_names <> '' "
+            "AND (CHAR_LENGTH(d.lead_owner_names) - CHAR_LENGTH(REPLACE(REPLACE(d.lead_owner_names, ',', ''), '；', '')) + 1) = 2 "
+            "ORDER BY d.task_id"
+        ),
+        "note": (
+            "gold 用 LIMIT 5 硬切「牵头人最多的任务」；榜首 2 人并列共 20 条（含顿号分隔的任务 109），"
+            "按规则 41 保留并列，改为全量 20 行"
+        ),
+    },
+    ("nl2sql", "R2-01"): {
+        "recompute_sql": (
+            "SELECT d.task_id, t.task_name, h.version_no, h.progress_effect FROM task_group_detail d "
+            "JOIN task t ON t.id = d.task_id JOIN task_group_progress_history h ON h.task_id = t.id AND h.is_published = 1 "
+            "AND h.version_no = (SELECT MAX(h2.version_no) FROM task_group_progress_history h2 "
+            "WHERE h2.task_id = t.id AND h2.is_published = 1) "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' ORDER BY d.task_id"
+        ),
+        "note": (
+            "gold 只有前 8 条（LIMIT 8），问「各任务最新一期」要全量 46 行；改为全量重算"
+        ),
+    },
+    ("nl2sql", "R2-02"): {
+        "recompute_sql": (
+            "SELECT d.task_id, t.task_name, (d.progress_effect = h.progress_effect) AS same FROM task_group_detail d "
+            "JOIN task t ON t.id = d.task_id JOIN task_group_progress_history h ON h.task_id = t.id AND h.is_published = 1 "
+            "AND h.version_no = (SELECT MAX(h2.version_no) FROM task_group_progress_history h2 "
+            "WHERE h2.task_id = t.id AND h2.is_published = 1) "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' ORDER BY d.task_id"
+        ),
+        "note": "同 R2-01：gold 只列前 8 条，改为全量 46 行（实测全部一致）",
+    },
+    ("nl2sql", "R3-01"): {
+        "recompute_sql": (
+            "SELECT t.id AS task_id, t.task_name, COUNT(DISTINCT s.round_no) AS rounds "
+            "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND t.board_id = 2 "
+            "GROUP BY t.id, t.task_name ORDER BY rounds DESC, t.id LIMIT 10"
+        ),
+        "note": (
+            "问「都提交过几轮审批」答每任务轮次数；gold 给的是提交单原始记录前 10 行（按 task_id 排的"
+            "流水），与问句的「几轮」不是一回事；改为按任务轮次数排名前 10"
+        ),
+    },
+    ("nl2sql", "R7-03"): {
+        "recompute_sql": (
+            "SELECT i.id AS import_id, p.task_id, t.task_name, COUNT(*) AS rows_r "
+            "FROM task_progress_import i JOIN task_progress p ON p.import_id = i.id "
+            "JOIN task t ON t.id = p.task_id WHERE i.id = 19 GROUP BY i.id, p.task_id, t.task_name "
+            "ORDER BY p.task_id"
+        ),
+        "note": (
+            "gold 只有前 10 个任务（LIMIT 10），「影响了哪些任务」要全量——第 19 批实落 17 个任务"
+            "（规则 62），改为全量 17 行"
+        ),
+    },
     ("oa_biz", "C2-02"): {
         "override_gold": {"columns": ["cnt"], "rows": [["73"]]},
         "override_sql": (
@@ -631,6 +707,17 @@ def _apply_fixes(
         record["gold_answer"] = fix["override_gold"]
         record["gold_row_count"] = fix.get("gold_row_count", 1)
         trail["gold_answer_overridden"] = True
+    if fix.get("recompute_sql"):
+        # 按给定 SQL 重算整个 gold_answer（用于「全量清单被 LIMIT 截断/口径替换」类修正）。
+        recomputed = _recompute(connection, fix["recompute_sql"]) if connection is not None else None
+        if recomputed is None:
+            trail["gold_answer_stale"] = True
+            record["gold_answer_needs_recompute"] = True
+        else:
+            trail["original_gold_answer"] = record.get("gold_answer")
+            record["gold_answer"] = recomputed
+            record["gold_row_count"] = len(recomputed["rows"])
+            trail["gold_answer_recomputed"] = len(recomputed["rows"])
     mask_spec = fix.get("mask_column")
     if mask_spec:
         column, mask = mask_spec["column"], mask_spec["mask"]
