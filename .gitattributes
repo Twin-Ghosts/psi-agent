@@ -1,0 +1,4 @@
+# 部署脚本必须是 LF。带 CRLF 的 shell 脚本在 Linux 上会 `bad interpreter: no such
+# file or directory` 直接死 —— 而这类脚本正是 cp 上生产机运行的那批, 在 Windows
+# 侧改一次就会被 core.autocrlf 转成 CRLF, 提交时不报错、上机才死。
+*.sh text eol=lf
