@@ -108,50 +108,162 @@ def tables_used(sql: str) -> set[str]:
 # 的口径表，逐题比对，而不是对 SQL 文本做关键字存在性判断。
 
 
-def audit_fanout(question: str, lowered: str, tables: set[str]) -> list[dict[str, str]]:
-    """COUNT(*) over a one-to-many JOIN while the question asks for a task count."""
-    if not (tables & _ONE_TO_MANY):
+def _run_scalar(connection: Any, sql: str, params: dict[str, Any]) -> Any:
+    """Execute a rewritten SQL and return its first cell, or None if it will not run."""
+    bound = _NAMED_PARAM.sub(lambda m: f"%({m.group(1)})s", sql)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(bound, params)
+            row = cursor.fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    return next(iter(row.values()), None)
+
+
+def _run_rowcount(connection: Any, sql: str, params: dict[str, Any]) -> int | None:
+    bound = _NAMED_PARAM.sub(lambda m: f"%({m.group(1)})s", sql)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(bound, params)
+            return len(cursor.fetchall())
+    except Exception:
+        return None
+
+
+def _params_for(record: dict[str, Any]) -> dict[str, Any]:
+    """Bind params, rebinding any snapshot anchor to the mock's own day."""
+    params = dict(record.get("params") or {})
+    for key in list(params):
+        if key.lower() in _AS_OF_KEYS:
+            params[key] = MOCK_AS_OF
+    for name in _NAMED_PARAM.findall(record.get("gold_sql") or ""):
+        if name not in params:
+            if name.lower() in _AS_OF_KEYS:
+                params[name] = MOCK_AS_OF
+            else:
+                return {}  # 缺参数就跑不了，交给调用方跳过
+    return params
+
+
+def audit_fanout(
+    connection: Any,
+    record: dict[str, Any],
+    question: str,
+    sql: str,
+    lowered: str,
+    tables: set[str],
+) -> list[dict[str, str]]:
+    """COUNT(*) counting rows where the question asks for a task count.
+
+    Differential execution is a hard gate here: a finding is emitted only when
+    swapping COUNT(*) for COUNT(DISTINCT t.id) actually RETURNS A DIFFERENT VALUE.
+    The previous version judged from SQL text and scored 0 true positives out of 19
+    when 42 findings were hand-checked:
+      B7-03 was flagged for "COUNT(*) over a one-to-many JOIN" -- that SQL has no
+            JOIN at all; task_progress appears only inside a NOT EXISTS anti-join,
+            so both spellings are identically 55.
+      C4-04 already collapses the child table to one row per task via
+            ROW_NUMBER() ... rn = 1, so both spellings agree there too.
+    "Could fan out" and "does fan out" are different claims; only running it tells
+    them apart.
+    """
+    if "count(*)" not in lowered or not (tables & _ONE_TO_MANY):
         return []
-    if " join task " not in lowered and "from task " not in lowered:
-        return []
-    if "count(*)" not in lowered:
-        return []
-    if "count(distinct" in lowered or "group by" in lowered:
-        return []
-    # 「问的是任务数」只能从问句判断：SQL 文本里没有中文。
     asks = "任务" in question and any(w in question for w in ("多少", "几个", "几条"))
     if not (asks or any(w in question for w in _ASKS_TASKS)):
+        return []
+    params = _params_for(record)
+    if not params and _NAMED_PARAM.search(sql):
+        return []
+    gold_value = _run_scalar(connection, sql, params)
+    if gold_value is None:
+        return []
+    # 只替换聚合本身，不动任何过滤或分组：差异就只能来自去重。
+    variant = re.sub(r"count\(\s*\*\s*\)", "COUNT(DISTINCT t.id)", sql, flags=re.IGNORECASE)
+    if variant == sql:
+        return []
+    fixed_value = _run_scalar(connection, variant, params)
+    if fixed_value is None or str(fixed_value) == str(gold_value):
         return []
     return [
         {
             "family": "rows_as_tasks",
-            "detail": "COUNT(*) 落在一对多 JOIN 上，问的是任务数却在数行数（应为 COUNT(DISTINCT t.id)）",
+            "detail": (
+                f"问的是任务数，但 COUNT(*) 数的是行数：gold 得 {gold_value}，"
+                f"换成 COUNT(DISTINCT t.id) 得 {fixed_value}（实测两值不同，确认扇出）"
+            ),
         }
     ]
 
 
-def audit_period(question: str, lowered: str, tables: set[str]) -> list[dict[str, str]]:
-    """Question scopes to the current period but the SQL keeps every period."""
+def audit_period(
+    connection: Any,
+    record: dict[str, Any],
+    question: str,
+    sql: str,
+    tables: set[str],
+) -> list[dict[str, str]]:
+    """Question scopes to one period but the SQL returns many rows per task.
+
+    Same hard gate: emit only when the measured row count EXCEEDS the number of
+    distinct tasks in the result. The previous version hunted for convergence
+    keywords (max(version_no), rn = 1, ...) and scored 0 true positives out of 6 --
+    there are too many ways to converge to enumerate, and in this corpus the word
+    used for "current period" usually means "the published snapshot" rather than
+    "the newest version" (siblings C2-02 and C2-04 are both written that way).
+    Whether rows actually outnumber tasks is a question for the database.
+    """
     if not any(word in question for word in _ASKS_PERIOD):
         return []
     if not (tables & {"task_progress", "task_group_progress_history"}):
         return []
-    converges = any(
-        token in lowered
-        for token in ("max(version_no)", "row_number()", "rn = 1", "limit 1", "max(p.version_no)", "= p.version_no")
+    params = _params_for(record)
+    if not params and _NAMED_PARAM.search(sql):
+        return []
+    rows = _run_rowcount(connection, sql, params)
+    if rows is None or rows <= 1:
+        return []
+    # 涉及任务数：把选择列换成 COUNT(DISTINCT) 不可靠（子查询形态各异），
+    # 改为把整条 SQL 包一层，数它自己返回的 task 标识有几个不同值。
+    ident = next(
+        (col for col in ("task_id", "id", "task_name") if re.search(rf"\b{col}\b", sql, re.IGNORECASE)),
+        None,
     )
-    if converges:
+    if ident is None:
+        return []
+    wrapped = f"SELECT COUNT(DISTINCT `{ident}`) AS n FROM ({sql}) AS _audit_sub"
+    tasks = _run_scalar(connection, wrapped, params)
+    if tasks is None or int(tasks) >= rows:
         return []
     return [
         {
             "family": "period_dropped",
-            "detail": "问句限定了当期/最新一期，SQL 没有任何期次收敛（会铺开全部历史期）",
+            "detail": (
+                f"问句限定当期/最新一期，但 gold 返回 {rows} 行只涉及 {tasks} 个任务"
+                f"（同一任务多期都在内，实测确认未收敛）"
+            ),
         }
     ]
 
 
-def audit_limit(question: str, sql: str) -> list[dict[str, str]]:
-    """A LIMIT the question never asked for."""
+_CN_NUMERALS = "一二三四五六七八九十两"
+
+
+def audit_limit(connection: Any, record: dict[str, Any], question: str, sql: str) -> list[dict[str, str]]:
+    """A LIMIT that truncates a set the question asked for in full.
+
+    Two failures from the previous version are closed here:
+      D4-01 asks for "the most recent three periods" -- the count is written in
+            Chinese numerals, which an Arabic-digit regex never saw.
+      D6-01's LIMIT 8 happens to equal the true row count, so the truncation is
+            inert and reporting it is noise.
+    So this version reads Chinese numerals too, and requires differential
+    execution: dropping the LIMIT must actually yield more rows. It also fires
+    only when the question asks for a complete set -- taking the head of a
+    "most recent / largest" question is legitimate.
+    """
     match = _LIMIT_N.search(sql or "")
     if not match:
         return []
@@ -159,14 +271,38 @@ def audit_limit(question: str, sql: str) -> list[dict[str, str]]:
     if n == 1:
         # LIMIT 1 常是「取最值」的合法写法，交给 sibling 检查去判并列。
         return []
-    if any(word in question.lower() for word in _ASKS_TOPN):
+    lowered_q = question.lower()
+    if any(word in lowered_q for word in _ASKS_TOPN):
         return []
     if str(n) in question:
+        return []
+    # A Chinese numeral only counts as a quantity when a measure word follows it.
+    # Matching the bare character misfired on both real defects found by hand:
+    # E6-04 and I8-04 each contain 不一致, whose 一 is not a count at all, so the
+    # two confirmed truncations were filtered out. D4-01's 最近三期 still matches,
+    # because there the numeral is followed by a measure word.
+    if re.search(rf"[{_CN_NUMERALS}](?=[期条个批位人天月年份组张次])", question):
+        return []
+    # 只有问句明确要「全部」时，截断才是缺陷。
+    if not any(word in question for word in ("有哪些", "都有", "列一下", "哪些", "全部", "各是")):
+        return []
+    params = _params_for(record)
+    if not params and _NAMED_PARAM.search(sql):
+        return []
+    gold_rows = _run_rowcount(connection, sql, params)
+    if gold_rows is None:
+        return []
+    without = _LIMIT_N.sub("", sql, count=1)
+    full_rows = _run_rowcount(connection, without, params)
+    if full_rows is None or full_rows <= gold_rows:
         return []
     return [
         {
             "family": "limit_vs_wording",
-            "detail": f"gold 用 LIMIT {n} 截断，但问句既没说「前 N 条」也没出现数字 {n}（真值可能更多）",
+            "detail": (
+                f"问句要完整集合，gold 用 LIMIT {n} 截成 {gold_rows} 行；"
+                f"去掉 LIMIT 实测 {full_rows} 行，丢了 {full_rows - gold_rows} 行"
+            ),
         }
     ]
 
@@ -383,9 +519,9 @@ def audit_bank(name: str, path: Path, connection: Any) -> dict[str, Any]:
         if sql:
             lowered = sql.lower()
             tables = tables_used(sql)
-            hits += audit_fanout(question, lowered, tables)
-            hits += audit_period(question, lowered, tables)
-            hits += audit_limit(question, sql)
+            hits += audit_fanout(connection, record, question, sql, lowered, tables)
+            hits += audit_period(connection, record, question, sql, tables)
+            hits += audit_limit(connection, record, question, sql)
             hits += audit_traps(record, lowered, tables)
             hits += audit_empty_filter(connection, sql, domain_cache)
         hits += audit_answer_values(_answer_rows(record))
