@@ -813,6 +813,25 @@ CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
             "（不含恰好 5 条的 10354/10564/u3214），问句边界取含 5"
         ),
     },
+    ("oa_biz", "V1-04"): {
+        "override_gold": {
+            "columns": ["owner_user_id", "cnt"],
+            "rows": [
+                ["10445", "4"], ["10515", "4"], ["u3208", "4"], ["u3214", "4"],
+            ],
+        },
+        "override_sql": (
+            "SELECT t.owner_user_id, COUNT(*) AS cnt FROM task t "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND t.board_id = 1 "
+            "GROUP BY t.owner_user_id HAVING cnt = (SELECT MAX(c) FROM (SELECT COUNT(*) AS c FROM task t2 "
+            "WHERE t2.is_deleted = 0 AND t2.workflow_status = 'published' AND t2.board_id = 1 "
+            "GROUP BY t2.owner_user_id) x) ORDER BY t.owner_user_id"
+        ),
+        "note": (
+            "gold 只取 LIMIT 1（10445 阎立新 4），但技术组榜首 4 人并列各 4 条"
+            "（10445/10515/u3208/u3214）；按规则 41「谁最多」并列全列，改为 4 行"
+        ),
+    },
     ("oa_biz", "C2-02"): {
         "override_gold": {"columns": ["cnt"], "rows": [["73"]]},
         "override_sql": (
