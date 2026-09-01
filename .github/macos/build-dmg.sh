@@ -559,8 +559,14 @@ if hdiutil attach "$DMG_PATH" -mountpoint "$MNT" -nobrowse -readonly >/dev/null 
     # otherwise outlive it and hold the runner's stdio open.
     smoke "=== direct exec ==="
     EXE_OUT="$BUILD_DIR/smoke-exec.txt"
-    ( "$MAIN_EXE" >"$EXE_OUT" 2>&1 & echo $! >"$BUILD_DIR/smoke.pid" ) || true
-    SMOKE_PID="$(cat "$BUILD_DIR/smoke.pid" 2>/dev/null || echo)"
+    # Backgrounded directly, NOT inside `( ... & echo $! >file )`. That form
+    # recorded the pid of a process belonging to the *subshell*, so out here it
+    # was not our child: `kill -0` still saw it, but `wait` refused it and
+    # returned **127** -- which `set -e` then turned into an abort of this whole
+    # script, before `done:` and before the verdict block below ever ran. The
+    # 127 was the probe's own bookkeeping bug, not a finding about the product.
+    "$MAIN_EXE" >"$EXE_OUT" 2>&1 &
+    SMOKE_PID=$!
 
     # 40s: the launcher seeds a ~600 MB agent tree on first run before the
     # Gateway even starts, and a hosted runner's disk is not fast.
@@ -580,11 +586,18 @@ if hdiutil attach "$DMG_PATH" -mountpoint "$MNT" -nobrowse -readonly >/dev/null 
         SMOKE_OK=1
         kill -TERM "-$SMOKE_PID" 2>/dev/null || kill -TERM "$SMOKE_PID" 2>/dev/null || true
     else
-        # Exit status is the diagnosis: 126/127 point at exec (bad interpreter,
-        # not executable), >128 is a signal -- 137/SIGKILL is what a hardened
-        # runtime or library-validation rejection looks like from out here.
-        wait "$SMOKE_PID" 2>/dev/null
-        smoke "process exited early, status $?"
+        # Exit status is the diagnosis: 2 is the CLI refusing its arguments
+        # (tyro prints a "Required options" box and never starts the Gateway),
+        # 126/127 point at exec (bad interpreter, not executable), >128 is a
+        # signal -- 137/SIGKILL is what a hardened runtime or library-validation
+        # rejection looks like from out here.
+        #
+        # `|| EXIT_ST=$?` rather than a bare `wait`: a non-zero status here is
+        # the very thing being measured, and under `set -e` a bare `wait` would
+        # abort the script instead of reporting it.
+        EXIT_ST=0
+        wait "$SMOKE_PID" 2>/dev/null || EXIT_ST=$?
+        smoke "process exited early, status $EXIT_ST"
     fi
 
     smoke "=== stdout/stderr ==="
@@ -628,12 +641,23 @@ elif [ "$SMOKE_OK" = "1" ]; then
     log "launch smoke test: exec ok but LaunchServices FAILED -- see smoke.txt"
     log "  this is the \"can't be opened\" class of failure, not a Gatekeeper one"
 else
-    # Not fatal yet: this check is new and its own false-negative modes are not
-    # yet characterised on a hosted runner (no window server, no user session).
-    # Turning it into a hard gate before that is understood would block every
-    # build on the probe rather than on the product.
+    # Now fatal. The earlier note here said this probe's false-negative modes
+    # were "not yet characterised on a hosted runner (no window server, no user
+    # session)" and therefore must not gate. That reasoning applies to `open -a`
+    # -- LaunchServices genuinely needs a GUI session, and the quarantined call
+    # above can only return "undetermined" here -- but it does NOT apply to
+    # SMOKE_OK, which comes from a direct exec(2). That path needs no window
+    # server, no user session and no policy layer: the binary either stays up or
+    # hands back a status. It is fully determined headlessly, so the only thing
+    # keeping it non-fatal was the earlier PID bug making its status unreadable.
+    #
+    # This is why the gate lands on SMOKE_OK alone. LS_OK and QUARANTINE_OK stay
+    # advisory above, because a red there can mean "no GUI session" rather than
+    # "broken product" -- gating on them would block builds on the probe.
     log "launch smoke test: FAILED -- see smoke.txt above"
-    log "  this is the \"can't be opened\" class of failure, not a Gatekeeper one"
+    log "  the app does not stay up under a direct exec; a dmg built from this"
+    log "  would install, pass Gatekeeper, and die on launch"
+    die "launch smoke test failed: the built app does not run"
 fi
 
 log "done: $DMG_PATH"
