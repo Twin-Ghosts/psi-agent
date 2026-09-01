@@ -4153,19 +4153,20 @@ async def run() -> int:
     )
 
     # 规则信号题的文本检查出口（G-E01/E02/D05）：正则与判定固化在服务端，
-    # 数字与扫描口径（每任务最新一期已发布进展）必须钉死，模型不能自己翻正文数。
+    # 数字与扫描口径（每任务最新一期已发布进展，含集团看板任务）必须钉死，
+    # 模型不能自己翻正文数。
     conflict = await _call(registry, "weekly_progress_coverage", scope="text_check", rule="number_conflict")
     check(
-        "text_check number_conflict 9 项硬冲突、4 项阶段和超 100",
+        "text_check number_conflict 15 项硬冲突、10 项阶段和超 100",
         conflict.get("ok") is True
-        and str(conflict.get("hard_conflict_count")) == "9"
-        and str(conflict.get("sum_anomaly_count")) == "4",
+        and str(conflict.get("hard_conflict_count")) == "15"
+        and str(conflict.get("sum_anomaly_count")) == "10",
         f"hard={conflict.get('hard_conflict_count')} sum={conflict.get('sum_anomaly_count')}",
     )
     avail = await _call(registry, "weekly_progress_coverage", scope="text_check", rule="availability")
     check(
-        "text_check availability 低于 90% 共 13 项",
-        avail.get("ok") is True and str(avail.get("row_count")) == "13",
+        "text_check availability 低于 90% 共 19 项",
+        avail.get("ok") is True and str(avail.get("row_count")) == "19",
         f"rows={avail.get('row_count')}",
     )
     kw = await _call(registry, "weekly_progress_coverage", scope="text_check", rule="keyword")
@@ -4185,6 +4186,46 @@ async def run() -> int:
         "text_check 不支持的规则报 unsupported_rule",
         bad.get("ok") is False and bad.get("error", {}).get("code") == "unsupported_rule",
         str(bad.get("error")),
+    )
+    allv = await _call(
+        registry, "weekly_progress_coverage", scope="text_check", rule="number_conflict", all_versions=True
+    )
+    check(
+        "text_check all_versions 扫全部版本（任务 103 的 V8 冲突出现，> 最新期 15 条）",
+        allv.get("ok") is True and int(allv.get("row_count", 0)) > 15,
+        f"rows={allv.get('row_count')}",
+    )
+    t103 = await _call(
+        registry, "weekly_progress_coverage", scope="text_check", rule="number_conflict", task="103", all_versions=True
+    )
+    t103_hits = {(r.get("version_no")) for r in t103.get("rows") or []}
+    check(
+        "text_check task=103 all_versions 命中 V8（G-P04）",
+        t103.get("ok") is True and 8 in t103_hits,
+        f"versions={sorted(t103_hits)}",
+    )
+    orphan = await _call(registry, "weekly_progress_coverage", scope="orphan_records")
+    check(
+        "孤儿记录 2 条无任务进展 + 2 条无提交单动作（G-E03）",
+        str(_first(orphan, "orphan_progress_rows")) == "2" and str(_first(orphan, "orphan_actions")) == "2",
+        str(orphan.get("rows")),
+    )
+    fc = await _call(registry, "weekly_progress_coverage", scope="formal_coverage")
+    check(
+        "formal_coverage 128 正式任务 / 119 有正式进展 / 93.0%（G-B01）",
+        str(_first(fc, "formal_task_count")) == "128"
+        and str(_first(fc, "tasks_with_progress")) == "119"
+        and str(_first(fc, "coverage_pct")) == "93.0",
+        str(fc.get("rows")),
+    )
+    series = await _call(registry, "weekly_aggregate", group_by="name_series")
+    check(
+        "name_series 33 个多期家族、97 条任务、总家族 64（G-D04）",
+        str(series.get("multi_member_families")) == "33"
+        and str(series.get("tasks_in_families")) == "97"
+        and str(series.get("families_total")) == "64",
+        f"multi={series.get('multi_member_families')} "
+        f"tasks={series.get('tasks_in_families')} total={series.get('families_total')}",
     )
 
     # OA-F6-02：项目团队人数在 task 行上，此前无排名度量。

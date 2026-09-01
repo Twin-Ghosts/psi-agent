@@ -50,7 +50,7 @@
   "E07": "verified",
   "E08": "partly_defective",
   "E09": "verified",
-  "E10": "partly_defective",
+  "E10": "verified",
   "F01": "verified",
   "F02": "partly_defective",
   "F03": "verified",
@@ -88,7 +88,7 @@
   "P01": "verified",
   "P02": "verified",
   "P03": "verified",
-  "P04": "partly_defective",
+  "P04": "verified",
   "P05": "verified",
   "P06": "verified"
 }

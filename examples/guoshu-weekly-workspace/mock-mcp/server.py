@@ -536,7 +536,8 @@ def weekly_aggregate(
 
     Args:
         group_by: One of board / category / primary_category / status /
-            project_group / owner.
+            project_group / owner / name_series (同名系列任务家族, 去掉
+            trailing "(N期)" suffix before grouping).
         board: Optional board code or name to scope the aggregation.
         metric: Only "count" is supported in the demo.
         top: When > 0, hard-cut to that many groups after the ordering. "任务最多
@@ -693,13 +694,24 @@ def weekly_aggregate(
                 "SELECT IFNULL(NULLIF(TRIM(t.lead_owner_name),''),'(未填)') AS group_name, "
                 f"COUNT(*) AS cnt FROM task t WHERE {scope} GROUP BY group_name ORDER BY cnt DESC, group_name"
             )
+        elif group_by == "name_series":
+            # 「同名系列（分期）任务」：任务名去掉尾部的（2期）/（3期）… 后
+            # 归并成家族。问「有多少分期项目可能被重复统计」用它：多期家族数、
+            # 涉及任务数、占正式任务比例一次给全；家族内按 task id 升序。
+            sql = (
+                "SELECT REGEXP_REPLACE(t.task_name, '（[0-9]+期）$', '') AS family_name, "
+                "COUNT(*) AS cnt, "
+                "GROUP_CONCAT(t.id ORDER BY t.id SEPARATOR ',') AS task_ids "
+                f"FROM task t WHERE {scope} "
+                "GROUP BY family_name ORDER BY cnt DESC, family_name"
+            )
         else:
             return {
                 "ok": False,
                 "error": {
                     "code": "unsupported_group_by",
                     "message": "group_by 支持 board / category / primary_category / "
-                    "top_sub_per_primary / status / workflow_status / project_group / owner",
+                    "top_sub_per_primary / status / workflow_status / project_group / owner / name_series",
                 },
             }
         caliber = f"{store.FORMAL_TASK_CALIBER}；LEFT JOIN 保留空分组（R-02/R-08）"
@@ -776,6 +788,13 @@ def weekly_aggregate(
                 )
             else:
                 caliber += "；本次按任务数定序，问「完成率最低/最高的几个组」请加 order_by=finish_rate"
+        elif group_by == "name_series":
+            caliber = (
+                f"{store.FORMAL_TASK_CALIBER}；同名系列 = 任务名去掉尾部「（N期）」后缀后"
+                "归并成的家族（如「数据资源登记体系建设」与其 2/3/4 期）；"
+                "cnt 是该家族任务数，task_ids 是家族内任务 id 列表（升序）；"
+                "单期任务也是独立家族，问「重复统计风险」看多期家族"
+            )
         cut = 0
         if top:
             try:
@@ -795,6 +814,19 @@ def weekly_aggregate(
             )
         result = store.fetch(sql, params, caliber=caliber, limit=cut or store.MAX_ROWS)
         result["group_by"] = group_by
+        if group_by == "name_series":
+            # 「重复统计风险」的答案 = 多期家族数 + 涉及任务数 + 占比，服务端一次算完：
+            # 让模型自己数 rows 里的 cnt > 1 会漏（家族多、截断或只看前几行）。
+            rows_list = result.get("rows") or []
+            multi = [r for r in rows_list if int(r.get("cnt") or 0) > 1]
+            result["multi_member_families"] = len(multi)
+            result["tasks_in_families"] = sum(int(r.get("cnt") or 0) for r in multi)
+            result["families_total"] = len(rows_list)
+            result["caliber"] += (
+                "；问「有多少分期项目可能被重复统计」报 multi_member_families / "
+                "tasks_in_families / 占比（= tasks_in_families / 正式任务总数），"
+                "不要拿全部家族数 families_total 当答案——单期家族不算重复统计风险"
+            )
         if cut:
             result["total_groups"] = tied_total["value"]
         if group_by == "workflow_status":
@@ -2697,6 +2729,7 @@ _TURNAROUND_SCOPES = ("summary", "board", "slowest", "pending")
 # unpublished_by_task 再往下一层，落到「哪些任务挂着未发布进展」的逐任务清单。
 _COVERAGE_SCOPES = (
     "summary",
+    "formal_coverage",
     "publish_split",
     "import_split",
     "unpublished",
@@ -2710,6 +2743,7 @@ _COVERAGE_SCOPES = (
     "missing_next",
     "backfill",
     "text_check",
+    "orphan_records",
 )
 
 # 「最新一期」的定序键：version_no 大者为新，同期再按 id 兜底，两级都要。
@@ -2739,11 +2773,19 @@ _COORD_RE = re.compile(r"协调|协同|联动|牵头组织")
 _TEXT_RULES = ("number_conflict", "availability", "keyword")
 
 
-def _text_check(rule: str, keyword: str, clause: str) -> dict[str, Any]:
-    """Run one text rule over each task's latest published progress round.
+def _text_check(
+    rule: str,
+    keyword: str,
+    clause: str,
+    task: str = "",
+    all_versions: bool = False,
+) -> dict[str, Any]:
+    """Run one text rule over published progress rounds.
 
-    Returns the standard envelope; the scan itself is unbounded server-side
-    (``store.all_rows``), only the returned rows are capped.
+    Default scans each task's LATEST published round (the "当前进展" semantics).
+    ``all_versions=True`` scans every published round -- for "历史哪一版出现过
+    冲突" questions (e.g. 任务 103 的 V8).  ``task`` narrows to one task by id or
+    exact name.
     """
     rule = (rule or "").strip().lower()
     if rule not in _TEXT_RULES:
@@ -2754,15 +2796,48 @@ def _text_check(rule: str, keyword: str, clause: str) -> dict[str, Any]:
                 "message": f"不支持的规则：{rule or '(空)'}；支持 {', '.join(_TEXT_RULES)}",
             },
         }
-    rows = store.all_rows(
-        "SELECT t.id AS task_id, t.task_name, p.version_no, p.latest_progress, p.next_work "
-        f"FROM task t JOIN {_LATEST_PROGRESS_CTE} p ON p.task_id = t.id AND p.rn = 1 "
-        f"WHERE {clause} ORDER BY t.id"
+    latest_cte = (
+        _LATEST_PROGRESS_CTE if not all_versions else "(SELECT p.* FROM task_progress p WHERE p.is_published = 1)"
     )
+    rn_join = " AND p.rn = 1" if not all_versions else ""
+    params: dict[str, Any] = {}
+    task_clause = ""
+    task_key = task.strip()
+    if task_key:
+        resolved = store.resolve_task_id(task_key)
+        if resolved is None:
+            return {
+                "ok": False,
+                "error": {"code": "task_not_found", "message": f"任务不存在：{task_key}"},
+            }
+        params["tid"] = resolved
+        task_clause = " AND t.id = %(tid)s"
+    # 进展正文在两处：技术看板在 task_progress，集团看板在 task_group_progress_history。
+    # 只扫 task_progress 会漏掉集团任务的历史版本（任务 103 的 V8 冲突就在集团历史表里）。
+    # 两张表各自取（latest 模式各取最新一期；all_versions 模式取全部已发布行），
+    # 再合并成同一行集供规则扫描。
+    hist_latest = ""
+    if not all_versions:
+        hist_latest = (
+            " AND h.version_no = (SELECT MAX(h2.version_no) FROM task_group_progress_history h2 "
+            "WHERE h2.task_id = h.task_id AND h2.is_published = 1)"
+        )
+    rows = store.all_rows(
+        "SELECT t.id AS task_id, t.task_name, p.version_no, p.latest_progress AS progress_text, "
+        f"p.next_work FROM task t JOIN {latest_cte} p ON p.task_id = t.id{rn_join} "
+        f"WHERE {clause}{task_clause}",
+        params,
+    ) + store.all_rows(
+        "SELECT t.id AS task_id, t.task_name, h.version_no, h.progress_effect AS progress_text, "
+        f"'' AS next_work FROM task_group_progress_history h JOIN task t ON t.id = h.task_id "
+        f"WHERE {clause} AND h.is_published = 1{hist_latest}{task_clause}",
+        params,
+    )
+    rows.sort(key=lambda r: (r["task_id"], r["version_no"]))
     if rule == "availability":
         hits: list[dict[str, Any]] = []
         for r in rows:
-            m = _AVAIL_RE.search(r.get("latest_progress") or "")
+            m = _AVAIL_RE.search(r.get("progress_text") or "")
             if m and float(m.group(1)) < 90:
                 hits.append(
                     {
@@ -2815,7 +2890,7 @@ def _text_check(rule: str, keyword: str, clause: str) -> dict[str, Any]:
     # number_conflict: 硬冲突 = 报批/征求数大于草案数；阶段和异常 = 草案+报批+征求 > 100。
     hits = []
     for r in rows:
-        text = f"{r.get('latest_progress') or ''} {r.get('next_work') or ''}"
+        text = f"{r.get('progress_text') or ''} {r.get('next_work') or ''}"
         d = _DRAFT_RE.findall(text)
         rp = _REPORT_RE.findall(text)
         cs = _CONSULT_RE.findall(text)
@@ -3405,6 +3480,8 @@ def weekly_progress_coverage(
     limit: int = 200,
     rule: str = "",
     keyword: str = "",
+    task: str = "",
+    all_versions: bool = False,
 ) -> str:
     """Summarise how far back published progress goes and how much it covers.
 
@@ -3512,13 +3589,66 @@ def weekly_progress_coverage(
             rows["total_count"] = total["value"]
             return rows
 
+        if key == "formal_coverage":
+            # 「正式周报覆盖率」：两张正式进展表各算各的（技术组 task_progress、
+            # 集团组 task_group_progress_history），并集 = 有正式进展的任务数。
+            # 单独看任何一张表都会漏掉另一看板（summary 的 tasks_covered 73 只含
+            # 技术组；集团组 46 条成效写在历史表）；128 - 9 = 119 的两张表都没有
+            # 的口径已在 never_reported 里，这里直接给并集与覆盖率。
+            covered = store.scalar(
+                f"SELECT COUNT(*) FROM task t WHERE {clause} AND ("
+                "EXISTS (SELECT 1 FROM task_progress p WHERE p.task_id = t.id AND p.is_published = 1) "
+                "OR EXISTS (SELECT 1 FROM task_group_progress_history h "
+                "WHERE h.task_id = t.id AND h.is_published = 1))",
+            )
+            total = store.scalar(f"SELECT COUNT(*) FROM task t WHERE {clause}")
+            return {
+                "ok": True,
+                "columns": ["formal_task_count", "tasks_with_progress", "coverage_pct"],
+                "rows": [
+                    {
+                        "formal_task_count": total["value"],
+                        "tasks_with_progress": covered["value"],
+                        "coverage_pct": round(covered["value"] / total["value"] * 100, 1),
+                    }
+                ],
+                "row_count": 1,
+                "has_more": False,
+                "caliber": (
+                    f"{store.FORMAL_TASK_CALIBER}；覆盖率 = 两张正式进展表（技术组 "
+                    "task_progress / 集团组 task_group_progress_history）并集的任务数 "
+                    "除以正式任务总数；任何一张表的单独口径都会漏掉另一看板，"
+                    "不要用 scope=summary 的 tasks_covered 代答"
+                ),
+                "snapshot_note": store.SNAPSHOT_NOTE,
+            }
+
         if key == "text_check":
             # 规则信号题的服务端出口：数字冲突/可用性/关键词三类文本规则检查。
             # 此前这些题让模型自己从正文里数——要么 max_rounds，要么方向不符；
             # 正则与判定固化在服务端，模型只需调一次并照抄结果。
-            # 扫描范围 = 每任务最新一期已发布进展（与 latest_round 同一套定序），
-            # 因为问「当前/最新进展」的规则题不应该拿历史期凑数。
-            return _text_check(rule, keyword, clause)
+            # 默认扫描每任务最新一期已发布进展；all_versions=True 扫全部版本
+            # （问「历史哪一版出过冲突」时用），task= 可限定单任务。
+            return _text_check(rule, keyword, clause, task, all_versions)
+
+        if key == "orphan_records":
+            # 「数据有没有孤儿记录」：进展行挂不到任务、审批动作挂不到提交单。
+            # 两张表各自 NOT EXISTS 判，一次给全（各 2 条）；模型翻附件表/导入批次
+            # 去答会答成另一类孤儿（G-E03 曾指到附件孤儿上）。
+            return store.fetch(
+                "SELECT "
+                "(SELECT COUNT(*) FROM task_progress p LEFT JOIN task t ON t.id = p.task_id "
+                "WHERE t.id IS NULL) AS orphan_progress_rows, "
+                "(SELECT COUNT(*) FROM task_workflow_action a "
+                "LEFT JOIN task_workflow_submission s ON s.id = a.submission_id "
+                "WHERE s.id IS NULL) AS orphan_actions ",
+                caliber=(
+                    "孤儿 = 外键指向查不到的记录（NOT EXISTS 语义）：进展行无对应任务、"
+                    "审批动作无对应提交单；外键为空是「没走那条路」不算孤儿。"
+                    "当前 2 条孤儿进展行 + 2 条孤儿审批动作"
+                ),
+                limit=1,
+            )
 
         if key == "backfill":
             # 「补报」= 期次小的那一期反而提交得更晚，判据是相邻两期的 report_time
@@ -6323,6 +6453,7 @@ def weekly_health() -> str:
             "ok": True,
             "store": _db.DSN_DESCRIPTION,
             "table_count": len(counts),
+            "total_rows": sum(counts.values()),
             "row_counts": counts,
             "caliber": store.FORMAL_TASK_CALIBER,
             "snapshot_note": "演示数据（weekly_mock 自建库），非集团真实周报",

@@ -536,6 +536,8 @@ async def weekly_progress_coverage(
     limit: int = 200,
     rule: str = "",
     keyword: str = "",
+    task: str = "",
+    all_versions: bool = False,
 ) -> str:
     """Summarise progress history depth: row count, tasks covered, date span, max version.
 
@@ -637,7 +639,15 @@ async def weekly_progress_coverage(
         return _invalid("limit must be an integer")
     return await _call(
         "weekly_progress_coverage",
-        {"scope": scope, "project_group": project_group, "limit": bounded, "rule": rule, "keyword": keyword},
+        {
+            "scope": scope,
+            "project_group": project_group,
+            "limit": bounded,
+            "rule": rule,
+            "keyword": keyword,
+            "task": task,
+            "all_versions": all_versions,
+        },
     )
 
 
