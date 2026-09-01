@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Bot, Trash2 } from 'lucide-react'
+import { Bot, Pencil, Trash2 } from 'lucide-react'
 import type { AiInfo } from '../../services/api'
 import { createAi, deleteAi, listAis } from '../../services/api'
 import {
   aiConfigKey,
   DEFAULT_REMOTE_AI,
-  dedupeAisForDisplay,
   hydrateAiForSessions,
   isPlaceholderAi,
+  labelAisForDisplay,
+  readAiAlias,
+  writeAiAlias,
   writeStoredAiId,
 } from '../../services/bootstrapAi'
 import {
@@ -46,15 +48,19 @@ export default function HubModelsPanel({
   const [apiKey, setApiKey] = useState('')
   const [connecting, setConnecting] = useState(false)
   const [pendingConnectedId, setPendingConnectedId] = useState<string | null>(null)
+  /** Bumps when aliases change so ``labelAisForDisplay`` re-reads localStorage. */
+  const [aliasEpoch, setAliasEpoch] = useState(0)
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
 
   const preset = useMemo(
     () => (presetId ? getModelPreset(presetId) : undefined),
     [presetId],
   )
 
-  const visibleAis = useMemo(
-    () => dedupeAisForDisplay(ais, selectedAiId),
-    [ais, selectedAiId],
+  const visibleRows = useMemo(
+    () => labelAisForDisplay(ais, selectedAiId),
+    [ais, selectedAiId, aliasEpoch],
   )
   const labelFor = (p: ModelPreset) => t(`presetModel.${p.id}.label`)
   const hintFor = (p: ModelPreset) => t(`presetModel.${p.id}.hint`)
@@ -65,6 +71,8 @@ export default function HubModelsPanel({
     setApiKey('')
     setConnecting(false)
     setPendingConnectedId(null)
+    setRenamingId(null)
+    setRenameDraft('')
     void listAis()
       .then((list) => {
         setAis(list)
@@ -135,9 +143,8 @@ export default function HubModelsPanel({
     }
   }
 
-  const removeAi = async (a: AiInfo) => {
-    const name = a.model || a.id
-    if (!window.confirm(t('models.confirmDelete', { name }))) return
+  const removeAi = async (a: AiInfo, displayName: string) => {
+    if (!window.confirm(t('models.confirmDelete', { name: displayName }))) return
     // One row can represent several same-config instances (e.g. free remotes
     // revived per Session); delete the whole config group in one click.
     const group = ais.filter((x) => aiConfigKey(x) === aiConfigKey(a))
@@ -145,18 +152,46 @@ export default function HubModelsPanel({
     const removedSelected = selectedAiId != null && groupIds.has(selectedAiId)
     try {
       await Promise.all(group.map((x) => deleteAi(x.id)))
+      writeAiAlias(a, null)
       if (removedSelected) {
         onSelectAi(null)
         writeStoredAiId(null)
       }
       setPendingConnectedId((cur) => (cur && groupIds.has(cur) ? null : cur))
+      if (renamingId && groupIds.has(renamingId)) {
+        setRenamingId(null)
+        setRenameDraft('')
+      }
       const list = await listAis()
       setAis(list)
       onAisChanged?.(list)
-      onToast?.(t('models.deleted', { name }))
+      setAliasEpoch((n) => n + 1)
+      onToast?.(t('models.deleted', { name: displayName }))
     } catch (e) {
       onToast?.(e instanceof Error ? e.message : t('models.deleteFailed'))
     }
+  }
+
+  const beginRename = (a: AiInfo, currentTitle: string) => {
+    setPendingConnectedId(null)
+    setPresetId(null)
+    setApiKey('')
+    setRenamingId(a.id)
+    // Draft = stored alias, else model (strip any auto `` (n)`` from the row title).
+    setRenameDraft(readAiAlias(a) ?? a.model ?? currentTitle.replace(/ \(\d+\)$/, ''))
+  }
+
+  const commitRename = (a: AiInfo) => {
+    writeAiAlias(a, renameDraft)
+    setRenamingId(null)
+    setRenameDraft('')
+    setAliasEpoch((n) => n + 1)
+    onToast?.(renameDraft.trim() ? t('models.renamed') : t('models.renameCleared'))
+  }
+
+  const cancelRename = () => {
+    setRenamingId(null)
+    setRenameDraft('')
   }
 
   return (
@@ -200,38 +235,85 @@ export default function HubModelsPanel({
         </>
       )}
     >
-      {visibleAis.length > 0 && (
+      {visibleRows.length > 0 && (
         <section className="hub-section">
           <h4>{t('models.connectedSection')}</h4>
           <ul className="hub-ai-list">
-            {visibleAis.map((a) => (
+            {visibleRows.map(({ ai: a, title, subtitle }) => (
               <li key={a.id}>
                 <div className="hub-ai-row-wrap">
-                  <button
-                    type="button"
-                    className={`hub-ai-row ${a.id === selectedAiId || a.id === pendingConnectedId ? 'active' : ''}`}
-                    onClick={() => {
-                      setPendingConnectedId(a.id)
-                      setPresetId(null)
-                      setApiKey('')
-                    }}
-                  >
-                    <Bot size={18} />
-                    <span className="hub-ai-info">
-                      <strong>{a.model || a.id}</strong>
-                      <em>{a.provider}</em>
-                    </span>
-                    {a.id === selectedAiId ? <span className="hub-badge">{t('models.current')}</span> : a.id === pendingConnectedId ? <span className="hub-badge">{t('models.pendingConnect')}</span> : null}
-                  </button>
-                  <button
-                    type="button"
-                    className="hub-ai-delete"
-                    onClick={() => void removeAi(a)}
-                    aria-label={t('models.deleteAria', { model: a.model || a.id })}
-                    title={t('models.delete')}
-                  >
-                    <Trash2 size={15} />
-                  </button>
+                  {renamingId === a.id ? (
+                    <div className="hub-ai-rename">
+                      <input
+                        type="text"
+                        value={renameDraft}
+                        placeholder={a.model || a.id}
+                        autoFocus
+                        aria-label={t('models.renameAria')}
+                        onChange={(e) => setRenameDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault()
+                            commitRename(a)
+                          } else if (e.key === 'Escape') {
+                            e.preventDefault()
+                            cancelRename()
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="hub-btn primary soft"
+                        onClick={() => commitRename(a)}
+                      >
+                        {t('models.renameSave')}
+                      </button>
+                      <button
+                        type="button"
+                        className="hub-btn"
+                        onClick={cancelRename}
+                      >
+                        {t('models.renameCancel')}
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        className={`hub-ai-row ${a.id === selectedAiId || a.id === pendingConnectedId ? 'active' : ''}`}
+                        onClick={() => {
+                          setPendingConnectedId(a.id)
+                          setPresetId(null)
+                          setApiKey('')
+                        }}
+                      >
+                        <Bot size={18} />
+                        <span className="hub-ai-info">
+                          <strong>{title}</strong>
+                          <em>{subtitle}</em>
+                        </span>
+                        {a.id === selectedAiId ? <span className="hub-badge">{t('models.current')}</span> : a.id === pendingConnectedId ? <span className="hub-badge">{t('models.pendingConnect')}</span> : null}
+                      </button>
+                      <button
+                        type="button"
+                        className="hub-ai-rename-btn"
+                        onClick={() => beginRename(a, title)}
+                        aria-label={t('models.renameAriaFor', { name: title })}
+                        title={t('models.rename')}
+                      >
+                        <Pencil size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        className="hub-ai-delete"
+                        onClick={() => void removeAi(a, title)}
+                        aria-label={t('models.deleteAria', { model: title })}
+                        title={t('models.delete')}
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </>
+                  )}
                 </div>
               </li>
             ))}
@@ -250,6 +332,7 @@ export default function HubModelsPanel({
               title={hintFor(p) || p.label}
               onClick={() => {
                 setPendingConnectedId(null)
+                setRenamingId(null)
                 setPresetId(p.id)
                 setApiKey('')
               }}

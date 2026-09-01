@@ -1,0 +1,17 @@
+---
+description: spa-v2 改完必须立刻 npm run build（Gateway 挂 dist）
+globs: src/psi_agent/gateway/desktop/spa-v2/**
+alwaysApply: false
+---
+
+# spa-v2：改完即 build
+
+验收默认走 Gateway 挂载的 `spa-v2/dist`（如 `http://127.0.0.1:8765/`），**不是** Vite HMR。
+
+每次改完本目录源码（tsx/ts/css/html 等）后，**同一回合内立刻**：
+
+```bash
+cd src/psi_agent/gateway/desktop/spa-v2 && npm run build
+```
+
+然后告知用户硬刷页面。不要等用户问「build 了吗」。纯文档（仅 `AGENTS.md`）改动可跳过 build。

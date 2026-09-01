@@ -72,8 +72,14 @@ async def _handle_spa_v2_index(request: web.Request) -> web.Response:
     if template is None:
         return _error("SPA v2 index.html not found", status=404)
     body = inject_app_name(template, app_name)
-    return web.Response(text=body, content_type="text/html", charset="utf-8")
-
+    # index 引用带 hash 的 JS；若浏览器缓存旧 index，会一直打到旧 bundle（改完 build
+    # 却看不到 UI）。刻意 no-store，资产文件仍可由 static 长期缓存。
+    return web.Response(
+        text=body,
+        content_type="text/html",
+        charset="utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
 
 async def _handle_favicon(request: web.Request) -> web.FileResponse:
     favicon_path: str = request.app["favicon_path"]

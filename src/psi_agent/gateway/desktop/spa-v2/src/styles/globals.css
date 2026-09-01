@@ -913,14 +913,24 @@ textarea:focus-visible {
 }
 
 .workspace-empty {
-  max-width: 630px;
-  margin: 12vh auto 0;
+  /* 铺满 main-stage（右侧整栏），内容块几何居中；勿用 12vh 顶推，会显右上偏。 */
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  max-width: none;
+  margin: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 18px;
   text-align: center;
   color: #5a6b7a;
+  pointer-events: none;
+}
+
+.workspace-empty > * {
+  pointer-events: auto;
 }
 
 .workspace-empty h1 {
@@ -932,6 +942,7 @@ textarea:focus-visible {
 
 .workspace-empty p {
   margin: 0 0 12px;
+  max-width: 630px;
   font-size: 20px;
   line-height: 1.55;
 }
@@ -959,6 +970,8 @@ textarea:focus-visible {
 }
 
 .stage-topbar {
+  position: relative;
+  z-index: 2;
   height: 42px;
   display: flex;
   align-items: center;

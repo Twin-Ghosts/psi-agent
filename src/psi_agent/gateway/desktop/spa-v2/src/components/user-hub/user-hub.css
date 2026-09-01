@@ -426,6 +426,7 @@
   min-width: 0;
 }
 
+.hub-ai-rename-btn,
 .hub-ai-delete {
   width: 34px;
   height: 34px;
@@ -439,9 +440,40 @@
   cursor: pointer;
 }
 
+.hub-ai-rename-btn:hover {
+  color: var(--brand-600);
+  background: rgba(var(--brand-rgb), 0.1);
+}
+
 .hub-ai-delete:hover {
   color: #d64545;
   background: rgba(214, 69, 69, 0.1);
+}
+
+.hub-ai-rename {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hub-ai-rename input {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(var(--brand-rgb), 0.45);
+  background: #fff;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.hub-ai-rename .hub-btn {
+  height: 34px;
+  padding: 0 10px;
+  flex-shrink: 0;
 }
 
 .hub-ai-info {

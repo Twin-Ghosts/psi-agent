@@ -5,8 +5,12 @@ import {
   DEFAULT_REMOTE_AI,
   hydrateAiForSessions,
   isPlaceholderAi,
+  labelAisForDisplay,
+  maskApiKeyTip,
   pickPreferredAi,
   PLACEHOLDER_API_KEY,
+  readAiAlias,
+  writeAiAlias,
 } from './bootstrapAi'
 
 vi.mock('./api', () => ({
@@ -16,6 +20,23 @@ vi.mock('./api', () => ({
 }))
 
 import { createAi, deleteAi, listAis } from './api'
+
+/** Node vitest has no DOM storage; alias helpers need a minimal stub. */
+function stubLocalStorage() {
+  const store = new Map<string, string>()
+  vi.stubGlobal('localStorage', {
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      store.set(k, String(v))
+    },
+    removeItem: (k: string) => {
+      store.delete(k)
+    },
+    clear: () => {
+      store.clear()
+    },
+  })
+}
 
 const ai = (partial: Partial<AiInfo> & Pick<AiInfo, 'id' | 'api_key'>): AiInfo => ({
   id: partial.id,
@@ -71,6 +92,62 @@ describe('dedupeAisForDisplay', () => {
     const free = ai({ id: 'free', api_key: PLACEHOLDER_API_KEY, provider: 'openai' })
     const real = ai({ id: 'real', api_key: 'sk-real', provider: 'openai' })
     expect(dedupeAisForDisplay([free, real]).map((x) => x.id).sort()).toEqual(['free', 'real'])
+  })
+})
+
+describe('labelAisForDisplay', () => {
+  beforeEach(() => {
+    stubLocalStorage()
+  })
+
+  it('numbers colliding model names and tags free vs own key', () => {
+    const free = ai({
+      id: 'free',
+      api_key: PLACEHOLDER_API_KEY,
+      provider: 'openai',
+      model: 'deepseek-v4-flash',
+      base_url: 'https://account.genuineknowledge.cn/llm/v1',
+    })
+    const paidA = ai({ id: 'a', api_key: 'sk-aaaa1111', model: 'deepseek-v4-flash' })
+    const paidB = ai({ id: 'b', api_key: 'sk-bbbb2222', model: 'deepseek-v4-flash' })
+    const rows = labelAisForDisplay([free, paidA, paidB])
+    expect(rows.map((r) => r.title)).toEqual([
+      'deepseek-v4-flash (1)',
+      'deepseek-v4-flash (2)',
+      'deepseek-v4-flash (3)',
+    ])
+    expect(rows[0]?.subtitle).toContain('免费')
+    expect(rows[1]?.subtitle).toContain('···1111')
+    expect(rows[2]?.subtitle).toContain('···2222')
+  })
+
+  it('uses alias as title and still numbers collisions', () => {
+    const a = ai({ id: 'a', api_key: 'sk-a', model: 'm' })
+    const b = ai({ id: 'b', api_key: 'sk-b', model: 'm' })
+    writeAiAlias(a, '工作')
+    writeAiAlias(b, '工作')
+    const rows = labelAisForDisplay([a, b])
+    expect(rows.map((r) => r.title)).toEqual(['工作 (1)', '工作 (2)'])
+  })
+})
+
+describe('maskApiKeyTip / aliases', () => {
+  beforeEach(() => {
+    stubLocalStorage()
+  })
+
+  it('masks to last 4', () => {
+    expect(maskApiKeyTip('sk-abcdefgh')).toBe('···efgh')
+    expect(maskApiKeyTip('')).toBe('无 Key')
+  })
+
+  it('stores aliases by config key', () => {
+    const a = ai({ id: 'a', api_key: 'sk-x' })
+    const twin = ai({ id: 'other-id', api_key: 'sk-x' })
+    writeAiAlias(a, '办公室')
+    expect(readAiAlias(twin)).toBe('办公室')
+    writeAiAlias(a, '')
+    expect(readAiAlias(twin)).toBeNull()
   })
 })
 
