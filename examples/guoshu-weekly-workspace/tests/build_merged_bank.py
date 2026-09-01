@@ -555,6 +555,58 @@ CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
             "（规则 62），改为全量 17 行"
         ),
     },
+    ("nl2sql", "F5-04"): {
+        "override_gold": {
+            "columns": ["task_name", "project_owner_names", "owner_count"],
+            "rows": [
+                ["数据资产入表试点推进", "胡建国,方永康,邓少华", "3"],
+                ["国企改革深化提升行动落实", "卢志刚,孙立群,吴晓东", "3"],
+                ["数据合规风控体系建设", "邹家骏,翁立诚,卢志刚", "3"],
+                ["数据要素综合试验区建设", "韩雪峰、杜金龙、葛正山", "3"],
+                ["跨区域数据交易互联互通", "曹瑞卿,吴晓东,常思远", "3"],
+                ["标注产业生态培育", "许文清,郑亚楠,阎立新", "3"],
+                ["市场化经营机制建设", "方永康,秦怀瑾,韩雪峰", "3"],
+                ["全流程合规审查机制建设", "秦怀瑾,卢志刚,韩雪峰", "3"],
+                ["国家级数据标注基地建设（2期）", "贾晓峰,任建华,金鹏程", "3"],
+                ["重点行业数据空间试点（2期）", "吴晓东,潘启明,常思远", "3"],
+                ["数据要素生态联合体组建（2期）", "方永康,宋佳明,卢志刚", "3"],
+                ["集团数据治理体系建设（2期）", "马跃进,梁焕新,唐立本", "3"],
+                ["数据要素综合试验区建设（2期）", "韩雪峰,曹瑞卿,蔡宏博", "3"],
+                ["数据资产入表试点推进（3期）", "崔明志,潘启明,孙立群", "3"],
+                ["数字中国建设重点工程支撑（3期）", "马跃进,邓少华,袁世豪", "3"],
+                ["一体化算力网体系建设（3期）", "陆嘉树,蔡宏博,苏明哲", "3"],
+                ["重点行业数据空间试点（3期）", "罗小川,范修远,钟守正", "3"],
+            ],
+        },
+        "override_sql": (
+            "SELECT t.task_name, d.project_owner_names, "
+            "(CHAR_LENGTH(d.project_owner_names) - CHAR_LENGTH(REPLACE(REPLACE(d.project_owner_names, ',', ''), '、', '')) + 1) AS owner_count "
+            "FROM task_group_detail d JOIN task t ON t.id = d.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND d.project_owner_names IS NOT NULL "
+            "AND d.project_owner_names <> '' AND "
+            "(CHAR_LENGTH(d.project_owner_names) - CHAR_LENGTH(REPLACE(REPLACE(d.project_owner_names, ',', ''), '、', '')) + 1) = 3 "
+            "ORDER BY d.task_id"
+        ),
+        "note": (
+            "gold 只取 LIMIT 1（数据资产入表试点推进），但项目责任人 3 人的任务共 17 条并列"
+            "（工具 owner_widths 同口径）；按规则 41 并列全列，改为 17 行"
+        ),
+    },
+    ("nl2sql", "Q3-02"): {
+        "override_gold": {"columns": ["tasks", "multi_lead", "single_lead"], "rows": [["46", "20", "26"]]},
+        "override_sql": (
+            "SELECT COUNT(*) AS tasks, "
+            "SUM(CHAR_LENGTH(d.lead_owner_names) - CHAR_LENGTH(REPLACE(REPLACE(d.lead_owner_names, ',', ''), '、', '')) + 1 >= 2) AS multi_lead, "
+            "SUM(CHAR_LENGTH(d.lead_owner_names) - CHAR_LENGTH(REPLACE(REPLACE(d.lead_owner_names, ',', ''), '、', '')) + 1 = 1) AS single_lead "
+            "FROM task_group_detail d JOIN task t ON t.id = d.task_id "
+            "JOIN task_board b ON b.id = t.board_id AND b.is_deleted = 0 AND b.code = 'group' "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published'"
+        ),
+        "note": (
+            "gold 用 lead_owner_ids LIKE '%,%' 只认逗号（19）；工作区多值负责人按顿号与逗号都计"
+            "（规则 11，工具 owner_widths 同口径），多人牵头 = 20（含顿号分隔的任务 109）"
+        ),
+    },
     ("oa_biz", "C2-02"): {
         "override_gold": {"columns": ["cnt"], "rows": [["73"]]},
         "override_sql": (
