@@ -500,6 +500,21 @@ async def weekly_field_completeness(field: str = "", list_missing: bool = False,
     total rounded to one decimal (project_owner_id: 128 / 119 / 93.0). Quote it
     as-is; do not recompute filled / total or round it yourself.
 
+    "Is this field trustworthy" is a different question from how often it is
+    filled, so the same reply carries distinct_values and top_value_rows.
+    implementation_measure is filled on every 集团组 detail row yet holds a
+    single distinct value -- one sentence copied down the column. A 100% fill
+    rate there means the opposite of healthy, and no fill rate can reveal that.
+    Read the two columns before calling a field usable for差异化归纳.
+
+    Detail-table fields come with a second denominator. filled / total counts
+    formal tasks (128, R-08 keeps tasks that have no detail row), while
+    raw_row_count / raw_filled / raw_distinct_values count task_group_detail
+    itself (55 rows, 9 of them on soft-deleted or unpublished tasks). Field
+    quality reads the raw tier; "how many tasks filled it" reads the gated one.
+    Both are correct for their own question -- say which one a number came from
+    rather than mixing them in one sentence.
+
     Args:
         field: Column to measure; empty lists the supported columns.
         list_missing: Return the tasks missing the field instead of counts.

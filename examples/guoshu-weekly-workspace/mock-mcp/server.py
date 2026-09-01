@@ -2290,6 +2290,18 @@ _PERSON_ROLE_COLUMNS: dict[str, tuple[str, str]] = {
     "owner": ("owner_user_id", "任务主责人（owner_user_id）"),
 }
 
+# 分组列是 ID 的档要配一列姓名。owner 档按 owner_user_id 分组，回出来的 person 是
+# 「10515」「u3208」这种工号，而问「任务量最高的是谁」要的是人名（姚立诚、余承志）。
+# 只给工号时模型只能照抄工号，判定器判「未提供姓名，无法确认」——数字全对却算错。
+# 姓名不能让模型自己去别处查：那要么多跑一轮，要么它顺手把工号当人名答出去。
+#
+# 取 project_owner_name 是核实过的：正式任务里 47 个 owner_user_id 全部 1:1 对应
+# 姓名，没有一个 id 对两个名、没有一个名对两个 id、也没有「有工号没姓名」的行，
+# 且 owner_user_id 与 project_owner_id 逐行相等。所以 MAX() 取的就是那唯一一个值，
+# 不是「随便挑一个」。这三条哪天不成立，person_name 就会静默变成任取一个，
+# 故 smoke 里钉住了这个映射。
+_PERSON_ID_NAME_COLUMNS: dict[str, str] = {"owner": "project_owner_name"}
+
 
 @mcp.tool()
 def weekly_person_stats(
@@ -2338,6 +2350,15 @@ def weekly_person_stats(
                 },
             }
         column, role_label = _PERSON_ROLE_COLUMNS[role_key]
+        # 工号档要带姓名列；姓名档本身就是姓名，name_select 留空即可。
+        name_column = _PERSON_ID_NAME_COLUMNS.get(role_key, "")
+        name_select = f", MAX(t.{name_column}) AS person_name" if name_column else ""
+        name_note = (
+            f"；person 是工号（{column}），person_name 是对应姓名（取自 {name_column}，"
+            "正式任务里两列 1:1 对应）；答「是谁」要报 person_name，不要报工号"
+            if name_column
+            else ""
+        )
         bounded = max(1, min(store.MAX_ROWS, int(top)))
         clause = store.formal_task_clause()
         # 看板闸门：问「技术组看板有多少人当负责人」时全库口径会把集团组的人算进来。
@@ -2354,7 +2375,7 @@ def weekly_person_stats(
             board_note = f"；仅看板 {board.strip()}（闸门落在 task.board_id 上）"
         # 姓名为空的行不是「一个叫空的人」，计人头时必须排除，否则人数会多 1。
         named = f"{clause} AND t.{column} IS NOT NULL AND t.{column} <> ''"
-        base = f"{store.FORMAL_TASK_CALIBER}；按「{role_label}」分组，姓名为空的行不计入人头{board_note}"
+        base = f"{store.FORMAL_TASK_CALIBER}；按「{role_label}」分组，姓名为空的行不计入人头{board_note}{name_note}"
 
         if key == "workload":
             # 「任务量最大的牵头人是谁」是单数问句，答案是定序后的首行；此前 caliber
@@ -2362,7 +2383,7 @@ def weekly_person_stats(
             # （F2-02）。并列不该由模型临场裁决：把并列个数作为数据回出来，
             # 让它照抄行数并按需提一句「另有 N 人并列」，而不是自行改写答案集合。
             result = store.fetch(
-                f"SELECT t.{column} AS person, COUNT(*) AS task_count "
+                f"SELECT t.{column} AS person{name_select}, COUNT(*) AS task_count "
                 f"FROM task t WHERE {named} "
                 f"GROUP BY t.{column} ORDER BY task_count DESC, person",
                 caliber=(
@@ -2392,7 +2413,7 @@ def weekly_person_stats(
             # 首行；本档是 HAVING = MAX（keep_ties），并列全在内。两档都对，取决于
             # 问句——而这个判断不该让模型在明细上临场做。
             peak_rows = store.fetch(
-                f"SELECT t.{column} AS person, COUNT(*) AS task_count "
+                f"SELECT t.{column} AS person{name_select}, COUNT(*) AS task_count "
                 f"FROM task t WHERE {named} GROUP BY t.{column} "
                 f"HAVING task_count = (SELECT MAX(g.c) FROM (SELECT COUNT(*) AS c "
                 f"FROM task t2 WHERE {named.replace('t.', 't2.')} GROUP BY t2.{column}) g) "
@@ -2424,7 +2445,7 @@ def weekly_person_stats(
 
         if key == "single_task":
             return store.fetch(
-                f"SELECT t.{column} AS person, COUNT(*) AS task_count "
+                f"SELECT t.{column} AS person{name_select}, COUNT(*) AS task_count "
                 f"FROM task t WHERE {named} "
                 f"GROUP BY t.{column} HAVING task_count = 1 ORDER BY person",
                 caliber=f"{base}；只带 1 个任务的人，HAVING 由服务端判定",
@@ -2984,18 +3005,89 @@ def weekly_field_completeness(field: str = "", list_missing: bool = False, limit
                 f"ROUND(SUM({expr}) / COUNT(*) * 100, 1) AS filled_pct "
                 f"FROM task t LEFT JOIN {table} d ON d.task_id = t.id WHERE {clause}"
             )
+        # 「这个字段可信吗」问的不是填报率。集团组实施举措 55 行全部非空、填写率
+        # 100%，但 55 行是同一句话复制的——只报填写率会推出「字段没问题」，与真相
+        # 相反。区分度必须一起给：distinct_values 是非空值里的不同值个数，
+        # top_value_rows 是最高频那个值占了多少行。两者落在服务端，模型没法自己
+        # 从占比里反推出来。
+        if table == "task":
+            scope_from = "FROM task t"
+            scope_where = f"WHERE {clause} AND t.{token} IS NOT NULL AND t.{token} <> ''"
+            scope_col = f"t.{token}"
+        else:
+            scope_from = f"FROM task t JOIN {table} d ON d.task_id = t.id"
+            scope_where = f"WHERE {clause} AND d.{token} IS NOT NULL AND d.{token} <> ''"
+            scope_col = f"d.{token}"
+        distinct_gated = store.scalar(f"SELECT COUNT(DISTINCT {scope_col}) AS n {scope_from} {scope_where}")
+        top_gated = store.scalar(
+            f"SELECT COUNT(*) AS n {scope_from} {scope_where} GROUP BY {scope_col} ORDER BY n DESC LIMIT 1"
+        )
+
+        quality: list[str] = []
+        # 明细表字段还要给裸表口径：E04 的金标依据是「55 条集团组当前明细」，那是
+        # task_group_detail 裸行数；filled_pct 的分母是 128 条正式任务（R-08 的
+        # LEFT JOIN 把无明细行的任务算成缺项）。两个分母都对，各答各的问题，
+        # 差在中间那 9 行挂在已软删或未发布的任务上。不写明分母，问字段质量的
+        # 会拿 128 当分母，问业务结论的会拿 55 当分母，两边都答偏。
+        raw_distinct = distinct_gated
+        if table != "task":
+            raw_rows = store.scalar(f"SELECT COUNT(*) AS n FROM {table} d")
+            raw_filled = store.scalar(
+                f"SELECT COUNT(*) AS n FROM {table} d WHERE d.{token} IS NOT NULL AND d.{token} <> ''"
+            )
+            raw_distinct = store.scalar(
+                f"SELECT COUNT(DISTINCT d.{token}) AS n FROM {table} d WHERE d.{token} IS NOT NULL AND d.{token} <> ''"
+            )
+            quality.append(
+                f"另给 {table} 裸表口径（不加任务闸门）：raw_row_count 共 "
+                f"{raw_rows['value']} 行、其中非空 {raw_filled['value']} 行、"
+                f"不同值 {raw_distinct['value']} 个；"
+                "问「这个字段本身可信吗／填得怎么样」看裸表这一档（明细表有多少行就是多少行），"
+                "问「有多少任务填了」看上面过闸的 filled / total（分母是正式任务，"
+                "R-08 保留无明细行的任务）；两档不要混着引用"
+            )
+
+        # 信号按裸表那一档判：明细表字段的区分度是表本身的属性，过闸只是少看了
+        # 9 行，不该让「同一句话复制 55 遍」因为闸门把行数减到 46 就不再报警。
+        signal_distinct = int(raw_distinct["value"] or 0)
+        if signal_distinct <= 1:
+            quality.append(
+                f"字段质量信号：非空行里只有 {signal_distinct} 个不同的值，"
+                "即所有行填的是同一份内容——填写率再高也不具备区分度，"
+                "不能拿它做差异化归纳（比较各组各任务的举措有何不同），"
+                "应回查生成逻辑或源数据；这是规则校验信号，不构成对项目或人员的绩效判断，"
+                "需业务责任人核实后才能进正式结论"
+            )
+        elif signal_distinct and top_gated["value"]:
+            quality.append(
+                f"字段质量信号：非空行里有 {signal_distinct} 个不同的值，"
+                f"最高频的那个值占 {top_gated['value']} 行；不同值远少于行数时"
+                "说明内容高度重复，做差异化归纳前先核实源数据"
+            )
+
         result = store.fetch(
             sql,
-            caliber=(
-                f"{store.FORMAL_TASK_CALIBER}；统计「{label}」非空占比（R-07/R-19）；"
-                "空字符串按未填计入 missing；"
-                "filled_pct 已按 total 算好（保留一位小数），直接引用，不要自己拿 filled / total 重算"
-                + ("；LEFT JOIN 保留无明细行的任务（R-08）" if table != "task" else "")
+            caliber="；".join(
+                [
+                    f"{store.FORMAL_TASK_CALIBER}；统计「{label}」非空占比（R-07/R-19）；"
+                    "空字符串按未填计入 missing；"
+                    "filled_pct 已按 total 算好（保留一位小数），直接引用，不要自己拿 filled / total 重算"
+                    + ("；LEFT JOIN 保留无明细行的任务（R-08）" if table != "task" else ""),
+                    "distinct_values 是非空值里的不同值个数，top_value_rows 是最高频值占的行数，"
+                    "两者已算好，问「字段是否可信／有没有区分度」看它们，不要只看 filled_pct",
+                    *quality,
+                ]
             ),
             limit=1,
         )
         result["field"] = token
         result["field_label"] = label
+        result["distinct_values"] = distinct_gated["value"]
+        result["top_value_rows"] = top_gated["value"]
+        if table != "task":
+            result["raw_row_count"] = raw_rows["value"]
+            result["raw_filled"] = raw_filled["value"]
+            result["raw_distinct_values"] = raw_distinct["value"]
         return result
 
     return _guard("weekly_field_completeness", work)

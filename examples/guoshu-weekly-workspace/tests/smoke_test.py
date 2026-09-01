@@ -3202,6 +3202,45 @@ async def run() -> int:
         str(full.get("rows")),
     )
 
+    # G-E04. 「集团组实施举措是否可信」的判据是区分度，不是填报率：裸表 55 行
+    # 全部非空、填写率 100%，但只有 1 个不同值（同一句话复制下来）。此前没有
+    # 任何一档报得出不同值个数，模型只能拿填写率作答，推出的结论与 gold 相反。
+    measure = await _call(registry, "weekly_field_completeness", field="implementation_measure")
+    check(
+        "E04 裸表口径 55 行全非空，但只有 1 个不同值",
+        measure.get("raw_row_count") == 55
+        and measure.get("raw_filled") == 55
+        and measure.get("raw_distinct_values") == 1,
+        f"raw={measure.get('raw_row_count')}/{measure.get('raw_filled')}/{measure.get('raw_distinct_values')}",
+    )
+    check(
+        "E04 过闸口径同样只有 1 个不同值，最高频值占满 46 行",
+        measure.get("distinct_values") == 1 and measure.get("top_value_rows") == 46,
+        f"distinct={measure.get('distinct_values')} top={measure.get('top_value_rows')}",
+    )
+    measure_caliber = str(measure.get("caliber"))
+    check(
+        "E04 caliber 点明「填写率再高也不具备区分度」，并给出规则信号定性",
+        "不具备区分度" in measure_caliber
+        and "应回查生成逻辑或源数据" in measure_caliber
+        and "不构成对项目或人员的绩效判断" in measure_caliber,
+        measure_caliber[-160:],
+    )
+    check(
+        "E04 caliber 指路两档分母：字段质量看裸表 55，任务填报看过闸 128",
+        "两档不要混着引用" in measure_caliber and "55 行" in measure_caliber and str(_first(measure, "total")) == "128",
+        f"total={_first(measure, 'total')} caliber={measure_caliber[-120:]}",
+    )
+    # 反向：正常字段不能被误报成「无区分度」，否则信号一响就没有信息量。
+    goal_measure = await _call(registry, "weekly_field_completeness", field="overall_goal")
+    check(
+        "E04 反向 overall_goal 区分度正常，不触发单值警报，且 task 字段无裸表档",
+        int(goal_measure.get("distinct_values") or 0) > 1
+        and "不具备区分度" not in str(goal_measure.get("caliber"))
+        and "raw_row_count" not in goal_measure,
+        f"distinct={goal_measure.get('distinct_values')}",
+    )
+
     roster = await _call(registry, "weekly_person_stats", scope="group_roster", project_group="标准安全组")
     names = [r.get("person") for r in roster.get("rows") or []]
     check(
@@ -3906,6 +3945,46 @@ async def run() -> int:
         "两档在 caliber 里互相指路，免得模型选错并列规则",
         "top=1" in str(top_tech.get("caliber")) and "并列" in str(top_tech.get("caliber")),
         str(top_tech.get("caliber"))[:170],
+    )
+    # G-D01. owner 档分组列是工号，只回 person 时模型只能照抄「10515」，数字全对
+    # 也判错（判定器：未提供姓名，无法确认）。person_name 与工号 1:1，故随行给出。
+    check(
+        "G-D01 owner 档带姓名：10515 是姚立诚、u3208 是余承志",
+        [(r.get("person"), r.get("person_name")) for r in (top_all.get("rows") or [])]
+        == [("10515", "姚立诚"), ("u3208", "余承志")],
+        str([(r.get("person"), r.get("person_name")) for r in (top_all.get("rows") or [])]),
+    )
+    check(
+        "G-D01 口径点明答「是谁」要报姓名而不是工号",
+        "person_name" in str(top_all.get("caliber", "")) and "不要报工号" in str(top_all.get("caliber", "")),
+        str(top_all.get("caliber"))[:200],
+    )
+    # 硬切档与非并列档同样要带姓名，否则同一问法换个档又退回工号。
+    check(
+        "G-D01 硬切档也带姓名（10445 是阎立新）",
+        [(r.get("person"), r.get("person_name")) for r in (cut_tech.get("rows") or [])] == [("10445", "阎立新")],
+        str(cut_tech.get("rows")),
+    )
+    # 姓名档本身就是姓名，不该多出一个 person_name 列来（否则等于同一个值给两遍）。
+    lead_top = await _call(registry, "weekly_person_stats", scope="workload_top", role="lead_owner")
+    check(
+        "G-D01 姓名档不多挂 person_name，也不在口径里提工号",
+        all("person_name" not in r for r in (lead_top.get("rows") or []))
+        and "不要报工号" not in str(lead_top.get("caliber", "")),
+        str((lead_top.get("rows") or [])[:2]),
+    )
+    # 映射是「取 MAX 也只有一个值」的前提：47 个工号全部 1:1 对应姓名。这条一旦
+    # 不成立，person_name 就静默变成任取一个，故把前提本身也钉住。
+    owner_all = await _call(registry, "weekly_person_stats", scope="workload", role="owner")
+    owner_rows = owner_all.get("rows") or []
+    pairs = {(str(r.get("person")), str(r.get("person_name"))) for r in owner_rows}
+    check(
+        "G-D01 工号与姓名 1:1（47 个工号、47 个姓名、无一为空）",
+        len(owner_rows) == 47
+        and len({p for p, _ in pairs}) == 47
+        and len({n for _, n in pairs}) == 47
+        and all(n.strip() and n != "None" for _, n in pairs),
+        f"{len(owner_rows)} 行 / {len({p for p, _ in pairs})} 工号 / {len({n for _, n in pairs})} 姓名",
     )
 
     # ---- 审批表「裸表口径」四档 + 提交单两档 ----

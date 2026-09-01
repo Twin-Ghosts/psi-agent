@@ -59,6 +59,12 @@ async def weekly_person_stats(
             owner (owner_user_id, 任务主责人) -- one person per task, 45 distinct
             on the tech board. This is what a plain 「负责人」 means: "有多少人当
             负责人"、"谁手里任务最多"、"平均每个负责人几个任务" all read off here.
+            Because this column holds work ids rather than names, the listing
+            scopes add person_name beside person: "10515" is 姚立诚 and "u3208"
+            is 余承志. Answer 「是谁」 with person_name -- quoting the id back
+            reads as an unanswered question even when the counts are right. The
+            two columns are 1:1 across all 47 formal-task owners, so the name is
+            the id's name and not one arbitrary pick among several.
             project_owner (project_owner_name) -- also 45 distinct, the named
             counterpart of the same role.
             lead_owner (lead_owner_name, 分管领导/牵头人) -- only 12 distinct on
