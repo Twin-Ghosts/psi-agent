@@ -43,6 +43,7 @@ from psi_agent.session.history_display import (
     truncate_tool_result,
     with_kind,
 )
+from psi_agent.session.prompt_budget import log_tool_schema_size
 from psi_agent.session.protocol import (
     AgentChunk,
     AgentError,
@@ -693,6 +694,11 @@ class SessionAgent:
                         }
                         for t in self._tool_registry.tools.values()
                     ]
+
+                    # Logged next to the prompt breakdown, not inside it: these
+                    # schemas are their own request field, so they are a
+                    # per-turn fixed cost the prompt total does not include.
+                    log_tool_schema_size(tool_defs, context=f"session={self._conversation.session_id}")
 
                     ai_messages = messages_for_ai(self._conversation.messages)
                     request_body: dict[str, Any] = {

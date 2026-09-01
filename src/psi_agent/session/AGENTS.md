@@ -113,6 +113,23 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 
 两条都不触发时，提示词**一字不改**沿用。所以**易变内容一律不放提示词里**——放进去就会冻结在首次构建那一刻，改由每回合的 turn context 承载（下一节）。
 
+### 分项长度：那个 N 由哪些段构成
+
+上表的 `N chars` 是乘在**每个回合**上的固定成本，但单一总数没法回答「该裁哪一段」。
+`prompt_budget.PromptBudget` 负责拆账：workspace builder 用带标签的 `add()` 累积各段，
+`render()` 的返回值**就是**提示词本身，所以分项与总长同源、不会各算一套而悄悄漂移。
+
+- 配平是**构造保证**而非约定：`render()` 拼的正是 `breakdown()` 量的，连 `\n` 分隔符
+  都单列一项，因此 `residual` 恒为 0。它仍然照打，且非 0 时打 **WARNING**——非 0
+  意味着有文本绕过了标签（例如 builder 返回后又拼了东西），此时分项不可用来定裁剪量。
+- 日志级别是 **INFO**，不是 DEBUG。生产 `setup_logging` 钉死 INFO，本仓已经吃过
+  「最想看的数据恰好在 DEBUG 里」的亏。且走 loguru 而非标准库 `logging`：本项目
+  从未配置标准库 root logger，workspace 模块里的 `logging.getLogger(...).info(...)`
+  会在到达任何 sink 之前被丢掉（实测无输出，WARNING 才靠 lastResort 漏出来）。
+- **工具 JSON schema 不在这个总数里**：它们是 `agent.py` 请求体里与 `messages`
+  平级的 `tools` 字段，不是提示词文本。同样每回合全额付费，由
+  `log_tool_schema_size()` 单独记一行，好让裁剪决策看到两个数并列。
+
 ### 6 个 hook 靠名字对上，写错了不报错
 
 `_load_module()` 用 `getattr(module, name, None)` 逐个查 `system_prompt_builder`、
