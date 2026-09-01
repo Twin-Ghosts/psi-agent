@@ -322,44 +322,18 @@ Gateway exposes the following REST endpoints (see [Gateway layer docs](src/psi_a
 | POST | `/ais` | Create AI instance |
 | DELETE | `/ais/{ai_id}` | Delete AI |
 | GET | `/ais` | List all AIs |
-| POST | `/routers` | Create and start Router |
-| DELETE | `/routers/{router_id}` | Delete Router |
-| GET | `/routers` | List all Routers |
 | POST | `/sessions` | Create Session |
 | DELETE | `/sessions/{session_id}` | Delete Session |
 | GET | `/sessions` | List all Sessions |
 | POST | `/sessions/{session_id}/chat` | Web UI chat (SSE stream) |
 | GET | `/sessions/{session_id}/history` | Get conversation history |
-| GET | `/sessions/{session_id}/todos` | Get session todos |
-| GET | `/sessions/{session_id}/todo-segments` | Get todo subtask segment list |
-| GET | `/sessions/{session_id}/todo-segments/{segment_id}` | Get single todo segment history |
-| POST | `/sessions/{session_id}/todo-segments/{segment_id}` | Update todo segment label |
 | POST | `/feishu/route` | Idempotently route a Feishu chat to a Session: group chats by chat_id (whole chat shares one), DMs by open_id (one per user); spawn on first use |
 | GET | `/feishu/routes` | List Feishu chat → Session routes |
 | GET | `/titles` | Get all session titles |
 | POST | `/titles` | Set session title |
 | POST | `/titles/generate` | AI auto-generate title |
-| GET | `/summaries` | Get all session task summaries |
-| POST | `/summaries` | Set session task summary |
-| POST | `/summaries/generate` | AI generate task summary |
-| GET | `/defaults` | Get default agent / workspace / appdata paths |
 | GET | `/workspace/browse` | Browse directory (`?path=...`) |
 | GET | `/workspace/cwd` | Get working directory |
-| GET | `/workspace/places` | Get quick places and drives list |
-| GET | `/workspace/file` | Read file as base64 |
-| POST | `/workspace/reveal` | Reveal file in native file manager |
-| POST | `/ui/attention` | Trigger tray/webview attention notification |
-| GET | `/ui/prefs/survey` | Get UI survey preference status |
-| POST | `/ui/prefs/survey` | Set UI survey preference status |
-| GET | `/auth/status` | Get cloud authentication and login status |
-| POST | `/auth/send-code` | Request verification code |
-| POST | `/auth/verify` | Verify authentication code |
-| POST | `/auth/complete` | Complete registration |
-| POST | `/auth/bind` | Bind phone or email identity |
-| GET | `/auth/me` | Get current user profile |
-| POST | `/auth/logout` | Logout and clear local credentials |
-| GET | `/auth/devices` | Get logged-in devices list |
-| DELETE | `/auth/devices/{device_id}` | Revoke logged-in device |
 | GET | `/openapi.json` | OpenAPI schema |
 | GET | `/favicon.ico` | Favicon (available only with `--icon`; returns 404 otherwise) |
 
@@ -427,10 +401,10 @@ The `examples/` directory contains several workspaces ranging from minimal to pr
 ## Development
 
 ```bash
-uv run ruff check src tests          # lint
-uv run ruff format --check src tests # format
-uv run ty check src tests            # types
-uv run pytest -v                     # tests
+uv run ruff check .          # lint
+uv run ruff format --check . # format
+uv run ty check              # types
+uv run pytest -v             # tests
 ```
 
 With Nix, `nix develop` drops you into a dev shell with Python 3.14, `uv`, and `node`, after which the `uv run ...` commands above work as usual.

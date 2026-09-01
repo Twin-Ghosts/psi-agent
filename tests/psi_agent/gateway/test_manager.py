@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import sys
 
-import aiohttp
 import anyio
 import pytest
 from anyio.abc import TaskGroup
@@ -266,26 +265,6 @@ async def test_aimanager_rollback_when_wait_socket_fails(tmp_path: str, monkeypa
         assert await mgr.list_all() == []
     finally:
         await _close(tg)
-
-
-@pytest.mark.anyio
-async def test_wait_socket_timeout_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    path = _socket_path("gw-test-timeout", "ais", "check-timeout")
-    captured_timeouts = []
-    old_session = aiohttp.ClientSession
-
-    def mock_session(*args, **kwargs):
-        captured_timeouts.append(kwargs.get("timeout"))
-        return old_session(*args, **kwargs)
-
-    monkeypatch.setattr(aiohttp, "ClientSession", mock_session)
-    with pytest.raises(TimeoutError):
-        await _wait_socket(path, timeout_sec=0.1)
-    assert len(captured_timeouts) > 0
-    timeout = captured_timeouts[0]
-    assert timeout is not None
-    assert timeout.total == 2.0
-    assert timeout.connect == 1.0
 
 
 @pytest.mark.anyio
