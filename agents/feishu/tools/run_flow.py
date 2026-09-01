@@ -140,6 +140,12 @@ _WORKSPACE_PATH_PARAMETERS = {
     "write": "file_path",
 }
 _NESTED_TURN_TOOLS = frozenset({"clarify"})
+_STEP_MAX_TURNS = 128
+"""Round ceiling for a FusionFlow step agent when the step names no ``max_turns``.
+
+A flow step's budget is not a chat turn's budget, so this stays independent of
+``DEFAULT_MAX_TOOL_ROUNDS`` (see ``_create_step_agent``).
+"""
 _HUMAN_PREPARER_TOOLS = frozenset({"read"})
 _PROGRAM_AGENT_TOOLS = frozenset({"bash", "find_files", "list_dir", "powershell", "read"})
 _HUMAN_CONTROL_KEY = "$fusion_flow/control"
@@ -2135,7 +2141,13 @@ async def _create_step_agent(
         tool_registry=tool_registry,
         # One FusionFlow turn is one SessionAgent model/tool-loop round.
         # A submit_step_result tool call can end that round immediately.
-        max_tool_rounds=128 if max_turns is None else max_turns,
+        #
+        # Deliberately *not* DEFAULT_MAX_TOOL_ROUNDS: that default is calibrated
+        # against interactive chat turns (p90=13), whereas here a "round" is one
+        # step turn of a whole flow, so the two budgets measure different things.
+        # Kept at the previous value so lowering the chat default cannot shorten
+        # a flow; pass max_turns to bound a specific step.
+        max_tool_rounds=_STEP_MAX_TURNS if max_turns is None else max_turns,
         workspace_path=_workspace_dir(),
         agent_path=_AGENT_DIR,
     )

@@ -74,7 +74,7 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
     - finish_reason="stop" → 最终 content 追加到 history + `commit()` + 刷新 schedule registry + 若收到 compaction 信号则调用 `_maybe_compact()` → 释放锁
    - finish_reason="error" → 回滚到快照 → `raise AgentError(message)`
    - 任何未捕获异常 → 回滚到快照 → 向上传播
-6. 最多 `max_tool_rounds` 轮 tool call，达到上限时追加关闭 assistant 消息 + commit
+6. 最多 `max_tool_rounds` 轮 tool call（默认 `DEFAULT_MAX_TOOL_ROUNDS` = 20），达到上限时追加**面向用户**的说明性 assistant 消息 + commit
 7. **Turn 级别原子性**：``run()`` 所有正常出口调用 ``commit()``（save + clear snapshot）；异常时 ``async with`` 上下文管理器自动 ``rollback()``。内存和磁盘仅在同一检查点同步更新。
 
 **注意**：
@@ -229,7 +229,7 @@ result = run.result   # 正常耗尽后非 None
 |------|----------|--------------|-----------------------|
 | 模型正常 `stop` | `COMPLETED` | `MODEL_COMPLETED` | `"stop"` |
 | 模型因 `length` 等停止 | `INCOMPLETE` | `MODEL_STOPPED` | 原始值 |
-| 达到 `max_tool_rounds` | `INCOMPLETE` | `AGENT_TURN_LIMIT` | 通常 `"tool_calls"` |
+| 达到 `max_tool_rounds`（默认 20） | `INCOMPLETE` | `AGENT_TURN_LIMIT` | 通常 `"tool_calls"` |
 | 流里从未出现 finish reason | `INCOMPLETE` | `INVALID_MODEL_STREAM` | `None` |
 | 模型 / Session 执行错误 | 不产出 result | 不适用 | 抛 `AgentError` |
 
@@ -238,6 +238,7 @@ result = run.result   # 正常耗尽后非 None
 - **`stop_cause` 与 `model_finish_reason` 分两列**，不合并：后者是模型的原始诊断串（照抄，含本代码还不认识的新 reason），前者是 **runtime 视角**的停止原因。多个 finish reason（以及「压根没有」）会 collapse 成同一个 runtime cause，而 `AGENT_TURN_LIMIT` 在模型侧根本没有对应值。
 - **`None` finish reason 单独归 `INVALID_MODEL_STREAM`**，不跟 `MODEL_STOPPED` 混：排错时「模型提前停了」和「我们没听到它为什么停」是两回事。
 - **`AGENT_TURN_LIMIT` 而非 "tool limit"**：受限的是 agent/model loop 的**轮数**，一轮可能含多个工具调用。配置名 `max_tool_rounds` 暂留以兼容。
+- **`AGENT_TURN_LIMIT` 是唯一会主动告诉用户的终态**：默认上限从 128 降到 20（实测 p50=3 / p90=13 / max=49，128 永远碰不到 = 等于没有上限）之后，这个分支在正常使用中**够得到**，而它终止的那条回复按定义是半截的（模型刚要继续调工具）。所以除日志外还向 content 槽 `yield` 一条 `MAX_ROUNDS_NOTICE`：原先的裸 `[Max tool rounds reached]` 是未翻译的开发者标记，粘在模型的过渡话术后面（`让我再查一下。[Max tool rounds reached]`），用户只看到一条读不出所以然的半截回复，分不清是撞上限还是崩了。其余终态仍只写日志，`result` 归调用方读。
 - **`run()` 保留**为 `run_streamed()` 的丢弃 result 版本（纯 `AsyncGenerator`），schedule / trigger runner 等现有调用点一字不改。
 - **SSE 线上形状不变**：result 归调用方读，永不作为 chunk 进流。`handle_request` 只把它写进日志（不完整则 WARNING，与 loop 内 `Reached max tool rounds` / `Unexpected finish_reason` 同级）。`ChannelAdapter.write()` 用结构化 `_ChunkStream` Protocol 同时接 `AgentRun` 和裸 generator——直接 import `AgentRun` 会让 `agent` ↔ `channel_adapter` 成环，而适配器除了迭代 + 关闭并不需要 run 的任何东西。
 - **`AgentRun` 显式实现 `aclose()`**（转发给内部 generator）：它本身不是 async generator，缺了这个方法根 AGENTS.md 坑 16 的 `async with aclosing(run)` 就会 `AttributeError`。消费方一律照旧用 `aclosing()` 包裹，提前退出 / 被 cancel 时 loop 内 `aclosing(ai_client.stream(...))` 才会随之释放上游连接。
@@ -502,7 +503,7 @@ Session 支持将对话历史持久化到 AppData `histories/{session_id}.jsonl`
   - `finish_reason="stop"` — assistant 响应追加后立即 `commit()`，随后刷新 schedule registry（完整回合）；若收到 compaction 信号则 `_maybe_compact()` 插入 `compacted` 消息并 `commit()`
   - `finish_reason="tool_calls"` — 所有 tool 结果追加后立即 `commit()`（子回合）
   - unexpected `finish_reason` — 累积 content 追加后 `commit()`
-  - 达到 `max_tool_rounds` — 追加 `[Max tool rounds reached]` assistant 消息后 `commit()`
+  - 达到 `max_tool_rounds` — 追加 `MAX_ROUNDS_NOTICE`（含实际轮数的中文说明，以 `[已达到单轮工具调用上限, 停在这里]` 开头）assistant 消息后 `commit()`
 - 只有 reasoning、没有 `content` / `tool_calls` 的最终 assistant 不写入 history；reasoning 仍可流式输出并传给 after-turn hook。读取旧 JSONL 时，`messages_for_ai()` 同样过滤这类不符合 OpenAI wire contract 的遗留行，避免上游返回 `Invalid assistant message`
 - `Conversation.save()` 使用 tempfile + `os.replace()` 实现原子写入；`commit()` 封装 save + 清除快照
 - **部分保存**的场景：`finish_reason="error"`、AI 连接断开、channel 断开、schedule runner 异常——user message 已通过早期 `commit()` 落盘，AI 响应部分通过 `rollback()` 回滚，不写入磁盘

@@ -7,6 +7,7 @@ import pytest
 
 from psi_agent.session.agent import SessionAgent
 from psi_agent.session.ai_client import AiClient
+from psi_agent.session.protocol import MAX_ROUNDS_NOTICE
 from psi_agent.session.tool_registry import FileEntry, ToolFunction, ToolRegistry
 from tests.integration.conftest import MockAIServer
 
@@ -189,7 +190,10 @@ async def test_max_tool_rounds_limit(mock_ai_server: MockAIServer) -> None:
         chunks.append(c)
 
     all_content = "".join(c.content or "" for c in chunks)
-    assert "Max tool rounds" in all_content
+    # Hitting the limit must be explicable to the user, carrying the real round
+    # count — not a bare developer marker (see MAX_ROUNDS_NOTICE).
+    assert MAX_ROUNDS_NOTICE.format(rounds=10) in all_content
+    assert "10 轮" in all_content
 
     tool_call_count = sum(1 for c in chunks if c.reasoning and "Tool Call" in (c.reasoning or ""))
     assert tool_call_count <= agent._max_tool_rounds
