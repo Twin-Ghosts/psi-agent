@@ -458,9 +458,17 @@ async def run(args: argparse.Namespace) -> int:
     checkpoint = anyio.Path(args.checkpoint)
     results: list[Outcome] = []
     if await checkpoint.exists():
+        seen_ids: set[str] = set()
         for line in (await checkpoint.read_text(encoding="utf-8")).splitlines():
-            if line.strip():
-                results.append(_outcome_from_dict(json.loads(line)))
+            if not line.strip():
+                continue
+            entry = _outcome_from_dict(json.loads(line))
+            if entry.qid in seen_ids:
+                # 同一题被追加两次（曾见过相邻重复行）：保留后写的那条，避免报告里
+                # 出现重复 id 把总数撑大。
+                results = [r for r in results if r.qid != entry.qid]
+            seen_ids.add(entry.qid)
+            results.append(entry)
         print(f"断点续跑：已有 {len(results)} 题结果", file=sys.stderr)
 
     raw_lines = (await answers_path.read_text(encoding="utf-8")).splitlines()
