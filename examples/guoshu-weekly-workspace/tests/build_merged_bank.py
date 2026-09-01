@@ -835,6 +835,28 @@ CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
             "（10445/10515/u3208/u3214）；按规则 41「谁最多」并列全列，改为 4 行"
         ),
     },
+    ("nl2sql", "Q1-01"): {
+        "recompute_sql": (
+            "SELECT d.task_id, t.task_name, d.progress_effect FROM task_group_detail d "
+            "JOIN task t ON t.id = d.task_id JOIN task_board b ON b.id = t.board_id AND b.is_deleted = 0 "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND b.code = 'group' "
+            "ORDER BY t.latest_progress_time DESC, d.task_id DESC LIMIT 8"
+        ),
+        "note": (
+            "问「当前进度成效」的「前 N 条」必须按最新进展时间取（工具指南：带 "
+            "order_by=progress_time）；gold 按 task_id 序拿的是看板最早那批（97 起），"
+            "与 C2-04 同一问法的 gold 自相矛盾，统一为当期序"
+        ),
+    },
+    ("nl2sql", "O7-05"): {
+        "recompute_sql": (
+            "SELECT d.task_id, t.task_name, d.progress_effect FROM task_group_detail d "
+            "JOIN task t ON t.id = d.task_id JOIN task_board b ON b.id = t.board_id AND b.is_deleted = 0 "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND b.code = 'group' "
+            "ORDER BY t.latest_progress_time DESC, d.task_id DESC LIMIT 8"
+        ),
+        "note": "同 Q1-01：当前进度成效的前 N 条按最新进展时间序，gold 的 task_id 序是另一页",
+    },
     ("oa_biz", "C2-02"): {
         "override_gold": {"columns": ["cnt"], "rows": [["73"]]},
         "override_sql": (
