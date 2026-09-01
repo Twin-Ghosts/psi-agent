@@ -2079,6 +2079,25 @@ def weekly_submission_query(
                 limit=1,
             )
 
+        if scope_key == "latest_status":
+            # 「最新进展提交都通过了吗」这类题答的是每任务最新一版提交单的状态分布：
+            # 一任务一行取 round_no 最大的单，再按状态聚合。模型拿进展行/全量提交单
+            # 去答会把「最新一版」答成「所有版本」（G-F05 的 72 条未发布就是这么来的）。
+            return store.fetch(
+                "SELECT s.status, COUNT(*) AS tasks FROM task_workflow_submission s "
+                "JOIN task t ON t.id = s.task_id "
+                "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' "
+                "AND s.round_no = (SELECT MAX(s2.round_no) FROM task_workflow_submission s2 "
+                "WHERE s2.task_id = s.task_id) "
+                "GROUP BY s.status ORDER BY tasks DESC, s.status",
+                caliber=(
+                    f"{store.FORMAL_TASK_CALIBER}；一任务一行取最新一版提交单"
+                    "（round_no 最大），再按状态计数，各档相加等于 128；"
+                    "与「全部提交单按状态分」（含历史版本）是两问"
+                ),
+                limit=200,
+            )
+
         if scope_key == "published_vs_progress":
             # 两个数各有自己的表和闸门，一次给全，避免模型跨两次调用对不上口径。
             return store.fetch(
@@ -2879,6 +2898,7 @@ _SUBMISSION_SCOPES = (
     "inflight_by_board",
     "inflight_by_kind",
     "inflight_multi",
+    "latest_status",
     "payload_key_combos",
     "payload_keys_by_board",
     "payload_absent",
@@ -3066,6 +3086,9 @@ _MILESTONE_DIMENSIONS: dict[str, str] = {
     # 填报人。此前没有这一维，问「里程碑都是谁报的、各几条」只能答不可答。
     "reporter_id": "填报人",
     "owner_id": "责任人",
+    # 看板。里程碑行上没有 board_id，看板在任务上，要 JOIN 回 task_board。
+    # 问「技术组和集团组的里程碑分别怎样」此前没有出口，只能答不可答。
+    "board": "看板",
 }
 
 _MILESTONE_STATS_SCOPES = ("summary", "by_dimension", "deleted", "fully_deleted", "per_task", "mismatch")
@@ -5160,6 +5183,10 @@ def weekly_milestone_stats(
                 order = "finish_rate_pct DESC, bucket"
             elif dimension == "task_status":
                 column = "t.status"
+            elif dimension == "board":
+                # 看板在任务上，里程碑行没有 board_id：JOIN 回 task_board 取名字。
+                column = "b.name"
+                joins = " JOIN task_board b ON b.id = t.board_id AND b.is_deleted = 0"
             else:
                 column = f"m.{dimension}"
             having = ""

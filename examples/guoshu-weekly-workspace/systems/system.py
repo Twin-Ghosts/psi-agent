@@ -225,6 +225,8 @@ TOOL_GUIDE = """\
   里程碑表自己的 group_name 列（区域组/安全组/技术组/标准组/运营组/总体组 6 档）——
   与 by=category（类别文本：国家任务/平台上线/… 6 档）是两根轴，别拿 category 答承担组，
   也别拿任务的专项组（project_group 11 档）代答。
+  问「技术组和集团组的里程碑分别怎样」用 by=board（294/142/48.3% 与 180/100/55.6%，
+  全部年份；只看 2026 是 179/87 与 94/55）。
   问「哪个看板/组里程碑完成最多的任务」用 weekly_rank metric=milestones_done
   （已完成里程碑数），不要用 metric=milestones（里程碑总数）——完成数与总数是两问。
   问「有没有任务的里程碑被全部删掉了」用 scope=fully_deleted：3 条，按 NOT EXISTS 未删行判，

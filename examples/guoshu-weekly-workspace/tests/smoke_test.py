@@ -2252,6 +2252,15 @@ async def run() -> int:
         by_grp.get("row_count") == 6 and _first(by_grp, "finish_rate_pct") is not None,
         f"rows={by_grp.get('row_count')} 首组={_first(by_grp, 'bucket')}",
     )
+    by_board = await _call(registry, "weekly_milestone_stats", scope="by_dimension", by="board", top=8)
+    board_map = {(r.get("bucket")): str(r.get("total")) for r in by_board.get("rows") or []}
+    check(
+        "里程碑按看板 2 组：技术组 294、集团组 180（G-C05）",
+        by_board.get("row_count") == 2
+        and board_map.get("技术组重点任务进展") == "294"
+        and board_map.get("集团重点任务调度") == "180",
+        str(by_board.get("rows")),
+    )
     floor20 = await _call(registry, "weekly_milestone_stats", scope="by_dimension", by="category", min_total=20, top=20)
     lowest = min(
         (r for r in floor20.get("rows") or []),
@@ -3130,6 +3139,18 @@ async def run() -> int:
         str(_first(pvp, "published_progress_submissions")) == "272"
         and str(_first(pvp, "published_progress_rows")) == "943",
         str(pvp.get("rows")),
+    )
+    ls = await _call(registry, "weekly_submission_query", scope="latest_status")
+    ls_map = {r.get("status"): str(r.get("tasks")) for r in ls.get("rows") or []}
+    check(
+        "G-F05 最新一版提交单状态分布 112/6/5/3/2（一任务一行取 round_no 最大，各档相加 128）",
+        ls_map.get("published") == "112"
+        and ls_map.get("pending_leader") == "6"
+        and ls_map.get("pending_audit") == "5"
+        and ls_map.get("rejected") == "3"
+        and ls_map.get("signing") == "2"
+        and str(ls.get("row_count")) == "5",
+        str(ls.get("rows")),
     )
     bna = await _call(registry, "weekly_workflow_query", scope="by_node_action")
     bna_rows = {(r.get("node_type"), r.get("action")): r.get("action_count") for r in bna.get("rows") or []}
