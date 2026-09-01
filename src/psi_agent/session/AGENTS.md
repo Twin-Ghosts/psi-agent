@@ -20,7 +20,8 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 
 | | 约定 |
 |--|------|
-| **唯一写入方** | 仅 `SessionAgent.run`（对话整轮）和 `SessionAgent.handle_event`（事件匹配与触发器执行）经 `runtime_scope`。禁止 Gateway / Channel / AI / 测试外业务代码自行 `set_*` |
+| **唯一写入方** | 仅 `SessionAgent.run`（对话整轮）和 `SessionAgent.handle_event`（事件匹配与触发器执行）经 `runtime_scope`。禁止 Gateway / Channel / 测试外业务代码自行 `set_*`。**唯一例外**：`ai/server.py` 的 `handle_chat_completions` 用 `session_id_scope` 绑本回合会话 id，**只为日志归属**（那是另一个进程，ContextVar 过不来，值从请求体 `routing.session_id` 取），它不读任何 getter |
+| **会话 id ContextVar 住在哪** | `psi_agent/_session_context.py`——零项目内依赖的叶子模块。`_logging.py` 要把会话 id 拼进每行日志，而 import 本模块会带出 `session/__init__.py` → 它又 import `_logging`，循环。本模块里那几个同名函数是 re-export，`from psi_agent.session.runtime_context import get_session_id` 照旧可用，全项目仍只有一个 ContextVar。`workspace` / `agent` 两个仍住本模块：外层没人读 |
 | **`get_session_id()`** | 仅 **workspace 工具**需要「当前会话 id」时（如 `todo`、fusion memory、飞书授权续跑）。框架内部用 `Conversation.session_id` / 显式参数。工具起的后台任务里也读得到（`asyncio.create_task` 建任务那刻复制 ContextVar），这是「脱离本轮后还能找回原 session」的依据——见下方「续跑一个回合」 |
 | **`get_workspace()` / `get_agent()`** | 仅 **workspace 工具**在解析相对路径、找 agent 包根时（`write`/`bash`/`read` 等）。**框架核心**（`SessionAgent` / registries / Gateway / Channel）一律用构造时的 `workspace_path` / `agent_path` 或 REST 入参，**禁止**回读 ContextVar |
 | **Tool AI socket bridge** | `current_tool_ai_socket()` 仅在 `SessionAgent` 实际 await workspace tool 的区间返回当前 AI socket，并用 token 复位；它供 `run_flow` 创建受限的临时 Step Session，不进入 tool schema，也不能传播 API key/provider 配置。 |

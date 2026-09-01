@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import json
+import re
 import socket as _s
 import textwrap
 from contextlib import aclosing
@@ -11,6 +12,7 @@ from pathlib import Path
 import anyio
 import pytest
 from aiohttp import web
+from loguru import logger
 
 from psi_agent.session import Session
 from psi_agent.session.agent import AgentRun, SessionAgent, current_tool_ai_socket
@@ -1648,3 +1650,226 @@ async def test_legacy_run_still_yields_chunks_without_result(tmp_path: Path) -> 
         assert "".join(c.content or "" for c in chunks) == "hello"
     finally:
         await server.cleanup()
+
+
+# -- tool elapsed time -------------------------------------------------------
+#
+# Tools run **concurrently** in a task group, so "Executing tool" and "Tool
+# result" interleave in the log. Reconstructing one tool's duration by pairing
+# those timestamps folds every other tool's waiting into the number, and the
+# error gets worse the more tools a turn calls at once. The measurement
+# therefore lives in the same function as the measured region.
+
+
+async def _run_one_tool_turn(
+    tmp_path: Path,
+    *,
+    tool_name: str,
+    func,
+    arguments: str = "{}",
+) -> None:
+    """Drive one tool-calling round trip against a mock AI server."""
+    request_count = 0
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        nonlocal request_count
+        request_count += 1
+        response = web.StreamResponse(status=200, reason="OK", headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        if request_count == 1:
+            call = {
+                "id": "mock",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "test",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": tool_name, "arguments": arguments},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+            }
+            await response.write(f"data: {json.dumps(call)}\n\n".encode())
+        else:
+            await response.write(_sse_chunk(content="done", finish="stop").encode())
+        await response.write(b"data: [DONE]\n\n")
+        return response
+
+    tool = ToolFunction.from_callable(func)
+    server = MockAIServer(tmp_path)
+    ai_socket = await server.start(handler)
+    try:
+        agent = SessionAgent(
+            ai_client=AiClient(ai_socket),
+            tool_registry=ToolRegistry(files={"test": FileEntry("", {tool_name: tool}, {tool_name: func})}),
+            conversation=Conversation(path=tmp_path / "h.jsonl"),
+        )
+        _ = [chunk async for chunk in agent.run({"role": "user", "content": "call a tool"})]
+    finally:
+        await server.cleanup()
+
+
+@pytest.mark.anyio
+async def test_tool_result_log_carries_elapsed_ms(tmp_path: Path) -> None:
+    """V1: the duration is a field on the result line, at INFO.
+
+    Production runs INFO, so a DEBUG-only field would be absent exactly when a
+    slow tool is the thing being hunted.
+    """
+    messages: list[str] = []
+    sink_id = logger.add(lambda m: messages.append(m.record["message"]), level="INFO")
+
+    async def slow_tool() -> str:
+        """A tool that takes a measurable amount of time."""
+        await anyio.sleep(0.05)
+        return "ok"
+
+    try:
+        await _run_one_tool_turn(tmp_path, tool_name="slow_tool", func=slow_tool)
+    finally:
+        logger.remove(sink_id)
+
+    results = [m for m in messages if m.startswith("Tool result (")]
+    assert len(results) == 1, messages
+    match = re.search(r"elapsed_ms=(\d+)", results[0])
+    assert match, results[0]
+    # Loose lower bound: the tool sleeps 50ms, so a real measurement cannot be 0.
+    # Deliberately no upper bound — Windows CI schedulers are erratic and a
+    # flaky ceiling would get the assertion deleted rather than fixed.
+    assert int(match.group(1)) >= 40, results[0]
+
+
+@pytest.mark.anyio
+async def test_tool_error_log_carries_elapsed_ms(tmp_path: Path) -> None:
+    """V2: failures need the duration too.
+
+    "hung for 30s then timed out" and "rejected the arguments instantly" are
+    different faults with the same message; only the number separates them.
+    """
+    messages: list[str] = []
+    sink_id = logger.add(lambda m: messages.append(m.record["message"]), level="ERROR")
+
+    async def failing_tool() -> str:
+        """A tool that raises after a measurable delay."""
+        await anyio.sleep(0.05)
+        raise RuntimeError("boom")
+
+    try:
+        await _run_one_tool_turn(tmp_path, tool_name="failing_tool", func=failing_tool)
+    finally:
+        logger.remove(sink_id)
+
+    errors = [m for m in messages if m.startswith("Tool execution error (")]
+    assert len(errors) == 1, messages
+    match = re.search(r"elapsed_ms=(\d+)", errors[0])
+    assert match, errors[0]
+    assert int(match.group(1)) >= 40, errors[0]
+
+
+@pytest.mark.anyio
+async def test_tool_elapsed_excludes_a_concurrent_tools_waiting(tmp_path: Path) -> None:
+    """V3: the number is per tool, not per batch.
+
+    Two tools start together, one sleeping 5x longer. Timestamp pairing would
+    charge the fast tool with the slow one's wait; measuring inside the tool's
+    own coroutine cannot.
+    """
+    messages: list[str] = []
+    sink_id = logger.add(lambda m: messages.append(m.record["message"]), level="INFO")
+
+    async def quick() -> str:
+        """Returns almost immediately."""
+        return "quick"
+
+    async def slow() -> str:
+        """Sleeps long enough to dominate the batch."""
+        await anyio.sleep(0.25)
+        return "slow"
+
+    quick_tool = ToolFunction.from_callable(quick)
+    slow_tool = ToolFunction.from_callable(slow)
+    request_count = 0
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        nonlocal request_count
+        request_count += 1
+        response = web.StreamResponse(status=200, reason="OK", headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        if request_count == 1:
+            call = {
+                "id": "mock",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "test",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "c1",
+                                    "type": "function",
+                                    "function": {"name": "slow", "arguments": "{}"},
+                                },
+                                {
+                                    "index": 1,
+                                    "id": "c2",
+                                    "type": "function",
+                                    "function": {"name": "quick", "arguments": "{}"},
+                                },
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+            }
+            await response.write(f"data: {json.dumps(call)}\n\n".encode())
+        else:
+            await response.write(_sse_chunk(content="done", finish="stop").encode())
+        await response.write(b"data: [DONE]\n\n")
+        return response
+
+    server = MockAIServer(tmp_path)
+    ai_socket = await server.start(handler)
+    try:
+        agent = SessionAgent(
+            ai_client=AiClient(ai_socket),
+            tool_registry=ToolRegistry(
+                files={
+                    "test": FileEntry(
+                        "",
+                        {"slow": slow_tool, "quick": quick_tool},
+                        {"slow": slow, "quick": quick},
+                    )
+                }
+            ),
+            conversation=Conversation(path=tmp_path / "h.jsonl"),
+        )
+        _ = [chunk async for chunk in agent.run({"role": "user", "content": "call two tools"})]
+    finally:
+        await server.cleanup()
+        logger.remove(sink_id)
+
+    elapsed = {
+        name: int(value)
+        for name, value in (
+            (m.split("'")[1], re.search(r"elapsed_ms=(\d+)", m).group(1))  # type: ignore[union-attr]
+            for m in messages
+            if m.startswith("Tool result (")
+        )
+    }
+    assert set(elapsed) == {"slow", "quick"}, messages
+    assert elapsed["slow"] >= 200, elapsed
+    # The fast tool must not have inherited the slow one's 250ms wait.
+    assert elapsed["quick"] < 100, elapsed
