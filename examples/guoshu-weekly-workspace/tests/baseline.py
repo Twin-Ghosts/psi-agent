@@ -125,8 +125,8 @@ GRADER_REFUSAL = (
 GRADERS = {"fact": GRADER_SYSTEM, "signal": GRADER_SIGNAL, "refusal": GRADER_REFUSAL}
 
 # merged-bank 的 grade_mode 是「答案形态」而不是判定 rubric。g93 行自带 g93_grade_mode
-# （事实/信号/拒答三选一），其余两库的 exact_value 一律按事实 rubric 判。把形态映射到
-# rubric，避免 20 道 refusal_justified 题掉进 fact rubric 被误判（正确拒答会被判错）。
+# (事实/信号/拒答三选一), 其余两库的 exact_value 一律按事实 rubric 判。把形态映射到
+# rubric, 避免 20 道 refusal_justified 题掉进 fact rubric 被误判(正确拒答会被判错)。
 _MODE_TO_RUBRIC = {
     "exact_value": "fact",
     "exact_value_in_prose": "fact",
@@ -287,8 +287,8 @@ async def grade(
     if not actual:
         return False, "空回答（可能撞到 max_rounds）"
     gold_text = gold if isinstance(gold, str) else json.dumps(gold, ensure_ascii=False)
-    # 清单类 gold 可能很长：截断前先把「共几行/几项」报给判定器，让它即使看不到
-    # 全部条目也能核验数量是否一致（曾因 73 行 gold 被截断而误判「无法确认」）。
+    # 清单类 gold 可能很长: 截断前先把「共几行/几项」报给判定器, 让它即使看不到
+    # 全部条目也能核验数量是否一致(曾因 73 行 gold 被截断而误判「无法确认」)。
     row_count = ""
     if isinstance(gold, dict):
         rows = gold.get("rows")
@@ -302,7 +302,8 @@ async def grade(
         # reference answer was computed under, which is what lets the grader tell
         # a wrong number from a right number under a different gate.
         user = (
-            f"问题：{question}\n\n{row_count}参考答案：{gold_text}\n\n参考答案的数据依据：{evidence}\n\n实际回答：{actual[:4000]}"
+            f"问题：{question}\n\n{row_count}参考答案：{gold_text}\n\n"
+            f"参考答案的数据依据：{evidence}\n\n实际回答：{actual[:4000]}"
         )
     reply = await upstream.complete(
         [{"role": "system", "content": GRADERS.get(mode, GRADER_SYSTEM)}, {"role": "user", "content": user}],
@@ -464,7 +465,7 @@ async def run(args: argparse.Namespace) -> int:
                 continue
             entry = _outcome_from_dict(json.loads(line))
             if entry.qid in seen_ids:
-                # 同一题被追加两次（曾见过相邻重复行）：保留后写的那条，避免报告里
+                # 同一题被追加两次(曾见过相邻重复行): 保留后写的那条, 避免报告里
                 # 出现重复 id 把总数撑大。
                 results = [r for r in results if r.qid != entry.qid]
             seen_ids.add(entry.qid)
@@ -549,9 +550,8 @@ async def run(args: argparse.Namespace) -> int:
                     trace=trace or [],
                 )
             )
-            async with checkpoint_lock:
-                async with await checkpoint.open("a", encoding="utf-8") as fh:
-                    await fh.write(json.dumps(_outcome_dict(results[-1]), ensure_ascii=False) + "\n")
+            async with checkpoint_lock, await checkpoint.open("a", encoding="utf-8") as fh:
+                await fh.write(json.dumps(_outcome_dict(results[-1]), ensure_ascii=False) + "\n")
             done += 1
             mark = "." if ok else "F"
             print(mark, end="", flush=True)

@@ -164,11 +164,26 @@ CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
         "override_gold": {
             "columns": ["ym", "n"],
             "rows": [
-                ["2025-01", "14"], ["2025-02", "14"], ["2025-03", "23"], ["2025-04", "19"],
-                ["2025-05", "27"], ["2025-06", "27"], ["2025-07", "25"], ["2025-08", "29"],
-                ["2025-09", "30"], ["2025-10", "27"], ["2025-11", "21"], ["2025-12", "21"],
-                ["2026-01", "23"], ["2026-02", "26"], ["2026-03", "32"], ["2026-04", "31"],
-                ["2026-05", "28"], ["2026-06", "16"], ["2026-07", "18"], ["2026-08", "3"],
+                ["2025-01", "14"],
+                ["2025-02", "14"],
+                ["2025-03", "23"],
+                ["2025-04", "19"],
+                ["2025-05", "27"],
+                ["2025-06", "27"],
+                ["2025-07", "25"],
+                ["2025-08", "29"],
+                ["2025-09", "30"],
+                ["2025-10", "27"],
+                ["2025-11", "21"],
+                ["2025-12", "21"],
+                ["2026-01", "23"],
+                ["2026-02", "26"],
+                ["2026-03", "32"],
+                ["2026-04", "31"],
+                ["2026-05", "28"],
+                ["2026-06", "16"],
+                ["2026-07", "18"],
+                ["2026-08", "3"],
             ],
         },
         "override_sql": (
@@ -186,7 +201,9 @@ CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
             "columns": ["task_name", "status", "completion_time", "effect_head"],
             "rows": [
                 [
-                    "省级数据平台协同对接", "1", "2026Q2",
+                    "省级数据平台协同对接",
+                    "1",
+                    "2026Q2",
                     "按照公共数据资源授权运营实施规范，完成36项技术攻关验证，关键指标较基线提升31",
                 ]
             ],
@@ -243,7 +260,9 @@ CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
     },
     ("nl2sql", "I6-01"): {
         "override_grade_mode": "refusal_justified",
-        "override_gold": "不可答：提交单 payload 的键值（填报内容）按权限不展示，只能给出键名组合与涉及条数；拒绝编造内容。",
+        "override_gold": (
+            "不可答：提交单 payload 的键值（填报内容）按权限不展示，只能给出键名组合与涉及条数；拒绝编造内容。"
+        ),
         "note": (
             "gold 从 payload 里取 latestProgress/nextWork 键值，与系统提示词第 6b 条（payload 键值不可读）"
             "直接冲突；问「进展内容是什么」的正确答案是拒答并给键名替代信息，改为拒答口径判分"
@@ -251,12 +270,16 @@ CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
     },
     ("nl2sql", "I6-02"): {
         "override_grade_mode": "refusal_justified",
-        "override_gold": "不可答：被驳回提交单的填报内容（payload 键值）按权限不展示，只能给出键名组合与涉及条数；拒绝编造内容。",
+        "override_gold": (
+            "不可答：被驳回提交单的填报内容（payload 键值）按权限不展示，只能给出键名组合与涉及条数；拒绝编造内容。"
+        ),
         "note": "同 I6-01：gold 取 payload 键值，与第 6b 条冲突，改为拒答口径判分",
     },
     ("nl2sql", "I6-04"): {
         "override_grade_mode": "refusal_justified",
-        "override_gold": "不可答：在途提交单的成效字段内容（payload 键值）按权限不展示，只能给出键名组合与涉及条数；拒绝编造内容。",
+        "override_gold": (
+            "不可答：在途提交单的成效字段内容（payload 键值）按权限不展示，只能给出键名组合与涉及条数；拒绝编造内容。"
+        ),
         "note": "同 I6-01：gold 取 payload 键值，与第 6b 条冲突，改为拒答口径判分",
     },
     ("nl2sql", "G3-02"): {
@@ -379,7 +402,8 @@ CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
     ("oa_biz", "V4-04"): {
         "override_gold": {"columns": ["pct"], "rows": [["89.0"]]},
         "override_sql": (
-            "SELECT ROUND(COUNT(DISTINCT CASE WHEN p.id IS NOT NULL THEN t.id END) / COUNT(DISTINCT t.id) * 100, 1) AS pct "
+            "SELECT ROUND(COUNT(DISTINCT CASE WHEN p.id IS NOT NULL THEN t.id END) "
+            "/ COUNT(DISTINCT t.id) * 100, 1) AS pct "
             "FROM task t LEFT JOIN task_progress p ON p.task_id = t.id AND p.is_published = 1 "
             "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND t.board_id = 1"
         ),
@@ -419,9 +443,7 @@ CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
             "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND p.is_published = 1 "
             "AND p.progress_date >= '2026-08-01' AND p.progress_date <= '2026-08-31'"
         ),
-        "note": (
-            "8月只有 4 条进展行且全部未发布（is_published = 0）；「报了多少条进展」按已发布行口径（规则 69）= 0"
-        ),
+        "note": ("8月只有 4 条进展行且全部未发布（is_published = 0）；「报了多少条进展」按已发布行口径（规则 69）= 0"),
     },
     ("oa_biz", "V7-04"): {
         "override_gold": {"columns": ["latest"], "rows": [["2026-07-31"]]},
@@ -497,11 +519,13 @@ CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
     ("nl2sql", "Q3-03"): {
         "recompute_sql": (
             "SELECT d.task_id, t.task_name, d.lead_owner_names, "
-            "(CHAR_LENGTH(d.lead_owner_names) - CHAR_LENGTH(REPLACE(REPLACE(d.lead_owner_names, ',', ''), '；', '')) + 1) AS lead_count "
+            "(CHAR_LENGTH(d.lead_owner_names) - "
+            "CHAR_LENGTH(REPLACE(REPLACE(d.lead_owner_names, ',', ''), '；', '')) + 1) AS lead_count "
             "FROM task_group_detail d JOIN task t ON t.id = d.task_id "
             "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' "
             "AND d.lead_owner_names IS NOT NULL AND d.lead_owner_names <> '' "
-            "AND (CHAR_LENGTH(d.lead_owner_names) - CHAR_LENGTH(REPLACE(REPLACE(d.lead_owner_names, ',', ''), '；', '')) + 1) = 2 "
+            "AND (CHAR_LENGTH(d.lead_owner_names) - "
+            "CHAR_LENGTH(REPLACE(REPLACE(d.lead_owner_names, ',', ''), '；', '')) + 1) = 2 "
             "ORDER BY d.task_id"
         ),
         "note": (
@@ -512,19 +536,19 @@ CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
     ("nl2sql", "R2-01"): {
         "recompute_sql": (
             "SELECT d.task_id, t.task_name, h.version_no, h.progress_effect FROM task_group_detail d "
-            "JOIN task t ON t.id = d.task_id JOIN task_group_progress_history h ON h.task_id = t.id AND h.is_published = 1 "
+            "JOIN task t ON t.id = d.task_id "
+            "JOIN task_group_progress_history h ON h.task_id = t.id AND h.is_published = 1 "
             "AND h.version_no = (SELECT MAX(h2.version_no) FROM task_group_progress_history h2 "
             "WHERE h2.task_id = t.id AND h2.is_published = 1) "
             "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' ORDER BY d.task_id"
         ),
-        "note": (
-            "gold 只有前 8 条（LIMIT 8），问「各任务最新一期」要全量 46 行；改为全量重算"
-        ),
+        "note": ("gold 只有前 8 条（LIMIT 8），问「各任务最新一期」要全量 46 行；改为全量重算"),
     },
     ("nl2sql", "R2-02"): {
         "recompute_sql": (
             "SELECT d.task_id, t.task_name, (d.progress_effect = h.progress_effect) AS same FROM task_group_detail d "
-            "JOIN task t ON t.id = d.task_id JOIN task_group_progress_history h ON h.task_id = t.id AND h.is_published = 1 "
+            "JOIN task t ON t.id = d.task_id "
+            "JOIN task_group_progress_history h ON h.task_id = t.id AND h.is_published = 1 "
             "AND h.version_no = (SELECT MAX(h2.version_no) FROM task_group_progress_history h2 "
             "WHERE h2.task_id = t.id AND h2.is_published = 1) "
             "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' ORDER BY d.task_id"
@@ -580,11 +604,13 @@ CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
         },
         "override_sql": (
             "SELECT t.task_name, d.project_owner_names, "
-            "(CHAR_LENGTH(d.project_owner_names) - CHAR_LENGTH(REPLACE(REPLACE(d.project_owner_names, ',', ''), '、', '')) + 1) AS owner_count "
+            "(CHAR_LENGTH(d.project_owner_names) - "
+            "CHAR_LENGTH(REPLACE(REPLACE(d.project_owner_names, ',', ''), '、', '')) + 1) AS owner_count "
             "FROM task_group_detail d JOIN task t ON t.id = d.task_id "
             "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND d.project_owner_names IS NOT NULL "
             "AND d.project_owner_names <> '' AND "
-            "(CHAR_LENGTH(d.project_owner_names) - CHAR_LENGTH(REPLACE(REPLACE(d.project_owner_names, ',', ''), '、', '')) + 1) = 3 "
+            "(CHAR_LENGTH(d.project_owner_names) - "
+            "CHAR_LENGTH(REPLACE(REPLACE(d.project_owner_names, ',', ''), '、', '')) + 1) = 3 "
             "ORDER BY d.task_id"
         ),
         "note": (
@@ -596,8 +622,10 @@ CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
         "override_gold": {"columns": ["tasks", "multi_lead", "single_lead"], "rows": [["46", "20", "26"]]},
         "override_sql": (
             "SELECT COUNT(*) AS tasks, "
-            "SUM(CHAR_LENGTH(d.lead_owner_names) - CHAR_LENGTH(REPLACE(REPLACE(d.lead_owner_names, ',', ''), '、', '')) + 1 >= 2) AS multi_lead, "
-            "SUM(CHAR_LENGTH(d.lead_owner_names) - CHAR_LENGTH(REPLACE(REPLACE(d.lead_owner_names, ',', ''), '、', '')) + 1 = 1) AS single_lead "
+            "SUM(CHAR_LENGTH(d.lead_owner_names) - "
+            "CHAR_LENGTH(REPLACE(REPLACE(d.lead_owner_names, ',', ''), '、', '')) + 1 >= 2) AS multi_lead, "
+            "SUM(CHAR_LENGTH(d.lead_owner_names) - "
+            "CHAR_LENGTH(REPLACE(REPLACE(d.lead_owner_names, ',', ''), '、', '')) + 1 = 1) AS single_lead "
             "FROM task_group_detail d JOIN task t ON t.id = d.task_id "
             "JOIN task_board b ON b.id = t.board_id AND b.is_deleted = 0 AND b.code = 'group' "
             "WHERE t.is_deleted = 0 AND t.workflow_status = 'published'"
@@ -624,9 +652,13 @@ CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
     },
     ("nl2sql", "O1-01"): {
         "override_gold": {
-            "id": "19", "task_no": "01", "task_name": "数据安全监测预警平台建设",
-            "project_group": "市场化改革组", "status": "1",
-            "lead_owner_name": "郑亚楠", "project_owner_name": "余承志",
+            "id": "19",
+            "task_no": "01",
+            "task_name": "数据安全监测预警平台建设",
+            "project_group": "市场化改革组",
+            "status": "1",
+            "lead_owner_name": "郑亚楠",
+            "project_owner_name": "余承志",
         },
         "note": (
             "gold 只给 lead_owner_name（郑亚楠），判定器把 lead 误读成「主责人」与 agent 的"
@@ -641,8 +673,7 @@ CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
             "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND p.is_published = 1"
         ),
         "note": (
-            "问「多少个任务报了进展」却 COUNT(*) 数行：gold 943 是进展行数，任务数是 73；"
-            "实测两个值不同，确认扇出"
+            "问「多少个任务报了进展」却 COUNT(*) 数行：gold 943 是进展行数，任务数是 73；实测两个值不同，确认扇出"
         ),
     },
     ("oa_biz", "G3-02"): {
@@ -871,8 +902,7 @@ def _load_owner_name_map(connection: Any) -> dict[str, str]:
         _OWNER_NAME_MAP = {}
         with connection.cursor() as cur:
             cur.execute(
-                "SELECT DISTINCT project_owner_id, project_owner_name FROM task "
-                "WHERE project_owner_id IS NOT NULL"
+                "SELECT DISTINCT project_owner_id, project_owner_name FROM task WHERE project_owner_id IS NOT NULL"
             )
             for row in cur.fetchall():
                 _OWNER_NAME_MAP.setdefault(str(row["project_owner_id"]), str(row["project_owner_name"]))
@@ -880,9 +910,9 @@ def _load_owner_name_map(connection: Any) -> dict[str, str]:
 
 
 def _nameify_owner_gold(record: dict[str, Any], connection: Any | None) -> bool:
-    """oa_biz 的 gold 用 owner_user_id，工作区工具按姓名返回——把答案改成姓名口径。
+    """oa_biz 的 gold 用 owner_user_id, 工作区工具按姓名返回——把答案改成姓名口径。
 
-    同名不同 id 的行合并计数（工具按姓名分组就是合并的）。返回是否发生了改写。
+    同名不同 id 的行合并计数(工具按姓名分组就是合并的)。返回是否发生了改写。
     """
     gold = record.get("gold_answer")
     if not isinstance(gold, dict) or connection is None:
