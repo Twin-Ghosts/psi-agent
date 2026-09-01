@@ -69,6 +69,13 @@ GRADER_SYSTEM = (
 - 数字必须一致。参考 82 而回答「约 80」判错。
 - 集合类答案：条目齐全且无多余即算对，顺序不计。
 - 实际回答多给了口径说明、数据来源声明、依据字段，不影响判定。
+- 实际回答在参考答案之外补充的相关信息（并列情况说明、权限说明、另一套相关口径的
+  分布），只要不与参考答案冲突，不算多余条目，不影响判定。
+- 参考答案里没有的内容（如下载地址、敏感字段值），实际回答说明不可得/按权限不展示，
+  不算缺失，不影响判定。
+- 参考答案的字段名是数据的列名，按列名语义对应：lead_owner_name=牵头人/分管领导、
+  project_owner_name=主责人/项目负责人。实际回答用同义词（如「牵头人」对
+  lead_owner_name）即算对应，不要因用词不同判错。
 - 若参考答案为空集/0，实际回答说明「没有记录/为 0」即算对。
 - 若实际回答说「不可答」但参考答案有内容，判错；反之亦然。"""
     + _VERDICT_TAIL
@@ -99,12 +106,14 @@ GRADER_SIGNAL = (
 
 GRADER_REFUSAL = (
     """\
-你是严格的评测判定器。这道题的正确表现是「拒答并说明缺什么数据」，不是给出数字。
+你是严格的评测判定器。这道题的正确表现是「拒答并说明缺什么」，不是给出数字。
 
 判定规则：
-- 实际回答必须明确表示当前数据不足以给出可靠结论。只要表达了这个意思即可，措辞不计。
-- 实际回答还必须点出缺失的数据/字段，方向与参考答案一致
-  （如缺截止日、缺权重、缺预算、缺基线、缺依赖关系）。列举得不完全不判错，方向错才判错。
+- 实际回答必须明确表示当前数据不足以给出可靠结论，或该内容按权限不展示——
+  只要表达了这个意思即可，措辞不计（「按权限不展示」「字段缺失」「无法可靠计算」都算）。
+- 实际回答还必须点出缺失的数据/字段或权限原因，方向与参考答案一致
+  （如缺截止日、缺权重、缺预算、缺基线、缺依赖关系、敏感字段按权限遮蔽）。
+  列举得不完全不判错，方向错才判错。
 - 关键：若实际回答绕过缺口、给出了一个具体结论或排名或百分比当作答案，一律判错，
   哪怕那个数字看起来合理——本题考的正是「不硬答」。
 - 只依据本题给出的参考答案判定；参考答案里没点名的缺失字段，不得作为要求。
@@ -114,6 +123,20 @@ GRADER_REFUSAL = (
 )
 
 GRADERS = {"fact": GRADER_SYSTEM, "signal": GRADER_SIGNAL, "refusal": GRADER_REFUSAL}
+
+# merged-bank 的 grade_mode 是「答案形态」而不是判定 rubric。g93 行自带 g93_grade_mode
+# （事实/信号/拒答三选一），其余两库的 exact_value 一律按事实 rubric 判。把形态映射到
+# rubric，避免 20 道 refusal_justified 题掉进 fact rubric 被误判（正确拒答会被判错）。
+_MODE_TO_RUBRIC = {
+    "exact_value": "fact",
+    "exact_value_in_prose": "fact",
+    "assertion_plus_figures": "signal",
+    "refusal_justified": "refusal",
+}
+
+
+def rubric_for(item: dict[str, Any]) -> str:
+    return str(item.get("g93_grade_mode") or _MODE_TO_RUBRIC.get(item.get("grade_mode", ""), "fact"))
 
 
 @dataclass
@@ -264,15 +287,22 @@ async def grade(
     if not actual:
         return False, "空回答（可能撞到 max_rounds）"
     gold_text = gold if isinstance(gold, str) else json.dumps(gold, ensure_ascii=False)
-    if len(gold_text) > 4000:
-        gold_text = gold_text[:4000] + " …（参考答案已截断）"
-    user = f"问题：{question}\n\n参考答案：{gold_text}\n\n实际回答：{actual[:4000]}"
+    # 清单类 gold 可能很长：截断前先把「共几行/几项」报给判定器，让它即使看不到
+    # 全部条目也能核验数量是否一致（曾因 73 行 gold 被截断而误判「无法确认」）。
+    row_count = ""
+    if isinstance(gold, dict):
+        rows = gold.get("rows")
+        if isinstance(rows, list):
+            row_count = f"参考答案共 {len(rows)} 行/条记录。"
+    if len(gold_text) > 8000:
+        gold_text = gold_text[:8000] + " …（参考答案已截断，见行数说明）"
+    user = f"问题：{question}\n\n{row_count}参考答案：{gold_text}\n\n实际回答：{actual[:4000]}"
     if evidence:
         # Only the 93-question set carries this: it states the caliber the
         # reference answer was computed under, which is what lets the grader tell
         # a wrong number from a right number under a different gate.
         user = (
-            f"问题：{question}\n\n参考答案：{gold_text}\n\n参考答案的数据依据：{evidence}\n\n实际回答：{actual[:4000]}"
+            f"问题：{question}\n\n{row_count}参考答案：{gold_text}\n\n参考答案的数据依据：{evidence}\n\n实际回答：{actual[:4000]}"
         )
     reply = await upstream.complete(
         [{"role": "system", "content": GRADERS.get(mode, GRADER_SYSTEM)}, {"role": "user", "content": user}],
@@ -381,6 +411,38 @@ def summarise(results: list[Outcome], elapsed: float) -> None:
             print(f"  …另有 {len(failures) - 40} 题，见 JSON 报告")
 
 
+def _outcome_dict(r: Outcome) -> dict[str, Any]:
+    return {
+        "id": r.qid,
+        "category": r.category,
+        "difficulty": r.difficulty,
+        "kind": r.kind,
+        "passed": r.passed,
+        "reason": r.reason,
+        "elapsed": round(r.elapsed, 2),
+        "rounds": r.rounds,
+        "grade_mode": r.grade_mode,
+        "tools": r.tools_used,
+        "trace": r.trace,
+    }
+
+
+def _outcome_from_dict(d: dict[str, Any]) -> Outcome:
+    return Outcome(
+        qid=str(d["id"]),
+        category=str(d.get("category", "")),
+        difficulty=str(d.get("difficulty", "")),
+        kind=str(d.get("kind", "")),
+        passed=bool(d.get("passed", False)),
+        reason=str(d.get("reason", "")),
+        elapsed=float(d.get("elapsed", 0.0)),
+        rounds=int(d.get("rounds", 0)),
+        grade_mode=str(d.get("grade_mode", "fact")),
+        tools_used=list(d.get("tools") or []),
+        trace=list(d.get("trace") or []),
+    )
+
+
 async def run(args: argparse.Namespace) -> int:
     api_key = os.environ.get("BASELINE_API_KEY", "")
     if not api_key:
@@ -390,6 +452,16 @@ async def run(args: argparse.Namespace) -> int:
     if not await answers_path.exists():
         print(f"测试集不存在：{answers_path}", file=sys.stderr)
         return 2
+
+    report = anyio.Path(args.report)
+    await report.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint = anyio.Path(args.checkpoint)
+    results: list[Outcome] = []
+    if await checkpoint.exists():
+        for line in (await checkpoint.read_text(encoding="utf-8")).splitlines():
+            if line.strip():
+                results.append(_outcome_from_dict(json.loads(line)))
+        print(f"断点续跑：已有 {len(results)} 题结果", file=sys.stderr)
 
     raw_lines = (await answers_path.read_text(encoding="utf-8")).splitlines()
     questions = [json.loads(line) for line in raw_lines if line.strip()]
@@ -412,14 +484,21 @@ async def run(args: argparse.Namespace) -> int:
         print("筛选后没有题目", file=sys.stderr)
         return 2
 
+    done_ids = {r.qid for r in results}
+    questions = [q for q in questions if q["id"] not in done_ids]
+    if not questions:
+        print("全部题目都已有结果，直接出报告", file=sys.stderr)
+    else:
+        print(f"待跑 {len(questions)} 题（跳过已完成 {len(done_ids)} 题）")
+
     upstream = Upstream(api_key, args.model, args.base_url)
     registry = await ToolRegistry.load(WORKSPACE / "tools", "baseline")
     schemas = tool_schemas(registry)
     system_prompt = await load_system_prompt()
     print(f"题目 {len(questions)} 道，工具 {len(schemas)} 个，模型 {args.model}，并发 {args.concurrency}")
 
-    results: list[Outcome] = []
     limiter = anyio.CapacityLimiter(args.concurrency)
+    checkpoint_lock = anyio.Lock()
     started = time.monotonic()
     done = 0
 
@@ -441,7 +520,7 @@ async def run(args: argparse.Namespace) -> int:
                         item["question"],
                         item["gold_answer"],
                         actual,
-                        item.get("grade_mode", "fact"),
+                        rubric_for(item),
                         item.get("evidence", ""),
                     )
             except Exception as exc:
@@ -457,11 +536,14 @@ async def run(args: argparse.Namespace) -> int:
                     reason=reason,
                     elapsed=spent,
                     rounds=rounds,
-                    grade_mode=item.get("grade_mode", "fact"),
+                    grade_mode=rubric_for(item),
                     tools_used=used,
                     trace=trace or [],
                 )
             )
+            async with checkpoint_lock:
+                async with await checkpoint.open("a", encoding="utf-8") as fh:
+                    await fh.write(json.dumps(_outcome_dict(results[-1]), ensure_ascii=False) + "\n")
             done += 1
             mark = "." if ok else "F"
             print(mark, end="", flush=True)
@@ -476,7 +558,6 @@ async def run(args: argparse.Namespace) -> int:
     results.sort(key=lambda r: r.qid)
     summarise(results, elapsed)
 
-    report = anyio.Path(args.report)
     await report.write_text(
         json.dumps(
             {
@@ -485,22 +566,7 @@ async def run(args: argparse.Namespace) -> int:
                 "passed": sum(1 for r in results if r.passed),
                 "elapsed_seconds": round(elapsed, 1),
                 "store": "本机 MySQL 8.4 + weekly_mock（演示数据）",
-                "results": [
-                    {
-                        "id": r.qid,
-                        "category": r.category,
-                        "difficulty": r.difficulty,
-                        "kind": r.kind,
-                        "passed": r.passed,
-                        "reason": r.reason,
-                        "elapsed": round(r.elapsed, 2),
-                        "rounds": r.rounds,
-                        "grade_mode": r.grade_mode,
-                        "tools": r.tools_used,
-                        "trace": r.trace,
-                    }
-                    for r in results
-                ],
+                "results": [_outcome_dict(r) for r in results],
             },
             ensure_ascii=False,
             indent=2,
@@ -522,7 +588,10 @@ def main() -> int:
     parser.add_argument("--trace", action="store_true", help="报告里记下每次工具调用的实际入参")
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--report", default="baseline-report.json")
+    parser.add_argument("--checkpoint", default="", help="每题一行的断点文件；默认 <report>.ckpt")
     args = parser.parse_args()
+    if not args.checkpoint:
+        args.checkpoint = args.report + ".ckpt"
     if not os.environ.get("GUOSHU_WEEKLY_MCP_URL"):
         print("GUOSHU_WEEKLY_MCP_URL 未设置；先起 mock 服务", file=sys.stderr)
         return 2

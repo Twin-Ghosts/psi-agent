@@ -65,8 +65,10 @@ _TABLE_REF = re.compile(r"(?:FROM|JOIN)\s+`?(\w+)`?", re.IGNORECASE)
 # 审计确认的参考答案缺陷。每条都经人工抽验或对抗验证核实过，附实测数字。
 # 合并时按这里的值修正，并在记录上留 `defect_fixed` 说明改了什么、原值是什么——
 # 不留痕的话，日后没人分得清这是原始答案还是我们改过的。
-CONFIRMED_FIXES: dict[str, dict[str, Any]] = {
-    "E6-04": {
+# 键是 (bank, qid)：nl2sql 与 oa_biz 两库存在同号题（如 C2-02），按裸 id 会互相污染。
+# override_gold 整体替换 gold_answer；override_sql 替换 gold_sql / gold_sql_bound。
+CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
+    ("nl2sql", "E6-04"): {
         "drop_limit": True,
         "gold_row_count": 73,
         "note": (
@@ -74,7 +76,7 @@ CONFIRMED_FIXES: dict[str, dict[str, Any]] = {
             "实测去掉 LIMIT 得 73 行，丢 65 个任务"
         ),
     },
-    "I8-04": {
+    ("nl2sql", "I8-04"): {
         "drop_limit": True,
         "gold_row_count": 16,
         "note": (
@@ -82,21 +84,443 @@ CONFIRMED_FIXES: dict[str, dict[str, Any]] = {
             "分支无 cap、smoke_test 断言 row_count == 16，此题在 7 次基线全部判错——是 gold 错、代码对"
         ),
     },
-    "M3-01": {
+    ("nl2sql", "M3-01"): {
+        "override_gold": {"submissions": "2", "rejected": "2"},
+        "override_sql": (
+            "SELECT COUNT(*) AS submissions, SUM(s.status = 'rejected') AS rejected "
+            "FROM task_workflow_submission s WHERE s.task_id = :tid"
+        ),
         "note": (
-            "SUM(s.status='pending') 恒为 0：'pending' 不在 task_workflow_submission.status "
+            "gold 里的 pending 恒为 0：'pending' 不在 task_workflow_submission.status "
             "值域内（published / pending_audit / pending_leader / rejected / signing / "
-            "pending_fill / cancelled）；应改用真实的在途状态枚举"
+            "pending_fill / cancelled），是列名串到了业务状态词汇；任务 2 的真实状态是 2 次全部被驳回"
         ),
     },
-    "M3-03": {
+    ("nl2sql", "M3-03"): {
+        "override_gold": {
+            "columns": ["task_id", "round_no", "status", "submitted_at"],
+            "rows": [
+                ["67", "1", "pending_fill", "2025-03-14 19:20:00"],
+                ["90", "3", "rejected", "2025-08-12 18:15:00"],
+                ["111", "3", "rejected", "2026-07-14 17:10:00"],
+                ["122", "1", "pending_audit", "2025-09-13 20:15:00"],
+            ],
+        },
+        "override_sql": (
+            "SELECT s.task_id, s.round_no, s.status, s.submitted_at FROM task_workflow_submission s "
+            "JOIN task t ON t.id = s.task_id WHERE t.is_deleted = 0 AND s.reporter_id = :oid "
+            "AND s.status <> 'published' ORDER BY s.id"
+        ),
         "note": (
-            "status <> 'approved' 筛不掉任何行：'approved' 不在该列值域内，"
-            "只作为 task_workflow_action.action 存在（兄弟表词汇串味）"
+            "原 gold 用 status <> 'approved'：'approved' 不在提交单状态值域内（只作为审批动作存在），"
+            "等于没过滤，把 u3208 的 29 条全部列出（含 25 条已发布）。问「还没发布」应排除 published："
+            "真值 4 条（1 pending_fill + 2 rejected + 1 pending_audit）"
         ),
     },
-    "R3-05": {
-        "note": "同 M3-03，空过滤谓词",
+    ("nl2sql", "O7-03"): {
+        "drop_limit": True,
+        "gold_row_count": 23,
+        "note": (
+            "gold 用 LIMIT 10 截断「有哪些」清单；问句要完整集合，实测去掉 LIMIT 得 23 条"
+            "（latest_progress_time 落在快照日前 7 天内的正式任务）"
+        ),
+    },
+    ("nl2sql", "R3-05"): {
+        "override_gold": {
+            "columns": ["task_id", "task_name", "round_no", "status", "submitted_at"],
+            "rows": [
+                ["104", "数据要素生态联合体组建", "2", "pending_leader", "2025-09-08 15:10:00"],
+            ],
+        },
+        "override_sql": (
+            "SELECT s.task_id, t.task_name, s.round_no, s.status, s.submitted_at "
+            "FROM task_workflow_submission s JOIN task t ON t.id = s.task_id "
+            "JOIN task_board b ON b.id = t.board_id AND b.is_deleted = 0 AND b.code = 'group' "
+            "WHERE t.is_deleted = 0 AND s.reporter_id = :uid AND s.status <> 'published' "
+            "ORDER BY s.task_id, s.round_no"
+        ),
+        "note": (
+            "同 M3-03：status <> 'approved' 等于没过滤，把宋佳明集团看板 18 条全列（17 条已发布）；"
+            "问「还没发布」真值 1 条（任务 104 第 2 轮 pending_leader）"
+        ),
+    },
+    ("nl2sql", "B7-03"): {
+        "override_gold": "9",
+        "note": (
+            "问「从来没报过进展」按两张表都没报过的口径答 9（never_reported_either_table，"
+            "见提示词第 65 条）；gold 的 55 是 task_progress 覆盖度口径，问句没有限定 task_progress，"
+            "取 9 才是第 65 条给「从来没上报过进展的任务有多少」的口径"
+        ),
+    },
+    ("nl2sql", "I2-01"): {
+        "drop_limit": True,
+        "gold_row_count": 13,
+        "note": (
+            "gold 用 LIMIT 8 截断「有哪些」清单；问句要完整集合，实测去掉 LIMIT 得 13 条"
+            "被驳回的提交单（全库驳回 13 条）"
+        ),
+    },
+    ("nl2sql", "J5-03"): {
+        "override_gold": {
+            "columns": ["ym", "n"],
+            "rows": [
+                ["2025-01", "14"], ["2025-02", "14"], ["2025-03", "23"], ["2025-04", "19"],
+                ["2025-05", "27"], ["2025-06", "27"], ["2025-07", "25"], ["2025-08", "29"],
+                ["2025-09", "30"], ["2025-10", "27"], ["2025-11", "21"], ["2025-12", "21"],
+                ["2026-01", "23"], ["2026-02", "26"], ["2026-03", "32"], ["2026-04", "31"],
+                ["2026-05", "28"], ["2026-06", "16"], ["2026-07", "18"], ["2026-08", "3"],
+            ],
+        },
+        "override_sql": (
+            "SELECT DATE_FORMAT(a.upload_time, '%Y-%m') AS ym, COUNT(*) AS n FROM task_attachment a "
+            "JOIN task t ON t.id = a.task_id WHERE t.is_deleted = 0 AND t.workflow_status = 'published' "
+            "AND a.is_deleted = 0 GROUP BY ym ORDER BY ym"
+        ),
+        "note": (
+            "gold 的 SQL 带 upload_time >= 2026-01-01 的隐性年份过滤（8 行），问句没有说「今年」；"
+            "「按月看趋势」应给完整历史，实测全量 20 个月（2025-01 .. 2026-08）"
+        ),
+    },
+    ("nl2sql", "K4-01"): {
+        "override_gold": {
+            "columns": ["task_name", "status", "completion_time", "effect_head"],
+            "rows": [
+                [
+                    "省级数据平台协同对接", "1", "2026Q2",
+                    "按照公共数据资源授权运营实施规范，完成36项技术攻关验证，关键指标较基线提升31",
+                ]
+            ],
+        },
+        "override_sql": (
+            "SELECT t.task_name, t.status, d.completion_time, LEFT(d.progress_effect, 40) AS effect_head "
+            "FROM task_group_detail d JOIN task t ON t.id = d.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND d.completion_time IN ("
+            "SELECT completion_time FROM task_group_detail WHERE completion_time REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' "
+            "OR completion_time REGEXP '^[0-9]{4}Q[1-4]$')"
+        ),
+        "note": (
+            "gold 只是「有 completion_time 的前 8 条」（含 2026Q4/2027年10月/持续推进 等未到期写法），"
+            "不是超期任务；按服务端 overdue 口径（只归一化标准日期与 YYYYQn，取季末日，超快照日且未完成）"
+            "真值 1 条：任务 123 省级数据平台协同对接（2026Q2 → 2026-06-30，超期 46 天）"
+        ),
+    },
+    ("nl2sql", "K6-01"): {
+        "override_gold": {
+            "columns": ["board_name", "tasks", "with_2026_goal", "milestones", "attachments"],
+            "rows": [
+                ["技术组重点任务进展", "82", "77", "294", "402"],
+                ["集团重点任务调度", "46", "40", "180", "52"],
+            ],
+        },
+        "override_sql": (
+            "SELECT b.name AS board_name, COUNT(DISTINCT t.id) AS tasks, "
+            "COUNT(DISTINCT CASE WHEN g.year = 2026 THEN t.id END) AS with_2026_goal, "
+            "COUNT(DISTINCT m.id) AS milestones, COUNT(DISTINCT a.id) AS attachments "
+            "FROM task_board b JOIN task t ON t.id = b.id "
+            "LEFT JOIN task_year_goal g ON g.task_id = t.id "
+            "LEFT JOIN task_milestone m ON m.task_id = t.id AND m.is_deleted = 0 "
+            "LEFT JOIN task_attachment a ON a.task_id = t.id AND a.is_deleted = 0 "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND b.is_deleted = 0 "
+            "GROUP BY b.id, b.name ORDER BY b.id"
+        ),
+        "note": (
+            "gold 的里程碑 1363/280 是 JOIN 扇出（README 规则 16 的经典反例：不去重时技术组 294 个里程碑"
+            "被附件行乘成 1363）；正确口径 COUNT(DISTINCT) 得 294/180，各组相加等于全库 474"
+        ),
+    },
+    ("nl2sql", "M2-03"): {
+        "override_gold": {
+            "columns": ["action", "operator_name", "opinion", "created_at"],
+            "rows": [
+                ["rejected", "林振伟", "[按权限不展示]", "2025-01-18 19:20:00"],
+                ["rejected", "林振伟", "[按权限不展示]", "2025-02-12 16:10:00"],
+            ],
+        },
+        "note": (
+            "gold 含驳回意见原文，但 demo 凭证（GUOSHU_WEEKLY_MOCK_TOKEN）下 opinion 按权限遮蔽（R-04），"
+            "agent 只能拿到 [按权限不展示]；参考答案应与该凭证下可取到的数据一致"
+        ),
+    },
+    ("nl2sql", "I6-01"): {
+        "override_grade_mode": "refusal_justified",
+        "override_gold": "不可答：提交单 payload 的键值（填报内容）按权限不展示，只能给出键名组合与涉及条数；拒绝编造内容。",
+        "note": (
+            "gold 从 payload 里取 latestProgress/nextWork 键值，与系统提示词第 6b 条（payload 键值不可读）"
+            "直接冲突；问「进展内容是什么」的正确答案是拒答并给键名替代信息，改为拒答口径判分"
+        ),
+    },
+    ("nl2sql", "I6-02"): {
+        "override_grade_mode": "refusal_justified",
+        "override_gold": "不可答：被驳回提交单的填报内容（payload 键值）按权限不展示，只能给出键名组合与涉及条数；拒绝编造内容。",
+        "note": "同 I6-01：gold 取 payload 键值，与第 6b 条冲突，改为拒答口径判分",
+    },
+    ("nl2sql", "I6-04"): {
+        "override_grade_mode": "refusal_justified",
+        "override_gold": "不可答：在途提交单的成效字段内容（payload 键值）按权限不展示，只能给出键名组合与涉及条数；拒绝编造内容。",
+        "note": "同 I6-01：gold 取 payload 键值，与第 6b 条冲突，改为拒答口径判分",
+    },
+    ("nl2sql", "G3-02"): {
+        "override_gold": "387",
+        "override_sql": "SELECT COUNT(*) AS cnt FROM task_year_goal g",
+        "note": (
+            "问「一共有多少条年度目标记录」没提正式任务，按全表口径答 387（task_year_goal 全表）；"
+            "gold 313 是正式任务口径（全量 313 行 / 128 任务），问句没有限定词时取全表"
+        ),
+    },
+    ("oa_biz", "U5-01"): {
+        "override_gold": {"columns": ["cnt"], "rows": [["1066"]]},
+        "override_sql": (
+            "SELECT COUNT(*) AS cnt FROM task_progress p JOIN task t ON t.id = p.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published'"
+        ),
+        "note": (
+            "gold 1068 是 task_progress 全表行数（含非正式任务的 2 行）；工作区所有进展工具默认上正式任务"
+            "闸门（规则 39 的 943/123/1066 同一套），问「一共记了多少条」按正式任务口径答 1066"
+        ),
+    },
+    ("oa_biz", "U5-02"): {
+        "override_gold": {"columns": ["cnt"], "rows": [["943"]]},
+        "override_sql": (
+            "SELECT COUNT(*) AS cnt FROM task_progress p JOIN task t ON t.id = p.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND p.is_published = 1"
+        ),
+        "note": "「对外展示」= 已发布进展；按正式任务口径 943（gold 945 含非正式任务的 2 行）",
+    },
+    ("oa_biz", "C6-02"): {
+        "override_gold": {
+            "columns": ["published", "rows_"],
+            "rows": [["0", "123"], ["1", "943"]],
+        },
+        "override_sql": (
+            "SELECT p.is_published, COUNT(*) AS rows_ FROM task_progress p JOIN task t ON t.id = p.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' GROUP BY p.is_published ORDER BY p.is_published"
+        ),
+        "note": "同 U5-02：对外展示 943 / 归档 123（正式任务口径，gold 的 945 未上任务闸门）",
+    },
+    ("oa_biz", "B7-02"): {
+        "override_gold": {"columns": ["versions", "tasks"], "rows": [["1066", "81"]]},
+        "override_sql": (
+            "SELECT COUNT(*) AS versions, COUNT(DISTINCT p.task_id) AS tasks FROM task_progress p "
+            "JOIN task t ON t.id = p.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published'"
+        ),
+        "note": "「进展一共记了多少条」按正式任务口径 1066 条 / 81 个任务（gold 1068/83 未上闸门）",
+    },
+    ("oa_biz", "D6-02"): {
+        "override_gold": {"columns": ["task_id", "version_no", "report_time"], "rows": []},
+        "override_sql": (
+            "SELECT p.task_id, p.version_no, p.report_time FROM task_progress p JOIN task t ON t.id = p.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND p.is_published = 1 "
+            "AND p.import_id IS NULL ORDER BY p.task_id, p.version_no"
+        ),
+        "note": (
+            "「手工填的进展」判据只有 import_id（规则 57）：已发布进展 943 条全部来自导入、手工 0 条；"
+            "gold 的 120 条是未发布的手工行（118 条正式 + 2 条非正式），不在已发布口径内"
+        ),
+    },
+    ("oa_biz", "U11-04"): {
+        "override_gold": {"columns": ["cnt"], "rows": [["0"]]},
+        "override_sql": (
+            "SELECT COUNT(*) AS cnt FROM task_progress p JOIN task t ON t.id = p.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND p.is_published = 1 "
+            "AND p.import_id IS NULL"
+        ),
+        "note": "同 D6-02：已发布进展手工填 0 条（规则 57）",
+    },
+    ("oa_biz", "U11-05"): {
+        "override_gold": {"columns": ["cnt"], "rows": [["454"]]},
+        "override_sql": (
+            "SELECT COUNT(*) AS cnt FROM task_attachment a JOIN task t ON t.id = a.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND a.is_deleted = 0"
+        ),
+        "note": "「没被删掉的附件」按正式任务口径 454（gold 510 含非正式任务的附件）",
+    },
+    ("oa_biz", "J2-01"): {
+        "override_gold": {
+            "columns": ["files", "total_bytes"],
+            "rows": [["454", "1954375767"]],
+        },
+        "override_sql": (
+            "SELECT COUNT(*) AS files, SUM(a.file_size) AS total_bytes FROM task_attachment a "
+            "JOIN task t ON t.id = a.task_id WHERE t.is_deleted = 0 AND t.workflow_status = 'published' "
+            "AND a.is_deleted = 0"
+        ),
+        "note": "同 U11-05：正式任务有效附件 454 个 / 1954375767 字节（gold 510/2172916096 未上闸门）",
+    },
+    ("oa_biz", "V3-01"): {
+        "override_gold": {
+            "columns": ["task_name"],
+            "rows": [
+                ["行业大模型底座建设"],
+                ["公共数据授权运营平台建设"],
+                ["数据资产评估工具研制"],
+                ["可信数据空间标准规范研制"],
+                ["枢纽节点数据中心集群建设（2期）"],
+                ["数据分类分级实施指南编制（2期）"],
+                ["隐私计算平台自主可控攻关（2期）"],
+                ["高质量中文语料库建设（3期）"],
+                ["高质量中文语料库建设（4期）"],
+            ],
+        },
+        "override_sql": (
+            "SELECT t.task_name FROM task t WHERE t.is_deleted = 0 "
+            "AND t.workflow_status = 'published' AND t.latest_progress_time IS NULL ORDER BY t.id"
+        ),
+        "note": "「还没报过进展」按两张表都没报过口径（规则 65）= 9 条；gold 48 是另一套计数",
+    },
+    ("oa_biz", "V3-02"): {
+        "override_gold": {"columns": ["cnt"], "rows": [["9"]]},
+        "override_sql": (
+            "SELECT COUNT(*) AS cnt FROM task t WHERE t.is_deleted = 0 "
+            "AND t.workflow_status = 'published' AND t.latest_progress_time IS NULL"
+        ),
+        "note": "同 V3-01：从来没报过进展 = 9（规则 65）",
+    },
+    ("oa_biz", "V4-04"): {
+        "override_gold": {"columns": ["pct"], "rows": [["89.0"]]},
+        "override_sql": (
+            "SELECT ROUND(COUNT(DISTINCT CASE WHEN p.id IS NOT NULL THEN t.id END) / COUNT(DISTINCT t.id) * 100, 1) AS pct "
+            "FROM task t LEFT JOIN task_progress p ON p.task_id = t.id AND p.is_published = 1 "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND t.board_id = 1"
+        ),
+        "note": "技术组报过进展的任务占比 = 73/82 = 89.0%（gold 98.8 是另一套分子分母）",
+    },
+    ("oa_biz", "V4-05"): {
+        "override_gold": {"columns": ["pct"], "rows": [["0.0"]]},
+        "override_sql": (
+            "SELECT ROUND(SUM(p.import_id IS NULL) / COUNT(*) * 100, 1) AS pct FROM task_progress p "
+            "JOIN task t ON t.id = p.task_id WHERE t.is_deleted = 0 AND t.workflow_status = 'published' "
+            "AND p.is_published = 1"
+        ),
+        "note": "手工填进展占比 = 0/943 = 0.0%（规则 57）",
+    },
+    ("oa_biz", "V5-05"): {
+        "override_gold": {"columns": ["most"], "rows": [["18"]]},
+        "override_sql": (
+            "SELECT MAX(c) AS most FROM (SELECT COUNT(*) AS c FROM task_progress p JOIN task t ON t.id = p.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND p.is_published = 1 "
+            "GROUP BY p.task_id) x"
+        ),
+        "note": "报得最勤的任务 18 期（gold 20 未上闸门/口径不同）",
+    },
+    ("oa_biz", "V7-02"): {
+        "override_gold": {"columns": ["tasks"], "rows": [["17"]]},
+        "override_sql": (
+            "SELECT COUNT(DISTINCT p.task_id) AS tasks FROM task_progress p JOIN task t ON t.id = p.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND p.is_published = 1 "
+            "AND p.progress_date = '2026-07-31'"
+        ),
+        "note": "7月31期报了进展的正式任务 17 个（gold 25 未上闸门）",
+    },
+    ("oa_biz", "V7-03"): {
+        "override_gold": {"columns": ["cnt"], "rows": [["0"]]},
+        "override_sql": (
+            "SELECT COUNT(*) AS cnt FROM task_progress p JOIN task t ON t.id = p.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND p.is_published = 1 "
+            "AND p.progress_date >= '2026-08-01' AND p.progress_date <= '2026-08-31'"
+        ),
+        "note": (
+            "8月只有 4 条进展行且全部未发布（is_published = 0）；「报了多少条进展」按已发布行口径（规则 69）= 0"
+        ),
+    },
+    ("oa_biz", "V7-04"): {
+        "override_gold": {"columns": ["latest"], "rows": [["2026-07-31"]]},
+        "override_sql": (
+            "SELECT MAX(p.progress_date) AS latest FROM task_progress p JOIN task t ON t.id = p.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND p.is_published = 1"
+        ),
+        "note": "最近一期（已发布）是 2026-07-31；gold 2026-08-01 是未发布草稿的日期",
+    },
+    ("oa_biz", "E1-02"): {
+        "override_gold": {"columns": ["task_name"], "rows": []},
+        "override_sql": (
+            "SELECT DISTINCT t.task_name FROM task_progress p JOIN task t ON t.id = p.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND p.is_published = 1 "
+            "AND p.progress_date >= '2026-08-01' AND p.progress_date <= '2026-08-31'"
+        ),
+        "note": "「这个月」= 快照所在月 8 月；8 月已发布进展 0 条，答案为无（gold 4 个任务是未发布草稿的）",
+    },
+    ("oa_biz", "E6-01"): {
+        "override_gold": {
+            "columns": ["latest", "days_ago"],
+            "rows": [["2026-07-31 20:30:00", "15"]],
+        },
+        "override_sql": (
+            "SELECT MAX(p.report_time) AS latest, DATEDIFF('2026-08-15', MAX(p.report_time)) AS days_ago "
+            "FROM task_progress p JOIN task t ON t.id = p.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND p.is_published = 1"
+        ),
+        "note": "进展数据最后一次更新（已发布行 report_time 最大值）= 2026-07-31 20:30，距今 15 天",
+    },
+    ("oa_biz", "U10-05"): {
+        "override_gold": {"columns": ["cnt"], "rows": [["84"]]},
+        "override_sql": (
+            "SELECT COUNT(*) AS cnt FROM task_milestone m JOIN task t ON t.id = m.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND m.is_deleted = 0 "
+            "AND m.category = '平台上线'"
+        ),
+        "note": "平台上线类里程碑按正式任务口径 84（gold 96 未上闸门）",
+    },
+    ("oa_biz", "M4-01"): {
+        "mask_column": {"column": "review_comment", "mask": "[按权限不展示]"},
+        "note": (
+            "gold 含审核意见原文，但 demo 凭证下 review_comment 按权限遮蔽（R-04/R-14）；"
+            "参考答案应与该凭证下可取到的数据一致（全部替换为 [按权限不展示]）"
+        ),
+    },
+    ("oa_biz", "C2-02"): {
+        "override_gold": {"columns": ["cnt"], "rows": [["73"]]},
+        "override_sql": (
+            "SELECT COUNT(DISTINCT p.task_id) AS cnt FROM task_progress p JOIN task t ON t.id = p.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND p.is_published = 1"
+        ),
+        "note": (
+            "问「多少个任务报了进展」却 COUNT(*) 数行：gold 943 是进展行数，任务数是 73；"
+            "实测两个值不同，确认扇出"
+        ),
+    },
+    ("oa_biz", "G3-02"): {
+        "override_gold": {"columns": ["cnt"], "rows": [["128"]]},
+        "override_sql": (
+            "SELECT COUNT(DISTINCT t.id) AS cnt FROM task t JOIN task_year_goal g ON g.task_id = t.id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND t.annual_goals <> '' "
+            "AND g.current_year_goal <> ''"
+        ),
+        "note": (
+            "问「任务有多少个」却 COUNT(*) 数年度目标行：gold 313 是目标条目数（全量 313 行 / 128 任务），"
+            "任务数是 128；实测两个值不同，确认扇出"
+        ),
+    },
+    ("oa_biz", "K3-03"): {
+        "override_gold": {"columns": ["cnt"], "rows": [["73"]]},
+        "override_sql": (
+            "SELECT COUNT(DISTINCT t.id) AS cnt FROM task t JOIN task_year_goal g ON g.task_id = t.id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' "
+            "AND EXISTS (SELECT 1 FROM task_progress p WHERE p.task_id = t.id AND p.is_published = 1)"
+        ),
+        "note": (
+            "问「任务一共多少个」却 COUNT(*) 数目标行：gold 186 是行数，任务数是 73（报过已发布进展且定了目标）；"
+            "实测两个值不同，确认扇出"
+        ),
+    },
+    ("oa_biz", "H5-01"): {
+        "override_gold": {
+            "columns": ["with_milestone", "total", "pct"],
+            "rows": [["80", "82", "97.6"]],
+        },
+        "override_sql": (
+            "SELECT COUNT(DISTINCT m.task_id) AS with_milestone, "
+            "(SELECT COUNT(*) FROM task t2 WHERE t2.is_deleted = 0 AND t2.workflow_status = 'published' "
+            "AND t2.board_id = 1) AS total, "
+            "ROUND(COUNT(DISTINCT m.task_id) / (SELECT COUNT(*) FROM task t2 WHERE t2.is_deleted = 0 "
+            "AND t2.workflow_status = 'published' AND t2.board_id = 1) * 100, 1) AS pct "
+            "FROM task_milestone m JOIN task t ON t.id = m.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND t.board_id = 1 AND m.is_deleted = 0"
+        ),
+        "note": (
+            "gold 覆盖率 125/82 = 152.4% 超过 100%：分子数全库有里程碑的任务而分母只数技术组 82，"
+            "两者不同源。正确口径是技术组内 80/82 = 97.6%"
+        ),
     },
 }
 
@@ -160,11 +584,12 @@ def _recompute(connection: Any, sql: str) -> dict[str, Any] | None:
 
 def _apply_fixes(
     qid: str,
+    bank: str,
     record: dict[str, Any],
     connection: Any | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """Apply a confirmed fix, returning the record plus an audit trail entry."""
-    fix = CONFIRMED_FIXES.get(qid)
+    fix = CONFIRMED_FIXES.get((bank, qid))
     if fix is None:
         return record, None
     trail: dict[str, Any] = {"reason": fix["note"]}
@@ -196,6 +621,31 @@ def _apply_fixes(
                 trail["row_count_mismatch"] = (
                     f"重算得 {len(recomputed['rows'])} 行，审计确认应为 {fix['gold_row_count']} 行——请复核"
                 )
+    if fix.get("override_sql"):
+        for key in ("gold_sql", "gold_sql_bound"):
+            if record.get(key):
+                trail.setdefault("sql_changed", []).append(key)
+                record[key] = fix["override_sql"]
+    if fix.get("override_gold"):
+        trail["original_gold_answer"] = record.get("gold_answer")
+        record["gold_answer"] = fix["override_gold"]
+        record["gold_row_count"] = fix.get("gold_row_count", 1)
+        trail["gold_answer_overridden"] = True
+    mask_spec = fix.get("mask_column")
+    if mask_spec:
+        column, mask = mask_spec["column"], mask_spec["mask"]
+        gold = record.get("gold_answer")
+        if isinstance(gold, dict):
+            columns = gold.get("columns") or []
+            rows = gold.get("rows") or []
+            if column in columns:
+                idx = columns.index(column)
+                masked = 0
+                for row in rows:
+                    if row[idx]:
+                        row[idx] = mask
+                        masked += 1
+                trail["masked_values"] = masked
     return record, trail
 
 
@@ -214,7 +664,7 @@ def build_396(records: list[dict[str, Any]], connection: Any | None = None) -> l
     for src in records:
         qid = str(src.get("id"))
         record = dict(src)
-        record, trail = _apply_fixes(qid, record, connection)
+        record, trail = _apply_fixes(qid, "nl2sql", record, connection)
         merged = {
             "id": f"W-{qid}",
             "origin_id": qid,
@@ -226,9 +676,61 @@ def build_396(records: list[dict[str, Any]], connection: Any | None = None) -> l
         }
         if trail:
             merged["defect_fixed"] = trail
+        fix_meta = CONFIRMED_FIXES.get(("nl2sql", qid)) or {}
+        if fix_meta.get("override_grade_mode"):
+            merged["grade_mode"] = fix_meta["override_grade_mode"]
         _tag(merged, qid)
         out.append(merged)
     return out
+
+
+_OWNER_NAME_MAP: dict[str, str] | None = None
+
+
+def _load_owner_name_map(connection: Any) -> dict[str, str]:
+    """task.project_owner_id -> project_owner_name (one id, one name)."""
+    global _OWNER_NAME_MAP
+    if _OWNER_NAME_MAP is None:
+        _OWNER_NAME_MAP = {}
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT project_owner_id, project_owner_name FROM task "
+                "WHERE project_owner_id IS NOT NULL"
+            )
+            for row in cur.fetchall():
+                _OWNER_NAME_MAP.setdefault(str(row["project_owner_id"]), str(row["project_owner_name"]))
+    return _OWNER_NAME_MAP
+
+
+def _nameify_owner_gold(record: dict[str, Any], connection: Any | None) -> bool:
+    """oa_biz 的 gold 用 owner_user_id，工作区工具按姓名返回——把答案改成姓名口径。
+
+    同名不同 id 的行合并计数（工具按姓名分组就是合并的）。返回是否发生了改写。
+    """
+    gold = record.get("gold_answer")
+    if not isinstance(gold, dict) or connection is None:
+        return False
+    columns = gold.get("columns") or []
+    rows = gold.get("rows") or []
+    if "owner_user_id" not in columns:
+        return False
+    idx = columns.index("owner_user_id")
+    name_map = _load_owner_name_map(connection)
+    merged: dict[str, list[str]] = {}
+    for row in rows:
+        name = name_map.get(str(row[idx]), str(row[idx]))
+        if name not in merged:
+            merged[name] = [str(v) for v in row]
+            merged[name][idx] = name
+        else:
+            for c in range(len(row)):
+                if c != idx and merged[name][c].isdigit() and str(row[c]).isdigit():
+                    merged[name][c] = str(int(merged[name][c]) + int(row[c]))
+    columns[idx] = "owner_name"
+    gold["columns"] = columns
+    gold["rows"] = list(merged.values())
+    record["gold_row_count"] = len(gold["rows"])
+    return True
 
 
 def build_oa(
@@ -252,7 +754,8 @@ def build_oa(
             dropped.append((qid, "mock 上无数据（结果为空或 0），构建期已剔除"))
             continue
         record = dict(m)
-        record, trail = _apply_fixes(qid, record, connection)
+        record, trail = _apply_fixes(qid, "oa_biz", record, connection)
+        nameified = _nameify_owner_gold(record, connection)
         merged = {
             "id": f"OA-{qid}",
             "origin_id": qid,
@@ -271,6 +774,11 @@ def build_oa(
         }
         if trail:
             merged["defect_fixed"] = trail
+        if nameified:
+            merged["owner_id_nameified"] = True
+        fix_meta = CONFIRMED_FIXES.get(("oa_biz", qid)) or {}
+        if fix_meta.get("override_grade_mode"):
+            merged["grade_mode"] = fix_meta["override_grade_mode"]
         _tag(merged, qid)
         out.append(merged)
     return out, dropped
