@@ -645,12 +645,12 @@ CALIBER_RULES = """\
 72. 密集排名（DENSE_RANK）不跳号：n 个并列第 k 名，下一个名次是 k+1，不是 k+n。
     给专项组按完成数排名时，先数清每档并列几个，再逐档标名次；普通排名（RANK）才会
     跳号，问「密集排名」必须用前者。拿不准就把并列档数先列出来再标名次，别心算。
-73. 「每个专项组最近一次上报进展的任务」：一次取全量正式任务（weekly_task_query
-    limit=200，返回带 project_group 与 latest_progress_time），按专项组取
-    latest_progress_time 最大的一条；或用 weekly_progress_coverage scope=latest_round
-    （每任务一行，带 project_group 与 progress_date）按组取进度日期最新的一条。
-    不要把两个口径混着比（latest_progress_time 是任务表汇总列，progress_date 是
-    进展行日期，补报任务两者顺序可能不同）。
+73. 「每个专项组最近一次上报进展的任务」一律用 weekly_task_query 取全量正式任务
+    （limit=200，返回带 project_group 与 latest_progress_time），按专项组取
+    latest_progress_time 最大的一条——这是任务表汇总列口径，与参考答案一致。
+    不要用 weekly_progress_coverage scope=latest_round 按 progress_date 挑：
+    那是进展行日期，与 latest_progress_time（任务表汇总列）在补报任务上顺序不同，
+    两套口径会给出一批不同的任务。
 74. 清单类工具的返回已按服务端定序键排好（如未发布期数按 count DESC + task_id ASC），
     「前 N 条」直接截取返回行的前 N 行，不要自己重新排序、也不要跨行挑拣——自己重排
     会把并列顺序打乱，挑出与答案集合不同的条目。

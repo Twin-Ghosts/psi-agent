@@ -607,6 +607,33 @@ CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
             "（规则 11，工具 owner_widths 同口径），多人牵头 = 20（含顿号分隔的任务 109）"
         ),
     },
+    ("nl2sql", "J3-03"): {
+        "recompute_sql": (
+            "SELECT t.task_name, p.version_no, COUNT(*) AS attachment_count "
+            "FROM task_attachment a JOIN task_progress p ON p.id = a.progress_id AND p.is_published = 1 "
+            "JOIN task t ON t.id = a.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND a.is_deleted = 0 "
+            "GROUP BY t.id, t.task_name, p.version_no "
+            "ORDER BY attachment_count DESC, t.id, p.version_no LIMIT 8"
+        ),
+        "note": (
+            "gold 的 ORDER BY 只有 attachment_count DESC, t.id，同任务多期（如任务 18 的 v12/v13）"
+            "顺序由 MySQL 任意决定，与工具 by_progress（并列按任务 id、期号 ASC 定序）不一致；"
+            "重算为与工具完全相同的定序（v12 而非 v13）"
+        ),
+    },
+    ("nl2sql", "O1-01"): {
+        "override_gold": {
+            "id": "19", "task_no": "01", "task_name": "数据安全监测预警平台建设",
+            "project_group": "市场化改革组", "status": "1",
+            "lead_owner_name": "郑亚楠", "project_owner_name": "余承志",
+        },
+        "note": (
+            "gold 只给 lead_owner_name（郑亚楠），判定器把 lead 误读成「主责人」与 agent 的"
+            "牵头人=郑亚楠冲突（任务 19 实际 project_owner=余承志、lead=郑亚楠）；补上"
+            "project_owner_name 让两列都对齐"
+        ),
+    },
     ("oa_biz", "C2-02"): {
         "override_gold": {"columns": ["cnt"], "rows": [["73"]]},
         "override_sql": (
