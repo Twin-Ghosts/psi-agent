@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import json
 import socket as _s
 import textwrap
@@ -11,10 +12,13 @@ import anyio
 import pytest
 from aiohttp import web
 
+from psi_agent.session import Session
 from psi_agent.session.agent import AgentRun, SessionAgent, current_tool_ai_socket
 from psi_agent.session.ai_client import AiClient
 from psi_agent.session.conversation import Conversation
 from psi_agent.session.protocol import (
+    DEFAULT_MAX_TOOL_ROUNDS,
+    MAX_ROUNDS_NOTICE,
     AgentChunk,
     AgentError,
     AgentRunResult,
@@ -1404,12 +1408,33 @@ async def test_agent_saves_on_max_tool_rounds(tmp_path: Path) -> None:
         chunks = [c async for c in agent.run({"role": "user", "content": "hi"})]
 
         content = "".join(c.content or "" for c in chunks)
-        assert "Max tool rounds reached" in content
+        expected = MAX_ROUNDS_NOTICE.format(rounds=1)
+        assert expected in content
+        # The stop must be explicable to the person in the chat, not just to the
+        # log: state the cause and carry the actual round count. A bare marker
+        # would pass a substring check while still reading as a glitch.
+        assert "工具调用上限" in content
+        assert "1 轮" in content
+        assert "Max tool rounds reached" not in content
 
         loaded = await Conversation._load(history_path)
-        assert any(m.get("content") == "[Max tool rounds reached]" for m in loaded)
+        assert any(m.get("content") == expected for m in loaded)
     finally:
         await runner.cleanup()
+
+
+def test_default_max_tool_rounds_is_single_sourced() -> None:
+    """All three entry points must expose the same default.
+
+    They were three separate ``128`` literals, so "change the default" silently
+    meant "change one of three". Pinning the number as well as the agreement
+    keeps a future edit from lowering one copy and leaving the others.
+    """
+    assert DEFAULT_MAX_TOOL_ROUNDS == 20
+    assert Session.__dataclass_fields__["max_tool_rounds"].default == DEFAULT_MAX_TOOL_ROUNDS
+    assert inspect.signature(SessionAgent.__init__).parameters["max_tool_rounds"].default == DEFAULT_MAX_TOOL_ROUNDS
+    assert inspect.signature(SessionAgent.create).parameters["max_tool_rounds"].default == DEFAULT_MAX_TOOL_ROUNDS
+    assert SessionAgent(ai_client=None)._max_tool_rounds == DEFAULT_MAX_TOOL_ROUNDS  # ty: ignore[invalid-argument-type]
 
 
 # --- AgentRunResult: terminal mapping (issue #585) ---
@@ -1419,7 +1444,7 @@ async def _run_streamed_against(
     tmp_path: Path,
     sse_body: bytes,
     *,
-    max_tool_rounds: int = 128,
+    max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS,
     tool: ToolFunction | None = None,
 ) -> AgentRun:
     """Drive one fully-consumed run against a canned SSE body, return the run."""

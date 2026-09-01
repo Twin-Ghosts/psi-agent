@@ -44,6 +44,8 @@ from psi_agent.session.history_display import (
     with_kind,
 )
 from psi_agent.session.protocol import (
+    DEFAULT_MAX_TOOL_ROUNDS,
+    MAX_ROUNDS_NOTICE,
     AgentChunk,
     AgentError,
     AgentRunResult,
@@ -260,7 +262,7 @@ class SessionAgent:
         schedule_registry: ScheduleRegistry | None = None,
         trigger_registry: TriggerRegistry | None = None,
         system_prompt: SystemPrompt | None = None,
-        max_tool_rounds: int = 128,
+        max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS,
         workspace_path: Path | None = None,
         agent_path: Path | None = None,
     ) -> None:
@@ -306,7 +308,7 @@ class SessionAgent:
         *,
         ai_socket: str,
         workspace_path: Path,
-        max_tool_rounds: int = 128,
+        max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS,
         session_id: str | None = None,
         agent_path: Path | None = None,
         appdata_root: str = "",
@@ -923,15 +925,25 @@ class SessionAgent:
                         return
 
                 else:
-                    logger.warning(f"Reached max tool rounds ({self._max_tool_rounds}), stopping")
+                    logger.warning(
+                        f"Reached max tool rounds ({self._max_tool_rounds}), stopping; "
+                        f"stop_cause={AgentStopCause.AGENT_TURN_LIMIT}"
+                    )
+                    # The notice goes to the *user*, not just the log: with the
+                    # ceiling at DEFAULT_MAX_TOOL_ROUNDS this branch is reachable
+                    # in normal use, and the reply it terminates is by definition
+                    # half-finished (the model had just asked for more tools). A
+                    # bare marker here reads as a glitch; naming the cause and the
+                    # round count makes the stop explicable and actionable.
+                    notice = MAX_ROUNDS_NOTICE.format(rounds=self._max_tool_rounds)
                     self._conversation.add(
                         with_kind(
-                            {"role": "assistant", "content": "[Max tool rounds reached]"},
+                            {"role": "assistant", "content": notice},
                             turn_response_kind,
                         )
                     )
                     await self._conversation.commit()
-                    yield AgentChunk(content="[Max tool rounds reached]")
+                    yield AgentChunk(content=notice)
                     # Loop ran out of rounds; the last model turn asked for yet
                     # more tools, so its finish reason is typically "tool_calls".
                     _finish(
