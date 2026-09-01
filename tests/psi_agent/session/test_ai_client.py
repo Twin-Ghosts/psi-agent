@@ -3,10 +3,35 @@ from __future__ import annotations
 import json
 import socket as _s
 
+import aiohttp
 import pytest
 from aiohttp import web
 
 from psi_agent.session.ai_client import AiClient
+
+
+@pytest.mark.anyio
+async def test_ai_client_timeout_config(monkeypatch: pytest.MonkeyPatch):
+    """AiClient.stream configures ClientSession with total=None and connect=30.0."""
+    captured_timeouts = []
+    old_session = aiohttp.ClientSession
+
+    def mock_session(*args, **kwargs):
+        captured_timeouts.append(kwargs.get("timeout"))
+        return old_session(*args, **kwargs)
+
+    monkeypatch.setattr(aiohttp, "ClientSession", mock_session)
+    client = AiClient(ai_socket="http://127.0.0.1:12345")
+    try:
+        async for _ in client.stream({"messages": []}):
+            pass
+    except Exception:
+        pass
+    assert len(captured_timeouts) > 0
+    timeout = captured_timeouts[0]
+    assert timeout is not None
+    assert timeout.total is None
+    assert timeout.connect == 30.0
 
 
 @pytest.mark.anyio

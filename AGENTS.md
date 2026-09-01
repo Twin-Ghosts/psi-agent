@@ -402,14 +402,14 @@ async def handler(request):
 ## 开发命令
 
 ```bash
-uv run ruff check .              # lint 检查
-uv run ruff check --fix .        # auto-fix
-uv run ruff format .             # 格式化
-uv run ruff format --check .     # 格式检查
-uv run ty check                  # 类型检查
-uv run pytest -v                 # 全部测试
-uv run psi-agent --help          # CLI 帮助
-uv build                         # 构建
+uv run ruff check src tests              # lint 检查
+uv run ruff check --fix src tests        # auto-fix
+uv run ruff format src tests             # 格式化
+uv run ruff format --check src tests     # 格式检查
+uv run ty check src tests                # 类型检查
+uv run pytest -v                         # 全部测试
+uv run psi-agent --help                  # CLI 帮助
+uv build                                 # 构建
 ```
 
 ## 多树协作与分支同步

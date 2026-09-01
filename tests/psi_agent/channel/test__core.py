@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 
+import aiohttp
 import anyio
 import anyio.lowlevel
 import pytest
@@ -11,6 +12,26 @@ from aiohttp import web
 from psi_agent.channel._core import ChannelCore
 from psi_agent.channel._errors import ChannelError
 from psi_agent.channel._types import FileChunk, ReasoningChunk, TextChunk
+
+
+@pytest.mark.anyio
+async def test_channel_core_timeout_config(monkeypatch: pytest.MonkeyPatch):
+    """ChannelCore.__aenter__ configures ClientSession with total=None and connect=30.0."""
+    captured_timeouts = []
+    old_session = aiohttp.ClientSession
+
+    def mock_session(*args, **kwargs):
+        captured_timeouts.append(kwargs.get("timeout"))
+        return old_session(*args, **kwargs)
+
+    monkeypatch.setattr(aiohttp, "ClientSession", mock_session)
+    async with ChannelCore("http://localhost:12345") as core:
+        assert core._session is not None
+    assert len(captured_timeouts) > 0
+    timeout = captured_timeouts[0]
+    assert timeout is not None
+    assert timeout.total is None
+    assert timeout.connect == 30.0
 
 
 @pytest.mark.anyio

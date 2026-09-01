@@ -310,18 +310,44 @@ Gateway 暴露以下 REST 端点（详细信息见 [Gateway 层设计文档](src
 | POST | `/ais` | 创建 AI 实例 |
 | DELETE | `/ais/{ai_id}` | 删除 AI |
 | GET | `/ais` | 列出所有 AI |
+| POST | `/routers` | 创建并启动 Router |
+| DELETE | `/routers/{router_id}` | 删除 Router |
+| GET | `/routers` | 列出所有 Router |
 | POST | `/sessions` | 创建 Session |
 | DELETE | `/sessions/{session_id}` | 删除 Session |
 | GET | `/sessions` | 列出所有 Session |
 | POST | `/sessions/{session_id}/chat` | Web UI 对话（SSE 流式） |
 | GET | `/sessions/{session_id}/history` | 获取会话历史 |
+| GET | `/sessions/{session_id}/todos` | 获取会话 todo 列表 |
+| GET | `/sessions/{session_id}/todo-segments` | 获取 todo 子任务分段列表 |
+| GET | `/sessions/{session_id}/todo-segments/{segment_id}` | 获取单段 todo 历史数据 |
+| POST | `/sessions/{session_id}/todo-segments/{segment_id}` | 修改 todo 分段标题 |
 | POST | `/feishu/route` | 幂等路由飞书会话到 Session：群聊按 chat_id（整群共用），私聊按 open_id（一人一个），首次按需 spawn |
 | GET | `/feishu/routes` | 列出飞书会话 → Session 路由 |
 | GET | `/titles` | 获取所有会话标题 |
 | POST | `/titles` | 设置会话标题 |
 | POST | `/titles/generate` | AI 自动生成标题 |
+| GET | `/summaries` | 获取所有会话任务摘要 |
+| POST | `/summaries` | 设置任务摘要 |
+| POST | `/summaries/generate` | AI 生成任务摘要 |
+| GET | `/defaults` | 获取默认 agent / workspace / appdata 路径 |
 | GET | `/workspace/browse` | 浏览目录（`?path=...`） |
 | GET | `/workspace/cwd` | 获取工作目录 |
+| GET | `/workspace/places` | 获取快捷位置与盘符列表 |
+| GET | `/workspace/file` | 读取文件为 base64 |
+| POST | `/workspace/reveal` | 在本机文件管理器中高亮显示指定文件 |
+| POST | `/ui/attention` | 会话在后台完成时触发托盘/webview 闪烁提示 |
+| GET | `/ui/prefs/survey` | 查询 UI 问卷偏好状态 |
+| POST | `/ui/prefs/survey` | 设置 UI 问卷偏好状态 |
+| GET | `/auth/status` | 查询云端认证与登录状态 |
+| POST | `/auth/send-code` | 请求发送验证码 |
+| POST | `/auth/verify` | 校验验证码 |
+| POST | `/auth/complete` | 完成账号注册/创建 |
+| POST | `/auth/bind` | 绑定手机号或邮箱 |
+| GET | `/auth/me` | 获取当前登录用户信息 |
+| POST | `/auth/logout` | 登出并清理本机凭证 |
+| GET | `/auth/devices` | 获取已登录设备列表 |
+| DELETE | `/auth/devices/{device_id}` | 剔除指定已登录设备 |
 | GET | `/openapi.json` | OpenAPI schema |
 | GET | `/favicon.ico` | favicon（仅当 `--icon` 设置时有效，否则返回 404） |
 
@@ -389,10 +415,10 @@ uv run psi-agent channel feishu \
 ## 开发
 
 ```bash
-uv run ruff check .          # lint
-uv run ruff format --check . # 格式
-uv run ty check              # 类型
-uv run pytest -v             # 测试
+uv run ruff check src tests          # lint
+uv run ruff format --check src tests # 格式
+uv run ty check src tests            # 类型
+uv run pytest -v                     # 测试
 ```
 
 用 Nix 的话，`nix develop` 会进入带 Python 3.14、`uv` 和 `node` 的开发 shell，之后照常用上面的 `uv run ...` 命令即可。
