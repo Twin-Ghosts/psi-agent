@@ -666,6 +666,153 @@ CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
             "project_owner_name 让两列都对齐"
         ),
     },
+    ("oa_biz", "C2-01"): {
+        "recompute_sql": (
+            "SELECT t.task_name, p.latest_progress FROM task_progress p JOIN task t ON t.id = p.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND p.is_published = 1 "
+            "AND p.version_no = (SELECT MAX(p2.version_no) FROM task_progress p2 "
+            "WHERE p2.task_id = p.task_id AND p2.is_published = 1) ORDER BY t.id"
+        ),
+        "note": (
+            "问「这一期各个任务」= 每任务最新一期一条（73 行）；gold 把 943 行已发布进展全列"
+            "（同一任务多期重复），与「各个任务」的逐任务语义不符"
+        ),
+    },
+    ("oa_biz", "C4-01"): {
+        "recompute_sql": (
+            "SELECT t.task_name FROM task_progress p JOIN task t ON t.id = p.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND p.is_published = 1 "
+            "AND p.next_work IS NOT NULL AND p.next_work <> '' "
+            "AND p.version_no = (SELECT MAX(p2.version_no) FROM task_progress p2 "
+            "WHERE p2.task_id = p.task_id AND p2.is_published = 1) ORDER BY t.id"
+        ),
+        "note": "问「哪些任务」= 去重任务清单（73 条）；gold 943 行重复任务名，与「只要任务名」不符",
+    },
+    ("oa_biz", "C3-01"): {
+        "override_gold": {
+            "columns": ["task_name"],
+            "rows": [
+                ["行业大模型底座建设"],
+                ["公共数据授权运营平台建设"],
+                ["数据资产评估工具研制"],
+                ["可信数据空间标准规范研制"],
+                ["枢纽节点数据中心集群建设（2期）"],
+                ["数据分类分级实施指南编制（2期）"],
+                ["隐私计算平台自主可控攻关（2期）"],
+                ["高质量中文语料库建设（3期）"],
+                ["高质量中文语料库建设（4期）"],
+            ],
+        },
+        "override_sql": (
+            "SELECT t.task_name FROM task t WHERE t.is_deleted = 0 "
+            "AND t.workflow_status = 'published' AND t.latest_progress_time IS NULL ORDER BY t.id"
+        ),
+        "note": (
+            "「还没报过进展」按两张表都没报过的口径（规则 65）= 9 条；gold 55 是 task_progress "
+            "无已发布行的覆盖度口径，与 W 库 B7-03/V3-01 同一修正"
+        ),
+    },
+    ("oa_biz", "A3-02"): {
+        "override_gold": {
+            "columns": ["name"],
+            "rows": [["数据要素登记与流通试点"], ["跨域可信数据空间"]],
+        },
+        "override_sql": (
+            "SELECT c.name FROM task_category c WHERE c.is_deleted = 0 AND c.parent_id IS NOT NULL "
+            "AND NOT EXISTS (SELECT 1 FROM task t WHERE t.category_id = c.id AND t.is_deleted = 0 "
+            "AND t.workflow_status = 'published') ORDER BY c.id"
+        ),
+        "note": (
+            "gold 把 8 个一级分类也算「没挂任务」——任务只挂二级分类，一级分类结构上永远没有"
+            "直接挂载，列进去是误导；「分类下面没挂任务」只数二级（2 个）"
+        ),
+    },
+    ("oa_biz", "V3-05"): {
+        "override_gold": {
+            "columns": ["name"],
+            "rows": [["数据要素登记与流通试点"], ["跨域可信数据空间"]],
+        },
+        "override_sql": (
+            "SELECT c.name FROM task_category c WHERE c.is_deleted = 0 AND c.parent_id IS NOT NULL "
+            "AND NOT EXISTS (SELECT 1 FROM task t WHERE t.category_id = c.id AND t.is_deleted = 0 "
+            "AND t.workflow_status = 'published') ORDER BY c.id"
+        ),
+        "note": "同 A3-02：空分类只数二级（2 个），一级分类是结构层不算",
+    },
+    ("oa_biz", "A4-01"): {
+        "override_gold": {"columns": ["max_no"], "rows": [["07"]]},
+        "override_sql": (
+            "SELECT MAX(t.task_no) AS max_no FROM task t WHERE t.is_deleted = 0 "
+            "AND t.workflow_status = 'published' AND t.board_id = 1"
+        ),
+        "note": (
+            "task_no 是零填充字符串（01..07），gold 用 CAST 成数字丢前导零（7），与工具返回的"
+            "原始编号（07）不一致；判定器把 7/07 判为数字不一致，按原始值对齐"
+        ),
+    },
+    ("oa_biz", "E6-02"): {
+        "recompute_sql": (
+            "SELECT t.task_name, t.latest_progress_time AS last_report FROM task t "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND t.status IN (0, 1) "
+            "AND (t.latest_progress_time IS NULL OR t.latest_progress_time < '2026-08-01') "
+            "ORDER BY t.latest_progress_time, t.id"
+        ),
+        "note": (
+            "「进展没更新」按规则 70 加在办闸门（已完成/已停用不再上报是正常的）：在办任务中"
+            "14 天没更新的 46 条（含从未上报）；gold 77 是全部正式任务按 report_time 的口径"
+        ),
+    },
+    ("oa_biz", "U5-05"): {
+        "recompute_sql": (
+            "SELECT DISTINCT p.progress_date AS period FROM task_progress p JOIN task t ON t.id = p.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND p.is_published = 1 "
+            "ORDER BY p.progress_date"
+        ),
+        "note": (
+            "「哪几期」= 已发布进展的期号（progress_date，19 个月末日）；gold 按 report_time "
+            "去重得 42 个日期——那是「哪天报的」不是「哪一期」，且未上任务闸门"
+        ),
+    },
+    ("oa_biz", "V1-02"): {
+        "recompute_sql": (
+            "SELECT p.reporter_id, COUNT(*) AS cnt FROM task_progress p JOIN task t ON t.id = p.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND p.is_published = 1 "
+            "GROUP BY p.reporter_id ORDER BY cnt DESC, p.reporter_id"
+        ),
+        "note": "「报了多少条进展」按规则 75 指已发布进展行且上正式任务闸门（43 人）；gold 66/65/56 是全表未上闸门",
+    },
+    ("oa_biz", "V1-03"): {
+        "override_gold": {"columns": ["reporter_id", "cnt"], "rows": [["10515", "63"]]},
+        "override_sql": (
+            "SELECT p.reporter_id, COUNT(*) AS cnt FROM task_progress p JOIN task t ON t.id = p.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND p.is_published = 1 "
+            "GROUP BY p.reporter_id ORDER BY cnt DESC, p.reporter_id LIMIT 1"
+        ),
+        "note": "同 V1-02：已发布进展口径，最多 63 条（gold 66 未上闸门）",
+    },
+    ("oa_biz", "U5-03"): {
+        "override_gold": {"columns": ["cnt"], "rows": [["43"]]},
+        "override_sql": (
+            "SELECT COUNT(DISTINCT p.reporter_id) AS cnt FROM task_progress p JOIN task t ON t.id = p.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND p.is_published = 1"
+        ),
+        "note": (
+            "「多少人报过进展」= 已发布进展的去重上报人 43（gold 46 未上闸门；"
+            "与 weekly_person_stats scope=reporter_count 同口径）"
+        ),
+    },
+    ("oa_biz", "L2-03"): {
+        "override_gold": {"columns": ["owners"], "rows": [["6"]]},
+        "override_sql": (
+            "SELECT COUNT(*) AS owners FROM (SELECT t.project_owner_id FROM task t "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND t.project_owner_id IS NOT NULL "
+            "GROUP BY t.project_owner_id HAVING COUNT(*) >= 5) x"
+        ),
+        "note": (
+            "「5 个以上」含 5 个（≥5）：6 位负责人（7/7/6/5/5/5）；gold 3 是 >5 的口径"
+            "（不含恰好 5 条的 10354/10564/u3214），问句边界取含 5"
+        ),
+    },
     ("oa_biz", "C2-02"): {
         "override_gold": {"columns": ["cnt"], "rows": [["73"]]},
         "override_sql": (

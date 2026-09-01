@@ -4129,6 +4129,41 @@ async def run() -> int:
         str(latest_round.get("columns")),
     )
 
+    # 规则信号题的文本检查出口（G-E01/E02/D05）：正则与判定固化在服务端，
+    # 数字与扫描口径（每任务最新一期已发布进展）必须钉死，模型不能自己翻正文数。
+    conflict = await _call(registry, "weekly_progress_coverage", scope="text_check", rule="number_conflict")
+    check(
+        "text_check number_conflict 9 项硬冲突、4 项阶段和超 100",
+        conflict.get("ok") is True
+        and str(conflict.get("hard_conflict_count")) == "9"
+        and str(conflict.get("sum_anomaly_count")) == "4",
+        f"hard={conflict.get('hard_conflict_count')} sum={conflict.get('sum_anomaly_count')}",
+    )
+    avail = await _call(registry, "weekly_progress_coverage", scope="text_check", rule="availability")
+    check(
+        "text_check availability 低于 90% 共 13 项",
+        avail.get("ok") is True and str(avail.get("row_count")) == "13",
+        f"rows={avail.get('row_count')}",
+    )
+    kw = await _call(registry, "weekly_progress_coverage", scope="text_check", rule="keyword")
+    check(
+        "text_check keyword 默认检索协调/协同等 19 条",
+        kw.get("ok") is True and str(kw.get("row_count")) == "19",
+        f"rows={kw.get('row_count')}",
+    )
+    kw2 = await _call(registry, "weekly_progress_coverage", scope="text_check", rule="keyword", keyword="跨域互认")
+    check(
+        "text_check keyword 自定义词生效（跨域互认 10 条）",
+        kw2.get("ok") is True and str(kw2.get("row_count")) == "10",
+        f"rows={kw2.get('row_count')}",
+    )
+    bad = await _call(registry, "weekly_progress_coverage", scope="text_check", rule="bogus")
+    check(
+        "text_check 不支持的规则报 unsupported_rule",
+        bad.get("ok") is False and bad.get("error", {}).get("code") == "unsupported_rule",
+        str(bad.get("error")),
+    )
+
     # OA-F6-02：项目团队人数在 task 行上，此前无排名度量。
     team = await _call(registry, "weekly_rank", metric="project_team_size", mode="keep_ties", top=1)
     check(

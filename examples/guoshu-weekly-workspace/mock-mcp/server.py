@@ -2690,6 +2690,7 @@ _COVERAGE_SCOPES = (
     "latest_round",
     "missing_next",
     "backfill",
+    "text_check",
 )
 
 # 「最新一期」的定序键：version_no 大者为新，同期再按 id 兜底，两级都要。
@@ -2707,6 +2708,151 @@ _LATEST_PROGRESS_CTE = (
     "ORDER BY p.version_no DESC, p.id DESC) AS rn "
     "FROM task_progress p WHERE p.is_published = 1)"
 )
+
+# text_check 的三类文本规则。文案是合成数据里固定的报数句式（「完成标准草案6项，
+# 其中50项已报批，16项进入征求意见阶段」），数字在「项」前后都可能出现。
+_DRAFT_RE = re.compile(r"草案(\d+)\s*项")
+_REPORT_RE = re.compile(r"(\d+)\s*项已?报批|已?报批(\d+)\s*项")
+_CONSULT_RE = re.compile(r"(\d+)\s*项进入征求意见|征求意见(\d+)\s*项")
+_AVAIL_RE = re.compile(r"可用性(\d+(?:\.\d+)?)%")
+_COORD_RE = re.compile(r"协调|协同|联动|牵头组织")
+
+_TEXT_RULES = ("number_conflict", "availability", "keyword")
+
+
+def _text_check(rule: str, keyword: str, clause: str) -> dict[str, Any]:
+    """Run one text rule over each task's latest published progress round.
+
+    Returns the standard envelope; the scan itself is unbounded server-side
+    (``store.all_rows``), only the returned rows are capped.
+    """
+    rule = (rule or "").strip().lower()
+    if rule not in _TEXT_RULES:
+        return {
+            "ok": False,
+            "error": {
+                "code": "unsupported_rule",
+                "message": f"不支持的规则：{rule or '(空)'}；支持 {', '.join(_TEXT_RULES)}",
+            },
+        }
+    rows = store.all_rows(
+        "SELECT t.id AS task_id, t.task_name, p.version_no, p.latest_progress, p.next_work "
+        f"FROM task t JOIN {_LATEST_PROGRESS_CTE} p ON p.task_id = t.id AND p.rn = 1 "
+        f"WHERE {clause} ORDER BY t.id"
+    )
+    if rule == "availability":
+        hits: list[dict[str, Any]] = []
+        for r in rows:
+            m = _AVAIL_RE.search(r.get("latest_progress") or "")
+            if m and float(m.group(1)) < 90:
+                hits.append(
+                    {
+                        "task_id": r["task_id"],
+                        "task_name": r["task_name"],
+                        "version_no": r["version_no"],
+                        "availability_pct": m.group(1),
+                    }
+                )
+        return {
+            "ok": True,
+            "columns": ["task_id", "task_name", "version_no", "availability_pct"],
+            "rows": hits,
+            "row_count": len(hits),
+            "has_more": False,
+            "caliber": (
+                f"{store.FORMAL_TASK_CALIBER}；每任务最新一期已发布进展（version_no 倒序）；"
+                "从正文正则抽取「可用性 NN%」，列出低于 90% 的；文本抽取≠结构化指标，"
+                "只能作待核实清单"
+            ),
+            "snapshot_note": store.SNAPSHOT_NOTE,
+        }
+    if rule == "keyword":
+        pattern = _COORD_RE
+        if keyword.strip():
+            pattern = re.compile(re.escape(keyword.strip()))
+        hits = [
+            {
+                "task_id": r["task_id"],
+                "task_name": r["task_name"],
+                "version_no": r["version_no"],
+                "next_work": r.get("next_work") or "",
+            }
+            for r in rows
+            if pattern.search(r.get("next_work") or "")
+        ]
+        return {
+            "ok": True,
+            "columns": ["task_id", "task_name", "version_no", "next_work"],
+            "rows": hits,
+            "row_count": len(hits),
+            "has_more": False,
+            "caliber": (
+                f"{store.FORMAL_TASK_CALIBER}；每任务最新一期已发布进展；"
+                f"按 next_work 文本检索 {keyword.strip() or '协调/协同/联动/牵头组织'}；"
+                "无结构化协同方/责任边界/承诺日期，只能作待核实线索"
+            ),
+            "snapshot_note": store.SNAPSHOT_NOTE,
+        }
+    # number_conflict: 硬冲突 = 报批/征求数大于草案数；阶段和异常 = 草案+报批+征求 > 100。
+    hits = []
+    for r in rows:
+        text = f"{r.get('latest_progress') or ''} {r.get('next_work') or ''}"
+        d = _DRAFT_RE.findall(text)
+        rp = _REPORT_RE.findall(text)
+        cs = _CONSULT_RE.findall(text)
+        if not d:
+            continue
+        draft = int(d[0])
+        report = int(rp[0][0] or rp[0][1]) if rp else None
+        consult = int(cs[0][0] or cs[0][1]) if cs else None
+        conflict_type: list[str] = []
+        if report is not None and report > draft:
+            conflict_type.append("hard_report_gt_draft")
+        if consult is not None and consult > draft:
+            conflict_type.append("hard_consult_gt_draft")
+        total = draft + (report or 0) + (consult or 0)
+        if report is not None and consult is not None and total > 100:
+            conflict_type.append("sum_anomaly")
+        if not conflict_type:
+            continue
+        hits.append(
+            {
+                "task_id": r["task_id"],
+                "task_name": r["task_name"],
+                "version_no": r["version_no"],
+                "draft_cnt": draft,
+                "report_cnt": report if report is not None else "",
+                "consult_cnt": consult if consult is not None else "",
+                "conflict_type": ",".join(conflict_type),
+                "text_snippet": (r.get("latest_progress") or "")[:60],
+            }
+        )
+    hard = sum(1 for h in hits if h["conflict_type"].startswith("hard"))
+    sum_anom = sum(1 for h in hits if "sum_anomaly" in h["conflict_type"])
+    return {
+        "ok": True,
+        "columns": [
+            "task_id",
+            "task_name",
+            "version_no",
+            "draft_cnt",
+            "report_cnt",
+            "consult_cnt",
+            "conflict_type",
+            "text_snippet",
+        ],
+        "rows": hits,
+        "row_count": len(hits),
+        "has_more": False,
+        "hard_conflict_count": hard,
+        "sum_anomaly_count": sum_anom,
+        "caliber": (
+            f"{store.FORMAL_TASK_CALIBER}；每任务最新一期已发布进展；"
+            f"硬冲突 {hard} 项（报批或征求意见数大于草案总数），阶段数量之和超 100 的 {sum_anom} 项"
+        ),
+        "snapshot_note": store.SNAPSHOT_NOTE,
+    }
+
 
 # 动作日志的聚合口径。日志 1578 条而清单封顶 200 行，所以「各节点各动作多少条」
 # 和「人均多少次动作」都必须服务端算完再回，模型翻明细自己数必然只数到第一页。
@@ -3230,7 +3376,13 @@ def weekly_progress_range(
 
 
 @mcp.tool()
-def weekly_progress_coverage(scope: str = "summary", project_group: str = "", limit: int = 200) -> str:
+def weekly_progress_coverage(
+    scope: str = "summary",
+    project_group: str = "",
+    limit: int = 200,
+    rule: str = "",
+    keyword: str = "",
+) -> str:
     """Summarise how far back published progress goes and how much it covers.
 
     Args:
@@ -3260,8 +3412,16 @@ def weekly_progress_coverage(scope: str = "summary", project_group: str = "", li
             (a task with 19 periods would otherwise contribute 19 rows and its
             oldest plan reads as current). ``missing_next`` counts tasks whose
             newest period left 下一步 blank.
+            ``text_check`` runs a text rule over each task's latest published
+            round -- ``rule=number_conflict`` finds 报批/征求意见数大于草案数
+            (plus 阶段数量之和超 100), ``rule=availability`` lists 可用性低于
+            90% 的, ``rule=keyword`` searches next_work for 协调/协同/联动/
+            牵头组织 (or a custom ``keyword``).  These are the 规则信号题的
+            服务端出口: 文本数字冲突 / 可用性抽取 / 跨部门协调线索.
         project_group: Narrow to one 项目组, for "算力网络组各任务下一步做什么".
         limit: Max rows for the listing scopes, capped at 200.
+        rule: For scope=text_check: number_conflict / availability / keyword.
+        keyword: For scope=text_check with rule=keyword: custom search term.
     """
 
     def work() -> dict[str, Any]:
@@ -3328,6 +3488,14 @@ def weekly_progress_coverage(scope: str = "summary", project_group: str = "", li
             )
             rows["total_count"] = total["value"]
             return rows
+
+        if key == "text_check":
+            # 规则信号题的服务端出口：数字冲突/可用性/关键词三类文本规则检查。
+            # 此前这些题让模型自己从正文里数——要么 max_rounds，要么方向不符；
+            # 正则与判定固化在服务端，模型只需调一次并照抄结果。
+            # 扫描范围 = 每任务最新一期已发布进展（与 latest_round 同一套定序），
+            # 因为问「当前/最新进展」的规则题不应该拿历史期凑数。
+            return _text_check(rule, keyword, clause)
 
         if key == "backfill":
             # 「补报」= 期次小的那一期反而提交得更晚，判据是相邻两期的 report_time

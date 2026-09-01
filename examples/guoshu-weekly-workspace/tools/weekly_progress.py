@@ -530,7 +530,13 @@ async def weekly_field_completeness(field: str = "", list_missing: bool = False,
     )
 
 
-async def weekly_progress_coverage(scope: str = "summary", project_group: str = "", limit: int = 200) -> str:
+async def weekly_progress_coverage(
+    scope: str = "summary",
+    project_group: str = "",
+    limit: int = 200,
+    rule: str = "",
+    keyword: str = "",
+) -> str:
     """Summarise progress history depth: row count, tasks covered, date span, max version.
 
     Use this for "how far back does the history go" or "how many progress records
@@ -610,10 +616,20 @@ async def weekly_progress_coverage(scope: str = "summary", project_group: str = 
             is the only outlet for "有哪些任务出现过补报"; do NOT try to answer it
             off weekly_progress_range's lag_days, which is "report date minus
             period date" WITHIN one row and says nothing about which period was
-            filed later).
+            filed later) /
+            text_check (the 规则信号题出口: run a text rule over each task's
+            NEWEST published period. rule=number_conflict finds 硬冲突 (报批或
+            征求意见数大于草案数, 当前 9 项, 其中 4 项阶段数量之和超 100) with
+            draft_cnt/report_cnt/consult_cnt and conflict_type per row;
+            rule=availability lists 可用性低于 90% 的 (13 项, 只能作待核实清单,
+            无统一指标定义不能直接判为业务风险); rule=keyword searches next_work
+            for 协调/协同/联动/牵头组织 (19 条) or a custom keyword. Do NOT hand-
+            count these off progress texts -- the regexes live server-side).
         project_group: Narrow latest_round / missing_next to one 项目组, for
             "算力网络组各任务下一步做什么". Matched exactly after trimming.
         limit: Max rows for the listing scopes, capped at 200.
+        rule: For scope=text_check: number_conflict / availability / keyword.
+        keyword: For scope=text_check with rule=keyword: custom search term.
     """
     try:
         bounded = max(1, min(200, int(limit)))
@@ -621,7 +637,7 @@ async def weekly_progress_coverage(scope: str = "summary", project_group: str = 
         return _invalid("limit must be an integer")
     return await _call(
         "weekly_progress_coverage",
-        {"scope": scope, "project_group": project_group, "limit": bounded},
+        {"scope": scope, "project_group": project_group, "limit": bounded, "rule": rule, "keyword": keyword},
     )
 
 

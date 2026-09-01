@@ -281,6 +281,24 @@ def fetch(
     }
 
 
+def all_rows(sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Run a read-only query and return ALL rows, unbounded.
+
+    Only for server-side scans that need the full corpus (text-rule checks):
+    the agent-facing envelope stays capped at MAX_ROWS, and anything that
+    would cross the boundary must go through ``fetch`` instead.
+    """
+    conn = connect()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(sql, params or {})
+            return [dict(row) for row in cursor.fetchall()]
+    except pymysql.Error as exc:
+        raise QueryError("query_failed", str(exc.args[-1] if exc.args else exc)) from exc
+    finally:
+        conn.close()
+
+
 def scalar(sql: str, params: dict[str, Any] | None = None, *, caliber: str = "") -> dict[str, Any]:
     conn = connect()
     try:
