@@ -817,7 +817,10 @@ CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
         "override_gold": {
             "columns": ["owner_user_id", "cnt"],
             "rows": [
-                ["10445", "4"], ["10515", "4"], ["u3208", "4"], ["u3214", "4"],
+                ["10445", "4"],
+                ["10515", "4"],
+                ["u3208", "4"],
+                ["u3214", "4"],
             ],
         },
         "override_sql": (
