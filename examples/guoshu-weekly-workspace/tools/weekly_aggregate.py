@@ -60,7 +60,22 @@ async def weekly_aggregate(
             row count is the answer -- ties past the boundary are excluded by
             the question, not missing from the data. Ignored for workflow_status,
             whose reply also carries a totals block with the unpublished count
-            and the published share already computed.
+            and the published share already computed, plus
+            active_pending_tasks -- the 18 tasks still awaiting someone's action
+            (pending_audit 7 + pending_leader 5 + pending_fill 3 + signing 3).
+            "有多少流程需要继续推动 / 当前审批积压怎样" is that number: quote it
+            instead of summing buckets, which tends to pull in the 3 rejected
+            (already back with the filer) and reach 21, and do not substitute
+            unpublished_tasks, which counts rejected and cancelled too.
+            The same reply also carries unpublished_task_list: all 22 unpublished
+            tasks by id / task_no / task_name / workflow_status, ordered by
+            state. "哪些任务在等领导审批" and "会签阶段有哪些任务" are answered by
+            filtering that list on workflow_status -- 5 tasks at pending_leader
+            (14 / 53 / 58 / 112 / 129) and 3 at signing (70 / 141 / 147). These
+            tasks are outside the formal set, so weekly_task_query returns none
+            of them under R-01; without this list the only route left is the
+            submission table, whose 审批中的填报单 are forms rather than tasks
+            and count 15 and 9 instead.
         order_by: "finish_rate" re-orders the project_group and primary_category
             breakdowns by completion rate. Both carry finished and
             finish_rate_pct next to cnt, already rounded on the server -- quote
@@ -104,6 +119,15 @@ async def weekly_freshness() -> str:
     timestamp). The per-board rows carry their own days_behind; overall is the
     whole-library pair, which is what a question about "整个看板" asks for --
     picking either board row answers a narrower question.
+
+    Asked about ONE board's data currency ("技术组数据更新到什么时候"), answer the
+    formal caliber, not the board row: latest_progress comes from
+    task.latest_progress_time, which counts unpublished rows and reads 2026-08-09
+    for the tech board while its newest published progress is 2026-07-31.
+    Use published_progress[].newest_published_progress, and for the tech board say
+    tech_import.newest_finished_batch (2026-07-31) -- adding that the 08-15 batch
+    (tech_import.newest_unfinished_batch) is still processing, so it cannot count
+    as "updated to".
     """
     return await _call("weekly_freshness", {})
 

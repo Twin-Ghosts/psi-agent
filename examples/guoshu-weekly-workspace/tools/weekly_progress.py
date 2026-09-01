@@ -133,6 +133,7 @@ async def weekly_freshness_distribution(
     in_flight: bool = False,
     by: str = "",
     reported_only: bool = False,
+    lag_bands: bool = False,
     limit: int = 200,
 ) -> str:
     """Report how stale progress is: 30/90/180-day buckets, a custom window, or drift.
@@ -191,6 +192,16 @@ async def weekly_freshness_distribution(
             one. The reply carries never_reported_count either way;
             "从来没报过的有哪些" is the other question -- 9 tasks reported into
             neither table, which is what this listing's NULL bucket holds.
+        lag_bands: True returns a per-board table binned 0-7 / 8-14 / 15-30 /
+            超过 30 天 / 无正式进展. Use it for "某个看板周报有多陈旧" and
+            "新鲜度怎么样": those ask for the distribution across that board's
+            tasks, which the default 30/90/180 buckets cannot express and which a
+            single newest timestamp does not answer at all. Each board's bands sum
+            to its own formal task count (技术组 82: 17 in 15-30, 56 over 30, 9
+            with none; 集团组 46: 14 / 28 / 4). The two boards are read from
+            different tables -- task_progress for 技术组, task_group_progress_history
+            for 集团组 -- so do not substitute latest_progress_time, which counts
+            unpublished rows and leaves the group board empty.
         limit: Max rows for the listing views, capped at 200.
     """
     try:
@@ -211,6 +222,7 @@ async def weekly_freshness_distribution(
             "in_flight": bool(in_flight),
             "by": by,
             "reported_only": bool(reported_only),
+            "lag_bands": bool(lag_bands),
             "limit": bounded,
         },
     )

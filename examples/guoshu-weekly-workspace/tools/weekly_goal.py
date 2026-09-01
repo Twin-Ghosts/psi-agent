@@ -130,14 +130,29 @@ async def weekly_milestone_stats(
             the surviving rows -- "has a deleted milestone" spans 23 tasks, an
             order of magnitude more) / per_task (counts per task, zero-milestone
             tasks kept, plus top_tie_count: the top bucket is a 23-way tie at 6
-            milestones, so "里程碑最多的任务是哪条" is the first row alone) /
-            mismatch (task status vs milestone status disagreements).
-        by: Dimension for by_dimension: year / category / group_name / status /
-            task_status / primary_category / reporter_id / owner_id.
+            milestones, so "里程碑最多的任务是哪条" is the first row alone; the
+            summary also carries tasks_with_milestone and coverage_pct, which is
+            how "多少任务配置了 N 年里程碑" gets answered -- see `year`) /
+            mismatch (task status vs milestone status disagreements; read the
+            `year` note below before picking one -- year changes the question here,
+            not just the row count, and it moves the two kinds in opposite
+            directions).
+        by: Dimension for by_dimension: year / category / group_name /
+            project_group / status / task_status / primary_category / reporter_id /
+            owner_id.
             reporter_id answers "里程碑都是谁报的 / 各几条" -- 47 filers, counted
             server-side; owner_id is the responsible party, a different column
             answering a different question. Do not read either off the milestone
             listing: it caps at 200 rows against 602 milestones.
+            project_group is the task's 项目组 and is NOT group_name, which is the
+            milestone row's own short label -- the two axes do not even share a
+            value set (project_group has 11 buckets: 关键技术攻关组/算力网络组/
+            国家工程办 ...; group_name has 6: 区域组/安全组/技术组 ...).
+            "哪些项目组的里程碑记录完成比例较高" and "需要重点核实" are project_group;
+            answering it off group_name reports 安全组 62.8% instead of
+            关键技术攻关组 81.8%. Sorted by finish_rate_pct, so the first rows are
+            the "较高" answer and the last rows the "较低" one. These rates are
+            filing status, not project-group performance -- say so.
             primary_category groups by the task's
             top-level category (t.category_id's parent -- task categories only go
             two levels deep) and is NOT the same axis as category, which is the
@@ -146,9 +161,27 @@ async def weekly_milestone_stats(
             question and reads 国家任务 58.9%. This axis sorts by finish_rate_pct,
             so the first row is the answer; pass min_total to keep small buckets
             from topping the list.
-        year: Restrict to one milestone year; 0 covers all.
+        year: Restrict to one milestone year; 0 covers all. Milestones exist for
+            2025 and 2026 only. Under scope=per_task the year is applied to the
+            LEFT JOIN, so tasks with none of that year's milestones stay in the
+            denominator as zeros -- that is what makes coverage answerable:
+            "多少任务配置了 2026 年里程碑" is summary.tasks_with_milestone 112 of
+            tasks 128, coverage_pct 87.5. Read coverage_pct off the summary rather
+            than dividing two numbers yourself. Under scope=mismatch this is not a
+            narrowing filter -- it changes the question, and the two kinds move
+            opposite ways. task_done_milestones_open is an EXISTS test, so restricting the
+            year only hides contradictions: all years gives 6 tasks, year=2026
+            gives 3, and the 3 dropped (50/111/126) have their open milestones in
+            2025 -- a task marked done with a 2025 milestone still open is the
+            harder contradiction, so leave year at 0 for "哪些已完成任务仍有未完成
+            里程碑". milestones_done_task_open is an ALL test, so restricting the
+            year RELAXES it: all years gives 8 tasks, year=2026 gives 22, and
+            those extra ones still have unfinished 2025 milestones. Either number
+            is defensible; state which span you used.
         category: Restrict to one milestone category.
         min_total: For by_dimension, drop buckets below this count; inclusive.
+            Rates over small buckets swing wildly -- set this before calling any
+            bucket the highest or lowest.
         kind: For mismatch: task_done_milestones_open or milestones_done_task_open.
         top: Row cap for the listing scopes.
     """

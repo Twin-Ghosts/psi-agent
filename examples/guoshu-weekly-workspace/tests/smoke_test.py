@@ -1276,6 +1276,55 @@ async def run() -> int:
         bool(fresh.get("rows")) and all(r.get("latest_progress") for r in fresh["rows"]),
         f"rows={fresh.get('rows')}",
     )
+    # G-B03/B04. latest_progress_time 含未发布行,技术组因此读成 08-09,而它最新的
+    # 正式进展是 07-31 —— 九天差。问「数据更新到什么时候」要的是正式口径,答
+    # latest_progress 就是报了一个没有正式记录支撑的日期。两个看板各取自己的表,
+    # 集团组在 task_group_progress_history,漏了它会把集团组算成 NULL(即「没数据」)。
+    pub = {r["board_name"]: r for r in fresh.get("published_progress") or []}
+    tech_pub = next((v for k, v in pub.items() if "技术组" in k), {})
+    grp_pub = next((v for k, v in pub.items() if "集团" in k), {})
+    check(
+        "G-B03 技术组正式进展日期取 is_published=1 的 07-31,不跟 latest_progress 的 08-09",
+        str(tech_pub.get("newest_published_progress", "")).startswith("2026-07-31"),
+        f"tech={tech_pub}",
+    )
+    check(
+        "G-B04 集团组正式进展日期从 task_group_progress_history 取到 08-14,而非 NULL",
+        str(grp_pub.get("newest_published_progress", "")).startswith("2026-08-14"),
+        f"group={grp_pub}",
+    )
+    check(
+        "G-B03 技术组导入批次分开报「已完成」和「仍在处理」两个日期",
+        (fresh.get("tech_import") or {}).get("newest_finished_batch") == "2026-07-31"
+        and (fresh.get("tech_import") or {}).get("newest_unfinished_batch") == "2026-08-15",
+        f"tech_import={fresh.get('tech_import')}",
+    )
+
+    # G-B05/B06. 落后天数分档:两个看板的正式进展在不同表,分档必须按 board_id 分流。
+    # 技术组各档与快照日无关(最新正式进展 07-31 已落在 15 天外),集团组会随快照日
+    # 移动 —— 08-15 是 17/28/1,金标绑的 08-17 是 14/28/4,三项跨过 7 天线。这里断言
+    # 默认锚点,跨档迁移由「总数守恒」兜住。
+    bands = await _call(registry, "weekly_freshness_distribution", lag_bands=True)
+    band_map = {(r["board_name"], r["lag_band"]): r["task_count"] for r in bands.get("rows") or []}
+    tech_bands = {k[1]: v for k, v in band_map.items() if "技术组" in k[0]}
+    grp_bands = {k[1]: v for k, v in band_map.items() if "集团" in k[0]}
+    check(
+        "G-B05 技术组 82 项分档为 15-30 天 17 项 / 超 30 天 56 项 / 无正式进展 9 项",
+        tech_bands.get("3 15-30 天") == 17
+        and tech_bands.get("4 超过 30 天") == 56
+        and tech_bands.get("5 无正式进展") == 9,
+        f"tech_bands={tech_bands}",
+    )
+    check(
+        "G-B06 集团组 46 项全有正式进展,总数守恒且无「无正式进展」档",
+        sum(grp_bands.values()) == 46 and "5 无正式进展" not in grp_bands,
+        f"grp_bands={grp_bands}",
+    )
+    check(
+        "G-B05/B06 分档总数等于两看板正式任务数 82+46,不漏不重",
+        sum(tech_bands.values()) == 82 and sum(band_map.values()) == 128,
+        f"tech={sum(tech_bands.values())} all={sum(band_map.values())}",
+    )
 
     # --- error paths are explicit, never fabricated -------------------------
     missing = await _call(registry, "weekly_task_detail", task="根本不存在的任务zzz999")
@@ -2235,6 +2284,49 @@ async def run() -> int:
         int(_first(per_task, "milestones") or 0) == 6,
         f"首行={_first(per_task, 'task_name')} {_first(per_task, 'milestones')}",
     )
+    # G-C03. year 此前在 per_task 里被静默丢掉（SQL 只用 clause，没用带年度的
+    # active），「多少任务配了 2026 里程碑」拿到的是全年度 474 条。补的时候年度条件
+    # 必须挂 LEFT JOIN 的 ON 上：进 WHERE 会把「没有 2026 里程碑」的 16 条任务整行
+    # 删掉，而这正是问句要数的那部分，分母同时从 128 缩到 112，覆盖率永远算成 100%。
+    pt26 = await _call(registry, "weekly_milestone_stats", scope="per_task", year=2026, top=8)
+    s26 = pt26.get("summary") or {}
+    check(
+        "G-C03 限 2026 后分母仍是 128，112 项配了、16 项没配，覆盖率 87.5%",
+        int(s26.get("tasks") or 0) == 128
+        and int(s26.get("tasks_with_milestone") or 0) == 112
+        and int(s26.get("tasks_without_milestone") or 0) == 16
+        and str(s26.get("coverage_pct")) == "87.5",
+        str(s26),
+    )
+    check(
+        "G-C03 年度条件生效：2026 计 273 条、2025 计 201 条，合计等于全年度 474",
+        int(s26.get("milestones") or 0) == 273
+        and int(psum.get("milestones") or 0) == 474
+        and int(
+            (
+                (await _call(registry, "weekly_milestone_stats", scope="per_task", year=2025, top=1)).get("summary")
+                or {}
+            ).get("milestones")
+            or 0
+        )
+        == 201,
+        f"2026={s26.get('milestones')} all={psum.get('milestones')}",
+    )
+    check(
+        "G-C03 口径写明年度条件挂在 LEFT JOIN 上、未配该年度的任务保留为 0",
+        "年度条件在 LEFT JOIN 上" in str(pt26.get("caliber", "")),
+        str(pt26.get("caliber"))[:160],
+    )
+    # 并列档那句口径必须跟着数据走：全年度是 23 条并列各 6 个、首行任务 8；限 2026
+    # 变成 4 条各 6 个、首行任务 52。写死就会让口径自己变成错的那一句。
+    check(
+        "G-C03 并列档口径随年度重算，不复用全年度的 23 条与任务 8",
+        pt26.get("top_tie_count") == 4
+        and per_task.get("top_tie_count") == 23
+        and "任务 52" in str(pt26.get("caliber", ""))
+        and "任务 8 " in str(per_task.get("caliber", "")),
+        f"tie26={pt26.get('top_tie_count')} tieAll={per_task.get('top_tie_count')}",
+    )
     mm1 = await _call(registry, "weekly_milestone_stats", scope="mismatch", top=20)
     check(
         "任务标完成但里程碑未全完成 6 条（H6-01）",
@@ -2259,6 +2351,69 @@ async def run() -> int:
         "里程碑不支持的维度明确报错",
         bad_dim.get("ok") is False and bad_dim.get("error", {}).get("code") == "unsupported_group_by",
         str(bad_dim.get("error"))[:120],
+    )
+    # G-C09/C06. year 在 mismatch 下不是筛行，是换题，而且两个 kind 反着走：
+    # 存在量词（已完成但有未完成里程碑）限年度只会漏掉矛盾，6 → 3，掉的三项
+    # （50/111/126）未完成里程碑在 2025，那是更硬的矛盾；全称量词（里程碑全完成但
+    # 任务在办）限年度反而放宽，8 → 22。两个数都对，口径必须自带量词说明，否则
+    # 「进行中但里程碑都完成的任务有多少」答 8 还是 22 没法判对错。
+    mm1y = await _call(registry, "weekly_milestone_stats", scope="mismatch", year=2026, top=20)
+    check(
+        "G-C06 存在量词限 2026 只剩 3 条，且口径写明限年度会漏掉跨年度矛盾",
+        mm1y.get("row_count") == 3
+        and "存在量词" in str(mm1y.get("caliber", ""))
+        and "漏掉" in str(mm1y.get("caliber", "")),
+        f"rows={mm1y.get('row_count')} caliber={str(mm1y.get('caliber'))[-90:]}",
+    )
+    mm2y = await _call(
+        registry, "weekly_milestone_stats", scope="mismatch", kind="milestones_done_task_open", year=2026, top=40
+    )
+    check(
+        "G-C09 全称量词限 2026 反而涨到 22 条，且口径写明限年度是放宽不是收紧",
+        mm2y.get("row_count") == 22
+        and "全称量词" in str(mm2y.get("caliber", ""))
+        and "放宽" in str(mm2y.get("caliber", "")),
+        f"rows={mm2y.get('row_count')} caliber={str(mm2y.get('caliber'))[-90:]}",
+    )
+    check(
+        "G-C06/C09 不限年度时口径明说比对 2025 与 2026 全部年度",
+        "2025 与 2026" in str(mm1.get("caliber", "")) and "2025 与 2026" in str(mm2.get("caliber", "")),
+        str(mm1.get("caliber"))[-90:],
+    )
+
+    # G-C07/C08. 项目组挂在任务上（11 个），里程碑行自己的 group_name 是六个短名，
+    # 名字像但取值集合都不一样。拿 group_name 顶上去答「哪些项目组完成比例较高」
+    # 会报成 安全组 62.8%，而正解首行是 关键技术攻关组 81.8%。
+    pg = await _call(registry, "weekly_milestone_stats", scope="by_dimension", by="project_group", year=2026, top=20)
+    pg_rows = pg.get("rows") or []
+    pg_map = {str(r.get("bucket")): str(r.get("finish_rate_pct")) for r in pg_rows}
+    check(
+        "G-C07 项目组轴按完成率降序，前三为 关键技术攻关组 81.8/市场化改革组 78.9/国家工程办 72.4",
+        [str(r.get("bucket")) for r in pg_rows[:3]] == ["关键技术攻关组", "市场化改革组", "国家工程办"]
+        and [str(r.get("finish_rate_pct")) for r in pg_rows[:3]] == ["81.8", "78.9", "72.4"],
+        str(pg_rows[:3])[:200],
+    )
+    check(
+        "G-C08 同一次调用的末三行即需重点核实的 算力网络组 34.9/区域协同组 35.7/标准安全组 38.6",
+        [str(r.get("bucket")) for r in pg_rows[-3:]] == ["标准安全组", "区域协同组", "算力网络组"]
+        and pg_map.get("算力网络组") == "34.9"
+        and pg_map.get("区域协同组") == "35.7"
+        and pg_map.get("标准安全组") == "38.6",
+        str(pg_rows[-3:])[:200],
+    )
+    check(
+        "G-C07/C08 项目组共 11 个桶，与 group_name 的 6 个短名不是同一个轴",
+        len(pg_rows) == 11
+        and "不是一个轴" in str(pg.get("caliber", ""))
+        and "不能当项目组绩效" in str(pg.get("caliber", "")),
+        f"buckets={len(pg_rows)}",
+    )
+    gname = await _call(registry, "weekly_milestone_stats", scope="by_dimension", by="group_name", top=20)
+    check(
+        "G-C07 对照：group_name 轴只有 6 个桶且取值与项目组不重叠，误用会答错",
+        len(gname.get("rows") or []) == 6
+        and not ({str(r.get("bucket")) for r in gname.get("rows") or []} & set(pg_map)),
+        str([r.get("bucket") for r in gname.get("rows") or []]),
     )
 
     # --- A5: JOIN 放大与去重 -------------------------------------------------
@@ -2522,6 +2677,72 @@ async def run() -> int:
         and int(wf_totals.get("unpublished_tasks", -1)) == 22
         and str(wf_totals.get("published_pct")) == "85.3",
         str(wf_totals),
+    )
+    # G-B08/F01. 「还有多少流程要继续推动」只数四档在途 = 18，退回（已回到填报方）
+    # 与已取消（不再推进）都不算。基线把退回加进去答成 21，正是因为这个加法留给了
+    # 模型自己做；22 那个数也顶不上，它含退回和已取消。
+    check(
+        "G-B08 活跃待办 18 由服务端算好，且与未发布 22、退回 3、已取消 1 各是各的数",
+        int(wf_totals.get("active_pending_tasks", -1)) == 18
+        and int(wf_totals.get("rejected_tasks", -1)) == 3
+        and int(wf_totals.get("cancelled_tasks", -1)) == 1
+        and int(wf_totals.get("active_pending_tasks", 0))
+        + int(wf_totals.get("rejected_tasks", 0))
+        + int(wf_totals.get("cancelled_tasks", 0))
+        == int(wf_totals.get("unpublished_tasks", -1)),
+        str(wf_totals),
+    )
+    check(
+        "G-B08 口径明说活跃待办不含退回与已取消，也不许用未发布数顶替",
+        "退回 rejected 与已取消 cancelled 不计入" in str(wf.get("caliber", ""))
+        and "不要用 unpublished_tasks 顶替" in str(wf.get("caliber", "")),
+        str(wf.get("caliber"))[-160:],
+    )
+    # G-F02/F04. 分档只给条数时，「等领导审批的是哪几个任务」无路可走：正式任务
+    # 清单按 R-01 一条未发布的都不返回，模型只能退回填报表，把「审批中的填报单」
+    # 当任务答成 15 条和 9 条。清单随分档一起返回后，问数与问名字同一次调用解决。
+    wf_list = wf.get("unpublished_task_list") or []
+    by_state: dict[str, list[int]] = {}
+    for row in wf_list:
+        by_state.setdefault(str(row.get("workflow_status")), []).append(int(row.get("id", 0)))
+    check(
+        "G-F02 待领导审批 5 条按名字可取（任务 14/53/58/112/129）",
+        by_state.get("pending_leader") == [14, 53, 58, 112, 129],
+        str(by_state.get("pending_leader")),
+    )
+    check(
+        "G-F04 会签 3 条按名字可取（任务 70/141/147）",
+        by_state.get("signing") == [70, 141, 147],
+        str(by_state.get("signing")),
+    )
+    check(
+        "G-F02 清单是未发布全量 22 条、无一条已发布、且每条都带任务名",
+        len(wf_list) == 22
+        and int(wf_totals.get("unpublished_tasks", -1)) == len(wf_list)
+        and all(str(r.get("workflow_status")) != "published" for r in wf_list)
+        and all(str(r.get("task_name") or "").strip() for r in wf_list),
+        f"{len(wf_list)} 条 / 状态 {sorted(by_state)}",
+    )
+    check(
+        "G-F02 四档在途条数与 active_pending_tasks 对得上（7+5+3+3=18）",
+        [len(by_state.get(code, [])) for code in ("pending_audit", "pending_leader", "pending_fill", "signing")]
+        == [7, 5, 3, 3],
+        str({k: len(v) for k, v in by_state.items()}),
+    )
+    check(
+        "G-F02 口径指路按 workflow_status 筛清单，并挡住拿填报单当任务清单",
+        "unpublished_task_list" in str(wf.get("caliber", ""))
+        and "填报单与任务不是一回事" in str(wf.get("caliber", "")),
+        str(wf.get("caliber"))[-220:],
+    )
+    # 对照组：正式任务清单一侧的闸门没动，未发布任务在那边仍然取不到。
+    formal_ids = {
+        int(r.get("id", 0)) for r in ((await _call(registry, "weekly_task_query", limit=200)).get("rows") or [])
+    }
+    check(
+        "G-F02 未放宽 R-01：22 条未发布任务在正式任务清单里一条都不出现",
+        formal_ids.isdisjoint({int(r.get("id", 0)) for r in wf_list}) and len(formal_ids) == 128,
+        f"正式 {len(formal_ids)} 条，交集 {sorted(formal_ids & {int(r.get('id', 0)) for r in wf_list})}",
     )
     check(
         "B6 口径点明与业务状态不是一套词汇，且未发布不能按在途各档相加",

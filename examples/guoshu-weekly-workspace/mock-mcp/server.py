@@ -801,16 +801,56 @@ def weekly_aggregate(
             # 「未发布几条」「已发布占比」和分档是同一题的三面，一次给全：分开问
             # 会让模型拿在途各档相加去凑未发布，而 cancelled 两边都不属于。
             wf_where = "t.is_deleted = 0" + (" AND t.board_id = %(bid)s" if board.strip() else "")
+            # 「还有多少流程要继续推动」不等于「未发布多少条」：退回和已取消都不在
+            # 推动之列（退回已回到填报方手上、已取消不再推进），把它们算进去就成了
+            # 22 或 21。活跃待办只数 pending_audit/pending_leader/pending_fill/
+            # signing 四档 = 18。这个加法必须在服务端做：让模型拿分档自己相加，它
+            # 多半会把 rejected 一起加上（基线正是这么答出 21 的）。
+            active_codes = "('pending_audit', 'pending_leader', 'pending_fill', 'signing')"
             totals = store.fetch(
                 "SELECT COUNT(*) AS total_tasks, "
                 "SUM(t.workflow_status = 'published') AS published_tasks, "
                 "SUM(t.workflow_status <> 'published') AS unpublished_tasks, "
-                "ROUND(SUM(t.workflow_status = 'published') / COUNT(*) * 100, 1) AS published_pct "
+                "ROUND(SUM(t.workflow_status = 'published') / COUNT(*) * 100, 1) AS published_pct, "
+                f"SUM(t.workflow_status IN {active_codes}) AS active_pending_tasks, "
+                "SUM(t.workflow_status = 'rejected') AS rejected_tasks, "
+                "SUM(t.workflow_status = 'cancelled') AS cancelled_tasks "
                 f"FROM task t WHERE {wf_where}",
                 params,
                 limit=1,
             )
             result["totals"] = totals["rows"][0] if totals["rows"] else {}
+            # 分档只给条数，「等领导审批的是哪几个任务」就没有任何工具答得上：
+            # weekly_task_query 硬挂 R-01 正式任务闸门（is_deleted = 0 AND
+            # published），未发布的 22 条它一条也不返回，而这里恰恰只回了个数。
+            # 结果模型退回填报表按「审批中的填报单」作答，答成 15 条和 9 条
+            # （那是填报单不是任务）。把这 22 条的名字随分档一起给出，问数和
+            # 问名字落在同一次调用里。
+            #
+            # 这不是放宽闸门：本清单固定 workflow_status <> 'published'，与正式
+            # 任务集互不相交，weekly_task_query 那侧一个字没改。
+            pending = store.fetch(
+                "SELECT t.id, t.task_no, t.task_name, t.board_id, t.workflow_status "
+                f"FROM task t WHERE {wf_where} AND t.workflow_status <> 'published' "
+                "ORDER BY FIELD(t.workflow_status, 'pending_audit', 'pending_leader', "
+                "'pending_fill', 'signing', 'rejected', 'cancelled'), t.board_id, t.id",
+                params,
+                limit=store.MAX_ROWS,
+            )
+            result["unpublished_task_list"] = pending["rows"]
+            result["caliber"] += (
+                "；totals.active_pending_tasks 是「仍需继续推动」的活跃待办，只含"
+                "待审核 pending_audit、待领导审批 pending_leader、待填报 pending_fill、"
+                "会签 signing 四档，退回 rejected 与已取消 cancelled 不计入"
+                "（退回已回到填报方、已取消不再推进）；"
+                "问「有多少流程需要继续推动／审批积压怎样」直接引用这个数，"
+                "不要拿分档自己相加，也不要用 unpublished_tasks 顶替——那个数含退回和已取消"
+                "；unpublished_task_list 是这些未发布任务的清单（id / task_no / task_name / "
+                "workflow_status），问「哪些任务在等领导审批／哪些在会签」按 workflow_status "
+                "在这份清单里筛，它已是全量不会截断；这些任务不在正式任务集内，"
+                "weekly_task_query 按 R-01 一条也不会返回，别把填报表里「审批中的填报单」"
+                "当成任务清单作答——填报单与任务不是一回事，条数也不同"
+            )
         if group_by == "status":
             # 「完成率是多少」与分档是同一题的两面。分档只给条数,模型要自己
             # 31 / 128 相除,结果是 24.21875,报出来成了 24.22%,而口径是保留
@@ -2851,6 +2891,11 @@ _MILESTONE_DIMENSIONS: dict[str, str] = {
     "task_status": "任务状态",
     # 任务分类树的一级。与 category（里程碑自己的类别文本）是两个维度，别混。
     "primary_category": "任务一级分类",
+    # 任务的项目组。与 group_name（里程碑行自己的承担组短名）是两个轴，名字像但取值
+    # 集合都不一样：group_name 是 区域组/安全组/技术组… 六个短名，project_group 是
+    # 关键技术攻关组/算力网络组/国家工程办… 十一个项目组。问「哪些项目组的里程碑
+    # 完成比例高/低」问的是后者，此前没有这一维，只能拿 group_name 顶上去答错。
+    "project_group": "项目组",
     # 填报人。此前没有这一维，问「里程碑都是谁报的、各几条」只能答不可答。
     "reporter_id": "填报人",
     "owner_id": "责任人",
@@ -3993,6 +4038,7 @@ def weekly_freshness_distribution(
     in_flight: bool = False,
     by: str = "",
     reported_only: bool = False,
+    lag_bands: bool = False,
     limit: int = 200,
 ) -> str:
     """Bucket formal tasks by how stale their latest progress is (30/90/180 天/从未).
@@ -4028,6 +4074,45 @@ def weekly_freshness_distribution(
     """
 
     def work() -> dict[str, Any]:
+        if lag_bands:
+            # 93 问的 B05/B06 按 0-7 / 8-14 / 15-30 / 超 30 / 无进展分档，且要
+            # 分看板。固定的 30/90/180 桶表达不了这套边界：技术组 17/56/9 与
+            # 集团组 14/28/4 都落在原来的「1 30 天内」和「2 31-90 天」里。
+            # 分档必须在服务端算——把清单交给模型自己数天数分桶，边界那几条必错。
+            #
+            # 两个看板的正式进展存在不同表：技术组在 task_progress，集团组在
+            # task_group_progress_history。用 task.latest_progress_time 一把抓会
+            # 把集团组算空，也会把技术组的未发布行算进来。
+            band = (
+                "CASE WHEN x.d IS NULL THEN '5 无正式进展' "
+                "WHEN x.d <= 7 THEN '1 0-7 天' "
+                "WHEN x.d <= 14 THEN '2 8-14 天' "
+                "WHEN x.d <= 30 THEN '3 15-30 天' "
+                "ELSE '4 超过 30 天' END"
+            )
+            inner = (
+                "SELECT t.id, t.board_id, CASE WHEN t.board_id = 2 "
+                f"THEN DATEDIFF('{store.AS_OF}', MAX(CASE WHEN h.is_published = 1 THEN h.report_time END)) "
+                f"ELSE DATEDIFF('{store.AS_OF}', MAX(CASE WHEN p.is_published = 1 THEN p.progress_date END)) "
+                "END AS d "
+                "FROM task t "
+                "LEFT JOIN task_progress p ON p.task_id = t.id "
+                "LEFT JOIN task_group_progress_history h ON h.task_id = t.id "
+                f"WHERE {store.formal_task_clause()} GROUP BY t.id, t.board_id"
+            )
+            return store.fetch(
+                f"SELECT b.name AS board_name, {band} AS lag_band, COUNT(*) AS task_count "
+                f"FROM ({inner}) x JOIN task_board b ON b.id = x.board_id "
+                "GROUP BY b.id, b.name, lag_band ORDER BY b.sort_order, lag_band",
+                caliber=(
+                    f"{store.FORMAL_TASK_CALIBER}；{store.as_of_caliber()}；"
+                    "按看板各自的正式进展表算：技术组取 task_progress.progress_date、"
+                    "集团组取 task_group_progress_history.report_time，都只算 is_published = 1；"
+                    "分档为 0-7 / 8-14 / 15-30 / 超过 30 / 无正式进展，各看板内相加等于该看板正式任务数；"
+                    "问某个看板「周报有多陈旧 / 新鲜度怎么样」就报这张表里该看板那几档，"
+                    "不要只报一个最新时间点——那答的是另一个问题"
+                ),
+            )
         if stale_days or recent_days:
             days = int(stale_days or recent_days)
             if days <= 0:
@@ -4690,10 +4775,14 @@ def weekly_milestone_stats(
             task, zero-milestone tasks kept, with ``top_tie_count`` because the
             top bucket is a 23-way tie at 6) / ``mismatch`` (task status vs
             milestone status disagreements).
-        by: Dimension for ``by_dimension``: year / category / group_name / status
-            / task_status / primary_category / reporter_id / owner_id.
+        by: Dimension for ``by_dimension``: year / category / group_name /
+            project_group / status / task_status / primary_category / reporter_id
+            / owner_id.
             reporter_id answers "里程碑都是谁报的 / 各几条" (47 people); owner_id is
             the responsible party, a different column and a different question.
+            group_name is the milestone row's own short label (区域组/安全组/… six
+            of them); project_group is the task's 项目组 (关键技术攻关组/算力网络组/
+            国家工程办 … eleven). "哪些项目组的里程碑完成比例高/低" means the latter.
         year: Restrict to one milestone year; 0 covers all.
         category: Restrict to one milestone category.
         min_total: For ``by_dimension``, drop buckets below this count. Inclusive.
@@ -4804,6 +4893,11 @@ def weekly_milestone_stats(
                 )
                 # 问的是「完成率最高」，按完成率排序，并列按分类名定序。
                 order = "finish_rate_pct DESC, bucket"
+            elif dimension == "project_group":
+                # 项目组挂在任务上，不在里程碑行上。问「比例高/低」同样按比率排序，
+                # 首行即最高、末行即最低，不必让模型自己在结果里挑。
+                column = "IFNULL(NULLIF(TRIM(t.project_group), ''), '(未填)')"
+                order = "finish_rate_pct DESC, bucket"
             elif dimension == "task_status":
                 column = "t.status"
             else:
@@ -4829,18 +4923,50 @@ def weekly_milestone_stats(
                     "小样本分类会把比率抬高，要设门槛请加 min_total"
                     if dimension == "primary_category"
                     else ""
+                )
+                + (
+                    "；项目组取 t.project_group（任务上的列），与 by=group_name 的"
+                    "里程碑承担组短名不是一个轴，取值集合都不一样（这里是 11 个项目组，"
+                    "那里是 区域组/安全组 等 6 个短名）——问「哪些项目组的里程碑完成比例"
+                    "高／低」用本轴；本轴按 finish_rate_pct 降序，首行最高、末行最低；"
+                    "这只是填报状态，不能当项目组绩效"
+                    if dimension == "project_group"
+                    else ""
                 ),
                 limit=bounded,
             )
 
         if key == "per_task":
+            # year/category 此前在本 scope 里被静默丢掉:SQL 只用了 clause,没用带
+            # 年度条件的 active,于是 year=2026 照收不误却毫无作用,「多少任务配了
+            # 2026 里程碑」拿到的是全年度 474 条而不是 273 条。
+            #
+            # 补的时候年度条件必须挂在 LEFT JOIN 的 ON 上,不能进 WHERE:进 WHERE 会
+            # 把「没有 2026 里程碑」的那 16 条任务整行删掉,而这恰好就是问句要数的
+            # 那部分,分母同时从 128 缩到 112,覆盖率永远算成 100%。挂 ON 上则保留
+            # 它们:128 项里 16 项没配,112 项配了,即 87.5%。
+            join_extra = ""
+            span = []
+            if year:
+                join_extra += " AND m.year = %(yr)s"
+                span.append(f"仅计 {int(year)} 年度里程碑（年度条件在 LEFT JOIN 上，未配该年度的任务保留为 0）")
+            if category.strip():
+                join_extra += " AND m.category = %(cat)s"
+                span.append(f"仅计类别「{category.strip()}」")
+            join = f"LEFT JOIN task_milestone m ON m.task_id = t.id AND m.is_deleted = 0{join_extra}"
+            span_text = ("；" + "；".join(span)) if span else ""
             summary = store.fetch(
                 "SELECT COUNT(DISTINCT t.id) AS tasks, COUNT(m.id) AS milestones, "
                 "ROUND(COUNT(m.id) / COUNT(DISTINCT t.id), 2) AS avg_per_task, "
-                "SUM(m.id IS NULL) AS tasks_without_milestone "
-                "FROM task t LEFT JOIN task_milestone m ON m.task_id = t.id AND m.is_deleted = 0 "
-                f"WHERE {clause}",
-                caliber=f"{store.FORMAL_TASK_CALIBER}；分母为全部正式任务（含零里程碑任务）",
+                "SUM(m.id IS NULL) AS tasks_without_milestone, "
+                "COUNT(DISTINCT CASE WHEN m.id IS NOT NULL THEN t.id END) AS tasks_with_milestone, "
+                "ROUND(COUNT(DISTINCT CASE WHEN m.id IS NOT NULL THEN t.id END) / "
+                "COUNT(DISTINCT t.id) * 100, 1) AS coverage_pct "
+                f"FROM task t {join} WHERE {clause}",
+                params,
+                caliber=f"{store.FORMAL_TASK_CALIBER}；分母为全部正式任务（含零里程碑任务）"
+                + span_text
+                + "；coverage_pct 为「至少配了一条」的任务占比，直接引用，不要自己拿两个数去除",
                 limit=1,
             )
             # LEFT JOIN so the three tasks with no milestone stay visible: H5-01
@@ -4848,10 +4974,11 @@ def weekly_milestone_stats(
             rows = store.fetch(
                 "SELECT t.id AS task_id, t.task_name, t.status AS task_status, "
                 "COUNT(m.id) AS milestones, SUM(m.status = 1) AS finished "
-                "FROM task t LEFT JOIN task_milestone m ON m.task_id = t.id AND m.is_deleted = 0 "
+                f"FROM task t {join} "
                 f"WHERE {clause} GROUP BY t.id, t.task_name, t.status "
                 "ORDER BY milestones DESC, t.id",
-                caliber=f"{store.FORMAL_TASK_CALIBER}；LEFT JOIN 保留零里程碑任务（R-08）；{status_note}",
+                params,
+                caliber=f"{store.FORMAL_TASK_CALIBER}；LEFT JOIN 保留零里程碑任务（R-08）；{status_note}" + span_text,
                 limit=bounded,
             )
             # 「里程碑最多的任务是哪条」榜首是 23 条并列（都是 6 个）。只回榜单时
@@ -4859,18 +4986,25 @@ def weekly_milestone_stats(
             # 并列数交给服务端数，取舍写进口径。
             tied = store.scalar(
                 "SELECT COUNT(*) FROM (SELECT t.id, COUNT(m.id) AS n FROM task t "
-                "LEFT JOIN task_milestone m ON m.task_id = t.id AND m.is_deleted = 0 "
-                f"WHERE {clause} GROUP BY t.id) r WHERE r.n = (SELECT MAX(r2.n) FROM "
-                "(SELECT COUNT(m.id) AS n FROM task t "
-                "LEFT JOIN task_milestone m ON m.task_id = t.id AND m.is_deleted = 0 "
+                f"{join} WHERE {clause} GROUP BY t.id) r "
+                "WHERE r.n = (SELECT MAX(r2.n) FROM "
+                f"(SELECT COUNT(m.id) AS n FROM task t {join} "
                 f"WHERE {clause} GROUP BY t.id) r2)",
+                params,
             )
             rows["summary"] = summary["rows"][0] if summary["rows"] else {}
             rows["top_tie_count"] = tied["value"]
+            # 并列档的条数、每条几个、首行是哪条任务，全从本次结果里取，别写死：
+            # 加了年度过滤后这三个数都会变（全年度 23 条并列各 6 个、首行任务 8；
+            # 限 2026 是 4 条并列各 6 个、首行任务 52；限 2025 是 2 条并列各 5 个）。
+            # 写死会让口径句自己变成错的那一句。
+            head = (rows.get("rows") or [{}])[0]
+            top_n = head.get("milestones")
+            top_task = f"任务 {head.get('task_id')} {head.get('task_name')}" if head else "首行"
             rows["caliber"] += (
                 "；按里程碑数降序、并列按 task id 升序（与其他榜单同一套定序键）；"
-                f"最多那档有 {tied['value']} 条任务并列（各 6 个），"
-                "问「最多的是哪条」取首行一条（任务 8 全国一体化算力网调度平台建设），"
+                f"最多那档有 {tied['value']} 条任务并列（各 {top_n} 个），"
+                f"问「最多的是哪条」取首行一条（{top_task}），"
                 "要把并列都报出来请说明是并列，不要当成几十个独立答案"
             )
             return rows
@@ -4888,13 +5022,36 @@ def weekly_milestone_stats(
             extra, having, label = "t.status = 2", "SUM(m.status = 1) < COUNT(*)", "任务已完成但里程碑未全完成"
         else:
             extra, having, label = "t.status = 1", "SUM(m.status = 1) = COUNT(*)", "里程碑全完成但任务仍在办"
+        # year 在这两个比对里不是「筛掉几行」，而是换了一道题，两个 kind 还反着走：
+        # 「已完成但有未完成里程碑」是存在量词，限年度只会漏掉矛盾——不限是 6 项，
+        # 限 2026 是 3 项，少掉的 50/111/126 未完成里程碑落在 2025，那是更硬的矛盾，
+        # 不该被过滤掉；「里程碑全完成但任务在办」是全称量词，限年度反而更容易满足
+        # ——不限是 8 项，限 2026 是 22 项，多出来的那些还有 2025 年里程碑没完成。
+        # 所以两个数都对，但答的是不同的话，口径里必须写清是哪一个。
+        # 限了年度的话上面 caliber 里已经写过「仅 N 年度里程碑」，别重复一遍。
+        span_note = "" if year else "比对该任务的全部年度里程碑（2025 与 2026）"
+        quantifier = (
+            "存在量词（有任一里程碑未完成即入选）：限定年度只会漏掉矛盾，"
+            "跨年度的未完成里程碑是更硬的矛盾，默认不限年度的 6 项才是全量"
+            if mismatch == "task_done_milestones_open"
+            else "全称量词（全部里程碑都已完成才入选）：限定年度会放宽条件而非收紧，"
+            "限 2026 得 22 项、不限得 8 项，多出的那些尚有 2025 年里程碑未完成，"
+            "答「进行中但里程碑都完成了」要说明是哪一种"
+        )
         return store.fetch(
             "SELECT t.id AS task_id, t.task_name, t.status AS task_status, "
             "COUNT(*) AS milestones, SUM(m.status = 1) AS finished_milestones "
             f"FROM task_milestone m JOIN task t ON t.id = m.task_id WHERE {active} AND {extra} "
             f"GROUP BY t.id, t.task_name, t.status HAVING {having} ORDER BY t.id",
             params,
-            caliber="；".join(caliber) + f"；{label}（task.status 2 已完成 / 1 进行中）",
+            caliber="；".join(
+                [
+                    *caliber,
+                    f"{label}（task.status 2 已完成 / 1 进行中）",
+                    *([span_note] if span_note else []),
+                    quantifier,
+                ]
+            ),
             limit=bounded,
         )
 
@@ -5802,6 +5959,54 @@ def weekly_freshness() -> str:
         )
         rows["overall"] = (overall.get("rows") or [{}])[0]
         rows["as_of"] = store.AS_OF
+        # task.latest_progress_time counts UNPUBLISHED progress rows, so the board
+        # row above reads 2026-08-09 for the tech board while its newest *formal*
+        # progress is 2026-07-31 -- a nine-day gap.  "技术组数据更新到什么时候"
+        # asks the formal date (B03/G02): answering off latest_progress_time
+        # reports a date that no published record supports.  Both are returned so
+        # the drift itself is visible instead of having to be inferred.
+        # 两个看板的正式进展存在不同表，只 JOIN task_progress 会把集团组算成 NULL
+        # （它的成效写在 task_group_progress_history），那等于把「集团组数据更新到
+        # 什么时候」答成「没有数据」。CASE 按 board_id 分流，与 lag_bands 同一口径。
+        formal = store.fetch(
+            "SELECT b.name AS board_name, "
+            "CASE WHEN b.id = 2 "
+            "THEN MAX(CASE WHEN h.is_published = 1 THEN h.report_time END) "
+            "ELSE MAX(CASE WHEN p.is_published = 1 THEN p.report_time END) END "
+            "AS newest_published_progress, "
+            f"DATEDIFF('{store.AS_OF}', CASE WHEN b.id = 2 "
+            "THEN MAX(CASE WHEN h.is_published = 1 THEN h.report_time END) "
+            "ELSE MAX(CASE WHEN p.is_published = 1 THEN p.report_time END) END) "
+            "AS published_days_behind "
+            "FROM task_board b "
+            f"LEFT JOIN task t ON t.board_id = b.id AND {store.formal_task_clause()} "
+            "LEFT JOIN task_progress p ON p.task_id = t.id "
+            "LEFT JOIN task_group_progress_history h ON h.task_id = t.id "
+            "WHERE b.is_deleted = 0 GROUP BY b.id, b.name ORDER BY b.sort_order",
+            caliber=(
+                "newest_published_progress 只算 is_published = 1 的正式进展行，"
+                "并按看板各取自己的表：技术组 task_progress、集团组 task_group_progress_history；"
+                "上面各看板行的 latest_progress 是 task.latest_progress_time，它含未发布行，"
+                "两者不等就是发布滞后（技术组 08-09 vs 07-31）；"
+                "问「（某看板）数据更新到什么时候」答正式口径这一列，不要答 latest_progress"
+            ),
+        )
+        rows["published_progress"] = formal.get("rows") or []
+        # 技术组的正式数据其实卡在导入批次上：最后一个跑完的批次（status = 1）
+        # 是 07-31，08-15 那批还在处理中。问「技术组数据更新到什么时候」正解是
+        # 这个批次日期，进展行只是它的产物。
+        imports = store.fetch(
+            "SELECT MAX(CASE WHEN status = 1 THEN data_date END) AS newest_finished_batch, "
+            "MAX(data_date) AS newest_batch_any_status, "
+            "MAX(CASE WHEN status <> 1 THEN data_date END) AS newest_unfinished_batch "
+            "FROM task_progress_import",
+            limit=1,
+            caliber=(
+                "导入批次只有 status = 1 才算跑完；newest_unfinished_batch 那批还没过发布门，"
+                "不能当作「数据已更新到」的日期（08-15 批次仍在处理中，正式口径停在 07-31）"
+            ),
+        )
+        rows["tech_import"] = (imports.get("rows") or [{}])[0]
         return rows
 
     return _guard("weekly_freshness", work)
