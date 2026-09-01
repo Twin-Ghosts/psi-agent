@@ -35,7 +35,7 @@ from psi_agent.gateway.feishu._auth import (
 from psi_agent.gateway.feishu._feishu_manager import FeishuManager
 from psi_agent.gateway.feishu._identity import owns_session, visible_sessions
 from psi_agent.gateway.feishu._oauth_manager import OAuthRelay
-from psi_agent.gateway.server import _error, _json, _read_json, _session_data
+from psi_agent.gateway.server import _error, _json, _read_json, _serve_chat_sse, _session_data
 from psi_agent.runtime._history_manager import HistoryManager
 from psi_agent.runtime._scheduler_manager import SchedulerManager
 from psi_agent.runtime._session_manager import SessionInfo, SessionManager
@@ -347,6 +347,42 @@ async def _web_get_history(request: web.Request) -> web.Response:
     return _json(messages)
 
 
+async def _web_chat(request: web.Request) -> web.StreamResponse:
+    """``POST /feishu/sessions/{id}/chat`` —— 带鉴权的聊天流, 只许操作自己的会话。
+
+    **为什么要有这一条**: 骨架的 ``POST /sessions/{id}/chat`` 一行身份校验都没有 (它在容器内
+    回环服务本机, 那是它的合理用途)。而它是**能驱动 agent 执行工具**的那条 —— 跑 bash、读
+    公司表格、往飞书发消息。把裸的那条放上公网等于任何知道一个 session id 的人都能让公司
+    agent 干活, 且不问他是谁。所以网页应用改打这条对等物, 裸的那条**行为一字不改**。
+
+    三段判定与 ``_web_get_history`` **逐条相同**(同一套 ``owns_session``, 同样先存在性再归属):
+    未登录 401、不存在 404、别人的/群聊的 403。两条路由拿同一个 session id 该给同一个答案 ——
+    「history 拒了但 chat 放行」这种缝隙只会来自两处各写一套判定。
+
+    **403 而不是 404**: 与 history 那条对齐是主因(前端拿到 404 会当「会话被删了」去刷列表,
+    越权时那个动作没有意义)。用 404 隐藏存在性在这里也换不到什么: session id 是本人 workspace
+    下派生的 uuid, 猜不出来; 而真·不存在已经占了 404, 再让越权也回 404 就把「会话被删」与
+    「不是你的」两种状态糊成一个, 前端分不出来。
+
+    正文交给骨架的 ``_serve_chat_sse``, **不复制 handler 体**: multipart 解析、SSE keepalive、
+    ``[DONE]`` 收尾都在那一份里。
+    """
+    try:
+        identity = _require_identity(request)
+    except PermissionError as e:
+        return _error(str(e), status=401)
+    fm: FeishuManager = request.app["fm"]
+    sm: SessionManager = request.app["sm"]
+    session_id = request.match_info["session_id"]
+    try:
+        workspace = sm.get_workspace(session_id)
+    except LookupError:
+        return _error(f"Session '{session_id}' not found", status=404)
+    if not owns_session(identity.open_id, session_id, workspace, fm):
+        return _error("forbidden", status=403)
+    return await _serve_chat_sse(request, session_id)
+
+
 async def _web_owned_ids(request: web.Request) -> set[str]:
     """当前身份可见的 session id 集合 —— titles/summaries 过滤共用。"""
     identity = _require_identity(request)
@@ -514,6 +550,10 @@ def register_feishu_routes(
     app.router.add_get("/feishu/sessions", _web_list_sessions)
     app.router.add_post("/feishu/sessions", _web_create_session)
     app.router.add_get("/feishu/sessions/{session_id}/history", _web_get_history)
+    # 带鉴权的聊天流。**与骨架 ``POST /sessions/{session_id}/chat`` 不同 path**, 不是重复注册
+    # —— 后者仍在, 行为一字不改。撞同 path 的后果见 ``register_auth_routes`` 里那段: aiohttp
+    # 不报错, 各建一个 resource 由先注册者胜出, 表现是有效 cookie 反而拿 401。
+    app.router.add_post("/feishu/sessions/{session_id}/chat", _web_chat)
     app.router.add_get("/feishu/titles", _web_list_titles)
     app.router.add_get("/feishu/summaries", _web_list_summaries)
     # ``/oauth/*`` 归本包(取件方全在 ToB 一侧), 但注册与 ``--gateway`` 解耦 —— 见

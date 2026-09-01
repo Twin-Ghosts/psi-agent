@@ -536,6 +536,7 @@ OAuth 回调中继（`feishu/_oauth_manager.py`，路由与 handler 在 `feishu/
 | POST | `/sessions/{session_id}/todo-segments/{segment_id}` | P1：改段标题 ``{label}``（spa-v2 可用回合 summary 覆盖） |
 | POST | `/feishu/route` | 幂等路由一次飞书会话到其 Session（首次按需 spawn）`{open_id, chat_id?, chat_type?, ai_id?, workspace?}` → 201 `{open_id, chat_id, session_id, channel_socket}`。`chat_type` 为 `group`/`topic` 且 `chat_id` 非空 → 按 `chat_id` 整群共用一个 Session；否则按 `open_id` 一人一个。缺路由键（私聊无 open_id）/ 无 ai_id → 400 |
 | GET | `/feishu/routes` | 列出所有飞书会话 → Session 路由 `[{open_id, chat_id, session_id}]`（群聊记录只有 `chat_id`，私聊只有 `open_id`） |
+| POST | `/feishu/sessions/{session_id}/chat` | **带鉴权的聊天流（SSE）** —— 网页应用打的就是这条，请求/响应格式与骨架 `POST /sessions/{session_id}/chat` 逐字节相同。为什么要有它：骨架那条**一行身份校验都没有**（容器内回环服务本机是它的合理用途），而它是能**驱动 agent 执行工具**的那条（跑 bash、读公司表格、往飞书发消息），上公网等于任何知道一个 session id 的人都能让公司 agent 干活。三段判定与 `/feishu/sessions/{id}/history` **同一套 `owns_session`**：未登录 401、会话不存在 404、别人的/群聊的 403（403 而非 404 是与 history 对齐，真·不存在已占了 404）。**实现不复制**：handler 只做判定，正文转骨架抽出的 `_serve_chat_sse`——两份 handler 体必有一份先过时，而过时的那份是能执行工具的路径。判据 `tests/integration/test_feishu_web_chat_auth.py`（含把归属校验打成恒真的变异复核）|
 | GET | `/oauth/callback` | OAuth 重定向落地点：收下 `?code=&state=` 交给 `OAuthRelay` 暂存，回一张「授权成功」页；缺 state → 400。用户因此**不必**手工复制 code |
 | GET | `/oauth/code` | 发起方（workspace 工具，通常在另一进程）按 `?state=` 取件，命中返回 `{state, code}` 并作废（一次性）；回调带错误则 `{state, error}`；未到达 → 404 |
 | GET | `/auth/status` | 登录态 + 链路自检信息 `{endpoint, prefix, loggedIn, deviceKey, platform, credentialEncrypted}`；**不含 token**。SPA 据此决定显示登录引导还是身份信息。顺带触发连接预热 —— 该端点只读内存不打云端，预热是后台任务，不拖慢本响应 |
@@ -575,6 +576,8 @@ AI 和 Session 的 `id` 字段可选，不传自动生成 UUID。
 ## Web UI Chat 协议
 
 `POST /sessions/{session_id}/chat` 接受 `Chunk` 列表，返回 SSE 流。
+
+**两条路由共用这一份协议与这一份实现。** 骨架这条无身份校验（容器内回环服务本机）；飞书网页应用打的是带鉴权的 `POST /feishu/sessions/{session_id}/chat`（见上表）。正文实现只有一份 `server._serve_chat_sse(request, session_id)`——**鉴权由调用方负责，它自己一行都不做**；`session_id` 走参数而非 `match_info`，否则内核就要认某条产品路由的占位符名字。multipart 解析、SSE keepalive、`[DONE]` 收尾都在这一份里，所以协议改一次两条路由同时跟上。
 
 **Request**：
 ```json
