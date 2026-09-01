@@ -839,11 +839,12 @@ CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
         "recompute_sql": (
             "SELECT d.task_id, t.task_name, d.progress_effect FROM task_group_detail d "
             "JOIN task t ON t.id = d.task_id "
-            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' ORDER BY d.task_id LIMIT 5"
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' "
+            "ORDER BY t.latest_progress_time DESC, d.task_id DESC LIMIT 5"
         ),
         "note": (
-            "「前 N 条」没给排序词时按默认 task_id 序（与 Q1-01/O7-05 及其余 14 题同口径）；"
-            "原 gold 按 latest_progress_time 序与全库 gold 的默认序不一致，模型 4 轮全取默认序"
+            "「前 N 条」按服务端默认序（最新进展时间倒序，与 Q1-01/O7-05 同口径）；"
+            "原 gold 的 task_id 序是早期默认序，服务端默认排序已改"
         ),
     },
     ("nl2sql", "Q1-01"): {
@@ -851,21 +852,76 @@ CONFIRMED_FIXES: dict[tuple[str, str], dict[str, Any]] = {
             "SELECT d.task_id, t.task_name, d.progress_effect FROM task_group_detail d "
             "JOIN task t ON t.id = d.task_id JOIN task_board b ON b.id = t.board_id AND b.is_deleted = 0 "
             "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND b.code = 'group' "
-            "ORDER BY d.task_id LIMIT 8"
+            "ORDER BY t.latest_progress_time DESC, d.task_id DESC LIMIT 8"
         ),
-        "note": (
-            "「前 N 条」按默认 task_id 序（与全库 gold 一致）；工具指南的 "
-            "order_by=progress_time 仅用于问句明确要「当期」时"
-        ),
+        "note": "「前 N 条」按服务端默认序（最新进展时间倒序）",
     },
     ("nl2sql", "O7-05"): {
         "recompute_sql": (
             "SELECT d.task_id, t.task_name, d.progress_effect FROM task_group_detail d "
             "JOIN task t ON t.id = d.task_id JOIN task_board b ON b.id = t.board_id AND b.is_deleted = 0 "
             "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' AND b.code = 'group' "
-            "ORDER BY d.task_id LIMIT 8"
+            "ORDER BY t.latest_progress_time DESC, d.task_id DESC LIMIT 8"
         ),
-        "note": "同 Q1-01：默认 task_id 序",
+        "note": "同 Q1-01：服务端默认序",
+    },
+    ("nl2sql", "E4-01"): {
+        "recompute_sql": (
+            "SELECT t.task_name, d.completion_time FROM task_group_detail d JOIN task t ON t.id = d.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' "
+            "AND d.completion_time IS NOT NULL AND d.completion_time <> '' "
+            "ORDER BY t.latest_progress_time DESC, d.task_id DESC LIMIT 10"
+        ),
+        "note": "「计划完成时间都填了什么前 10 条」= 10 个任务的完成时间（服务端默认序），不是 10 种写法",
+    },
+    ("nl2sql", "F5-01"): {
+        "recompute_sql": (
+            "SELECT t.task_name, d.lead_owner_names, d.project_owner_names, d.project_group "
+            "FROM task_group_detail d JOIN task t ON t.id = d.task_id "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' "
+            "ORDER BY t.latest_progress_time DESC, d.task_id DESC LIMIT 8"
+        ),
+        "note": "前 8 条按服务端默认序（最新进展时间倒序）",
+    },
+    ("nl2sql", "Q1-04"): {
+        "recompute_sql": (
+            "SELECT d.task_id, t.task_name, d.target_result, d.implementation_measure "
+            "FROM task_group_detail d JOIN task t ON t.id = d.task_id "
+            "JOIN task_board b ON b.id = t.board_id AND b.is_deleted = 0 AND b.code = 'group' "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' "
+            "ORDER BY t.latest_progress_time DESC, d.task_id DESC LIMIT 6"
+        ),
+        "note": "前 6 条按服务端默认序",
+    },
+    ("nl2sql", "Q3-01"): {
+        "recompute_sql": (
+            "SELECT d.task_id, t.task_name, d.lead_owner_names, d.project_owner_names "
+            "FROM task_group_detail d JOIN task t ON t.id = d.task_id "
+            "JOIN task_board b ON b.id = t.board_id AND b.is_deleted = 0 AND b.code = 'group' "
+            "WHERE t.is_deleted = 0 AND t.workflow_status = 'published' "
+            "ORDER BY t.latest_progress_time DESC, d.task_id DESC LIMIT 8"
+        ),
+        "note": "前 8 条按服务端默认序",
+    },
+    ("nl2sql", "Q4-01"): {
+        "recompute_sql": (
+            "SELECT d.task_id, t.task_name, d.completion_time FROM task_group_detail d "
+            "JOIN task t ON t.id = d.task_id JOIN task_board b ON b.id = t.board_id AND b.is_deleted = 0 "
+            "AND b.code = 'group' WHERE t.is_deleted = 0 AND t.workflow_status = 'published' "
+            "ORDER BY t.latest_progress_time DESC, d.task_id DESC LIMIT 10"
+        ),
+        "note": "前 10 条按服务端默认序",
+    },
+    ("nl2sql", "R5-04"): {
+        "recompute_sql": (
+            "SELECT d.task_id, t.task_name, d.completion_time FROM task_group_detail d "
+            "JOIN task t ON t.id = d.task_id JOIN task_board b ON b.id = t.board_id AND b.is_deleted = 0 "
+            "AND b.code = 'group' WHERE t.is_deleted = 0 AND t.workflow_status = 'published' "
+            "AND d.completion_time IS NOT NULL AND d.completion_time <> '' "
+            "AND d.completion_time NOT REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' "
+            "ORDER BY t.latest_progress_time DESC, d.task_id DESC LIMIT 10"
+        ),
+        "note": "非日期表述前 10 条按服务端默认序",
     },
     ("oa_biz", "C2-02"): {
         "override_gold": {"columns": ["cnt"], "rows": [["73"]]},

@@ -5379,9 +5379,9 @@ def weekly_group_detail_query(
             ``status`` for the contradiction question: without it, tasks that are
             未开始 *and* blank come along and inflate the count.
         order_by: ``progress_time`` orders by the task's latest progress newest
-            first, which is what "当期进度成效" means -- the default task-id order
-            puts the board's oldest rows on page one and a "给我前 5 条" cut then
-            returns 5 rows that are not the current ones. Empty keeps task-id order.
+            first, which is what "当期进度成效" means. The DEFAULT is already this
+            order, so a plain "给我前 5 条" returns the current ones -- pass the
+            parameter only to make the caliber explicit.
         limit: Max rows, capped at 200.
     """
 
@@ -5516,9 +5516,9 @@ def weekly_group_detail_query(
                     "并非同一个数据（46 条任务两列的值不一致），问集团看板的负责人一律用本列"
                 )
 
-        # 「当期进度成效」要的是最近报过的那几条，默认按 task_id 排会把看板最早
-        # 那批放在第一页，再取前 5 条答的就不是当期。排序键落在服务端，
-        # 顺带把 latest_progress_time 一并选出来，让「凭什么是这 5 条」可核。
+        # 「当期进度成效」要的是最近报过的那几条。默认排序直接落在最新进展时间上：
+        # 问句没给排序词时，模型拿到的第一页就是当期，不会把看板最早那批（97 起）
+        # 当答案；顺带把 latest_progress_time 一并选出来，让「凭什么是这 5 条」可核。
         order_key = (order_by or "").strip().lower()
         if order_key and order_key != "progress_time":
             return {
@@ -5530,13 +5530,11 @@ def weekly_group_detail_query(
             }
         if order_key == "progress_time":
             columns += ", t.latest_progress_time"
-            order_sql = "t.latest_progress_time DESC, d.task_id DESC"
-            caliber.append(
-                "按任务最新进展时间 latest_progress_time 倒序（并列按任务 id 倒序），"
-                "首行即最近报过的；集团看板 46 条该列都非空，所以排序不会把空值顶到前面"
-            )
-        else:
-            order_sql = "d.task_id"
+        order_sql = "t.latest_progress_time DESC, d.task_id DESC"
+        caliber.append(
+            "默认按任务最新进展时间 latest_progress_time 倒序（并列按任务 id 倒序），"
+            "首行即最近报过的；集团看板 46 条该列都非空，所以排序不会把空值顶到前面"
+        )
 
         clause = " AND ".join(where)
         total = store.scalar(

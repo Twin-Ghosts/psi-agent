@@ -668,10 +668,10 @@ async def run() -> int:
         f"keys={sorted(group_owners.get('rows', [{}])[0])}",
     )
     check(
-        "F5-01 前 8 条按任务 id 定序，首条与 gold 一致",
+        "F5-01 前 8 条按最新进展时间定序，首条与 gold 一致",
         [r.get("task_name") for r in group_owners.get("rows", [])][:2]
-        == ["数据资产入表试点推进", "公共数据授权运营模式创新"]
-        and group_owners["rows"][0].get("project_owner_names") == "胡建国,方永康,邓少华",
+        == ["重点行业数据空间试点", "数字中国建设重点工程支撑（2期）"]
+        and group_owners["rows"][0].get("project_owner_names") == "吴晓东",
         f"first={group_owners.get('rows', [{}])[0]}",
     )
 
@@ -1588,8 +1588,8 @@ async def run() -> int:
         limit=8,
     )
     check(
-        "Q3-01 明细表一次出两列且按 task_id 顺序，前 8 条与 gold 一致",
-        [r.get("task_id") for r in (both.get("rows") or [])] == [97, 98, 99, 100, 101, 102, 103, 104]
+        "Q3-01 明细表一次出两列且按最新进展时间定序，前 8 条与 gold 一致",
+        [r.get("task_id") for r in (both.get("rows") or [])] == [103, 128, 113, 149, 116, 150, 138, 101]
         and all(r.get("lead_owner_names") and r.get("project_owner_names") for r in (both.get("rows") or [])),
         f"ids={[r.get('task_id') for r in (both.get('rows') or [])]}",
     )
@@ -2020,8 +2020,10 @@ async def run() -> int:
     # 集团组两张专表：现有工具一条都读不到，Q/R 两类 56 题全靠这四个入口。
     gd = await _call(registry, "weekly_group_detail_query", limit=8)
     check(
-        "集团明细可读且带 task_name（Q1-01 前 8 条）",
-        gd.get("row_count") == 8 and _first(gd, "task_id") == 97 and "数据资产入表" in str(_first(gd, "task_name")),
+        "集团明细默认按最新进展时间倒序（首行 103 重点行业数据空间试点）",
+        gd.get("row_count") == 8
+        and _first(gd, "task_id") == 103
+        and "重点行业数据空间" in str(_first(gd, "task_name")),
         f"rows={gd.get('row_count')} 首行={str(_first(gd, 'task_name'))[:30]}",
     )
     check(
@@ -2863,8 +2865,8 @@ async def run() -> int:
         fields="progress_effect",
     )
     check(
-        "K4-04 未开始却写了成效的 6 条（97/108/130/137/140/142）",
-        [int(r.get("task_id", -1)) for r in k44.get("rows") or []] == [97, 108, 130, 137, 140, 142]
+        "K4-04 未开始却写了成效的 6 条（97/108/130/137/140/142，按最新进展时间序）",
+        sorted(int(r.get("task_id", -1)) for r in k44.get("rows") or []) == [97, 108, 130, 137, 140, 142]
         and int(k44.get("total_count", -1)) == 6,
         str([r.get("task_id") for r in k44.get("rows") or []]),
     )
@@ -2900,10 +2902,10 @@ async def run() -> int:
         limit=8,
     )
     check(
-        "F5-01 前 8 条带牵头人与项目负责人（首行 唐立本 / 胡建国,方永康,邓少华）",
+        "F5-01 前 8 条带牵头人与项目负责人（首行 高志强 / 吴晓东）",
         f51.get("row_count") == 8
-        and _first(f51, "lead_owner_names") == "唐立本"
-        and _first(f51, "project_owner_names") == "胡建国,方永康,邓少华",
+        and _first(f51, "lead_owner_names") == "高志强"
+        and _first(f51, "project_owner_names") == "吴晓东",
         f"lead={_first(f51, 'lead_owner_names')} proj={_first(f51, 'project_owner_names')}",
     )
     check(
@@ -3786,17 +3788,17 @@ async def run() -> int:
         str(backfill.get("caliber"))[:160],
     )
 
-    # Q1-01/O7-05：gold 按 task_id 排，默认档就是对的；order_by=progress_time
-    # 会返回另一批 8 条（103/128/113/149...），那是另一个问题的答案。
+    # Q1-01/O7-05：默认档就是最新进展时间序（当期在前）；order_by=progress_time
+    # 只是把它写显式，返回同一批（103/128/113/149...）。
     group_default = await _call(registry, "weekly_group_detail_query", limit=8)
     check(
-        "Q1-01 集团明细默认按 task_id 定序，前 8 条即 97-104",
-        [r.get("task_id") for r in (group_default.get("rows") or [])] == [97, 98, 99, 100, 101, 102, 103, 104],
+        "Q1-01 集团明细默认按最新进展时间定序，前 8 条即当期",
+        [r.get("task_id") for r in (group_default.get("rows") or [])] == [103, 128, 113, 149, 116, 150, 138, 101],
         str([r.get("task_id") for r in (group_default.get("rows") or [])]),
     )
     group_recent = await _call(registry, "weekly_group_detail_query", order_by="progress_time", limit=8)
     check(
-        "Q1-01 order_by=progress_time 确实是另一批任务，两档不可混用",
+        "Q1-01 order_by=progress_time 与默认档同一批任务（口径写显式，不是另一问）",
         [r.get("task_id") for r in (group_recent.get("rows") or [])][:3] == [103, 128, 113],
         str([r.get("task_id") for r in (group_recent.get("rows") or [])][:5]),
     )
