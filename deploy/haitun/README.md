@@ -76,3 +76,13 @@ PYTHONPATH=src .venv/Scripts/python.exe -m pytest -o testpaths= --no-cov tests/d
    预期的**(刻意不放行), 不要照着把它们加进白名单。
 3. `/feishu-web/` 的静态产物能加载(依赖 Gateway 侧 `dist/` 存在, 不存在时 `add_static`
    静默跳过)。
+
+### 一条已知的设计边界: 响应不流式
+
+本代理把上游响应**一次读完再回**(`await resp.read()`), 不是边收边转。今天放行的路径里
+没有一条是流式的 —— 前端唯一走流的是 `chatStream.ts`, 它打 `POST /sessions/{id}/chat`,
+而那条刻意不放行。
+
+**所以哪天要放行 chat 一族, 光往 `ALLOWED_PATHS` 加一条是不够的**: SSE 会被这里缓冲成
+「等全部生成完才一次性吐给浏览器」, 表现是打字机效果消失、长回答疑似卡死。那时要改成
+`web.StreamResponse` 边收边写。记在这里, 因为这个缺陷加白名单时看不出来。
