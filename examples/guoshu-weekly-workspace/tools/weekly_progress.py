@@ -542,6 +542,13 @@ async def weekly_progress_coverage(scope: str = "summary", project_group: str = 
             进展、但对外看到的还是上一期". 58 rows over 47 tasks; a NULL
             public_version means the very first period is still in review, so
             nothing is public yet) /
+            same_text (the periods whose latest_progress and next_work were written
+            identically -- "最新进展和下一步计划写成一样的有哪些任务". Compares the two
+            columns WITHIN each row, whole-field after TRIM, across EVERY published
+            period rather than the newest one only: a task that wrote them the same
+            way in period 7 alone would be missed by a latest-only reading. The reply
+            carries scanned_rows / scanned_tasks, so 0 rows reads as "every one of
+            those periods was checked and none matched" instead of "not checked") /
             latest_unpublished (each task's NEWEST period, kept only when that
             period is still unpublished -- 72 rows, the answer to "最新写的那版进展
             还没对外发布". Three nearby calibers, do not swap them: this one spans
@@ -632,7 +639,16 @@ async def weekly_rank(
 
     Args:
         metric: progress_rounds (已发布进展期数) / milestones / milestones_done /
-            attachments / submissions / group_rounds (集团看板成效期数).
+            attachments / submissions / group_rounds (集团看板成效期数) /
+            project_team_size (项目团队人数).
+            project_team_size counts the people written in the task row's own
+            project_owner_name, splitting on the three delimiters the column uses
+            (ideographic comma, ASCII comma, fullwidth semicolon). It is NOT the group board's
+            multi-value project_owner_names column: that one lives on
+            task_group_detail and covers only the 46 group tasks, while this covers
+            all 128 tasks on both boards. Ask "哪个任务的项目团队人数最多" and you
+            want this metric; tasks with an empty owner column are excluded rather
+            than counted as 0 people, since they have no team size to compare.
             Every metric here is a per-task COUNT, so this tool answers "谁最多 /
             谁最少". It does NOT answer "都提交过几轮 / 给我前 N 条", which wants the
             submission rows themselves (task, round_no, status, submitted_at) --

@@ -203,7 +203,13 @@ async def weekly_group_stats(scope: str = "owners", top: int = 8, min_rounds: in
     exact and cost one call.
 
     Args:
-        scope: owners (multi vs single lead, distinct leads) / separators (how the
+        scope: project_group_raw (the detail TABLE grouped by 专项组, ungated -- 11
+            groups summing to 55 rows. Use it for "集团明细按专项组分 / 各有多少条",
+            which asks how many detail rows exist, not how many tasks are in flight.
+            rows_ is the answer; formal_rows sits alongside as the gated tier (46) for
+            comparison only. Do NOT use this for "各专项组有多少任务" -- that is a task
+            count and belongs to weekly_aggregate group_by="project_group") /
+            owners (multi vs single lead, distinct leads) / separators (how the
             multi-value owner column is delimited -- comma, ideographic comma,
             both, or a single person with no delimiter at all) / owner_widths
             (how many people share one owner cell, widest first) /

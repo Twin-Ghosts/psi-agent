@@ -3812,6 +3812,79 @@ async def run() -> int:
         f"total={pending.get('total_count')}",
     )
 
+    # ---- 工作流诊断出的四处：列追加 / 团队人数 / 同文本 / 明细裸表 ----
+
+    # OA-C1-02：填报人与上报时间此前不同源，得两次调用再自己配对。
+    hist_cols = await _call(registry, "weekly_progress_history", task="8")
+    check(
+        "OA-C1-02 进展历史同排返回 reporter_id，人和时间一次读全",
+        "reporter_id" in (hist_cols.get("columns") or []) and str(hist_cols.get("row_count")) == "11",
+        str(hist_cols.get("columns")),
+    )
+    latest_round = await _call(registry, "weekly_progress_coverage", scope="latest_round", limit=200)
+    check(
+        # 纯加列：行数必须仍是 73，否则就不是加列而是改了口径。
+        "latest_round 加 latest_progress 列后仍是 73 行（纯加列，不动行集）",
+        "latest_progress" in (latest_round.get("columns") or []) and str(latest_round.get("row_count")) == "73",
+        str(latest_round.get("columns")),
+    )
+
+    # OA-F6-02：项目团队人数在 task 行上，此前无排名度量。
+    team = await _call(registry, "weekly_rank", metric="project_team_size", mode="keep_ties", top=1)
+    check(
+        "OA-F6-02 项目团队人数 keep_ties 回 128 行，全为 1 人（与 gold 一致）",
+        str(team.get("row_count")) == "128" and {int(r.get("metric_value")) for r in (team.get("rows") or [])} == {1},
+        f"row_count={team.get('row_count')} values={sorted({r.get('metric_value') for r in (team.get('rows') or [])})}",
+    )
+    rounds_cut = await _call(registry, "weekly_rank", metric="progress_rounds", mode="cut", top=3)
+    check(
+        "回归 progress_rounds 名次档未受新度量影响（首行 18 期）",
+        str((rounds_cut.get("rows") or [{}])[0].get("metric_value")) == "18",
+        str([(r.get("task_name"), r.get("metric_value")) for r in (rounds_cut.get("rows") or [])][:2]),
+    )
+
+    # OA-C4-03：0 行是答案，但必须带扫描分母，否则读不出「查遍了都没有」。
+    same_text = await _call(registry, "weekly_progress_coverage", scope="same_text", limit=200)
+    check(
+        "OA-C4-03 同文本比对 0 行，且带扫描分母 943 行 / 73 任务",
+        str(same_text.get("total_count")) == "0"
+        and str(same_text.get("scanned_rows")) == "943"
+        and str(same_text.get("scanned_tasks")) == "73",
+        f"total={same_text.get('total_count')} "
+        f"scanned={same_text.get('scanned_rows')}/{same_text.get('scanned_tasks')}",
+    )
+    check(
+        "OA-C4-03 caliber 说明是整字段比对且全期扫描（不是只看最新一期）",
+        "TRIM" in str(same_text.get("caliber")) and "最新一期" in str(same_text.get("caliber")),
+        str(same_text.get("caliber"))[:170],
+    )
+
+    # OA-T1-03：集团明细裸表 55 行，与加闸门的 46 是两个口径。
+    raw_grp = await _call(registry, "weekly_group_stats", scope="project_group_raw", top=50)
+    check(
+        "OA-T1-03 集团明细按专项组裸表分档逐值等于 gold（10/6/6/6/5/5/5/4/4/2/2）",
+        [int(r.get("rows_")) for r in (raw_grp.get("rows") or [])] == [10, 6, 6, 6, 5, 5, 5, 4, 4, 2, 2],
+        str([(r.get("grp"), r.get("rows_")) for r in (raw_grp.get("rows") or [])][:4]),
+    )
+    check(
+        "OA-T1-03 两档口径随 caliber_tiers 返回：裸表 55 / 加闸门 46",
+        raw_grp.get("caliber_tiers") == {"raw_table": 55, "formal_task_gate": 46}
+        and sum(int(r.get("formal_rows")) for r in (raw_grp.get("rows") or [])) == 46,
+        json.dumps(raw_grp.get("caliber_tiers"), ensure_ascii=False),
+    )
+    check(
+        # 这一档是 opt-in，必须指回任务口径那条路，否则会抢走「各组有多少任务」的问题。
+        "OA-T1-03 caliber 指回 weekly_aggregate（免得抢走任务口径的问题）",
+        "weekly_aggregate" in str(raw_grp.get("caliber")),
+        str(raw_grp.get("caliber"))[-140:],
+    )
+    gated_grp = await _call(registry, "weekly_aggregate", group_by="project_group", board="group")
+    check(
+        "回归任务口径仍是 46（新增裸表档没污染 weekly_aggregate）",
+        sum(int(r.get("cnt")) for r in (gated_grp.get("rows") or [])) == 46,
+        f"sum={sum(int(r.get('cnt')) for r in (gated_grp.get('rows') or []))}",
+    )
+
     return report()
 
 

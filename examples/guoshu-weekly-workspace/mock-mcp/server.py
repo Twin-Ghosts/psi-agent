@@ -468,9 +468,12 @@ def weekly_progress_history(
         # 「这几期有什么变化」要的是相邻两期并排，不是各期原文。只给各期让模型
         # 自己错位对照，它会把上一期的正文抄串行,或干脆不给对照列。prev_progress
         # 与 gap_days 由服务端用 LAG 算好,按 version_no 升序取前一期。
+        # reporter_id 与 report_time 同排返回：问「最新一次进展是谁报的、什么时候报的」
+        # 本是一问，此前这里只给 report_time，填报人得另查 weekly_submission_query，
+        # 两次调用的行集不一定对齐（提交单按轮次、进展按期号），容易把人和时间配错。
         rows = store.fetch(
             "SELECT id, task_id, version_no, latest_progress, next_work, progress_date, "
-            "report_time, is_published, review_comment, "
+            "report_time, reporter_id, is_published, review_comment, "
             "LAG(latest_progress) OVER (ORDER BY version_no) AS prev_progress, "
             "DATEDIFF(progress_date, LAG(progress_date) OVER (ORDER BY version_no)) AS gap_days "
             f"FROM task_progress WHERE {where} ORDER BY version_no DESC, id DESC",
@@ -2620,6 +2623,7 @@ _COVERAGE_SCOPES = (
     "unpublished_by_task",
     "pending_review",
     "latest_unpublished",
+    "same_text",
     "never_reported",
     "version_gaps",
     "latest_round",
@@ -2730,7 +2734,19 @@ _RANK_METRICS: dict[str, tuple[str, str, str, str]] = {
     "attachments": ("task_attachment", "x.is_deleted = 0", "COUNT(x.id)", "附件数"),
     "submissions": ("task_workflow_submission", "1 = 1", "COUNT(x.id)", "审批提交单数"),
     "group_rounds": ("task_group_progress_history", "x.is_published = 1", "COUNT(x.id)", "集团看板成效期数"),
+    # 唯一不 JOIN 子表的度量：值就在 task 行上，故 table 留空、gate 恒真。
+    "project_team_size": ("", "", "_TEAM_SIZE", "项目团队人数"),
 }
+
+# 项目团队人数：数 task 行上 project_owner_name 的分隔符个数 + 1，不 JOIN 子表。
+# 三种分隔符都要数（、／,／；），只数顿号会把另两种写法算成 1 人。
+# 与集团明细的多值列 project_owner_names 是两个列：那一列在 task_group_detail 上、
+# 只覆盖集团看板 46 条，本列在 task 行上、覆盖两个看板 128 条，两个「人数」答案
+# 必须能分开——问「哪个任务的项目团队人数最多」问的是本列。
+_TEAM_SIZE_EXPR = (
+    "CHAR_LENGTH(t.project_owner_name) - CHAR_LENGTH("
+    "REPLACE(REPLACE(REPLACE(t.project_owner_name, '、', ''), ',', ''), '；', '')) + 1"
+)
 
 # per_group 的分组轴。键是对外口径名，值是 (分组表达式, 分组定序键)。
 # 定序键进 ROW_NUMBER 的 ORDER BY 尾部，保证组内并列的裁决可复现。
@@ -2765,6 +2781,7 @@ _GROUP_OWNER_ROLES: dict[str, tuple[str, str]] = {
 
 _GROUP_STATS_SCOPES = (
     "owners",
+    "project_group_raw",
     "completion_time",
     "completion_time_values",
     "completion_time_formats",
@@ -3152,9 +3169,13 @@ def weekly_progress_coverage(scope: str = "summary", project_group: str = "", li
                 f"WHERE {latest_where} AND p.next_work IS NOT NULL AND p.next_work <> ''",
                 params,
             )
+            # latest_progress 与 next_work 同排返回：问「这一期各任务报了什么」要的是
+            # 正文，此前本档只给 next_work（下一步），正文得回 weekly_progress_history
+            # 逐任务查 73 次。注意本档的 next_work 非空闸门对正文题是错闸门——
+            # 今天 73/73 都非空所以无害，问正文时要留意这一点。
             rows = store.fetch(
                 "SELECT t.id AS task_id, t.task_name, t.project_group, p.version_no, "
-                "p.next_work, p.progress_date "
+                "p.latest_progress, p.next_work, p.progress_date "
                 f"FROM task t JOIN {_LATEST_PROGRESS_CTE} p ON p.task_id = t.id AND p.rn = 1 "
                 f"WHERE {latest_where} AND p.next_work IS NOT NULL AND p.next_work <> '' "
                 "ORDER BY t.id",
@@ -3275,6 +3296,45 @@ def weekly_progress_coverage(scope: str = "summary", project_group: str = "", li
             )
             rows["total_count"] = total["value"]
             return rows
+
+        if key == "same_text":
+            # 「最新进展和下一步计划写成一样的有哪些任务」是逐期比对同一行的两列。
+            # 全期扫描而不是只看最新一期：某任务可能只在第 7 期犯过这个错，
+            # 只看最新一期就漏了。0 行是有意义的答案，但必须带上扫描分母，
+            # 否则「没有」读不出是「查遍了都没有」还是「压根没查」。
+            same_total = store.scalar(
+                "SELECT COUNT(*) FROM task_progress p JOIN task t ON t.id = p.task_id "
+                f"WHERE {clause} AND p.is_published = 1 "
+                "AND TRIM(p.latest_progress) = TRIM(p.next_work)",
+            )
+            scanned = store.fetch(
+                "SELECT COUNT(*) AS scanned_rows, COUNT(DISTINCT p.task_id) AS scanned_tasks "
+                "FROM task_progress p JOIN task t ON t.id = p.task_id "
+                f"WHERE {clause} AND p.is_published = 1",
+                limit=1,
+            )
+            same_rows = store.fetch(
+                "SELECT t.id AS task_id, t.task_name, p.version_no, p.progress_date, "
+                "p.latest_progress, p.next_work "
+                "FROM task_progress p JOIN task t ON t.id = p.task_id "
+                f"WHERE {clause} AND p.is_published = 1 "
+                "AND TRIM(p.latest_progress) = TRIM(p.next_work) "
+                "ORDER BY t.id, p.version_no",
+                caliber=(
+                    f"{store.FORMAL_TASK_CALIBER}；仅已发布进展（p.is_published = 1）；"
+                    "逐期比对同一行的 latest_progress 与 next_work 是否全等（两侧各 TRIM 后整字段比较，"
+                    "不做前缀或包含匹配——那答的是另一个问题）；"
+                    "全期扫描而非只看最新一期：只在某一期写重的任务，最新一期口径会漏掉；"
+                    "扫描分母见 scanned_rows / scanned_tasks，0 行的意思是「这些期全查过、没有一期写重」，"
+                    "不是「没查」；要只看最新一期的下一步请用 scope=latest_round"
+                ),
+                limit=bounded,
+            )
+            same_rows["total_count"] = same_total["value"]
+            first_scan = (scanned.get("rows") or [{}])[0]
+            same_rows["scanned_rows"] = first_scan.get("scanned_rows")
+            same_rows["scanned_tasks"] = first_scan.get("scanned_tasks")
+            return same_rows
 
         if key == "latest_unpublished":
             # 「最新写的那版进展还没对外发布」问的是每任务最大 version_no 那一版的
@@ -3562,10 +3622,18 @@ def weekly_rank(
 
         table, gate, expression, label = chosen
         direction = "ASC" if ascending else "DESC"
-        # LEFT JOIN 而非 JOIN：期数为 0 的任务是「最少」那一端的正确答案，
-        # INNER JOIN 会把它们整行丢掉（inner_join_drops_zero）。
-        join = f"LEFT JOIN {table} x ON x.task_id = t.id AND {gate}"
         clause = store.formal_task_clause()
+        if expression == "_TEAM_SIZE":
+            # 值在 task 行上，没有子表可 JOIN。空 join 让下面所有 mode 的 SQL
+            # 原样复用，不必为这一个度量另开分支。空负责人列不算 0 人而是排除：
+            # 「人数最多」问的是有团队的任务，没填的那些没有人数可比。
+            join = ""
+            expression = f"MAX({_TEAM_SIZE_EXPR})"
+            clause += " AND t.project_owner_name IS NOT NULL AND t.project_owner_name <> ''"
+        else:
+            # LEFT JOIN 而非 JOIN：期数为 0 的任务是「最少」那一端的正确答案，
+            # INNER JOIN 会把它们整行丢掉（inner_join_drops_zero）。
+            join = f"LEFT JOIN {table} x ON x.task_id = t.id AND {gate}"
         base = f"{store.FORMAL_TASK_CALIBER}；按{label}{'升序' if ascending else '降序'}"
         params: dict[str, Any] = {}
         if board.strip():
@@ -5377,6 +5445,39 @@ def weekly_group_stats(scope: str = "owners", top: int = 8, min_rounds: int = 0)
         clause = store.formal_task_clause()
         join = store.group_board_join()
         base = f"{store.FORMAL_TASK_CALIBER}；集团看板"
+
+        if key == "project_group_raw":
+            # 「集团明细按专项组分，各有多少条」问的是明细表本身有多少行，故不加任务
+            # 闸门——与审批表那几档同一个道理（问的是表本身）。两档差得不小：裸表
+            # 55 行 / 加闸门 46 行，差的 9 行挂在已软删或未发布的任务上。
+            # 这一档是 opt-in，绝不能变成 project_group 类问题的默认路径：问「各专项组
+            # 有多少任务」仍走 weekly_aggregate group_by=project_group（那是任务口径）。
+            raw_sum = store.scalar("SELECT COUNT(*) FROM task_group_detail d")
+            gated_sum = store.scalar(
+                f"SELECT COUNT(*) FROM task_group_detail d JOIN task t ON t.id = d.task_id WHERE {clause}"
+            )
+            raw_rows = store.fetch(
+                "SELECT d.project_group AS grp, COUNT(*) AS rows_, "
+                "SUM(CASE WHEN EXISTS (SELECT 1 FROM task t2 WHERE t2.id = d.task_id "
+                "AND t2.is_deleted = 0 AND t2.workflow_status = 'published') THEN 1 ELSE 0 END) AS formal_rows, "
+                "SUM(d.target_result IS NOT NULL AND d.target_result <> '') AS target_filled, "
+                "SUM(d.implementation_measure IS NOT NULL AND d.implementation_measure <> '') AS measure_filled "
+                "FROM task_group_detail d GROUP BY grp ORDER BY rows_ DESC, grp",
+                caliber=(
+                    f"集团明细表（task_group_detail）裸表口径，不加任务闸门，本档的答案是 rows_ 那一列，"
+                    f"合计 {raw_sum['value']} 行；formal_rows 是同一分组下过正式任务闸门的行数，"
+                    f"合计 {gated_sum['value']}，仅供口径对照，不要拿它当本档答案；"
+                    "target_filled / measure_filled 同为裸表口径的填写行数；"
+                    "问「各专项组有多少任务」不要用本档——那是任务口径，"
+                    "请用 weekly_aggregate group_by=project_group"
+                ),
+                limit=bounded,
+            )
+            raw_rows["caliber_tiers"] = {
+                "raw_table": raw_sum["value"],
+                "formal_task_gate": gated_sum["value"],
+            }
+            return raw_rows
 
         if key == "owners":
             summary = store.fetch(
