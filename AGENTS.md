@@ -467,6 +467,15 @@ C 端注册登录的云端服务**不在本仓库**，在服务器 `/srv/psi-clo
 - 云端的目录结构、模块契约与硬规则记在 `/srv/psi-cloud/AGENTS.md`，**本文不重复**。一句话概括：`core/` 是框架且不认识任何业务，`modules/` 下每个目录一块业务自报清单，认证是 `modules/auth`。
 - 本机侧只有 `gateway/desktop/_auth_manager.py` 与 `_auth_store.py` 两个文件与它对接，**不持任何供应商密钥**。改动云端接口要同步上面那份设计文档。
 
+## 服务器部署（haitun / ToB 栈）
+
+把本仓部署到云服务器的完整流程见 `docs/deploy/psi-agent-cloud-deployment.md`（前置条件、镜像获取、编排、配置项清单、反代、启动验证判据、数据迁移与故障排查）。与上一节的 psi-cloud 是两套东西：那是 C 端服务，这是 haitun 的 ToB 栈（`gateway` / `luolin` / `oauth-proxy` 三容器 + fusion-memory），同机但完全隔离。
+
+- **`Dockerfile` 与 `docker-compose.yml` 不在本仓**，只在目标机 `/srv/haitun/psi-agent/`。本仓贡献的是镜像里 `pip install -e .` 装的那部分。改了配置项 / 启动参数 / 端口暴露，要同步那份部署文档。
+- 反直觉但正确的三条判据，别当 bug 修：公网 `/sessions` 返回 **404** 才表示 gateway 未暴露（它无跨用户鉴权却能驱动 agent 执行工具，绝不能发布）；从 gateway 容器内访问 `psi-agent-luolin:8081` 返回 **404 是正常**（DNS+TCP+HTTP 都通），`000` 才是故障；`Exited (137)` 在 `OOMKilled=false` 时是 `docker stop` 超时强杀，属正常停机。
+- `oauth-proxy` 用 `network_mode: "service:gateway"` 借用 gateway 的网络命名空间，**重启 gateway 会静默打断它的网络栈**（容器仍显示 Up 但 8090 不通）。用目标机的 `./restart-stack.sh`，不要裸 `docker compose restart gateway`。
+- 飞书 channel 是外发 WebSocket 长连接，同一 app 只能有一条，**两端同时在线会导致消息重复投递** —— 迁移顺序必须是「停旧 → 拷数据 → 起新」。
+
 ## 未来扩展方向
 
 - [x] 单进程中运行多个 session 实例（利用 anyio task group）— 通过 Gateway 实现
