@@ -361,6 +361,10 @@ class Gateway:
 
             attention = AttentionHub()
             schedm = SchedulerManager(_sm=sm, _ai_id=self.scheduler_ai_id or self.feishu_ai_id)
+            # 首个定时任务由 watch_loop 自动拉起: ensure 只会在「schedules 已存在」时
+            # spawn, 而 schedule_manage 写第一个 TASK.md 不会触发 ensure —— 没有这个
+            # 常驻协程, 用户新建的定时任务要等下一次 ensure 碰巧发生才生效 (到点不触发)。
+            tg.start_soon(schedm.watch_loop)
             # 骨架 + 按 --gateway 贴各 gateway 的 HTTP 面。**贴哪些完全由调用方给定** ——
             # 该参数必填, 没有「不传时挂什么」这回事: 少挂一面的表现是某个前端 404 而非
             # 报错, 所以宁可在启动期就要求说清楚。生产上飞书容器起的也是 `psi-agent

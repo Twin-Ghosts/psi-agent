@@ -18,8 +18,11 @@ workspace 开多个会话; 每个 Session 都能读到 ``{workspace}/schedules``
 
 **按需创建**: 只有 workspace 真的存在非空 ``schedules/`` 时才 spawn, 免得 N 个
 从不用定时任务的飞书用户各挂一个空调度 Session (每个都要付 tools 加载成本)。
-调用方在建 workspace / 路由用户 / 恢复 state 后调 ``ensure``; 用户新建第一个定时
-任务后, 下一次 ``ensure`` 会把它拉起来。
+调用方在建 workspace / 路由用户 / 恢复 state 后调 ``ensure``; 被跳过的 workspace
+记入 ``_pending``, 由常驻 ``watch_loop`` 每 ``_WATCH_INTERVAL_SECONDS`` 重查 ——
+用户新建第一个定时任务后**不需要任何外部事件** (下一次 ensure / 重启 / 新消息)
+就会被自动拉起。旧行为是「到点不触发、必须唤醒」: 调度 Session 不 spawn 就没有
+``_watch_dir``, 而 ``schedule_manage`` 写 TASK.md 这件事本身不会触发 ensure。
 
 **对 SPA / state 完全隐藏**: ``SessionInfo.scheduler`` (由 ``active_schedules`` 含
 ``*`` 派生) 使其从 ``SessionManager.list_all()`` 与 ``state/latest.json`` 中排除。
@@ -39,6 +42,10 @@ from loguru import logger
 from psi_agent.runtime._session_manager import SessionManager
 from psi_agent.session.schedule_registry import ACTIVATE_ALL
 
+# 被 ensure 跳过 (暂无 schedules) 的 workspace 多久重查一次。与调度 Session 自己的
+# ``_watch_dir`` 轮询周期一致: 用户新建定时任务后最多等这么久就被拉起。
+_WATCH_INTERVAL_SECONDS = 30.0
+
 
 @dataclass
 class SchedulerManager:
@@ -47,12 +54,19 @@ class SchedulerManager:
     ``_ai_id`` 是调度 Session 挂载的缺省 AI 实例; 为空时 ``ensure`` 直接跳过
     (记 warning) —— 没有 AI 后端时 ``fire=prompt`` 无法工作, 但 spawn 一个连不上
     上游的 Session 更糟。
+
+    ``_pending`` 是「按需 spawn 跳过但可能随时出现 schedules」的 workspace:
+    ``ensure`` 因暂无 schedules 而跳过时记入, ``watch_loop`` 每 30s 重查, 一旦
+    ``schedules/*/TASK.md`` 出现就按记下的 ai/agent 拉起调度 Session 并出队 ——
+    首个定时任务因此不再依赖下一次 ``ensure`` 碰巧发生。
     """
 
     _sm: SessionManager
     _ai_id: str = ""
     _routes: dict[str, str] = field(default_factory=dict)
     _lock: anyio.Lock = field(default_factory=anyio.Lock)
+    # workspace_key -> (workspace, ai_id, agent); 仅记「有 AI 可用但暂无 schedules」的。
+    _pending: dict[str, tuple[str, str, str]] = field(default_factory=dict)
 
     @staticmethod
     async def _workspace_key(workspace: str) -> str:
@@ -78,9 +92,10 @@ class SchedulerManager:
     async def ensure(self, workspace: str, *, ai_id: str = "", agent: str = "") -> str:
         """确保 *workspace* 有且仅有一个调度 Session; 返回其 session id (跳过时 ``""``)。
 
-        幂等: 已存在则直接返回。``schedules/`` 不存在或为空时**不** spawn (按需)。
-        任何异常都只记 warning 并返回 ``""`` —— 调度起不来不该拖垮建会话 / 收消息
-        的主链路。
+        幂等: 已存在则直接返回。``schedules/`` 不存在或为空时**不** spawn (按需),
+        但有可用 AI 时把 workspace 记入 ``_pending``, 由 ``watch_loop`` 稍后自动拉起
+        —— 首个定时任务无需任何外部事件即可生效。任何异常都只记 warning 并返回
+        ``""`` —— 调度起不来不该拖垮建会话 / 收消息的主链路。
         """
         if not workspace.strip():
             return ""
@@ -104,11 +119,17 @@ class SchedulerManager:
                 logger.debug(f"SchedulerManager: adopted existing scheduler session {sid!r}")
                 return sid
 
+            resolved_ai = ai_id or self._ai_id
             if not await self._has_schedules(workspace):
-                logger.debug(f"SchedulerManager: no schedules under {workspace!r}; not spawning")
+                if resolved_ai:
+                    # watch_loop 每 _WATCH_INTERVAL_SECONDS 重查本条目, schedules/ 一
+                    # 出现就自动拉起 —— 首个定时任务不再等下一次 ensure 碰巧发生。
+                    self._pending[key] = (workspace, resolved_ai, agent)
+                    logger.debug(f"SchedulerManager: {workspace!r} has no schedules yet; queued for watch_loop")
+                else:
+                    logger.debug(f"SchedulerManager: no schedules under {workspace!r}; not spawning")
                 return ""
 
-            resolved_ai = ai_id or self._ai_id
             if not resolved_ai:
                 logger.warning(
                     f"SchedulerManager: {workspace!r} has schedules but no ai_id is configured; "
@@ -133,6 +154,43 @@ class SchedulerManager:
             self._routes[key] = sid
             logger.info(f"SchedulerManager: scheduler session {sid!r} owns schedules of {workspace!r}")
             return sid
+
+    async def watch_loop(self) -> None:
+        """常驻协程: 每 ``_WATCH_INTERVAL_SECONDS`` 重查 ``_pending`` 里的 workspace。
+
+        刻意为之: ``ensure`` 只在「schedules 已存在」时 spawn, 而它的调用时机
+        (建会话 / 路由 / 恢复 state) 全都不是「``schedule_manage`` 写入第一个
+        TASK.md」这件事本身 —— 没有这个循环, 首个定时任务会一直等到下一次
+        ``ensure`` 碰巧发生 (飞书还得等 channel 路由缓存失效), 到点不触发、
+        看起来必须「唤醒」。调度 Session 一旦拉起, 其自身的 ``_watch_dir`` 接管
+        后续增删改, 本循环随即出队该 workspace。
+
+        ``Gateway.run`` 在启动时 ``start_soon`` 本协程; 任何一轮失败只记 warning
+        下轮重试, ``CancelledError`` 是 ``BaseException`` 照常传播 (随 Gateway
+        关闭而终止)。
+        """
+        logger.info(f"SchedulerManager: watch_loop started (every {_WATCH_INTERVAL_SECONDS}s)")
+        while True:
+            await anyio.sleep(_WATCH_INTERVAL_SECONDS)
+            try:
+                await self._sweep_once()
+            except Exception as e:
+                logger.warning(f"SchedulerManager: watch_loop iteration failed: {e!r}")
+
+    async def _sweep_once(self) -> None:
+        """一轮 pending 重查: 有 schedules 的 workspace 立即拉起调度 Session。"""
+        for key, (workspace, ai_id, agent) in list(self._pending.items()):
+            sid = self._session_id_from_key(key)
+            if self._sm.has(sid):
+                # 已被并发 ensure / 本循环拉起的路径建好, 无需再等。
+                self._pending.pop(key, None)
+                continue
+            if not await self._has_schedules(workspace):
+                continue
+            spawned = await self.ensure(workspace, ai_id=ai_id, agent=agent)
+            if spawned == sid:
+                self._pending.pop(key, None)
+                logger.info(f"SchedulerManager: watch_loop spawned scheduler {sid!r} for {workspace!r}")
 
     @staticmethod
     async def _has_schedules(workspace: str) -> bool:

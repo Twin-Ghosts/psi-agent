@@ -169,6 +169,114 @@ async def test_ensure_without_ai_id_does_not_spawn(tmp_path: Path) -> None:
         await tg.__aexit__(None, None, None)
 
 
+# ── watch_loop (首个定时任务自动拉起) ────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_ensure_queues_pending_when_no_schedules(tmp_path: Path) -> None:
+    """ensure 跳过时把 workspace 记入 _pending, 由 watch_loop 稍后重查。"""
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        schedm = SchedulerManager(_sm=sm, _ai_id="ai1")
+
+        assert await schedm.ensure(str(tmp_path)) == ""
+        key = await SchedulerManager._workspace_key(str(tmp_path))
+        assert key in schedm._pending
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_ensure_without_ai_id_not_queued(tmp_path: Path) -> None:
+    """没有可用 AI 时不入队 —— 反正 spawn 不起来, 不必每 30s 空查一次。"""
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        schedm = SchedulerManager(_sm=sm)
+
+        assert await schedm.ensure(str(tmp_path)) == ""
+        assert schedm._pending == {}
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_watch_loop_spawns_scheduler_after_first_schedule(tmp_path: Path) -> None:
+    """用户建第一个定时任务后由 watch_loop 自动拉起 —— 不再等下一次 ensure。"""
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        schedm = SchedulerManager(_sm=sm, _ai_id="ai1")
+
+        assert await schedm.ensure(str(tmp_path)) == ""
+        assert await sm.list_all(include_scheduler=True) == []
+
+        await _write_schedule(tmp_path)
+        await schedm._sweep_once()
+
+        sid = await _sid(tmp_path)
+        assert sm.has(sid)
+        assert sid not in schedm._pending
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_watch_loop_keeps_pending_until_schedules_appear(tmp_path: Path) -> None:
+    """schedules 未出现时 sweep 不 spawn、条目保留; 出现后才拉起并出队。"""
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        schedm = SchedulerManager(_sm=sm, _ai_id="ai1")
+
+        assert await schedm.ensure(str(tmp_path)) == ""
+        key = await SchedulerManager._workspace_key(str(tmp_path))
+
+        await schedm._sweep_once()
+        assert await sm.list_all(include_scheduler=True) == []
+        assert key in schedm._pending
+
+        await _write_schedule(tmp_path)
+        await schedm._sweep_once()
+        assert sm.has(await _sid(tmp_path))
+        assert key not in schedm._pending
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_watch_loop_drops_pending_when_already_spawned(tmp_path: Path) -> None:
+    """并发 ensure 已拉起调度 Session 时, sweep 只出队不重复 spawn。"""
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        am, sm = await _make_managers(tg)
+        schedm = SchedulerManager(_sm=sm, _ai_id="ai1")
+
+        assert await schedm.ensure(str(tmp_path)) == ""
+        await _write_schedule(tmp_path)
+
+        # 另一条路径 (例如下一次 /feishu/route) 抢先 ensure 成功。
+        sid = await schedm.ensure(str(tmp_path))
+        assert sid != ""
+        await schedm._sweep_once()
+
+        assert len(await sm.list_all(include_scheduler=True)) == 1
+        assert await schedm.ensure(str(tmp_path)) == sid
+    finally:
+        await _drain(sm, am)
+        await tg.__aexit__(None, None, None)
+
+
 @pytest.mark.anyio
 async def test_ensure_empty_workspace_returns_blank(tmp_path: Path) -> None:
     tg = anyio.create_task_group()
