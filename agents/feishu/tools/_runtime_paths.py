@@ -80,3 +80,41 @@ def resolve_under(root: str | anyio.Path | Path, path: str) -> anyio.Path:
 def resolve_user_path(path: str, *, workspace_raw: str = "") -> anyio.Path:
     """Resolve a tool file path against the user workspace."""
     return resolve_under(workspace_dir(workspace_raw), path)
+
+
+def is_within(path: str, root: str) -> bool:
+    """True when *path* (absolute, any case) sits under *root* (absolute).
+
+    Pure string logic (``os.path.commonpath``) — safe to call from async tool
+    code, unlike ``pathlib.Path.resolve()``. Returns False when the two live on
+    different drives or either is empty.
+    """
+    if not path or not root:
+        return False
+    try:
+        common = os.path.commonpath([os.path.normcase(path), os.path.normcase(root)])
+    except ValueError:  # different drives
+        return False
+    return common == os.path.normcase(root)
+
+
+def refuse_agent_write(resolved_path: str) -> str | None:
+    """Return a refusal message when *resolved_path* lands in the agent package.
+
+    Deliverable-writing tools call this after ``resolve_user_path`` so a bare or
+    workspace-relative output name never resolves into the version-controlled
+    agent package (the tool process cwd) — which silently breaks ``[SEND:]``
+    delivery and pollutes the git tree. Refusal only applies when the runtime
+    really keeps the package apart from the workspace: with unbound ContextVars
+    both collapse onto the same root (standalone use), where refusing would
+    block legitimate writes. Returns None to allow the write.
+    """
+    ws_root = os.path.abspath(workspace_dir())
+    agent_root = os.path.abspath(agent_dir())
+    if agent_root != ws_root and is_within(os.path.abspath(resolved_path), agent_root):
+        return (
+            "[Error] Refusing to write into the agent package directory "
+            f"({agent_root}); outputs must go to the session workspace. "
+            "Pass a bare filename or a workspace-relative path instead."
+        )
+    return None

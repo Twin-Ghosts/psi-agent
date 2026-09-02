@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import _runtime_paths as _paths
 import anyio
 from docx import Document
 from docx.oxml.ns import qn
@@ -98,6 +99,10 @@ async def write_word(
 
     Args:
         file_path: Output path for the .docx file (e.g. "report.docx").
+            Relative paths (including bare filenames) resolve under the
+            **session workspace** — never under the agent package directory.
+            Absolute paths are used as-is, except writes into the agent
+            package itself, which are refused.
         blocks_json: Array of content blocks, in order. Each block
             is an object with a ``type``:
               - ``{"type": "heading", "level": 1, "text": "概述"}`` — level 0 is
@@ -114,7 +119,8 @@ async def write_word(
         latin_font: Latin font for ASCII text (default Calibri).
 
     Returns:
-        Success message with the block count, or an error message.
+        Success message with the block count and the **resolved** output path
+        (the path a ``[SEND:…]`` marker should point at), or an error message.
     """
     if not file_path.lower().endswith(".docx"):
         file_path = f"{file_path}.docx"
@@ -131,19 +137,27 @@ async def write_word(
     if not blocks and not title:
         return "[Error] provide a title or at least one block"
 
-    path = anyio.Path(file_path)
+    # Deliverables belong in the session workspace: bare/relative names resolve
+    # there (the framework binds get_workspace() per turn), never against the
+    # process cwd — which is the agent package dir. Writing into the package
+    # silently breaks [SEND:] delivery (markers point at the workspace) and
+    # pollutes the version-controlled tree, so it is refused outright.
+    path = _paths.resolve_user_path(file_path)
+    refusal = _paths.refuse_agent_write(str(path))
+    if refusal is not None:
+        return refusal
     parent = path.parent
     if not await parent.exists():
         await parent.mkdir(parents=True, exist_ok=True)
 
     try:
         count = await anyio.to_thread.run_sync(  # ty: ignore
-            _build_document, file_path, title, blocks, cjk_font, latin_font
+            _build_document, str(path), title, blocks, cjk_font, latin_font
         )
     except Exception as e:  # python-docx raises assorted errors on bad content
         return f"[Error] Failed to write Word file: {e!r}"
 
-    return f"[OK] Wrote {count} block(s) to {file_path}"
+    return f"[OK] Wrote {count} block(s) to {path}"
 
 
 async def write_word_from_markdown(
@@ -159,15 +173,16 @@ async def write_word_from_markdown(
     avoids oversized structured tool arguments and runtime package installs.
 
     Args:
-        markdown_path: Existing UTF-8 Markdown source file.
-        file_path: Output .docx path.
+        markdown_path: Existing UTF-8 Markdown source file. Relative paths
+            resolve under the session workspace.
+        file_path: Output .docx path (see ``write_word`` for resolution rules).
         cjk_font: East-Asian font for Chinese text.
         latin_font: Latin font for ASCII text.
 
     Returns:
         Success message with the block count, or an error message.
     """
-    source = anyio.Path(markdown_path)
+    source = _paths.resolve_user_path(markdown_path)
     if not await source.exists():
         return f"[Error] Markdown source does not exist: {markdown_path}"
     try:
