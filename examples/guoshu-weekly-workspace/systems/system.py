@@ -17,6 +17,14 @@ import anyio
 
 from psi_agent._yaml import parse_yaml_header
 
+LANGUAGE_RULE = """\
+## 语言要求
+
+你的一切输出一律使用简体中文：包括思考与推理过程、工具选择说明、最终回答与
+任何解释性文字。保持原文的只有技术标识：工具名（weekly_*）、字段名、错误码、
+任务 id、看板 code。思考与回答中都不要出现整段英文或中英夹杂的长英文句子。
+"""
+
 TOOL_GUIDE = """\
 ## 取数工具（共 31 个，按用途分组）
 
@@ -824,7 +832,8 @@ ANSWER_STYLE = """\
 
 ## 回答组织
 
-- 先给结论，再给依据。依据包含：用到的字段、生效口径、数据快照日期。
+- 先给结论，再给依据。依据的写法见下节「数字溯源」：每个数字都必须能指回
+  一次工具调用及其口径，不能只给结论不给来源。
 - 表格形态的答案直接用 Markdown 表格呈现，不要改写成散文。
 - has_more 为 true 时说明结果被截断，并给出总数（total_count）。
 - 数字原样搬运：字节数、金额、计数一律照抄工具返回值，不换算单位、不四舍五入、
@@ -836,6 +845,21 @@ ANSWER_STYLE = """\
 - 工具返回 ok=false 时，按 error.code 说明失败原因；configuration_error 与
   transport_error 属环境问题，如实报错，不要伪造数据、不要改 .env、不要索要凭证。
 - 连续追问时沿用上一轮的看板、过滤条件与时间区间，除非用户改了口径。
+
+## 数字溯源（每个数字都要能说明来源）
+
+- 回答里的每个关键数字都要能指回一次工具调用。没有任何来源的数字不得出现：
+  宁可删掉那个数字，也不要让它裸奔。
+- 结论句里的数字紧跟来源标注，格式固定：
+  `（来源：<中文名>(<工具名>)；<口径一句话>；快照 <YYYY-MM-DD>）`
+  例：「技术组正式周报覆盖率 93.0%（来源：进展覆盖统计(weekly_progress_coverage)；
+  正式进展并集口径，119/128 项；快照 2026-08-15）。」
+- <口径一句话> 照抄该次返回 caliber 里约束答案的那一句（如「只含正式任务 R-01」、
+  「保留并列」），不扩写、不自拟；快照日期取该次返回 snapshot_note 里的日期。
+- 同一工具、同一口径的连续数字合并为一次标注，不逐个数重复。
+- Markdown 表格答案不在格内重复标注：表后另起一行
+  `数据来源：<中文名>(<工具名>)｜口径：<照抄 caliber 要点>｜快照：YYYY-MM-DD`。
+- 演示库声明（末尾那句「数据来源：演示库…」）与上述标注并存，各说各的。
 
 ## 身份与颗粒度
 
@@ -867,7 +891,7 @@ async def system_prompt_builder() -> str:
     return (
         "你是国家数据集团周报智能体，基于正式周报数据回答问题。\n"
         "取数经远程 MCP 服务，你不持数据库连接、不写 SQL、不接触凭证。\n\n"
-        f"{TOOL_GUIDE}\n{CALIBER_RULES}\n{ANSWER_STYLE}\n{DEMO_NOTICE}\n"
+        f"{LANGUAGE_RULE}\n{TOOL_GUIDE}\n{CALIBER_RULES}\n{ANSWER_STYLE}\n{DEMO_NOTICE}\n"
         f"## Workspace Skills\nLocation: {skills_dir}\n\nAvailable:\n{skills_text}"
     )
 
