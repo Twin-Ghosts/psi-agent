@@ -842,10 +842,7 @@ class SessionAgent:
                                 for i, tc, func_name, _args, _argument_error in tool_args:
                                     result = results[i]
                                     yield AgentChunk(
-                                        reasoning=(
-                                            "[Tool Result: "
-                                            f"{compact_tool_result_for_event(str(result))}]"
-                                        ),
+                                        reasoning=(f"[Tool Result: {compact_tool_result_for_event(str(result))}]"),
                                         kind=REASONING_KIND_TOOL_RESULT,
                                     )
                                     raw_result = str(result)

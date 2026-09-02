@@ -132,7 +132,7 @@ def compact_tool_result_for_event(text: str, limit: int = _EVENT_LINE_LIMIT) -> 
         return text
     try:
         payload = json.loads(text)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return text[:limit]
     if not isinstance(payload, dict):
         return text[:limit]
