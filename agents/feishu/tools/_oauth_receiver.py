@@ -37,15 +37,34 @@ _LOOPBACK_PORT_ENV = "PSI_OAUTH_LOOPBACK_PORT"
 _DEFAULT_LOOPBACK_PORT = 17860
 _CALLBACK_PATH = "/oauth/callback"
 
+# 本进程**自己**正在等待回调的端口。plan_receiver 的「端口空不空」判定必须认得它:
+# 自己的 watcher 占着 17860 时回调照样能接到; 若误判成「被占 → manual」, 一次本可
+# 免复制的授权会被静默降级成手工贴码 —— env_check 也会对着一台活着的监听报 manual,
+# 把用户往「复制 code」上引 (线上实际发生过)。
+_SELF_LISTENING: set[int] = set()
+
 _DONE_HTML = (
-    "<!doctype html><meta charset=utf-8><title>{title}</title>"
-    "<body style='font:16px/1.7 system-ui;padding:3rem;text-align:center'>"
-    "<h2>{title}</h2><p style='color:#666'>{note}</p></body>"
+    "<!doctype html><html lang='zh-CN'><meta charset='utf-8'>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>{title}</title><style>"
+    "body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;"
+    "font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;"
+    "background:linear-gradient(160deg,#f4f7fd,#e8eefb);}}"
+    ".card{{background:#fff;border-radius:20px;box-shadow:0 14px 44px rgba(38,72,150,.14);"
+    "padding:44px 52px;max-width:400px;text-align:center;}}"
+    ".icon{{font-size:52px;line-height:1;margin-bottom:14px;}}"
+    "h1{{font-size:21px;margin:0 0 10px;color:#1c2b4a;}}"
+    "p{{margin:0;color:#5a6b8c;font-size:14.5px;line-height:1.75;}}"
+    "</style></head><body><div class='card'>"
+    "<div class='icon'>{icon}</div><h1>{title}</h1><p>{note}</p>"
+    "</div></body></html>"
 )
-_OK_TITLE = "授权成功 ✅"
-_OK_NOTE = "可以关掉这个页面, 回到对话继续 -- 不用复制任何东西."
+_OK_TITLE = "授权成功"
+_OK_ICON = "✅"
+_OK_NOTE = "可以关掉这个页面, 回到对话继续 -- 不用复制任何东西。"
 _FAIL_TITLE = "授权未完成"
-_FAIL_NOTE = "可以回到对话里重新发起授权."
+_FAIL_ICON = "⚠️"
+_FAIL_NOTE = "可以回到对话里重新发起授权。"
 
 
 def callback_base() -> str:
@@ -103,6 +122,25 @@ def _port_is_free(port: int) -> bool:
     return False
 
 
+def _port_usable(port: int) -> bool:
+    """回环通道可用 = 端口空闲, 或正被**本进程自己的 watcher** 守着。
+
+    自己的监听占着 17860 时回调照样能接到 —— 那正是「等授权中」的正常形态, 不算被占;
+    只有**别人**占着 (``_port_is_free`` 失败且不在 ``_SELF_LISTENING``) 才算不可用。
+    """
+    return _port_is_free(port) or port in _SELF_LISTENING
+
+
+def mark_self_listening(port: int) -> None:
+    """记录本进程正在 127.0.0.1:*port* 上等回调 (供 ``plan_receiver`` 识别)。"""
+    _SELF_LISTENING.add(port)
+
+
+def unmark_self_listening(port: int) -> None:
+    """撤销 :func:`mark_self_listening` 的记录。"""
+    _SELF_LISTENING.discard(port)
+
+
 @dataclass
 class ReceiverPlan:
     """本次授权用哪条自动接收通道, 以及配套的 ``redirect_uri``。"""
@@ -119,19 +157,19 @@ def plan_receiver(explicit_redirect: str = "") -> ReceiverPlan:
     """按环境选自动接收通道: gateway → loopback → manual。
 
     ``explicit_redirect`` (来自 ``PSI_FEISHU_REDIRECT_URI``) 一旦设置就尊重它 ——
-    那是用户在应用后台登记过的地址; 若它正好是本机回环且端口空闲, 仍可自动接收,
-    否则只能手工贴码。
+    那是用户在应用后台登记过的地址; 若它正好是本机回环且端口可用 (空闲, 或由本进程
+    自己的 watcher 守着), 仍可自动接收, 否则只能手工贴码。
     """
     if explicit_redirect:
         host = (urlsplit(explicit_redirect).hostname or "").lower()
         port = urlsplit(explicit_redirect).port
-        if host in ("127.0.0.1", "localhost") and port and _port_is_free(port):
+        if host in ("127.0.0.1", "localhost") and port and _port_usable(port):
             return ReceiverPlan(mode="loopback", redirect_uri=explicit_redirect)
         return ReceiverPlan(mode="manual", redirect_uri=explicit_redirect)
     gw = gateway_redirect_uri()
     if gw:
         return ReceiverPlan(mode="gateway", redirect_uri=gw)
-    if _port_is_free(loopback_port()):
+    if _port_usable(loopback_port()):
         return ReceiverPlan(mode="loopback", redirect_uri=loopback_redirect_uri())
     return ReceiverPlan(mode="manual", redirect_uri="http://localhost/")
 
@@ -165,17 +203,17 @@ async def _serve_one_callback(port: int, expected_state: str, result: dict[str, 
             query = _parse_request_target(raw.split(b"\r\n", 1)[0].decode("latin-1"))
             state = query.get("state", "")
             if not state or state != expected_state:
-                body = _DONE_HTML.format(title=_FAIL_TITLE, note="state 不匹配, 请重新发起授权.")
+                body = _DONE_HTML.format(title=_FAIL_TITLE, icon=_FAIL_ICON, note="state 不匹配, 请重新发起授权.")
                 status = "400 Bad Request"
             else:
                 code = query.get("code", "")
                 error = query.get("error", "") or query.get("error_description", "")
                 if code:
                     result["code"] = code
-                    body, status = _DONE_HTML.format(title=_OK_TITLE, note=_OK_NOTE), "200 OK"
+                    body, status = _DONE_HTML.format(title=_OK_TITLE, icon=_OK_ICON, note=_OK_NOTE), "200 OK"
                 else:
                     result["error"] = error or "callback carried neither code nor error"
-                    body = _DONE_HTML.format(title=_FAIL_TITLE, note=_FAIL_NOTE)
+                    body = _DONE_HTML.format(title=_FAIL_TITLE, icon=_FAIL_ICON, note=_FAIL_NOTE)
                     status = "400 Bad Request"
             payload = body.encode("utf-8")
             head = (
@@ -191,10 +229,14 @@ async def _serve_one_callback(port: int, expected_state: str, result: dict[str, 
                 done.set()
 
     listener = await anyio.create_tcp_listener(local_host="127.0.0.1", local_port=port)
-    async with listener, anyio.create_task_group() as tg:
-        tg.start_soon(listener.serve, _handle, tg)
-        await done.wait()
-        tg.cancel_scope.cancel()
+    mark_self_listening(port)
+    try:
+        async with listener, anyio.create_task_group() as tg:
+            tg.start_soon(listener.serve, _handle, tg)
+            await done.wait()
+            tg.cancel_scope.cancel()
+    finally:
+        unmark_self_listening(port)
 
 
 async def wait_loopback(port: int, expected_state: str, timeout_seconds: float) -> dict[str, str]:
