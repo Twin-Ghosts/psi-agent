@@ -25,7 +25,7 @@ import os
 import socket
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 import anyio
 import anyio.abc
@@ -59,10 +59,13 @@ _DONE_HTML = (
     ".btn{{display:inline-block;padding:9px 26px;border:1px solid #d3daea;border-radius:999px;"
     "background:#fff;color:#5a6b8c;font-size:14px;cursor:pointer;text-decoration:none;}}"
     ".btn:hover{{background:#f2f5fc;color:#1c2b4a;}}"
+    ".btn.primary{{background:#3370ff;border-color:#3370ff;color:#fff;}}"
+    ".btn.primary:hover{{background:#275fe0;color:#fff;}}"
     "#hint{{display:none;margin-top:14px;color:#9aa7bd;font-size:12.5px;}}"
     "</style></head><body><div class='card'>"
     "<div class='icon'>{icon}</div><h1>{title}</h1><p>{note}</p>"
     "<button class='btn' onclick='closePage()'>✕ 关闭页面</button>"
+    "{feishu_btn}"
     "<p id='hint'>浏览器未允许自动关闭, 请手动关闭本标签页后回到飞书。</p>"
     "</div>"
     "<script>function closePage(){{try{{window.close();}}catch(e){{}}"
@@ -193,6 +196,19 @@ def _parse_request_target(request_line: str) -> dict[str, str]:
     return {k: v[0] for k, v in qs.items() if v}
 
 
+def _chat_from_state(state: str) -> str:
+    """从 ``<random>.oc_xxx`` 形态的 state 里取回 chat_id (授权发起时拼入的尾巴)。"""
+    return state.split(".", 1)[1] if "." in state else ""
+
+
+def _feishu_chat_btn(chat_id: str) -> str:
+    """「回到飞书对话」按钮: applink 深链直接打开该会话, 让用户授权完就回到聊天。"""
+    if not chat_id:
+        return ""
+    href = f"https://applink.feishu.cn/client/chat/open?chatId={quote(chat_id, safe='')}"
+    return f"<p style='margin:12px 0 0'><a class='btn primary' href='{href}'>回到飞书对话</a></p>"
+
+
 async def _serve_one_callback(port: int, expected_state: str, result: dict[str, str]) -> None:
     """接一次回调就收工: 校验 ``state``, 记下 code/error, 回一张成功页。
 
@@ -212,18 +228,24 @@ async def _serve_one_callback(port: int, expected_state: str, result: dict[str, 
                     raw += chunk
             query = _parse_request_target(raw.split(b"\r\n", 1)[0].decode("latin-1"))
             state = query.get("state", "")
+            feishu_btn = _feishu_chat_btn(_chat_from_state(expected_state)) if state == expected_state else ""
             if not state or state != expected_state:
-                body = _DONE_HTML.format(title=_FAIL_TITLE, icon=_FAIL_ICON, note="state 不匹配, 请重新发起授权.")
+                body = _DONE_HTML.format(
+                    title=_FAIL_TITLE, icon=_FAIL_ICON, feishu_btn="", note="state 不匹配, 请重新发起授权."
+                )
                 status = "400 Bad Request"
             else:
                 code = query.get("code", "")
                 error = query.get("error", "") or query.get("error_description", "")
                 if code:
                     result["code"] = code
-                    body, status = _DONE_HTML.format(title=_OK_TITLE, icon=_OK_ICON, note=_OK_NOTE), "200 OK"
+                    body, status = (
+                        _DONE_HTML.format(title=_OK_TITLE, icon=_OK_ICON, feishu_btn=feishu_btn, note=_OK_NOTE),
+                        "200 OK",
+                    )
                 else:
                     result["error"] = error or "callback carried neither code nor error"
-                    body = _DONE_HTML.format(title=_FAIL_TITLE, icon=_FAIL_ICON, note=_FAIL_NOTE)
+                    body = _DONE_HTML.format(title=_FAIL_TITLE, icon=_FAIL_ICON, feishu_btn=feishu_btn, note=_FAIL_NOTE)
                     status = "400 Bad Request"
             payload = body.encode("utf-8")
             head = (
