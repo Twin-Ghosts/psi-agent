@@ -292,14 +292,14 @@ def fetch(
         columns = list(rows[0].keys())
     return {
         "ok": True,
-        "columns": columns,
-        "rows": rows,
-        "row_count": len(rows),
-        "has_more": has_more,
         "caliber": caliber or "无附加口径",
         "snapshot_note": SNAPSHOT_NOTE,
         "snapshot_date": AS_OF,
         "source_tables": source_tables(sql),
+        "columns": columns,
+        "rows": rows,
+        "row_count": len(rows),
+        "has_more": has_more,
     }
 
 
@@ -334,11 +334,11 @@ def scalar(sql: str, params: dict[str, Any] | None = None, *, caliber: str = "")
     value = None if not row else next(iter(row.values()))
     return {
         "ok": True,
-        "value": value,
         "caliber": caliber or "无附加口径",
         "snapshot_note": SNAPSHOT_NOTE,
         "snapshot_date": AS_OF,
         "source_tables": source_tables(sql),
+        "value": value,
     }
 
 
