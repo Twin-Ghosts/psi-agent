@@ -403,17 +403,25 @@ _OAUTH_DONE_HTML = (
     "<!doctype html><html lang='zh-CN'><meta charset='utf-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
     "<title>授权完成</title><style>"
-    "body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;"
+    "html,body{{height:100%;margin:0;}}"
+    "body{{display:flex;align-items:center;justify-content:center;"
     "font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;"
     "background:linear-gradient(160deg,#f4f7fd,#e8eefb);}}"
     ".card{{background:#fff;border-radius:20px;box-shadow:0 14px 44px rgba(38,72,150,.14);"
-    "padding:44px 52px;max-width:400px;text-align:center;}}"
+    "padding:44px 52px;max-width:400px;width:100%;box-sizing:border-box;text-align:center;}}"
     ".icon{{font-size:52px;line-height:1;margin-bottom:14px;}}"
     "h1{{font-size:21px;margin:0 0 10px;color:#1c2b4a;}}"
-    "p{{margin:0;color:#5a6b8c;font-size:14.5px;line-height:1.75;}}"
+    "p{{margin:0 0 24px;color:#5a6b8c;font-size:14.5px;line-height:1.75;}}"
+    ".btn{{display:inline-block;padding:10px 30px;border:0;border-radius:999px;"
+    "background:#3370ff;color:#fff;font-size:15px;cursor:pointer;text-decoration:none;}}"
+    ".btn:hover{{background:#275fe0;}}"
     "</style></head><body><div class='card'>"
     "<div class='icon'>{icon}</div><h1>{title}</h1><p>{note}</p>"
-    "</div></body></html>"
+    "<button class='btn' onclick='goBack()'>返回飞书</button>"
+    "</div>"
+    "<script>function goBack(){{try{{window.close();}}catch(e){{}}"
+    "setTimeout(function(){{location.replace('https://www.feishu.cn');}},350);}}</script>"
+    "</body></html>"
 )
 
 
@@ -444,7 +452,7 @@ async def _oauth_callback(request: web.Request) -> web.Response:
     await relay.deliver(state, code=code, error=error)
     if error:
         return _oauth_html("授权未完成", "可以回到对话里重新发起授权。", status=400)
-    return _oauth_html("授权成功", "可以关掉这个页面, 回到对话继续 -- 不用复制任何东西。")
+    return _oauth_html("授权成功", "授权已完成, 现在可以回到飞书继续对话了。")
 
 
 async def _oauth_take_code(request: web.Request) -> web.Response:
