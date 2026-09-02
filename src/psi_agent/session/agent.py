@@ -38,6 +38,7 @@ from psi_agent.session.event_protocol import EventProtocolError, parse_event_env
 from psi_agent.session.history_display import (
     KIND_COMPACTED,
     TURN_CONTEXT_KEY,
+    compact_tool_result_for_event,
     message_kind,
     messages_for_ai,
     truncate_tool_result,
@@ -841,7 +842,10 @@ class SessionAgent:
                                 for i, tc, func_name, _args, _argument_error in tool_args:
                                     result = results[i]
                                     yield AgentChunk(
-                                        reasoning=f"[Tool Result: {str(result)[:1000]}]",
+                                        reasoning=(
+                                            "[Tool Result: "
+                                            f"{compact_tool_result_for_event(str(result))}]"
+                                        ),
                                         kind=REASONING_KIND_TOOL_RESULT,
                                     )
                                     raw_result = str(result)
