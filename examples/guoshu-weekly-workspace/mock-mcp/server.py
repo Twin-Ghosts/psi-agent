@@ -2888,7 +2888,7 @@ def _text_check(
             "snapshot_note": store.SNAPSHOT_NOTE,
         }
     # number_conflict: 硬冲突 = 报批/征求数大于草案数；阶段和异常 = 草案+报批+征求 > 100。
-    hits = []
+    hits: list[dict[str, Any]] = []
     for r in rows:
         text = f"{r.get('progress_text') or ''} {r.get('next_work') or ''}"
         d = _DRAFT_RE.findall(text)
@@ -2918,7 +2918,7 @@ def _text_check(
                 "report_cnt": report if report is not None else "",
                 "consult_cnt": consult if consult is not None else "",
                 "conflict_type": ",".join(conflict_type),
-                "text_snippet": (r.get("latest_progress") or "")[:60],
+                "text_snippet": (r.get("progress_text") or "")[:60],
             }
         )
     hard = sum(1 for h in hits if h["conflict_type"].startswith("hard"))
