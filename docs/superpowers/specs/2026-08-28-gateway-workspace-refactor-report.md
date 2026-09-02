@@ -489,7 +489,7 @@ ERROR serve_session: Failed to start session server on
 ERROR Session '<sid>' crashed: PermissionError(13, '拒绝访问。', None, 5, None)
 ```
 
-冲突的是**完整管道名**，不是前缀 —— 同前缀不同 sid 的两条管道可以并存（实测两个进程各建一个 Session，零报错）。撞名的来源是 `_scheduler_manager.py:69`：调度 Session 的 id 由 workspace 路径 sha256 派生，两个进程只要 `--default-workspace` 指向同一目录就算出同一个 id，而 `_session_manager.py:131` 的去重只管进程内。
+冲突的是**完整管道名**，不是前缀 —— 同前缀不同 sid 的两条管道可以并存（实测两个进程各建一个 Session，零报错）。撞名的来源是 `_scheduler_manager.py` 的 `_session_id_from_key`：调度 Session 的 id 由 workspace 路径 sha256 派生，两个进程只要 `--default-workspace` 指向同一目录就算出同一个 id，而 `_session_manager.py` 的去重只管进程内。
 
 修法两条，实测都成立：给第二个进程换 `--socket-path psi-tob`，或让两个进程用不同的 `--default-workspace`。另外 `--listen` 必须带 scheme，`--listen 127.0.0.1:18081` 会掉进 `_sockets.py:94` 的 Unix socket 分支在 Windows 上直接抛错。
 

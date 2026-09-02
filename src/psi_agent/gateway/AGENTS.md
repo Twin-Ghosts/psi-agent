@@ -97,14 +97,14 @@ A5 把模块文件搬进两个子包后，这条曾**不成立**：两个 `regis
 6b. 创建 AuthManager（地址非空时；从 `{appdata}/auth.enc.json` 恢复登录态）— **旁挂**：不注入 Session、不写 ContextVar、不进 `_do_persist` 快照（凭证不落 `state/latest.json`）。随后把 `aim._resolve_key` 接上 `make_key_resolver(...)`，再 `nudge_warm()` 预热云端连接（注入 `tg`，详见 [AuthManager 连接复用](#authmanager-连接复用)）
    - **必须排在第 7 步之前**：交给 `Ai` 的 key 在 socket 构造时就定了，建晚了恢复出来的免费模型会带着哨兵起来，第一次对话必然 401（见 [免费模型的 key 替换](#免费模型的-key-替换)）
 7. 恢复 AI / Router / Session（Session 恢复时带 `agent`，缺省用 Gateway default）/ titles / summaries
-8. 创建 SchedulerManager（`--scheduler-ai-id`，空则回落 `--feishu-ai-id`）
+8. 创建 SchedulerManager（`--scheduler-ai-id`，空则回落 `--feishu-ai-id`）并 `start_soon(schedm.watch_loop)` — 常驻协程兜底「首个 TASK.md」的自动拉起（见下节 SchedulerManager 表「按需 spawn」）
 9. await create_core_app(aim, sm, tm, rm=..., default_agent=..., default_workspace=..., appdata=..., schedm=...)  — 骨架（`server.py`）：内核 manager + 两条线都要的路由（含 `GET /defaults`）
 9b. await register_desktop_routes(app, favicon_path=..., app_name=..., attention=..., authm=...)  — ToC（`desktop/_routes.py`）：SPA 静态 + `/ui/*` + `/workspace/*`（`authm` 非 None 才注册 `/auth/*`）。**仅当 `--gateway` 含 `desktop`**
 9c. register_feishu_routes(app, feishu_ai_id=..., feishu_workspace_root=...)  — ToB（`feishu/_routes.py`）：`FeishuManager` + `/feishu/*` + `/feishu-web/`。**仅当 `--gateway` 含 `feishu`**；只挂 ToB 时另注册 `GET /` → 302 `/feishu-web/index.html`
 9d. register_oauth_routes(app) — `/oauth/callback` + `/oauth/code`。**与挂了哪些 gateway 正交，每种组合都贴**：含 `feishu` 时由 9c 内部调用，只挂 ToC 时由 `Gateway.run` 自己调，恰好一处调到
    - **`--gateway` 必填，没有默认值**：挂哪些面是部署方的决定，内核不替它猜。少挂一面不报错，只是某个前端 404，排查方向完全跑偏——必填把这个静默失败提前成启动期的显式失败（不传即非 0 退出）。各调用方都得显式写：装机版 `--gateway desktop`（`.github/inno-setup/haitun.c`），云端 `launch-gateway.sh` `--gateway feishu`
    - `--gateway` 只决定挂哪些 HTTP 面；agent 包选哪个是**独立的一维**，走 `--default-agent`（见 [路径默认值](#路径默认值)），不另造一套。两维可自由组合，见 [gateway 与 agent 是两个独立维度](#gateway-与-agent-是两个独立维度)
-10. 为每个已恢复 Session 的 workspace `schedm.ensure(...)` — 按需拉起调度 Session（无 `schedules/` 则跳过）
+10. 为每个已恢复 Session 的 workspace `schedm.ensure(...)` — 按需拉起调度 Session（无 `schedules/` 则记入 `_pending`，由 watch_loop 每 30s 重查）
 11. 创建 _do_persist 闭包（快照 managers → state.save，sessions 含 `agent`；`list_all()` 默认已排除调度 Session）
 12. 注入 _persist + 初始全量持久化
 13. runner.setup() + create_site + site.start() + tray/webview/browser 等待与 finally 清理

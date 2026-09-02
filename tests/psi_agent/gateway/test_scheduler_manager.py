@@ -136,7 +136,7 @@ async def test_ensure_skips_empty_schedules_dir(tmp_path: Path) -> None:
 
 @pytest.mark.anyio
 async def test_ensure_picks_up_schedules_created_later(tmp_path: Path) -> None:
-    """用户建第一个定时任务后, 下一次 ensure 把调度 Session 拉起来。"""
+    """显式 ensure 路径: schedules 已出现时直接拉起 (watch_loop 之外, 如重启恢复 / 建会话路由)。"""
     tg = anyio.create_task_group()
     await tg.__aenter__()
     try:

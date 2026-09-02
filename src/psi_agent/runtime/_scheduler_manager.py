@@ -170,12 +170,15 @@ class SchedulerManager:
         关闭而终止)。
         """
         logger.info(f"SchedulerManager: watch_loop started (every {_WATCH_INTERVAL_SECONDS}s)")
-        while True:
-            await anyio.sleep(_WATCH_INTERVAL_SECONDS)
-            try:
-                await self._sweep_once()
-            except Exception as e:
-                logger.warning(f"SchedulerManager: watch_loop iteration failed: {e!r}")
+        try:
+            while True:
+                await anyio.sleep(_WATCH_INTERVAL_SECONDS)
+                try:
+                    await self._sweep_once()
+                except Exception as e:
+                    logger.warning(f"SchedulerManager: watch_loop iteration failed: {e!r}")
+        finally:
+            logger.info("SchedulerManager: watch_loop stopped")
 
     async def _sweep_once(self) -> None:
         """一轮 pending 重查: 有 schedules 的 workspace 立即拉起调度 Session。"""
