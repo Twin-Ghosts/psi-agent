@@ -122,11 +122,15 @@ def compact_tool_result_for_event(text: str, limit: int = _EVENT_LINE_LIMIT) -> 
 
     Best effort.  When *text* parses as a JSON object, rebuild it as a compact
     object that keeps every scalar/metadata field (``caliber``,
-    ``snapshot_note``, ``total_count``, ``error`` …), caps arrays such as
-    ``rows`` to two sample rows, and reports the original row count as
-    ``_rows_truncated``.  If the compact object still exceeds *limit*, the
-    longest string fields are trimmed in ``_EVENT_TRIM_ORDER``.  Non-JSON or
-    unparsable text falls back to plain head truncation (previous behaviour).
+    ``snapshot_note``, ``snapshot_date``, ``source_tables``, ``total_count``,
+    ``error`` …), drops ``rows`` to an empty array, and reports the original
+    row count as ``_rows_truncated`` — the provenance view shows counts and
+    calibers, never the row bodies, and a couple of sample rows from a
+    wide-row payload (12+ fields each) can alone blow the line budget.
+    ``columns`` is capped to two entries; if the compact object still exceeds
+    *limit*, the longest string fields are trimmed in ``_EVENT_TRIM_ORDER``.
+    Non-JSON or unparsable text falls back to plain head truncation (previous
+    behaviour).
     """
     if len(text) <= limit:
         return text
@@ -142,7 +146,7 @@ def compact_tool_result_for_event(text: str, limit: int = _EVENT_LINE_LIMIT) -> 
         if isinstance(value, list):
             if key == "rows" and value:
                 compact["_rows_truncated"] = len(value)
-                compact[key] = value[:2]
+                compact[key] = []
             elif value:
                 compact[key] = value[:2]
             else:
