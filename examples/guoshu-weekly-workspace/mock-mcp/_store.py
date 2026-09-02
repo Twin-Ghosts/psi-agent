@@ -85,6 +85,26 @@ if not _DATE_RE.match(AS_OF):
     raise ValueError(f"GUOSHU_AS_OF 必须是 YYYY-MM-DD，收到 {AS_OF!r}")
 
 
+_TABLE_NAME_RE = re.compile(r"\b(?:FROM|JOIN)\s+([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
+
+
+def source_tables(sql: str) -> list[str]:
+    """Extract the tables a query reads, in first-appearance order.
+
+    Used for provenance: the evidence panel shows 来源表 next to the row
+    count, so a reader can see at a glance which tables produced the answer.
+    Sub-query bodies and aliases are naturally handled — the regex only picks
+    identifiers directly after FROM/JOIN, so ``FROM (SELECT …)`` contributes
+    nothing and the inner tables still surface from their own FROM/JOIN.
+    """
+    seen: list[str] = []
+    for match in _TABLE_NAME_RE.finditer(sql):
+        name = match.group(1)
+        if name not in seen:
+            seen.append(name)
+    return seen
+
+
 def as_of_caliber() -> str:
     return f"相对时间窗以数据快照日 {AS_OF} 为基准（非当前系统时间）"
 
@@ -278,6 +298,8 @@ def fetch(
         "has_more": has_more,
         "caliber": caliber or "无附加口径",
         "snapshot_note": SNAPSHOT_NOTE,
+        "snapshot_date": AS_OF,
+        "source_tables": source_tables(sql),
     }
 
 
@@ -315,6 +337,8 @@ def scalar(sql: str, params: dict[str, Any] | None = None, *, caliber: str = "")
         "value": value,
         "caliber": caliber or "无附加口径",
         "snapshot_note": SNAPSHOT_NOTE,
+        "snapshot_date": AS_OF,
+        "source_tables": source_tables(sql),
     }
 
 

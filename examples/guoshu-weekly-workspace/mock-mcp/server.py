@@ -223,6 +223,7 @@ def weekly_schema(board: str = "") -> str:
                 "table_columns_note": "已剔除禁止外泄字段，故此清单即可对外引用的全部字段",
             },
             "snapshot_note": store.SNAPSHOT_NOTE,
+            "snapshot_date": store.AS_OF,
         }
 
     return _guard("weekly_schema", work)
@@ -438,6 +439,7 @@ def weekly_task_detail(task: str, ctx: Context | None = None) -> str:
                 "review_comment 按权限展示（R-04/R-14）" + owners + extra
             ),
             "snapshot_note": "演示数据（weekly_mock 自建库），非集团真实周报",
+            "snapshot_date": store.AS_OF,
         }
 
     return _guard("weekly_task_detail", work)
@@ -2859,6 +2861,7 @@ def _text_check(
                 "只能作待核实清单"
             ),
             "snapshot_note": store.SNAPSHOT_NOTE,
+            "snapshot_date": store.AS_OF,
         }
     if rule == "keyword":
         pattern = _COORD_RE
@@ -2886,6 +2889,7 @@ def _text_check(
                 "无结构化协同方/责任边界/承诺日期，只能作待核实线索"
             ),
             "snapshot_note": store.SNAPSHOT_NOTE,
+            "snapshot_date": store.AS_OF,
         }
     # number_conflict: 硬冲突 = 报批/征求数大于草案数；阶段和异常 = 草案+报批+征求 > 100。
     hits: list[dict[str, Any]] = []
@@ -2945,6 +2949,7 @@ def _text_check(
             f"硬冲突 {hard} 项（报批或征求意见数大于草案总数），阶段数量之和超 100 的 {sum_anom} 项"
         ),
         "snapshot_note": store.SNAPSHOT_NOTE,
+        "snapshot_date": store.AS_OF,
     }
 
 
