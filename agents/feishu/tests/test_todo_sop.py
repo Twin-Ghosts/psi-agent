@@ -67,9 +67,7 @@ def test_closure_elements_have_five() -> None:
 def test_ledger_schema_fields_are_typed() -> None:
     fields = _config()["ledger_schema"]["fields"]
     assert fields, "ledger fields must not be empty"
-    assert all(
-        isinstance(field, dict) and field.get("field_name") and "type" in field for field in fields
-    )
+    assert all(isinstance(field, dict) and field.get("field_name") and "type" in field for field in fields)
 
 
 def test_completion_verdicts_have_four() -> None:
