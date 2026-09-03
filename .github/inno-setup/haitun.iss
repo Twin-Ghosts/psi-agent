@@ -6,7 +6,7 @@
 ;   - (default)        -> HaiTun_Agent_Setup.exe (full install)
 
 #define MyAppName "HaiTun Agent"
-#define MyAppVersion "1.0.12"
+#define MyAppVersion "1.0.13"
 #define MyMsysVersion "env-1"
 #define MyAppPublisher "Hefei Zhenzhi Artificial Intelligence Application Software Co., Ltd"
 #define MyAppExeName "haitun.exe"
@@ -38,6 +38,7 @@ ShowLanguageDialog=yes
 
 [Languages]
 Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
+Name: "chinesetraditional"; MessagesFile: "ChineseTraditional.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [CustomMessages]
@@ -49,10 +50,16 @@ chinesesimplified.LegalPrivacy=《Haitun Agent 隐私保护政策》
 chinesesimplified.LegalAgree=我已阅读并同意上述协议
 english.LegalPageCaption=License Agreement and Privacy Policy
 english.LegalPageDesc=Please read and accept the agreements before installing
-english.LegalIntro=Click the links below to read the full text. Checking the box means you have read and accepted both agreements. (Chinese only.)
+english.LegalIntro=Click the links below to read the full text. Checking the box means you have read and accepted both agreements.
 english.LegalTerms=Haitun Agent Software License and Service Agreement
 english.LegalPrivacy=Haitun Agent Privacy Policy
 english.LegalAgree=I have read and agree to the agreements above
+chinesetraditional.LegalPageCaption=授權協議與隱私保護政策
+chinesetraditional.LegalPageDesc=安裝前請閱讀並同意以下協議
+chinesetraditional.LegalIntro=請點擊下方連結閱讀協議全文。勾選即表示您已閱讀並同意兩份協議的全部內容。
+chinesetraditional.LegalTerms=《Haitun Agent 軟體授權及服務協議》
+chinesetraditional.LegalPrivacy=《Haitun Agent 隱私保護政策》
+chinesetraditional.LegalAgree=我已閱讀並同意上述協議
 
 #ifndef COMPONENT_MSYS
 [Tasks]
@@ -80,11 +87,13 @@ Source: "..\..\agents\feishu\msys64\*"; DestDir: "{app}\msys64"; Flags: ignoreve
 Source: "rollback.cmd"; DestDir: "{app}"
 Source: "rollback.ps1"; DestDir: "{app}"
 Source: "rollback-state.json"; DestDir: "{app}"; Flags: onlyifdoesntexist
-; 协议页要读的三个文件。dontcopy = 只打进安装包供向导页临时解出, 不装到 {app}
+; 协议页要读的文件。dontcopy = 只打进安装包供向导页临时解出, 不装到 {app}
 ; —— 产品内那份走 spa-v2/dist（vite 会把 public/* 拷进去）, 装两份必有一份过时。
-; 这三个是 scripts/gen_legal_html.py 的产物, 改 docs/ 下的 md 后需重新生成。
+; 这些是 scripts/gen_legal_html.py 的产物, 改 legal/ 下的 md 后需重新生成。
 Source: "..\..\src\psi_agent\gateway\desktop\spa-v2\public\terms.html"; Flags: dontcopy
+Source: "..\..\src\psi_agent\gateway\desktop\spa-v2\public\terms-en.html"; Flags: dontcopy
 Source: "..\..\src\psi_agent\gateway\desktop\spa-v2\public\privacy.html"; Flags: dontcopy
+Source: "..\..\src\psi_agent\gateway\desktop\spa-v2\public\privacy-en.html"; Flags: dontcopy
 Source: "..\..\src\psi_agent\gateway\desktop\spa-v2\public\legal.css"; Flags: dontcopy
 
 #ifndef COMPONENT_MSYS
@@ -116,23 +125,30 @@ begin
   if not LegalFilesExtracted then
   begin
     ExtractTemporaryFile('legal.css');
-    ExtractTemporaryFile('terms.html');
-    ExtractTemporaryFile('privacy.html');
     LegalFilesExtracted := True;
   end;
+  ExtractTemporaryFile(FileName);
   if not ShellExec('open', ExpandConstant('{tmp}\') + FileName,
                    '', '', SW_SHOWNORMAL, ewNoWait, ResultCode) then
     MsgBox('无法打开协议文件，请检查系统默认浏览器设置。', mbError, MB_OK);
 end;
 
+function LegalDocName(const ChineseName, EnglishName: String): String;
+begin
+  if ActiveLanguage = 'english' then
+    Result := EnglishName
+  else
+    Result := ChineseName;
+end;
+
 procedure LegalTermsClick(Sender: TObject);
 begin
-  OpenLegalDoc('terms.html');
+  OpenLegalDoc(LegalDocName('terms.html', 'terms-en.html'));
 end;
 
 procedure LegalPrivacyClick(Sender: TObject);
 begin
-  OpenLegalDoc('privacy.html');
+  OpenLegalDoc(LegalDocName('privacy.html', 'privacy-en.html'));
 end;
 
 procedure UpdateNextButtonState;
@@ -333,6 +349,34 @@ begin
 #endif
 end;
 
+function InstalledLanguageCode: String;
+begin
+  if ActiveLanguage = 'english' then
+    Result := 'en-US'
+  else if ActiveLanguage = 'chinesetraditional' then
+    Result := 'zh-TW'
+  else
+    Result := 'zh-CN';
+end;
+
+procedure WriteInstalledLanguage;
+var
+  Path, Tmp, Content: String;
+begin
+  if not InstallsApp then
+    Exit;
+  ForceDirectories(ComponentDir('app'));
+  Path := ComponentDir('app') + '\haitun-language.txt';
+  Content := InstalledLanguageCode;
+  Tmp := Path + '.tmp';
+  if SaveStringToFile(Tmp, Content + #13#10, False) then
+  begin
+    if FileExists(Path) then
+      DeleteFile(Path);
+    RenameFile(Tmp, Path);
+  end;
+end;
+
 function UpdateKindName: String;
 begin
 #ifdef COMPONENT_APP
@@ -429,6 +473,7 @@ var
 begin
   if CurStep = ssPostInstall then
   begin
+    WriteInstalledLanguage;
     if DirExists(ComponentDir('app') + '.backup') or
        DirExists(ComponentDir('msys64') + '.backup') then
     begin

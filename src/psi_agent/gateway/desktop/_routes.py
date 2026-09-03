@@ -14,6 +14,7 @@ A7: 这个函数原先住在 ``gateway/server.py``, 于是骨架层为了给它�
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 import anyio
@@ -27,6 +28,7 @@ from psi_agent.gateway.desktop._spa_shell import DEFAULT_APP_NAME, inject_app_na
 from psi_agent.gateway.desktop._ui_prefs import UIPrefs
 from psi_agent.gateway.desktop._workspace_manager import WorkspaceManager
 from psi_agent.gateway.server import _error, _json, _read_json
+from psi_agent.i18n import DEFAULT_LANGUAGE, normalize_language
 from psi_agent.runtime._ai_manager import AIManager
 
 
@@ -70,7 +72,14 @@ async def _handle_spa_v2_index(request: web.Request) -> web.Response:
     if template is None:
         return _error("SPA v2 index.html not found", status=404)
     body = inject_app_name(template, app_name)
-    return web.Response(text=body, content_type="text/html", charset="utf-8")
+    # index 引用带 hash 的 JS; 若浏览器缓存旧 index, 会一直打到旧 bundle (改完 build
+    # 却看不到 UI). 刻意 no-store, 资产文件仍可由 static 长期缓存.
+    return web.Response(
+        text=body,
+        content_type="text/html",
+        charset="utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def _handle_favicon(request: web.Request) -> web.FileResponse:
@@ -111,6 +120,33 @@ async def _set_survey_pref(request: web.Request) -> web.Response:
     done = body.get("done") if isinstance(body, dict) else None
     await prefs.set_survey_done(done if isinstance(done, bool) else True)
     return _json({"done": await prefs.survey_done()})
+
+
+async def _get_language_pref(request: web.Request) -> web.Response:
+    """GET /ui/prefs/language — effective app language for the SPA.
+
+    User choice (``ui-prefs.json``) wins over the boot-time default so the
+    language switch survives Gateway restarts on a new random port.
+    """
+    prefs: UIPrefs = request.app["uiprefs"]
+    saved = await prefs.language()
+    default = str(request.app.get("language") or DEFAULT_LANGUAGE)
+    return _json({"language": normalize_language(saved or default)})
+
+
+async def _set_language_pref(request: web.Request) -> web.Response:
+    """POST /ui/prefs/language — persist the in-app language switch."""
+    prefs: UIPrefs = request.app["uiprefs"]
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        body = {}
+    raw = body.get("language") if isinstance(body, dict) else ""
+    language = normalize_language(str(raw))
+    await prefs.set_language(language)
+    # New sessions built after the switch should already speak the new language.
+    os.environ["HAITUN_LANG"] = language
+    return _json({"language": language})
 
 
 async def _get_cwd(request: web.Request) -> web.Response:
@@ -357,6 +393,8 @@ async def register_desktop_routes(
     app.router.add_post("/ui/attention", _request_attention)
     app.router.add_get("/ui/prefs/survey", _get_survey_pref)
     app.router.add_post("/ui/prefs/survey", _set_survey_pref)
+    app.router.add_get("/ui/prefs/language", _get_language_pref)
+    app.router.add_post("/ui/prefs/language", _set_language_pref)
     app.router.add_get("/workspace/cwd", _get_cwd)
     app.router.add_get("/workspace/places", _list_workspace_places)
     app.router.add_get("/workspace/browse", _browse_workspace)

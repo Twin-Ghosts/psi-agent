@@ -2,20 +2,18 @@ import { useEffect, useRef, useState } from 'react'
 import { Bot, ClipboardList, ExternalLink, LogIn, Settings2, UserCog, UserRound } from 'lucide-react'
 import type { AiInfo } from '../../services/api'
 import { listAis } from '../../services/api'
+import { useI18n } from '../../i18n'
+import { surveyUrlFor } from '../../haitun-agent/surveyLinks'
 import { readStoredAvatar, readStoredName } from '../../services/userProfile'
 import { dedupeAisForDisplay, readStoredAiId } from '../../services/bootstrapAi'
 import { useAuthAccount } from '../../services/useAuthAccount'
 import HubAdvancedPanel from './HubAdvancedPanel'
 import HubAdvancedSettingsPanel from './HubAdvancedSettingsPanel'
 import HubLoginPanel from './HubLoginPanel'
-import HubModelsPanel, { FREE_MODEL_NOTICE_BODY, FREE_MODEL_NOTICE_TITLE } from './HubModelsPanel'
+import HubModelsPanel from './HubModelsPanel'
 import HubProfilePanel from './HubProfilePanel'
 import HubSettingsPanel from './HubSettingsPanel'
 import './user-hub.css'
-
-/** 产品问卷反馈表单（飞书共享问卷，新窗口打开）。 */
-const FEEDBACK_SURVEY_URL =
-  'https://genuineknowledge.feishu.cn/share/base/form/shrcn7pp47SeGec2M4Srnbt75Rg?from=navigation'
 
 export type HubPanel = 'profile' | 'models' | 'login' | 'settings' | 'settingsAdvanced' | 'advanced' | null
 
@@ -70,6 +68,7 @@ export default function UserHub({
   loginRequired = false,
   onLoginStateChanged,
 }: Props) {
+  const { t, language } = useI18n()
   // 头像改成弹菜单(资料 / 登录)后需要这两个: rootRef 判点击是否落在菜单外。
   const rootRef = useRef<HTMLDivElement | null>(null)
   const [menuOpen, setMenuOpen] = useState(false)
@@ -158,7 +157,7 @@ export default function UserHub({
   const cloudName = auth.user?.displayName?.trim() ?? ''
   const shownName = (loggedIn && cloudName) || userName.trim()
   const initial = shownName.charAt(0).toUpperCase()
-  const displayName = shownName || '用户'
+  const displayName = shownName || t('app.defaultUser')
 
   const openPanel = (next: HubPanel) => {
     setPanel(next)
@@ -169,12 +168,12 @@ export default function UserHub({
     <div className="user-hub" ref={rootRef}>
       <a
         className="user-hub-feedback"
-        href={FEEDBACK_SURVEY_URL}
+        href={surveyUrlFor(language)}
         target="_blank"
         rel="noopener noreferrer"
       >
         <ClipboardList size={15} aria-hidden="true" />
-        <span>反馈问卷</span>
+        <span>{t('app.feedback')}</span>
         <ExternalLink size={13} aria-hidden="true" />
       </a>
       <div className="user-hub-row">
@@ -183,7 +182,7 @@ export default function UserHub({
           className="user-hub-trigger"
           aria-haspopup="menu"
           aria-expanded={menuOpen}
-          title={`${displayName} — 账户`}
+          title={`${displayName} — ${t('app.account')}`}
           onClick={() => setMenuOpen((v) => !v)}
         >
           <span className="account-avatar user-hub-avatar">
@@ -191,16 +190,16 @@ export default function UserHub({
           </span>
           <span className="user-hub-meta">
             <strong>{displayName}</strong>
-            <span><i /> Agent 在线</span>
+            <span><i /> {t('app.agentOnline')}</span>
           </span>
         </button>
 
-        <div className="user-hub-shortcuts" role="toolbar" aria-label="模型与设置">
+        <div className="user-hub-shortcuts" role="toolbar" aria-label={t('app.ariaModelsAndSettings')}>
           <button
             type="button"
             className={`user-hub-shortcut${panel === 'models' || panel === 'advanced' ? ' active' : ''}`}
-            title="模型池"
-            aria-label={`模型池${aiCount > 0 ? `，${aiCount} 个` : ''}`}
+            title={t('app.models')}
+            aria-label={`${t('app.models')}${aiCount > 0 ? ` · ${aiCount}` : ''}`}
             onClick={() => openPanel('models')}
           >
             <Bot size={16} />
@@ -208,8 +207,8 @@ export default function UserHub({
           <button
             type="button"
             className={`user-hub-shortcut${panel === 'settings' || panel === 'settingsAdvanced' ? ' active' : ''}`}
-            title="设置"
-            aria-label="设置"
+            title={t('app.settings')}
+            aria-label={t('app.settings')}
             onClick={() => openPanel('settings')}
           >
             <Settings2 size={16} />
@@ -220,13 +219,13 @@ export default function UserHub({
       {menuOpen && (
         <div className="user-hub-menu" role="menu">
           <button type="button" role="menuitem" onClick={() => openPanel('profile')}>
-            <UserRound size={15} /> 我的资料
+            <UserRound size={15} /> {t('app.profile')}
           </button>
           {/* 已登录后这一项要变成「账户」: 仍写「登录账号」会让用户以为没登上,
               点进去却是账户面板 —— 入口与落点对不上。 */}
           <button type="button" role="menuitem" onClick={() => openPanel('login')}>
             {loggedIn ? <UserCog size={15} /> : <LogIn size={15} />}
-            {loggedIn ? ' 账户与设备' : ' 登录账号'}
+            {loggedIn ? ` ${t('app.accountDevices')}` : ` ${t('app.login')}`}
           </button>
         </div>
       )}
@@ -293,12 +292,12 @@ export default function UserHub({
       />
 
       {freeModelNoticeOpen && (
-        <div className="hub-dialog-layer" role="dialog" aria-modal="true" aria-label="免费模型提示">
+        <div className="hub-dialog-layer" role="dialog" aria-modal="true" aria-label={t('app.ariaFreeModelNotice')}>
           <div className="hub-dialog-backdrop hub-free-notice-backdrop" aria-hidden="true" />
           <div className="hub-dialog hub-free-notice-dialog">
             <div className="hub-dialog-body">
-              <p className="hub-free-notice-title">{FREE_MODEL_NOTICE_TITLE}</p>
-              <p className="hub-free-notice-text">{FREE_MODEL_NOTICE_BODY}</p>
+              <p className="hub-free-notice-title">{t('models.freeTitle')}</p>
+              <p className="hub-free-notice-text">{t('models.freeBody')}</p>
             </div>
             <footer className="hub-dialog-actions">
               <button
@@ -306,7 +305,7 @@ export default function UserHub({
                 className="hub-btn primary"
                 onClick={() => setFreeModelNoticeOpen(false)}
               >
-                知道了
+                {t('app.freeModelGotIt')}
               </button>
             </footer>
           </div>

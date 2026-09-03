@@ -1,0 +1,10 @@
+{
+  "language.name": "English",
+  "repl.connected": "Connected to session. Enter for newline, Alt+Enter to send (Ctrl+D to exit).",
+  "repl.panel_title": "psi-agent REPL — Enter newline, Alt+Enter send",
+  "repl.exit_hint": "Ctrl+D to exit",
+  "repl.goodbye": "Goodbye!",
+  "cli.error": "Error: ",
+  "cli.connection_error": "Connection error: ",
+  "cli.unexpected_error": "Unexpected error: "
+}

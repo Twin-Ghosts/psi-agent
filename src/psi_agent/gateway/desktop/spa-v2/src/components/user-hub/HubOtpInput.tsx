@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 
 import { fillOtp } from '../../services/authFlow'
+import { useI18n } from '../../i18n'
 
 type Props = {
   value: string
@@ -31,6 +32,7 @@ export default function HubOtpInput({
   disabled = false,
   autoFocus = false,
 }: Props) {
+  const { t } = useI18n()
   const refs = useRef<(HTMLInputElement | null)[]>([])
   // 已触发过自动提交的码：避免同一个码因重渲染重复提交
   const submitted = useRef('')
@@ -101,7 +103,7 @@ export default function HubOtpInput({
   }
 
   return (
-    <div className={`hub-otp${invalid ? ' bad' : ''}`} role="group" aria-label="6 位验证码">
+    <div className={`hub-otp${invalid ? ' bad' : ''}`} role="group" aria-label={t('auth.otpGroupAria')}>
       {SLOTS.map((i) => (
         <input
           key={i}
@@ -115,7 +117,7 @@ export default function HubOtpInput({
           disabled={disabled}
           inputMode="numeric"
           autoComplete="one-time-code"
-          aria-label={`验证码第 ${i + 1} 位`}
+          aria-label={t('auth.otpSlotAria', { n: i + 1 })}
           aria-invalid={invalid || undefined}
           maxLength={6}
         />

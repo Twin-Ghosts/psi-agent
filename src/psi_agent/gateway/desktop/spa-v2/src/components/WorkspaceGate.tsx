@@ -3,6 +3,7 @@ import { FormEvent, useEffect, useState } from 'react'
 import { BrandLogo } from '../haitun-agent/primitives'
 import { fetchCwd, fetchDefaults } from '../services/api'
 import PathPickerDialog from './PathPickerDialog'
+import { useI18n } from '../i18n'
 
 export type PathPickKind = 'workspace' | 'agent'
 
@@ -23,6 +24,7 @@ export default function WorkspaceGate({
   onReady,
   onCancel,
 }: Props) {
+  const { t } = useI18n();
   const isAgent = kind === 'agent'
   const [path, setPath] = useState(initialPath)
   const [loading, setLoading] = useState(!initialPath)
@@ -63,7 +65,7 @@ export default function WorkspaceGate({
     event.preventDefault()
     const clean = path.trim()
     if (!clean) {
-      setError(isAgent ? '请选择或输入 Agent 包路径' : '请选择或输入海豚工作室路径')
+      setError(isAgent ? t('gate.errorAgent') : t('gate.errorWorkspace'))
       return
     }
     onReady(clean)
@@ -76,32 +78,31 @@ export default function WorkspaceGate({
       <div className="workspace-gate-card">
         <BrandLogo size="hero" />
         <span className="eyebrow">HaiTun Agent</span>
-        <h1>{isAgent ? '选择 Agent 包' : '打开海豚工作室'}</h1>
+        <h1>{isAgent ? t('gate.agentTitle') : t('gate.workspaceTitle')}</h1>
         <p>
           {isAgent ? (
             <>
-              Agent 包是能力根目录（<code>tools/</code>、<code>schedules/</code>、<code>systems/</code>）。
-              可与用户海豚工作室不同；切换后<strong>新建任务/聊天</strong>会挂上此包，已有任务仍用创建时绑定的包。
+              {t('gate.agentDescPrefix')}<code>tools/</code>、<code>schedules/</code>、<code>systems/</code>{t('gate.agentDescSuffix')}<strong>{t('app.newTask')}</strong>{t('gate.agentDescTail')}
             </>
           ) : (
             <>
-              先选一个本地文件夹作为海豚工作室吧，之后的任务都会围绕这个文件夹进行。
+              {t('gate.workspaceDesc')}
             </>
           )}
         </p>
         {loading ? (
-          <div className="workspace-gate-loading"><Loader2 className="spin" size={22} /> 正在连接 Gateway…</div>
+          <div className="workspace-gate-loading"><Loader2 className="spin" size={22} /> {t('app.connecting')}</div>
         ) : (
           <form onSubmit={submit}>
             <label>
-              <span>{isAgent ? 'Agent 包路径' : '海豚工作室路径'}</span>
+              <span>{isAgent ? t('gate.agentPathLabel') : t('gate.workspacePathLabel')}</span>
               <div className="workspace-gate-path-row">
                 <button
                   type="button"
                   className="workspace-gate-browse"
                   onClick={() => setPickerOpen(true)}
-                  aria-label="浏览文件夹"
-                  title="浏览文件夹"
+                  aria-label={t('gate.browseAria')}
+                  title={t('gate.browseAria')}
                 >
                   <FolderOpen size={18} />
                 </button>
@@ -110,8 +111,8 @@ export default function WorkspaceGate({
                   onChange={(e) => setPath(e.target.value)}
                   placeholder={
                     isAgent
-                      ? '例如 D:\\Haitun\\workspace\\tob'
-                      : '例如 D:\\Projects\\my-folder'
+                      ? t('gate.agentPlaceholder')
+                      : t('gate.workspacePlaceholder')
                   }
                   autoFocus
                 />
@@ -121,11 +122,11 @@ export default function WorkspaceGate({
             <div className="workspace-gate-actions">
               {onCancel && (
                 <button type="button" className="secondary-button" onClick={onCancel}>
-                  取消
+                  {t('gate.cancel')}
                 </button>
               )}
               <button type="submit" className="primary-button" disabled={!path.trim()}>
-                <ConfirmIcon size={16} /> {isAgent ? '使用此 Agent 包' : '进入任务工作台'}
+                <ConfirmIcon size={16} /> {isAgent ? t('gate.useAgent') : t('gate.enterWorkspace')}
               </button>
             </div>
           </form>
@@ -135,12 +136,12 @@ export default function WorkspaceGate({
       <PathPickerDialog
         open={pickerOpen}
         initialPath={path}
-        title={isAgent ? '选择 Agent 包' : '打开海豚工作室'}
-        confirmLabel={isAgent ? '选择' : '打开'}
+        title={isAgent ? t('gate.agentTitle') : t('gate.workspaceTitle')}
+        confirmLabel={isAgent ? t('gate.pickAgent') : t('gate.pickWorkspace')}
         hint={
           isAgent
-            ? '选择含 tools / schedules / systems 的 Agent 能力包目录。'
-            : '选择本地文件夹作为用户海豚工作室。'
+            ? t('gate.agentHint')
+            : t('gate.workspaceHint')
         }
         onCancel={() => setPickerOpen(false)}
         onConfirm={(picked) => {

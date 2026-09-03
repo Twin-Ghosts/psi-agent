@@ -7,6 +7,7 @@ import {
   type WorkspaceDrive,
   type WorkspacePlace,
 } from '../services/api'
+import { useI18n } from '../i18n'
 import './path-picker.css'
 
 function normalizePath(path: string): string {
@@ -45,6 +46,7 @@ export default function PathPickerDialog({
   onConfirm,
   onCancel,
 }: Props) {
+  const { t } = useI18n();
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [places, setPlaces] = useState<WorkspacePlace[]>([])
@@ -59,6 +61,8 @@ export default function PathPickerDialog({
 
   const visible = useMemo(() => filterEntries(entries, filterText), [entries, filterText])
   const canGoUp = Boolean(parent && normalizePath(parent) !== normalizePath(currentPath))
+  const titleText = title || t('picker.chooseFolder')
+  const confirmText = confirmLabel || t('picker.chooseFolder')
 
   const loadBrowse = async (path: string) => {
     setLoading(true)
@@ -128,12 +132,12 @@ export default function PathPickerDialog({
         className="path-picker-dialog"
         role="dialog"
         aria-modal="true"
-        aria-label={title}
+        aria-label={titleText}
         onClick={(e) => e.stopPropagation()}
       >
         <header className="path-picker-header">
-          <h3>{title}</h3>
-          <button type="button" className="path-picker-icon-btn" aria-label="关闭" onClick={onCancel}>
+          <h3>{titleText}</h3>
+          <button type="button" className="path-picker-icon-btn" aria-label={t('picker.close')} onClick={onCancel}>
             <X size={18} />
           </button>
         </header>
@@ -143,7 +147,7 @@ export default function PathPickerDialog({
           <aside className="path-picker-nav">
             {drives.length > 0 && (
               <div className="path-picker-nav-section">
-                <div className="path-picker-nav-label">此电脑</div>
+                <div className="path-picker-nav-label">{t('picker.thisPc')}</div>
                 {drives.map((d) => (
                   <button key={d.path} type="button" className="path-picker-nav-item" onClick={() => void loadBrowse(d.path)}>
                     <HardDrive size={16} />
@@ -153,7 +157,7 @@ export default function PathPickerDialog({
               </div>
             )}
             <div className="path-picker-nav-section">
-              <div className="path-picker-nav-label">快捷位置</div>
+              <div className="path-picker-nav-label">{t('picker.quickPlaces')}</div>
               {places.map((p) => (
                 <button key={p.id} type="button" className="path-picker-nav-item" onClick={() => void loadBrowse(p.path)}>
                   <Folder size={16} />
@@ -168,7 +172,7 @@ export default function PathPickerDialog({
               <button
                 type="button"
                 className="path-picker-icon-btn"
-                title="上级目录"
+                title={t('picker.upDir')}
                 disabled={!canGoUp || loading}
                 onClick={() => void loadBrowse(parent)}
               >
@@ -189,7 +193,7 @@ export default function PathPickerDialog({
             <input
               className="path-picker-address"
               value={address}
-              aria-label="路径"
+              aria-label={t('picker.addressAria')}
               onChange={(e) => setAddress(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
@@ -204,15 +208,15 @@ export default function PathPickerDialog({
               <input
                 type="search"
                 value={filterText}
-                placeholder="筛选当前文件夹"
-                aria-label="筛选"
+                placeholder={t('picker.filterPlaceholder')}
+                aria-label={t('picker.filterAria')}
                 onChange={(e) => setFilterText(e.target.value)}
               />
             </div>
 
             {error ? <div className="path-picker-error">{error}</div> : null}
             {loading ? (
-              <div className="path-picker-loading"><Loader2 className="spin" size={18} /> 加载中…</div>
+              <div className="path-picker-loading"><Loader2 className="spin" size={18} /> {t('picker.loading')}</div>
             ) : (
               <div className="path-picker-listing" role="listbox">
                 {visible.map((entry) => {
@@ -235,7 +239,7 @@ export default function PathPickerDialog({
                     </button>
                   )
                 })}
-                {visible.length === 0 ? <div className="path-picker-empty">此文件夹为空</div> : null}
+                {visible.length === 0 ? <div className="path-picker-empty">{t('picker.empty')}</div> : null}
               </div>
             )}
           </section>
@@ -243,7 +247,7 @@ export default function PathPickerDialog({
 
         <footer className="path-picker-footer">
           <label>
-            <span>文件夹</span>
+            <span>{t('picker.folderLabel')}</span>
             <input
               value={selectedPath}
               onChange={(e) => setSelectedPath(e.target.value)}
@@ -256,14 +260,14 @@ export default function PathPickerDialog({
             />
           </label>
           <div className="path-picker-footer-actions">
-            <button type="button" className="path-picker-cancel" onClick={onCancel}>取消</button>
+            <button type="button" className="path-picker-cancel" onClick={onCancel}>{t('picker.cancel')}</button>
             <button
               type="button"
               className="path-picker-ok"
               disabled={!selectedPath.trim()}
               onClick={() => onConfirm(normalizePath(selectedPath.trim()))}
             >
-              {confirmLabel}
+              {confirmText}
             </button>
           </div>
         </footer>

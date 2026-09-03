@@ -2,10 +2,8 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 import { ClipboardList, ExternalLink, GripVertical } from 'lucide-react'
 import { fetchSurveyDone, markSurveyDone } from '../services/api'
 import './survey-popup.css'
-
-/** 问卷反馈表单（飞书共享问卷）。 */
-const SURVEY_URL =
-  'https://genuineknowledge.feishu.cn/share/base/form/shrcn7pp47SeGec2M4Srnbt75Rg?from=navigation'
+import { useI18n } from '../i18n'
+import { surveyUrlFor } from './surveyLinks'
 
 // 进入 HaiTun 页面 5 分钟后弹出。
 const SURVEY_DELAY_MS = 300_000
@@ -14,6 +12,7 @@ const SURVEY_DELAY_MS = 300_000
  *  关闭后由 Gateway 落盘（AppData `ui-prefs.json`），此后不再弹。标记不放
  *  `localStorage`：Gateway 每次启动换随机端口，origin 变了标记就读不回来。 */
 export default function SurveyPopup() {
+  const { t, language } = useI18n();
   const [open, setOpen] = useState(false)
   const [canClose, setCanClose] = useState(false)
   const [position, setPosition] = useState<{ left: number; top: number } | null>(null)
@@ -77,18 +76,18 @@ export default function SurveyPopup() {
           <GripVertical size={16} className="survey-popup-grip" aria-hidden="true" />
         </header>
         <p className="survey-popup-intro">
-          您好，本次问卷用于收集您的真实使用感受与反馈，帮助我们持续优化产品能力和使用体验，所有填写内容仅用于产品迭代，填写时长约 3-5 分钟
+          {t('survey.intro')}
         </p>
         <div className="survey-popup-body">
           <a
             className="survey-popup-link"
-            href={SURVEY_URL}
+            href={surveyUrlFor(language)}
             target="_blank"
             rel="noopener noreferrer"
             onClick={() => setCanClose(true)}
           >
             <ClipboardList size={18} aria-hidden="true" />
-            <span>请填写体验反馈问卷</span>
+            <span>{t('survey.link')}</span>
             <ExternalLink size={15} aria-hidden="true" />
           </a>
         </div>
@@ -103,7 +102,7 @@ export default function SurveyPopup() {
                 void markSurveyDone().catch(() => {})
               }}
             >
-              关闭
+              {t('survey.close')}
             </button>
           </footer>
         )}

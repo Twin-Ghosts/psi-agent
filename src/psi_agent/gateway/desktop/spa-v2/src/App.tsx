@@ -3,6 +3,7 @@ import WorkspaceGate, { type PathPickKind } from './components/WorkspaceGate'
 import HaiTunAgentWorkspace from './haitun-agent/HaiTunAgentWorkspace'
 import { browseWorkspace, fetchDefaults } from './services/api'
 import { BrandLogo } from './haitun-agent/primitives'
+import { useI18n } from './i18n'
 
 const LS_WORKSPACE = 'gw-v2-workspace'
 const LS_AGENT = 'gw-v2-agent'
@@ -64,6 +65,7 @@ async function pathExistsAsDir(path: string): Promise<boolean> {
  * - Settings can switch workspace or agent package (same PathPicker flow).
  */
 export default function App() {
+  const { t } = useI18n()
   const [workspace, setWorkspace] = useState('')
   const [defaultAgent, setDefaultAgent] = useState('')
   const [bootstrapping, setBootstrapping] = useState(true)
@@ -156,7 +158,7 @@ export default function App() {
       <div className="workspace-gate" aria-busy="true">
         <div className="workspace-gate-card">
           <BrandLogo size="hero" />
-          <p>正在连接 Gateway…</p>
+          <p>{t('app.connecting')}</p>
         </div>
       </div>
     )

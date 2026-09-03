@@ -1,4 +1,5 @@
-import { ChevronRight, FolderOpen } from 'lucide-react'
+import { ChevronRight, FolderOpen, Languages } from 'lucide-react'
+import { useI18n } from '../../i18n'
 import HubDialog from './HubDialog'
 
 type Props = {
@@ -23,26 +24,59 @@ export default function HubSettingsPanel({
   onChangeWorkspace,
   onOpenAdvancedSettings,
 }: Props) {
+  const { t, language, setLanguage } = useI18n()
   return (
     <HubDialog
       show={show}
       title={(
         <div className="hub-models-title">
-          <span>设置</span>
+          <span>{t('app.settings')}</span>
           <button
             type="button"
             className="hub-link"
             onClick={() => onOpenAdvancedSettings?.()}
           >
-            高级设置
+            {t('app.advancedSettings')}
           </button>
         </div>
       )}
       width={480}
       onClose={onClose}
-      actions={<button type="button" className="hub-btn primary" onClick={onClose}>关闭</button>}
+      actions={<button type="button" className="hub-btn primary" onClick={onClose}>{t('app.close')}</button>}
     >
       <section className="hub-settings-section">
+        <div className="hub-settings-row hub-settings-language">
+          <span className="hub-settings-workspace-icon" aria-hidden="true">
+            <Languages size={18} />
+          </span>
+          <span>
+            <strong>{t('app.language')}</strong>
+            <em>{language === 'zh-CN' ? t('app.languageZh') : language === 'zh-TW' ? t('app.languageZhTw') : t('app.languageEn')}</em>
+          </span>
+          <div className="hub-language-switch" role="group" aria-label={t('app.language')}>
+            <button
+              type="button"
+              className={`hub-btn${language === 'zh-CN' ? ' primary' : ''}`}
+              onClick={() => setLanguage('zh-CN')}
+            >
+              {t('app.languageZh')}
+            </button>
+            <button
+              type="button"
+              className={`hub-btn${language === 'zh-TW' ? ' primary' : ''}`}
+              onClick={() => setLanguage('zh-TW')}
+            >
+              {t('app.languageZhTw')}
+            </button>
+            <button
+              type="button"
+              className={`hub-btn${language === 'en-US' ? ' primary' : ''}`}
+              onClick={() => setLanguage('en-US')}
+            >
+              {t('app.languageEn')}
+            </button>
+          </div>
+        </div>
         {onChangeWorkspace ? (
           <button
             type="button"
@@ -56,22 +90,20 @@ export default function HubSettingsPanel({
               <FolderOpen size={18} />
             </span>
             <span>
-              <strong>切换海豚工作室</strong>
+              <strong>{t('app.switchWorkspace')}</strong>
               <em title={workspace || undefined}>
-                {workspace ? pathLabel(workspace) : '选择本机目录'}
+                {workspace ? pathLabel(workspace) : t('app.selectLocalDir')}
               </em>
             </span>
             <ChevronRight size={16} className="hub-settings-row-chevron" />
           </button>
         ) : (
-          <p className="hub-settings-workspace-path">{workspace || '未选择海豚工作室'}</p>
+          <p className="hub-settings-workspace-path">{workspace || t('app.workspacePath')}</p>
         )}
         {workspace && onChangeWorkspace ? (
           <p className="hub-settings-workspace-path" title={workspace}>{workspace}</p>
         ) : null}
-        <p className="hub-settings-foot">
-          任务会绑定到这个文件夹，项目文件、历史记录和交付物都会保存在这里。
-        </p>
+        <p className="hub-settings-foot">{t('app.workspaceFoot')}</p>
       </section>
     </HubDialog>
   )

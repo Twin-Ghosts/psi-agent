@@ -7,26 +7,30 @@ import {
 } from "lucide-react";
 import { type CSSProperties, useEffect, useState, type MouseEvent } from "react";
 import { plainTextFromMarkdown } from "../services/assistantDisplay";
-import { DELIVERY_LABEL, OVERVIEW_LABEL, PENDING_LABEL, type Task, type TaskStep } from "./model";
+import { type Task, type TaskStep } from "./model";
 import { ProgressRing, TreasureButton, TreasureVisual } from "./primitives";
-import { WORKING_LABEL, filterTasksBySignal, type TaskSignalKind } from "./taskSignals";
+import { filterTasksBySignal, type TaskSignalKind } from "./taskSignals";
+import { useI18n, type Language } from "../i18n";
 
 /** 3 columns × 2 rows — middle step viewport stays fixed; overflow pages. */
 const STEPS_COLS = 3;
 const STEPS_ROWS = 2;
 const STEPS_PER_PAGE = STEPS_COLS * STEPS_ROWS;
 
-/** Local calendar day as ``M 月 D 日`` (zh-CN overview eyebrow). */
-export function formatOverviewDay(date: Date = new Date()): string {
+/** Local calendar day for the overview eyebrow, localized for the app language. */
+export function formatOverviewDay(date: Date = new Date(), language: Language = "zh-CN"): string {
+  if (language === "en-US") {
+    return date.toLocaleDateString("en-US", { month: "long", day: "numeric" });
+  }
   return `${date.getMonth() + 1} 月 ${date.getDate()} 日`;
 }
 
 /** Re-render when the local calendar day changes (checks every minute + at midnight). */
-function useLiveOverviewDay(): string {
-  const [label, setLabel] = useState(() => formatOverviewDay());
+function useLiveOverviewDay(language: Language): string {
+  const [label, setLabel] = useState(() => formatOverviewDay(undefined, language));
 
   useEffect(() => {
-    const sync = () => setLabel(formatOverviewDay());
+    const sync = () => setLabel(formatOverviewDay(undefined, language));
     sync();
 
     const minuteId = window.setInterval(sync, 60_000);
@@ -46,7 +50,7 @@ function useLiveOverviewDay(): string {
       window.clearTimeout(midnightId);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, []);
+  }, [language]);
 
   return label;
 }
@@ -66,12 +70,13 @@ export function TaskRow({
   onOpenArtifact: (task: Task, fileName?: string) => void;
   onDelete?: (task: Task) => void;
 }) {
+  const { t } = useI18n();
   return (
     <div
       className={`task-row ${active ? "active" : ""}`}
       onPointerEnter={onPrefetch}
     >
-      <button type="button" className="task-row-select" onClick={onSelect} aria-label={`打开任务：${task.title}`}>
+      <button type="button" className="task-row-select" onClick={onSelect} aria-label={t("task.openTask", { title: task.title })}>
         <span className="task-row-main">
           <span className="task-row-progress-line">
             <ProgressRing
@@ -82,7 +87,7 @@ export function TaskRow({
               label={task.hasTodoTrack ? task.progressLabel : undefined}
             />
             {task.status === "attention" ? (
-              <span className="mini-alert" title="需要处理">
+              <span className="mini-alert" title={t("task.needAttention")}>
                 <AlertCircle size={13} />
               </span>
             ) : null}
@@ -95,8 +100,8 @@ export function TaskRow({
           <button
             type="button"
             className="task-row-delete"
-            title="删除任务"
-            aria-label={`删除任务：${task.title}`}
+            title={t("task.deleteTask")}
+            aria-label={t("task.deleteTaskAria", { title: task.title })}
             onClick={(event) => {
               event.stopPropagation();
               onDelete(task);
@@ -121,7 +126,8 @@ export function OverviewCard({
   /** Same inbox API as sidebar topline signals (working / pending / deliveries). */
   onOpenSignal?: (kind: TaskSignalKind) => void;
 }) {
-  const dayLabel = useLiveOverviewDay();
+  const { language, t } = useI18n();
+  const dayLabel = useLiveOverviewDay(language);
   const finiteTasks = tasks.filter((task) => task.status !== "continuous");
   const tracked = finiteTasks.filter((task) => task.hasTodoTrack);
   const overall = tracked.length
@@ -149,32 +155,32 @@ export function OverviewCard({
       } : undefined}
       role={onOpenChat ? "button" : undefined}
       tabIndex={onOpenChat ? 0 : undefined}
-      aria-label={onOpenChat ? "打开任务总览对话" : undefined}
+      aria-label={onOpenChat ? t("overview.openChatAria") : undefined}
     >
       <div className="card-orbit orbit-one" />
       <div className="card-orbit orbit-two" />
-      <div className="overall-dial" style={{ "--progress": `${overall * 3.6}deg` } as CSSProperties} aria-label={`综合进度 ${overall}%`}>
+      <div className="overall-dial" style={{ "--progress": `${overall * 3.6}deg` } as CSSProperties} aria-label={t("overview.progressAria", { value: overall })}>
         <div>
           <strong>{overall}%</strong>
-          <span>综合进度</span>
+          <span>{t("overview.progressLabel")}</span>
         </div>
       </div>
       <header className="card-header">
-        <span className="eyebrow">{OVERVIEW_LABEL} · {dayLabel}</span>
+        <span className="eyebrow">{t("app.overview")} · {dayLabel}</span>
       </header>
 
       <div className="overview-hero">
         <div>
-          <span className="live-label"><span /> Agent 工作台</span>
-          <h1>今天，已为您完成 {completed} 件事</h1>
-          <p>同时推进 {working + attention} 件任务，并整理出 {newDeliveries} 组新交付物。</p>
+          <span className="live-label"><span /> {t("overview.liveLabel")}</span>
+          <h1>{t("overview.heroDone", { count: completed })}</h1>
+          <p>{t("overview.heroDesc", { working: working + attention, deliveries: newDeliveries })}</p>
         </div>
       </div>
 
       <div
         className="overview-metrics"
         role="group"
-        aria-label="任务信号"
+        aria-label={t("overview.signalsAria")}
         data-card-interactive
       >
         <button
@@ -183,10 +189,10 @@ export function OverviewCard({
           data-card-interactive
           disabled={!onOpenSignal}
           onClick={openSignal("working")}
-          aria-label={`${WORKING_LABEL} ${working}`}
+          aria-label={`${t("app.working")} ${working}`}
         >
           <span className="metric-icon working"><ProgressRing value={overall} size="sm" showValue={false} /></span>
-          <div><strong>{working}</strong><span>{WORKING_LABEL}</span></div>
+          <div><strong>{working}</strong><span>{t("app.working")}</span></div>
         </button>
         <button
           type="button"
@@ -194,10 +200,10 @@ export function OverviewCard({
           data-card-interactive
           disabled={!onOpenSignal}
           onClick={openSignal("pending")}
-          aria-label={`${PENDING_LABEL} ${attention}`}
+          aria-label={`${t("app.pending")} ${attention}`}
         >
           <span className="metric-icon"><AlertCircle size={16} /></span>
-          <div><strong>{attention}</strong><span>{PENDING_LABEL}</span></div>
+          <div><strong>{attention}</strong><span>{t("app.pending")}</span></div>
         </button>
         <button
           type="button"
@@ -205,10 +211,10 @@ export function OverviewCard({
           data-card-interactive
           disabled={!onOpenSignal}
           onClick={openSignal("deliveries")}
-          aria-label={`${DELIVERY_LABEL} ${newDeliveries}`}
+          aria-label={`${t("app.deliveries")} ${newDeliveries}`}
         >
           <span className="metric-icon treasure-metric"><TreasureVisual state="ready" size="mini" /></span>
-          <div><strong>{newDeliveries}</strong><span>{DELIVERY_LABEL}</span></div>
+          <div><strong>{newDeliveries}</strong><span>{t("app.deliveries")}</span></div>
         </button>
       </div>
     </article>
@@ -216,6 +222,7 @@ export function OverviewCard({
 }
 
 function StepChip({ step, showBusyHint }: { step: TaskStep; showBusyHint: boolean }) {
+  const { t } = useI18n();
   return (
     <div className={`task-step ${step.state}`}>
       <span className="step-marker">
@@ -223,7 +230,7 @@ function StepChip({ step, showBusyHint }: { step: TaskStep; showBusyHint: boolea
       </span>
       <span className="task-step-label">
         {step.label}
-        {step.state === "working" && <em>{step.detail?.trim() || (showBusyHint ? "进行中" : "")}</em>}
+        {step.state === "working" && <em>{step.detail?.trim() || (showBusyHint ? t("steps.inProgress") : "")}</em>}
         {step.state === "waiting" && step.detail?.trim() ? <em>{step.detail.trim()}</em> : null}
         {step.state === "done" && step.detail?.trim() ? <em>{step.detail.trim()}</em> : null}
       </span>
@@ -232,6 +239,7 @@ function StepChip({ step, showBusyHint }: { step: TaskStep; showBusyHint: boolea
 }
 
 function TaskStepsPanel({ task }: { task: Task }) {
+  const { t } = useI18n();
   const steps = task.steps;
   const pageCount = Math.max(1, Math.ceil(steps.length / STEPS_PER_PAGE));
   const [page, setPage] = useState(0);
@@ -254,16 +262,16 @@ function TaskStepsPanel({ task }: { task: Task }) {
     <div className={`task-steps-panel ${isActivity ? "is-activity" : ""}`}>
       <div className="task-steps-toolbar">
         <span className="task-steps-caption">
-          {isActivity ? "活动状态" : "执行步骤"}
+          {isActivity ? t("steps.activity") : t("steps.execution")}
           {!isActivity && task.progressLabel ? <em>{task.progressLabel}</em> : null}
         </span>
         {showPager ? (
-          <div className="task-steps-pager" role="group" aria-label="步骤翻页">
+          <div className="task-steps-pager" role="group" aria-label={t("steps.pagerAria")}>
             <button
               type="button"
               className="task-steps-page-btn"
               disabled={safePage <= 0}
-              aria-label="上一页步骤"
+              aria-label={t("steps.prevPage")}
               data-card-interactive=""
               onClick={(event) => {
                 event.stopPropagation();
@@ -277,7 +285,7 @@ function TaskStepsPanel({ task }: { task: Task }) {
               type="button"
               className="task-steps-page-btn"
               disabled={safePage >= pageCount - 1}
-              aria-label="下一页步骤"
+              aria-label={t("steps.nextPage")}
               data-card-interactive=""
               onClick={(event) => {
                 event.stopPropagation();
@@ -305,25 +313,26 @@ function TaskStepsPanel({ task }: { task: Task }) {
 }
 
 function TaskLinearProgress({ task }: { task: Task }) {
+  const { t } = useI18n();
   const busy = !!task.progressIndeterminate;
   // CSS `.done` forces bar width 100% — only apply when checklist (or no-todo turn) is truly complete.
   const barComplete = task.hasTodoTrack
     ? !!task.steps.length && task.steps.every((step) => step.state === "done")
     : task.phase === "done";
   const label = task.hasTodoTrack
-    ? "步骤进度"
+    ? t("progress.steps")
     : busy
-      ? "处理中"
+      ? t("progress.processing")
       : task.phase === "done"
-        ? "本轮进度"
-        : "活动";
+        ? t("progress.round")
+        : t("progress.activity");
   const valueText = task.hasTodoTrack
     ? (task.progressLabel || `${task.progress}%`)
     : busy
       ? "…"
       : task.phase === "done"
-        ? "完成"
-        : "待续";
+        ? t("progress.done")
+        : t("progress.pending");
   const width = busy && !task.hasTodoTrack ? 42 : Math.max(0, Math.min(100, task.progress));
 
   return (
@@ -354,6 +363,7 @@ export function TaskCard({
   /** Overview swipe surface: open split chat (same as clicking the dialogue strip). */
   onOpenChat?: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <article
       className={`focus-card task-card${onOpenChat ? " card-open-chat" : ""}`}
@@ -367,7 +377,7 @@ export function TaskCard({
       } : undefined}
       role={onOpenChat ? "button" : undefined}
       tabIndex={onOpenChat ? 0 : undefined}
-      aria-label={onOpenChat ? `打开任务对话：${task.title}` : undefined}
+      aria-label={onOpenChat ? t("task.openChatAria", { title: task.title }) : undefined}
     >
       <div className="task-accent-line" />
 
@@ -377,7 +387,7 @@ export function TaskCard({
         onClick={(event) => event.stopPropagation()}
         onKeyDown={(event) => event.stopPropagation()}
       >
-        <span className="task-corner-treasure-label">交付物</span>
+        <span className="task-corner-treasure-label">{t("task.deliverables")}</span>
         <TreasureButton task={task} onOpen={onOpenArtifact} />
       </div>
 
@@ -388,8 +398,8 @@ export function TaskCard({
             <button
               type="button"
               className="task-card-delete"
-              title="删除任务"
-              aria-label={`删除任务：${task.title}`}
+              title={t("task.deleteTask")}
+              aria-label={t("task.deleteTaskAria", { title: task.title })}
               data-card-interactive=""
               onClick={(event) => {
                 event.stopPropagation();

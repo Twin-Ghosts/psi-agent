@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { createAi, listAis, type AiInfo } from '../../services/api'
 import { writeStoredAiId } from '../../services/bootstrapAi'
 import { PROVIDERS } from '../../services/providers'
+import { useI18n } from '../../i18n'
 import HubDialog from './HubDialog'
 
 type Props = {
@@ -23,6 +24,7 @@ export default function HubAdvancedPanel({
   onAisChanged,
   requireAi = false,
 }: Props) {
+  const { t } = useI18n();
   const [provider, setProvider] = useState(PROVIDERS[0]?.v ?? 'openai')
   const [model, setModel] = useState(PROVIDERS[0]?.models[0] ?? '')
   const [baseUrl, setBaseUrl] = useState(PROVIDERS[0]?.base ?? '')
@@ -63,10 +65,10 @@ export default function HubAdvancedPanel({
       onAisChanged?.(list)
       onSelectAi(info.id)
       writeStoredAiId(info.id)
-      onToast?.('大模型已连接')
+      onToast?.(t('advanced.connected'))
       onClose()
     } catch (e) {
-      onToast?.(e instanceof Error ? e.message : '连接失败')
+      onToast?.(e instanceof Error ? e.message : t('models.connectFailed'))
     } finally {
       setConnecting(false)
     }
@@ -74,7 +76,7 @@ export default function HubAdvancedPanel({
 
   const handleClose = () => {
     if (requireAi) {
-      onToast?.('请先连接至少一个大模型')
+      onToast?.(t('advanced.requireAi'))
       return
     }
     onClose()
@@ -93,9 +95,9 @@ export default function HubAdvancedPanel({
       show={show}
       title={(
         <div className="hub-models-title">
-          <span>链接大模型</span>
+          <span>{t('advanced.title')}</span>
           <button type="button" className="hub-link" onClick={backToModels}>
-            返回模型池
+            {t('advanced.backToModels')}
           </button>
         </div>
       )}
@@ -103,33 +105,33 @@ export default function HubAdvancedPanel({
       onClose={handleClose}
       actions={(
         <>
-          <button type="button" className="hub-btn ghost" onClick={backToModels}>返回模型池</button>
+          <button type="button" className="hub-btn ghost" onClick={backToModels}>{t('advanced.backToModels')}</button>
           <button
             type="button"
             className="hub-btn primary"
             disabled={!apiKey.trim() || !model.trim() || connecting}
             onClick={() => void connect()}
           >
-            {connecting ? '连接中…' : '链接'}
+            {connecting ? t('models.connecting') : t('advanced.link')}
           </button>
         </>
       )}
     >
       <label className="hub-field">
-        <span>供应商</span>
+        <span>{t('advanced.providerLabel')}</span>
         <select value={provider} onChange={(e) => selectProvider(e.target.value)}>
           {PROVIDERS.map((p) => (
-            <option key={p.v} value={p.v}>{p.l}</option>
+            <option key={p.v} value={p.v}>{t(`provider.${p.v}`)}</option>
           ))}
         </select>
       </label>
       <label className="hub-field">
-        <span>模型名称</span>
+        <span>{t('advanced.modelLabel')}</span>
         <input
           value={model}
           list="hub-advanced-models"
           onChange={(e) => setModel(e.target.value)}
-          placeholder="选择或输入模型名称"
+          placeholder={t('advanced.modelPlaceholder')}
         />
         <datalist id="hub-advanced-models">
           {(current?.models ?? []).map((m) => (
@@ -138,11 +140,11 @@ export default function HubAdvancedPanel({
         </datalist>
       </label>
       <label className="hub-field">
-        <span>接口地址</span>
+        <span>{t('advanced.baseUrlLabel')}</span>
         <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://..." />
       </label>
       <label className="hub-field">
-        <span>API 密钥</span>
+        <span>{t('advanced.apiKeyLabel')}</span>
         <input
           type="password"
           value={apiKey}

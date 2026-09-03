@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from psi_agent._appdata import appdata_ui_prefs_path
 from psi_agent.gateway.desktop._routes import register_desktop_routes
 from psi_agent.gateway.desktop._ui_prefs import UIPrefs
 from psi_agent.gateway.server import create_core_app
+from psi_agent.i18n import DEFAULT_LANGUAGE
 from psi_agent.runtime._ai_manager import AIManager
 from psi_agent.runtime._session_manager import SessionManager
 from psi_agent.runtime._title_manager import TitleManager
@@ -92,6 +94,36 @@ async def test_from_appdata_lands_at_expected_path(tmp_path: Path) -> None:
     assert await appdata_ui_prefs_path(str(tmp_path)).is_file()
 
 
+@pytest.mark.anyio
+async def test_language_defaults_empty_when_unset(tmp_path: Path) -> None:
+    assert await _prefs(tmp_path).language() == ""
+
+
+@pytest.mark.anyio
+async def test_language_roundtrip_survives_new_instance(tmp_path: Path) -> None:
+    prefs = _prefs(tmp_path)
+    assert await prefs.set_language("en_US") == "en-US"
+    assert await _prefs(tmp_path).language() == "en-US"
+
+
+@pytest.mark.anyio
+async def test_language_updated_at_is_persisted(tmp_path: Path) -> None:
+    prefs = _prefs(tmp_path)
+    assert await prefs.language_updated_at() == ""
+    await prefs.set_language("en-US")
+    saved_at = await _prefs(tmp_path).language_updated_at()
+    assert saved_at.startswith("20")
+    assert saved_at.endswith("+00:00")
+
+
+@pytest.mark.anyio
+async def test_install_language_seen_roundtrip(tmp_path: Path) -> None:
+    prefs = _prefs(tmp_path)
+    assert await prefs.install_language_seen() == ""
+    await prefs.set_install_language_seen("zh-TW")
+    assert await _prefs(tmp_path).install_language_seen() == "zh-TW"
+
+
 async def _start_app_on_free_port(app: web.Application) -> tuple[str, web.AppRunner]:
     runner = web.AppRunner(app)
     await runner.setup()
@@ -160,3 +192,75 @@ async def test_survey_pref_survives_app_restart(tmp_path: Path) -> None:
         finally:
             await runner.cleanup()
             await tg.__aexit__(None, None, None)
+
+
+@pytest.mark.anyio
+async def test_language_pref_routes_and_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """GET reports boot default → POST persists switch → GET and /defaults agree."""
+    monkeypatch.delenv("HAITUN_LANG", raising=False)
+    previous_lang = os.environ.get("HAITUN_LANG")
+    tg = anyio.create_task_group()
+    await tg.__aenter__()
+    try:
+        aim = AIManager(_prefix="lang-pref-test", _tg=tg)
+        sm = SessionManager(_aim=aim, _prefix="lang-pref-test", _tg=tg)
+        app = await register_desktop_routes(
+            await create_core_app(aim, sm, TitleManager(), appdata=str(tmp_path), language="zh-CN")
+        )
+        base_url, runner = await _start_app_on_free_port(app)
+        async with ClientSession(timeout=ClientTimeout(total=10)) as session:
+            async with session.get(f"{base_url}/ui/prefs/language") as resp:
+                assert resp.status == 200
+                assert (await resp.json())["language"] == DEFAULT_LANGUAGE
+
+            async with session.post(f"{base_url}/ui/prefs/language", json={"language": "en_US"}) as resp:
+                assert resp.status == 200
+                assert (await resp.json())["language"] == "en-US"
+
+            async with session.get(f"{base_url}/ui/prefs/language") as resp:
+                assert (await resp.json())["language"] == "en-US"
+
+            async with session.get(f"{base_url}/defaults") as resp:
+                assert (await resp.json())["language"] == "en-US"
+
+            # Garbage body falls back to the default rather than 500ing.
+            async with session.post(f"{base_url}/ui/prefs/language", data="not json") as resp:
+                assert resp.status == 200
+                assert (await resp.json())["language"] == DEFAULT_LANGUAGE
+    finally:
+        await runner.cleanup()
+        await tg.__aexit__(None, None, None)
+        if previous_lang is None:
+            os.environ.pop("HAITUN_LANG", None)
+        else:
+            os.environ["HAITUN_LANG"] = previous_lang
+
+
+@pytest.mark.anyio
+async def test_language_pref_survives_app_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same AppData, new app instance — the persisted language must win."""
+    monkeypatch.delenv("HAITUN_LANG", raising=False)
+    previous_lang = os.environ.get("HAITUN_LANG")
+    for expected in ("zh-CN", "en-US"):
+        tg = anyio.create_task_group()
+        await tg.__aenter__()
+        try:
+            aim = AIManager(_prefix=f"lang-restart-{expected}", _tg=tg)
+            sm = SessionManager(_aim=aim, _prefix=f"lang-restart-{expected}", _tg=tg)
+            app = await register_desktop_routes(
+                await create_core_app(aim, sm, TitleManager(), appdata=str(tmp_path), language="zh-CN")
+            )
+            base_url, runner = await _start_app_on_free_port(app)
+            async with ClientSession(timeout=ClientTimeout(total=10)) as session:
+                async with session.get(f"{base_url}/ui/prefs/language") as resp:
+                    assert (await resp.json())["language"] == expected
+                if expected == "zh-CN":
+                    async with session.post(f"{base_url}/ui/prefs/language", json={"language": "en-US"}) as resp:
+                        assert resp.status == 200
+        finally:
+            await runner.cleanup()
+            await tg.__aexit__(None, None, None)
+        if previous_lang is None:
+            os.environ.pop("HAITUN_LANG", None)
+        else:
+            os.environ["HAITUN_LANG"] = previous_lang

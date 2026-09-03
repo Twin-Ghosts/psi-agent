@@ -16,7 +16,13 @@ from loguru import logger
 
 from psi_agent._logging import setup_logging
 from psi_agent._sockets import create_site
-from psi_agent.gateway._defaults import resolve_appdata_root, resolve_default_agent, resolve_default_workspace
+from psi_agent.gateway._defaults import (
+    read_install_language,
+    resolve_appdata_root,
+    resolve_default_agent,
+    resolve_default_language,
+    resolve_default_workspace,
+)
 from psi_agent.gateway._state import GatewayState
 from psi_agent.gateway.desktop._attention import AttentionHub
 from psi_agent.gateway.desktop._auth_manager import AuthManager, resolve_endpoint
@@ -24,6 +30,7 @@ from psi_agent.gateway.desktop._free_model import make_key_resolver
 from psi_agent.gateway.desktop._routes import register_desktop_routes
 from psi_agent.gateway.desktop._spa_shell import DEFAULT_APP_NAME
 from psi_agent.gateway.desktop._tray import GatewayTray
+from psi_agent.gateway.desktop._ui_prefs import UIPrefs
 from psi_agent.gateway.desktop._webview import GatewayWebView
 from psi_agent.gateway.feishu._feishu_manager import (
     FEISHU_SESSION_PREFIX as _FEISHU_SESSION_PREFIX,
@@ -212,6 +219,14 @@ class Gateway:
     Empty = soft default under the OS Desktop. Not the AppData root (see --appdata).
     """
 
+    language: str = ""
+    """UI language: ``zh-CN`` (default), ``zh-TW`` or ``en-US``.
+
+    Empty → ``HAITUN_LANG`` env → installer-written ``haitun-language.txt`` under
+    the agent package → ``zh-CN``.  The SPA can still switch languages in-app;
+    that choice is persisted in AppData and wins over this flag on later boots.
+    """
+
     appdata: str = ""
     """AppData memory-area root (``GET /defaults.appdata``, env ``PSI_APPDATA``).
 
@@ -265,11 +280,24 @@ class Gateway:
         agent_default = await resolve_default_agent(self.default_agent)
         workspace_default = await resolve_default_workspace(self.default_workspace)
         appdata_root = await resolve_appdata_root(self.appdata)
+        prefs = await UIPrefs.from_appdata(appdata_root)
+        install_language = await read_install_language(agent_default)
+        language = await resolve_default_language(
+            self.language,
+            install_language=install_language,
+            user_language=await prefs.language(),
+            install_language_seen=await prefs.install_language_seen(),
+        )
+        if install_language:
+            await prefs.set_install_language_seen(install_language)
         # So in-process Session tools (todo, …) see the same root as GET /defaults.
         os.environ["PSI_APPDATA"] = appdata_root
+        # Workspace system-prompt builders and channels read this for default language.
+        os.environ["HAITUN_LANG"] = language
         logger.info(f"Default agent: {agent_default or '(same as workspace)'}")
         logger.info(f"Default workspace: {workspace_default}")
         logger.info(f"AppData root: {appdata_root}")
+        logger.info(f"UI language: {language}")
 
         state = await GatewayState.from_appdata(appdata_root)
         snapshot = await state.load()
@@ -375,7 +403,18 @@ class Gateway:
                 await sum_m.set(row["id"], row["summary"])
 
             attention = AttentionHub()
-            schedm = SchedulerManager(_sm=sm, _ai_id=self.scheduler_ai_id or self.feishu_ai_id)
+            schedm = SchedulerManager(
+                _sm=sm,
+                _ai_id=self.scheduler_ai_id or self.feishu_ai_id,
+                # 公司级种子任务: 部署时经 PSI_SEED_SCHEDULES_WORKSPACE 指定落点
+                # workspace, 种子来源是 agent 包自带的 schedules/。空 = 关闭 seed。
+                seed_workspace=os.environ.get("PSI_SEED_SCHEDULES_WORKSPACE", ""),
+                seed_agent=agent_default,
+            )
+            # 首个定时任务由 watch_loop 自动拉起: ensure 只会在「schedules 已存在」时
+            # spawn, 而 schedule_manage 写第一个 TASK.md 不会触发 ensure —— 没有这个
+            # 常驻协程, 用户新建的定时任务要等下一次 ensure 碰巧发生才生效 (到点不触发)。
+            tg.start_soon(schedm.watch_loop)
             # 骨架 + 按 --gateway 贴各 gateway 的 HTTP 面。**贴哪些完全由调用方给定** ——
             # 该参数必填, 没有「不传时挂什么」这回事: 少挂一面的表现是某个前端 404 而非
             # 报错, 所以宁可在启动期就要求说清楚。生产上飞书容器起的也是 `psi-agent
@@ -392,6 +431,7 @@ class Gateway:
                 rm=rm,
                 default_agent=agent_default,
                 default_workspace=workspace_default,
+                language=language,
                 appdata=appdata_root,
                 scheduler_ai_id=self.scheduler_ai_id,
                 schedm=schedm,

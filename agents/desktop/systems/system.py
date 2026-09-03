@@ -1280,6 +1280,7 @@ this workspace, generated workflows, instruction files, or committed `.env` file
         budget.add_if(await (ws / "BOOTSTRAP.md").exists(), "static: bootstrap pending", "", BOOTSTRAP_PENDING_SECTION)
 
         budget.add("static: silent replies", "", SILENT_REPLIES_SECTION)
+        budget.add("static: saving gate", "", _SAVING_GATE_SECTION)
         budget.add_if(model_identity := build_model_identity_line(model), "model identity line", "", model_identity)
 
         # NOTE: the heartbeat instruction is intentionally NOT injected here.
@@ -1483,6 +1484,22 @@ async def system_before_turn(
         logger.warning("Background supervisor unavailable: %r", exc, exc_info=True)
         return {}
     return {"supervisor_advice": advice} if isinstance(advice, dict) else {}
+
+
+_SAVING_GATE_SECTION = """\
+## Saving-decision core rules
+For purchase / money-saving requests (national subsidy, coupons, price comparison, bank instant discounts,
+recommendations, cart-filling), these core rules ALWAYS apply:
+1. Policy parameters (rate / cap / threshold / energy-efficiency / categories) come ONLY from this session's
+   retrieval or a fact-card snapshot (with verification date) - never from memory, never by reverse-engineering
+   from product price.
+2. Computing money (subsidy / final price): call subsidy_calc when available; if unavailable or failed, mark
+   [Unverified] - do NOT hand-compute.
+3. Recommendation / guide tasks: first call review_search for candidate articles; only if it returns empty or
+   fails may you search on your own.
+4. Also load and follow `skills/saving-decision/SKILL.md` (read it with the read tool) for the full rule set.
+Ignore this section for non-saving tasks.
+"""
 
 
 async def system_prompt_builder(

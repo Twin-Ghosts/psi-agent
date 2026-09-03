@@ -7,22 +7,22 @@ import { htmlEscape, renderMd } from "../services/renderMd";
 import { stripTransferMarkers } from "../services/sendMarkers";
 import { downloadMatrixXlsx, matrixToTsv, tableToMatrix } from "../services/mdTable";
 import { preferResultBelowRule } from "../services/assistantDisplay";
-import { TURN_PROGRESS, type ProgressLog } from "../services/turnProgress";
+import { type ProgressLog } from "../services/turnProgress";
 import {
   hasDisplayableReasoning,
   stripToolMarkersFromReasoning,
-  thinkingHeaderLabel,
-  toolsHeaderLabel,
 } from "../services/reasoningDisplay";
-import { FAILED_REASON_LABEL, isCompleteAgent } from "../services/messageTurn";
+import { isCompleteAgent } from "../services/messageTurn";
 import { ensureChatFileData, revealDeliverableInFolder } from "../utils/filePreviewUtils";
 import { isBlobPreviewable } from "../utils/renderBlobPreview";
 import FilePreview from "../components/FilePreview";
+import { useI18n } from "../i18n";
 
 /** Distance from bottom (px) — beyond this, streaming must not yank the viewport down. */
 const STICK_BOTTOM_PX = 60;
 
 function ChatAvatar({ role }: { role: "agent" | "user" }) {
+  const { t } = useI18n();
   const [userAvatar, setUserAvatar] = useState(readStoredAvatar);
   const [userName, setUserName] = useState(readStoredName);
 
@@ -49,7 +49,7 @@ function ChatAvatar({ role }: { role: "agent" | "user" }) {
     );
   }
 
-  const initial = userName.trim().charAt(0).toUpperCase() || "我";
+  const initial = userName.trim().charAt(0).toUpperCase() || t("chat.me");
   return (
     <div className="focus-chat-avatar user" aria-hidden="true">
       {userAvatar ? <img src={userAvatar} alt="" /> : <span>{initial}</span>}
@@ -64,6 +64,7 @@ function ChatBlock({
   role: "agent" | "user";
   children: ReactNode;
 }) {
+  const { t } = useI18n();
   const [userName, setUserName] = useState(readStoredName);
   useEffect(() => {
     const sync = () => setUserName(readStoredName());
@@ -76,7 +77,7 @@ function ChatBlock({
       window.removeEventListener(USER_PROFILE_EVENT, sync);
     };
   }, []);
-  const speaker = role === "agent" ? "HaiTun Agent" : (userName.trim() || "我");
+  const speaker = role === "agent" ? "HaiTun Agent" : (userName.trim() || t("chat.me"));
   return (
     <div className={`focus-chat-msg ${role}`}>
       <ChatAvatar role={role} />
@@ -136,13 +137,14 @@ async function handleTableAction(e: MouseEvent) {
 }
 
 function CopyButton({ text, className }: { text: string; className?: string }) {
+  const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   return (
     <button
       type="button"
       className={className}
-      title={copied ? "已复制" : "复制"}
-      aria-label="复制"
+      title={copied ? t("chat.copied") : t("chat.copy")}
+      aria-label={t("chat.copy")}
       onClick={() => {
         void copyText(text).then(() => {
           setCopied(true);
@@ -169,7 +171,8 @@ function TurnProcessDisclosure({
   tools?: string[];
   streaming?: boolean;
 }) {
-  const toolLines = tools.filter((t) => !!t.trim());
+  const { t } = useI18n();
+  const toolLines = tools.filter((line) => !!line.trim());
   const thinking = stripToolMarkersFromReasoning(reasoning ?? "");
   const [toolsOpen, setToolsOpen] = useState(true);
   const [thinkingOpen, setThinkingOpen] = useState(false);
@@ -186,13 +189,13 @@ function TurnProcessDisclosure({
             onClick={() => setToolsOpen((v) => !v)}
           >
             <ChevronRight size={14} className="focus-chat-thinking-chevron" aria-hidden />
-            <span>{toolsHeaderLabel(toolLines.length)}</span>
+            <span>{t("chat.toolsHeader", { count: toolLines.length })}</span>
           </button>
           {toolsOpen ? (
             <div
               className="focus-chat-tools-body"
               role="list"
-              aria-label="工具调用"
+              aria-label={t("chat.toolsAria")}
             >
               {toolLines.map((line, i) => (
                 <div className="focus-chat-progress-line" role="listitem" key={`${i}-${line}`}>
@@ -212,10 +215,10 @@ function TurnProcessDisclosure({
             onClick={() => setThinkingOpen((v) => !v)}
           >
             <ChevronRight size={14} className="focus-chat-thinking-chevron" aria-hidden />
-            <span>{thinkingHeaderLabel({ streaming, hasBody: true })}</span>
+            <span>{streaming ? t("chat.thinkingHeaderStreaming") : t("chat.thinkingHeaderDone")}</span>
           </button>
           {thinkingOpen ? (
-            <div className="focus-chat-thinking-body" role="region" aria-label="思考过程">
+            <div className="focus-chat-thinking-body" role="region" aria-label={t("chat.thinkingAria")}>
               {thinking}
             </div>
           ) : null}
@@ -253,6 +256,7 @@ export function FocusChatThread({
   onRegenerate?: (index: number) => void;
   onRetry?: (index: number) => void;
 }) {
+  const { t, language } = useI18n();
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   /** Align with spa v1 / Cursor: only pin to bottom while the user is near the end. */
   const stickToBottomRef = useRef(true);
@@ -308,7 +312,7 @@ export function FocusChatThread({
       const loaded = await ensureChatFileData(file, workspaceRoot);
       setPreview(loaded);
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : String(e));
+      alertError(e);
     } finally {
       setPreviewBusy(null);
     }
@@ -322,7 +326,7 @@ export function FocusChatThread({
     try {
       await revealDeliverableInFolder(path, workspaceRoot);
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : String(e));
+      alertError(e);
     } finally {
       setRevealBusy(null);
     }
@@ -334,6 +338,15 @@ export function FocusChatThread({
     ? stripTransferMarkers(messages[messages.length - 1]!.interimText ?? "")
     : "";
   const stepText = lastInterim;
+  const alertError = (err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err)
+    const text = msg === '没有可打开的文件路径。'
+      ? t('fileError.noPath')
+      : msg === '历史记录中没有该文件的路径，无法从磁盘读取预览。'
+        ? t('fileError.readPath')
+        : msg
+    window.alert(text)
+  }
 
   const showAgentActions = (msg: ChatMessage) => {
     if (msg.role !== "agent") return false;
@@ -350,11 +363,11 @@ export function FocusChatThread({
         {stepText.trim() ? (
           <div
             className="focus-chat-live-thinking-step"
-            dangerouslySetInnerHTML={{ __html: renderMd(stepText) }}
+            dangerouslySetInnerHTML={{ __html: renderMd(stepText, language) }}
           />
         ) : null}
         {!liveThinking.trim() && !stepText.trim() ? (
-          <span className="typing" aria-label="正在输入"><i /><i /><i /></span>
+          <span className="typing" aria-label={t("chat.typing")}><i /><i /><i /></span>
         ) : null}
       </div>
     </div>
@@ -364,7 +377,7 @@ export function FocusChatThread({
     <div
       className="focus-chat-thread"
       ref={scrollerRef}
-      aria-label={`${title} 的对话`}
+      aria-label={t("chat.threadAria", { title })}
       onScroll={onThreadScroll}
       onClick={(e) => void handleTableAction(e)}
     >
@@ -374,8 +387,8 @@ export function FocusChatThread({
             <BrandLogo size="mini" />
           </div>
           <p>
-            正在同步对话…
-            <span className="typing" aria-label="加载中"><i /><i /><i /></span>
+            {t("chat.syncing")}
+            <span className="typing" aria-label={t("chat.loading")}><i /><i /><i /></span>
           </p>
         </div>
       )}
@@ -384,13 +397,13 @@ export function FocusChatThread({
           <div className="focus-chat-avatar agent" aria-hidden="true">
             <BrandLogo size="mini" />
           </div>
-          <p>向 Agent 发送消息，开始围绕「{title}」继续推进。</p>
+          <p>{t("chat.emptyHint", { title })}</p>
         </div>
       )}
       {messages.map((message, index) => {
         const isLast = index === messages.length - 1;
         const isLiveAgent = typing && isLast && message.role === "agent";
-        const writing = progressLog?.current === TURN_PROGRESS.writing;
+        const writing = progressLog?.current === t("turn.writing");
         const clean = stripTransferMarkers(message.text);
         const interimClean = stripTransferMarkers(message.interimText ?? "");
         // Live: keep step interim + current segment visible (do not hide on tool rounds).
@@ -412,10 +425,10 @@ export function FocusChatThread({
         if (!showProse && !(isLiveAgent && writing)) return null;
 
         const finalHtml = message.role === "agent"
-          ? renderMd(displayText)
+          ? renderMd(displayText, language)
           : htmlEscape(displayText).replace(/\n/g, "<br>");
         const failedLabel = message.failed
-          ? (FAILED_REASON_LABEL[message.failedReason ?? "incomplete"] ?? FAILED_REASON_LABEL.incomplete)
+          ? t(`chat.failed.${message.failedReason ?? "incomplete"}`)
           : "";
 
         const fileChips = showFiles ? (
@@ -435,18 +448,18 @@ export function FocusChatThread({
                     onClick={() => {
                       void openPreview(f);
                     }}
-                    title={canPreview ? `预览 ${f.name}` : f.name}
+                    title={canPreview ? t("chat.previewFile", { name: f.name }) : f.name}
                   >
                     <span>{f.name}</span>
-                    {isPreviewable(f.name) ? <em>{busy ? "加载中" : "预览"}</em> : null}
+                    {isPreviewable(f.name) ? <em>{busy ? t("chat.loading") : t("chat.preview")}</em> : null}
                   </button>
                   {canReveal ? (
                     <button
                       type="button"
                       className="focus-chat-file-reveal"
                       disabled={revealing}
-                      title={revealing ? "正在打开…" : "在文件夹中显示"}
-                      aria-label={`在文件夹中显示 ${f.name}`}
+                      title={revealing ? t("chat.opening") : t("chat.showInFolder")}
+                      aria-label={t("chat.showInFolderAria", { name: f.name })}
                       onClick={() => {
                         void revealFile(f);
                       }}
@@ -484,8 +497,8 @@ export function FocusChatThread({
                     <button
                       type="button"
                       className="focus-chat-retry-btn"
-                      aria-label="拉回输入框重发"
-                      title={`${failedLabel} · 点击拉回输入框`}
+                      aria-label={t("chat.retryAria")}
+                      title={t("chat.retryTitle", { label: failedLabel })}
                       disabled={typing}
                       onClick={() => onRetry?.(index)}
                     >
@@ -503,11 +516,11 @@ export function FocusChatThread({
             </div>
             {fileChips}
             {showAgentActions(message) && (
-              <div className="focus-chat-msg-actions" role="toolbar" aria-label="消息操作">
+              <div className="focus-chat-msg-actions" role="toolbar" aria-label={t("chat.actionsAria")}>
                 <button
                   type="button"
                   className={`focus-chat-action-btn${message.feedback === "up" ? " active" : ""}`}
-                  title={message.feedback === "up" ? "取消点赞" : "点赞"}
+                  title={message.feedback === "up" ? t("chat.unlike") : t("chat.like")}
                   aria-pressed={message.feedback === "up"}
                   onClick={() => onFeedback?.(index, "up")}
                 >
@@ -516,7 +529,7 @@ export function FocusChatThread({
                 <button
                   type="button"
                   className={`focus-chat-action-btn${message.feedback === "down" ? " active" : ""}`}
-                  title={message.feedback === "down" ? "取消点踩" : "点踩"}
+                  title={message.feedback === "down" ? t("chat.undislike") : t("chat.dislike")}
                   aria-pressed={message.feedback === "down"}
                   onClick={() => onFeedback?.(index, "down")}
                 >
@@ -525,8 +538,8 @@ export function FocusChatThread({
                 <button
                   type="button"
                   className="focus-chat-action-btn"
-                  title="重新生成"
-                  aria-label="重新生成"
+                  title={t("chat.regenerate")}
+                  aria-label={t("chat.regenerate")}
                   disabled={typing}
                   onClick={() => onRegenerate?.(index)}
                 >

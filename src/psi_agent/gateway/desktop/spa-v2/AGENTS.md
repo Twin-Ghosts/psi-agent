@@ -72,7 +72,7 @@ Hub「使用免费模型」→ **保留**已连接真实模型；hydrateAiForSes
 发消息           → ensureSessionAi（优先任务绑定的模型；已被删除则用当前模型配置重绑旧 id，通道继续可用）
 ```
 
-不盲选 `ais[0]`。**不自动删除任何已连接模型**——只有「已连接」行的删除按钮会删除，且一次删除该配置（`provider+model+api_key+base_url`）的**全部实例**（同一模型被多个 Session 绑定的重复条目会一起删掉）；删除当前模型后回落到剩余模型，新连接/切免费都不影响其它模型，新连接的模型立即成为当前模型。优先 localStorage 选中 AI（含用户主动选的免费条目），免费条目与真实 key 可以同时保留在池中。Gateway **不**级联删 Session——AI 删除后 Session 仍挂旧 `ai_id`；该任务下一次对话用**当前选中模型**，并把旧 `ai_id` **重绑到当前模型配置**（池全空时才回落免费默认），Session 通道保持可用，刷新后任务卡与可聊性不变。模型池「已连接」按同配置 **折叠展示**（仅 id 不同只显示一行；key 不同则分列）；无显式 id 的 `POST /ais` 同配置复用已有实例。workspace 过滤用 `sessionMatchesWorkspace`（空 workspace 视为本工作区）。
+不盲选 `ais[0]`。**不自动删除任何已连接模型**——只有「已连接」行的删除按钮会删除，且一次删除该配置（`provider+model+api_key+base_url`）的**全部实例**（同一模型被多个 Session 绑定的重复条目会一起删掉）；删除当前模型后回落到剩余模型，新连接/切免费都不影响其它模型，新连接的模型立即成为当前模型。优先 localStorage 选中 AI（含用户主动选的免费条目），免费条目与真实 key 可以同时保留在池中。Gateway **不**级联删 Session——AI 删除后 Session 仍挂旧 `ai_id`；该任务下一次对话用**当前选中模型**，并把旧 `ai_id` **重绑到当前模型配置**（池全空时才回落免费默认），Session 通道保持可用，刷新后任务卡与可聊性不变。模型池「已连接」按同配置 **折叠展示**（仅 id 不同只显示一行；key 不同则分列）；无显式 id 的 `POST /ais` 同配置复用已有实例。**展示层**（`labelAisForDisplay`）：副标题区分「免费」与「自有 Key ···末四位」；同名标题再加 `(1)/(2)`；**重命名**独立存 `gw` 无关的 `spa-v2-ai-aliases`（按 `aiConfigKey`，id 重绑不丢）。workspace 过滤用 `sessionMatchesWorkspace`（空 workspace 视为本工作区）。
 
 ### 任务卡三步进度（分层）
 
@@ -167,9 +167,10 @@ npm run dev
 
 **刻意为之**：本地联调不要再用仓库内 `.appdata-spa-dev` 等沙盒记忆区；安装包 / CLI / spa 开发共用同一 AppData 软默认，会话与「已思考」等状态才一致。
 
+**改完验收 / Agent 约定（硬）**：经 Gateway（`http://127.0.0.1:8765/`）看页面时，**每次改完 spa-v2 源码必须立刻 `npm run build`**，再让对方硬刷；不要只改源码不 build，也不要等用户追问「build 了吗」。纯 Vite `:5174` 联调可靠 HMR，但本仓默认验收路径是 Gateway 挂 `dist/`。
+
 生产/联调：`npm run build` 后 Gateway 自动挂载 `spa-v2/dist` → `http://<gateway>/spa-v2/`。
 
-**改完验收**：用户经 Gateway 看页面时，前端改动后先 `npm run build` 再让对方刷新（硬刷）；不要只改源码不 build。
 安装包：PyInstaller / Nuitka CI 会构建并 `--add-data` / `--include-data-dir` 打入 `spa-v2/dist`；有该目录时安装版默认 `GET /` → v2。
 
 单测：`npm test`（vitest）。DOM 行为测试在文件头写 `@vitest-environment jsdom`，纯逻辑测试留在默认 node 环境（快得多）。

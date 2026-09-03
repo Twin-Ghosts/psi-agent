@@ -15,6 +15,8 @@ import { plainTextFromMarkdown } from "../services/assistantDisplay";
 import type { TodoSegmentSummary } from "../services/api";
 import type { FocusHistoryItem, Task } from "./model";
 import { ProgressRing, TreasureVisual } from "./primitives";
+import { translate, useI18n, type Language } from "../i18n";
+import { displayTaskStatusLabel, localizedTaskUpdated } from "../services/sessionBridge";
 
 function FocusHistoryIcon({ item, task }: { item: FocusHistoryItem; task: Task | null }) {
   if (item.kind === "segment") return <ListTodo size={15} />;
@@ -26,19 +28,19 @@ function FocusHistoryIcon({ item, task }: { item: FocusHistoryItem; task: Task |
   return <ProgressRing value={task?.progress ?? 0} continuous={task?.status === "continuous" || !!task?.progressIndeterminate} size="sm" showValue={false} label={task?.hasTodoTrack ? task.progressLabel : undefined} />;
 }
 
-function deliveryFileDescription(fileName: string) {
-  if (fileName.endsWith(".pdf")) return "文档摘要、关键结论与证据页可继续展开查看";
-  if (fileName.endsWith(".xlsx")) return "字段、名单或证据明细已按结构化表格整理";
-  if (fileName.endsWith(".docx")) return "正文、批注与可继续编辑的内容已经保留";
-  return "任务生成的可复用文件，已关联到本次执行记录";
+function deliveryFileDescription(fileName: string, language: Language) {
+  if (fileName.endsWith(".pdf")) return translate(language, "focus.fileDesc.pdf");
+  if (fileName.endsWith(".xlsx")) return translate(language, "focus.fileDesc.xlsx");
+  if (fileName.endsWith(".docx")) return translate(language, "focus.fileDesc.docx");
+  return translate(language, "focus.fileDesc.generic");
 }
 
-function formatSegmentTime(iso: string): string {
+function formatSegmentTime(iso: string, language: Language): string {
   const raw = iso.trim();
   if (!raw) return "";
   const d = new Date(raw);
   if (Number.isNaN(d.getTime())) return raw;
-  return d.toLocaleString("zh-CN", {
+  return d.toLocaleString(language === "en-US" ? "en-US" : "zh-CN", {
     month: "numeric",
     day: "numeric",
     hour: "2-digit",
@@ -72,6 +74,7 @@ export function TaskFocusDetails({
   onSelectTodoSegment?: (segmentId: string) => void;
   onOpenArtifact: (task: Task, fileName?: string) => void;
 }) {
+  const { language, t } = useI18n();
   const viewingHistory = !!task && selectedSegmentId !== "live";
   const workingStep = task?.steps.find((step) => step.state === "working");
   const checklistDone = !!task?.hasTodoTrack
@@ -80,24 +83,24 @@ export function TaskFocusDetails({
   const activeStep = viewingHistory
     ? (task?.hasTodoTrack
       ? (checklistDone
-        ? `历史子任务 · ${task.progressLabel || "已完成"}`
-        : `历史子任务 · ${task.progressLabel || workingStep?.label || "步骤"}`)
-      : "历史子任务")
+        ? t("focus.historySubtaskWithLabel", { label: task.progressLabel || t("focus.completed") })
+        : t("focus.historySubtaskWithLabel", { label: task.progressLabel || workingStep?.label || t("focus.stepsUnit") }))
+      : t("focus.historySubtask"))
     : task?.phase === "done"
     ? (task.hasTodoTrack
-      ? (checklistDone ? "全部执行步骤已完成" : (workingStep?.label || `清单 ${task.progressLabel || "未完成"}`))
-      : "本轮已完成")
+      ? (checklistDone ? t("focus.cleanedDone") : (workingStep?.label || t("focus.listLabel", { label: task.progressLabel || t("focus.notDone") })))
+      : t("focus.roundDone"))
     : task?.phase === "deliver"
-      ? "正在整理交付"
+      ? t("focus.delivering")
       : task?.phase === "advance"
         ? (task.hasTodoTrack
           ? (workingStep?.detail?.trim()
             ? `${task.progressLabel ?? workingStep.label} · ${workingStep.detail.trim()}`
-            : (workingStep?.label || task.progressLabel || "推进中"))
-          : (workingStep?.label || "待继续"))
+            : (workingStep?.label || task.progressLabel || t("focus.advancing")))
+          : (workingStep?.label || t("focus.pending")))
         : workingStep
           ? workingStep.label
-          : (task?.status === "completed" ? "全部执行步骤已完成" : "等待下一步");
+          : (task?.status === "completed" ? t("focus.cleanedDone") : t("focus.waitingNext"));
   const historyItems: FocusHistoryItem[] = task
     ? (todoSegments.length
       ? todoSegments.map((seg) => {
@@ -107,9 +110,9 @@ export function TaskFocusDetails({
             id: `seg-${seg.id}`,
             kind: "segment" as const,
             segmentId: isOpen ? "live" : seg.id,
-            title: seg.label || "子任务",
-            detail: [isOpen ? "当前" : "已归档", nm ? `清单 ${nm}` : ""].filter(Boolean).join(" · "),
-            time: formatSegmentTime(seg.updated_at || seg.created_at),
+            title: seg.label || t("focus.subtask"),
+            detail: [isOpen ? t("focus.current") : t("focus.archived"), nm ? t("focus.listLabel", { label: nm }) : ""].filter(Boolean).join(" · "),
+            time: formatSegmentTime(seg.updated_at || seg.created_at, language),
           };
         })
       : [{
@@ -118,23 +121,23 @@ export function TaskFocusDetails({
           title: task.hasTodoTrack
             ? (task.phase === "done"
               ? (checklistDone
-                ? `本轮已完成 · ${task.progressLabel || `${task.progress}%`}`
-                : `本轮已回复 · ${task.progressLabel || `${task.progress}%`}`)
-              : `${task.statusLabel} · ${task.progressLabel || `${task.progress}%`}`)
+                ? `${t("focus.roundDone")} · ${task.progressLabel || `${task.progress}%`}`
+                : `${t("focus.roundReplied")} · ${task.progressLabel || `${task.progress}%`}`)
+              : `${displayTaskStatusLabel(task.status, task.statusLabel, language)} · ${task.progressLabel || `${task.progress}%`}`)
             : (task.progressIndeterminate
-              ? `${task.statusLabel} · 处理中`
+              ? `${displayTaskStatusLabel(task.status, task.statusLabel, language)} · ${t("focus.processing")}`
               : task.phase === "done"
-                ? (task.status === "completed" ? task.statusLabel : "本轮已完成")
-                : task.statusLabel),
+                ? (task.status === "completed" ? displayTaskStatusLabel(task.status, task.statusLabel, language) : t("focus.roundDone"))
+                : displayTaskStatusLabel(task.status, task.statusLabel, language)),
           detail: "",
-          time: task.updated,
+          time: localizedTaskUpdated(task.updated, language),
         }])
     : tasks.slice(0, 3).map((item) => ({
       id: `status-${item.id}`,
       kind: "status" as const,
-      title: `${item.shortTitle} · ${item.statusLabel}`,
+      title: `${item.shortTitle} · ${displayTaskStatusLabel(item.status, item.statusLabel, language)}`,
       detail: "",
-      time: item.updated,
+      time: localizedTaskUpdated(item.updated, language),
     }));
 
   const finiteTasks = tasks.filter((item) => item.status !== "continuous");
@@ -151,55 +154,55 @@ export function TaskFocusDetails({
     : tasks.filter((item) => item.deliveryState === "generating");
   const historicalFileCount = historicalDeliveryTasks.reduce((sum, item) => sum + item.deliverables.length, 0);
   const emptyDeliveryCopy = !task
-    ? "还没有历史交付物；Agent 通过 [SEND:] 交付文件后，会按会话累计显示在这里。"
+    ? t("focus.emptyDeliveryAll")
     : task.status === "completed"
-      ? "该任务会话尚无文件交付物。完成结果已记录在任务历史中。"
+      ? t("focus.emptyDeliveryDone")
       : task.status === "continuous"
-        ? "本会话暂无交付物，Agent 交付文件后会保留在这里。"
-        : "本会话尚未形成交付物；生成后会累计出现在这里（刷新后仍保留列表）。";
+        ? t("focus.emptyDeliveryContinuous")
+        : t("focus.emptyDeliveryDefault");
 
   return (
     <div className="focus-detail-panel">
       <section className="focus-state-banner">
         <div>
-          <span><Sparkles size={13} /> 任务摘要</span>
-          <strong>{task ? task.title : "今天全部任务的执行上下文"}</strong>
-          <p>{task ? plainTextFromMarkdown(task.summary) : `共 ${tasks.length} 个任务，综合进度 ${overall}%。您可以基于任一历史动作继续补充要求。`}</p>
+          <span><Sparkles size={13} /> {t("focus.summaryLabel")}</span>
+          <strong>{task ? task.title : t("focus.allTasksContext")}</strong>
+          <p>{task ? plainTextFromMarkdown(task.summary) : t("focus.summaryAll", { count: tasks.length, overall })}</p>
           {viewingHistory && onSelectTodoSegment ? (
             <p className="focus-history-viewing-hint">
-              正在查看历史子任务步骤（只读）。
+              {t("focus.viewingHistoryHint")}
               <button type="button" className="focus-history-back-live" onClick={() => onSelectTodoSegment("live")}>
-                返回当前清单
+                {t("focus.backToLive")}
               </button>
             </p>
           ) : null}
         </div>
         <div className="focus-state-grid">
-          <span><em>状态</em><strong>{task?.statusLabel ?? `${tasks.length} 个任务`}</strong></span>
+          <span><em>{t("focus.status")}</em><strong>{task ? displayTaskStatusLabel(task.status, task.statusLabel, language) : t("focus.taskCount", { count: tasks.length })}</strong></span>
           <span>
-            <em>{task?.hasTodoTrack ? "步骤" : task?.status === "continuous" ? "本轮" : "活动"}</em>
+            <em>{task?.hasTodoTrack ? t("focus.stepsUnit") : task?.status === "continuous" ? t("focus.roundUnit") : t("focus.activityUnit")}</em>
             <strong>
               {task
                 ? (task.hasTodoTrack
                   ? (task.progressLabel || "—")
                   : task.progressIndeterminate
-                    ? "处理中"
+                    ? t("focus.processing")
                     : task.phase === "done"
-                      ? "已完成"
-                      : "待继续")
+                      ? t("focus.completed")
+                      : t("focus.pending"))
                 : `${overall}%`}
             </strong>
           </span>
-          <span><em>当前阶段</em><strong>{task ? activeStep : `${tasks.filter((item) => item.status === "attention").length} 项待您处理`}</strong></span>
-          <span><em>最近更新</em><strong>{task?.updated ?? "刚刚同步"}</strong></span>
+          <span><em>{t("focus.currentPhase")}</em><strong>{task ? activeStep : t("focus.attentionCount", { count: tasks.filter((item) => item.status === "attention").length })}</strong></span>
+          <span><em>{t("focus.recentUpdate")}</em><strong>{task ? localizedTaskUpdated(task.updated, language) : t("focus.justSynced")}</strong></span>
         </div>
       </section>
 
-      <section className="focus-execution-path" aria-label={task ? "任务执行路径" : "任务状态列表"}>
+      <section className="focus-execution-path" aria-label={task ? t("focus.executionPathAria") : t("focus.statusListAria")}>
         <header>
           <span>
             <Zap size={13} />
-            {task ? (task.hasTodoTrack ? "执行步骤" : "活动状态") : "任务运行状态"}
+            {task ? (task.hasTodoTrack ? t("focus.executionSteps") : t("focus.activityStatus")) : t("focus.runningStatus")}
           </span>
         </header>
         <div>
@@ -209,10 +212,10 @@ export function TaskFocusDetails({
               <strong>{step.label}</strong>
               <em>
                 {step.state === "done"
-                  ? "已完成"
+                  ? t("focus.stepDone")
                   : step.state === "working"
-                    ? (step.detail?.trim() || (task?.hasTodoTrack ? "进行中" : "处理中"))
-                    : (step.detail?.trim() || "待推进")}
+                    ? (step.detail?.trim() || (task?.hasTodoTrack ? t("focus.stepInProgress") : t("focus.stepProcessing")))
+                    : (step.detail?.trim() || t("focus.stepPending"))}
               </em>
             </span>
           ))}
@@ -221,7 +224,7 @@ export function TaskFocusDetails({
 
       <div className="focus-detail-columns">
         <section className="focus-task-history">
-          <header><div><History size={14} /><strong>{task ? "任务历史" : "今天的任务记录"}</strong></div><span>{historyItems.length} 条记录</span></header>
+          <header><div><History size={14} /><strong>{task ? t("focus.taskHistory") : t("focus.todayHistory")}</strong></div><span>{t("focus.recordCount", { count: historyItems.length })}</span></header>
           <div className="focus-history-list">
             {historyItems.map((item) => {
               const segKey = item.segmentId ?? item.id;
@@ -248,7 +251,7 @@ export function TaskFocusDetails({
                   key={item.id}
                   onClick={() => onSelectTodoSegment?.(item.segmentId!)}
                   aria-pressed={active}
-                  aria-label={`查看子任务：${item.title}`}
+                  aria-label={t("focus.viewSubtask", { title: item.title })}
                 >
                   {inner}
                 </button>
@@ -260,25 +263,25 @@ export function TaskFocusDetails({
             })}
             {historyItems.length === 0 && (
               <div className="focus-history-empty">
-                {task ? "尚无子任务分段；Agent 调用 todo（整表重开）后会出现在这里。" : "暂无额外记录"}
+                {task ? t("focus.noSegments") : t("focus.noExtraRecords")}
               </div>
             )}
           </div>
         </section>
 
         <section className="focus-delivery-history">
-          <header><div><FileArchive size={14} /><strong>{task?.deliveryState === "generating" ? "交付物进度" : "历史交付物"}</strong></div><span>{task?.deliveryState === "generating" ? "生成中" : `${historicalFileCount} 份`}</span></header>
+          <header><div><FileArchive size={14} /><strong>{task?.deliveryState === "generating" ? t("focus.deliveryProgress") : t("focus.historicalDeliveries")}</strong></div><span>{task?.deliveryState === "generating" ? t("focus.generating") : t("focus.fileCount", { count: historicalFileCount })}</span></header>
           {historicalDeliveryTasks.length ? (
             <div className="focus-delivery-groups">
               {historicalDeliveryTasks.map((owner) => {
                 const hasNew = owner.newDeliverables.length > 0;
                 const stateCopy = owner.deliveryState === "saved"
-                  ? "历史交付 · 已保存过成果库"
+                  ? t("focus.savedToLibrary")
                   : hasNew
-                    ? "含未确认的新交付物"
+                    ? t("focus.hasNewDeliveries")
                     : owner.deliverables.length
-                      ? "本会话历史交付物"
-                      : "预计交付 · 正在生成";
+                      ? t("focus.sessionDeliveries")
+                      : t("focus.expectedDelivery");
                 return (
                   <div className="focus-delivery-group" key={owner.id}>
                     {!task && <span className="focus-delivery-owner">{owner.shortTitle}</span>}
@@ -287,10 +290,10 @@ export function TaskFocusDetails({
                         type="button"
                         key={file}
                         onClick={() => onOpenArtifact(owner, file)}
-                        aria-label={`查看历史交付物 ${file}`}
+                        aria-label={t("focus.viewDelivery", { file })}
                       >
                         <span className="focus-file-preview" aria-hidden="true"><FileText size={15} /><i /><i /><i /></span>
-                        <span className="focus-file-copy"><strong>{file}</strong><em>{stateCopy} · {owner.updated}</em><small>{deliveryFileDescription(file)}</small></span>
+                        <span className="focus-file-copy"><strong>{file}</strong><em>{stateCopy} · {localizedTaskUpdated(owner.updated, language)}</em><small>{deliveryFileDescription(file, language)}</small></span>
                         <ChevronRight size={15} />
                       </button>
                     ))}
@@ -302,7 +305,7 @@ export function TaskFocusDetails({
             <div className="focus-delivery-empty"><TreasureVisual state="none" size="compact" /><p>{emptyDeliveryCopy}</p></div>
           )}
           {generatingTasks.map((owner) => (
-            <div className="focus-pending-delivery" key={owner.id}><TreasureVisual state="generating" size="mini" /><span><strong>{owner.shortTitle}</strong><em>预计交付 {owner.deliverables.length} 份 · 生成中</em></span></div>
+            <div className="focus-pending-delivery" key={owner.id}><TreasureVisual state="generating" size="mini" /><span><strong>{owner.shortTitle}</strong><em>{t("focus.expectedCount", { count: owner.deliverables.length })}</em></span></div>
           ))}
         </section>
       </div>

@@ -1,10 +1,12 @@
 ---
 name: company-todo-audit
-description: "公司 TODO 管理体系·闭环判定与回流 —— 在每次采集前，按闭环五要素判定上一周期每条 todo 是否真正闭环；未闭环项按原截止日算逾期天数，标题加 [逾期 N 天] 前缀回流进本周期派发列表；给 boss 出整体统计。Use when the todo-cycle-audit schedule fires (fire=prompt, cron '30 14 * * 1,3,5', 本周期 15:00 采集前半小时), or when explicitly asked to audit last cycle's closure status by hand. Must run before company-todo-sync in the same cycle — sync 依赖本技能算出的回流项。Companion skills: company-todo-sync (采集与派发), company-todo-review (评价回写)。"
+description: "公司 TODO 管理体系·闭环判定与回流 —— 在每次采集前，按闭环五要素判定上一周期每条 todo 是否真正闭环；未闭环项按原截止日算逾期天数，标题加 [逾期 N 天] 前缀回流进本周期派发列表；给 boss 出整体统计。Use when the todo-cycle-audit schedule fires (fire=prompt, cron '30 14 * * 1,3,5', 本周期 15:00 采集前半小时), or when explicitly asked to audit last cycle's closure status by hand. Must run before company-todo-sync in the same cycle — sync 依赖本技能算出的回流项。Companion skills: company-todo-sync (采集与派发), company-todo-review (评价回写)。动态一层:每轮判定结果落盘 .todo-eval 评测记录 + 逐人前后对比摘要(新开/承接/消失/回流/顺延)。"
 category: productivity
 ---
 
 # 公司 TODO 管理体系 · 闭环判定与回流
+
+> 判定口径读 `config/todo-sop.yaml`，用户可编辑，换公司只改此文件；本文保留引擎与通用纪律，参数值以该文件为准。
 
 「交付完成」不等于「勾了框」。每次采集前半小时跑一次审计，判上一周期每条 todo 是否走完整圈；
 没走完的带着逾期天数回流进本周期，绝不静默消失。
@@ -66,10 +68,67 @@ mentor 有两条打分通道：评价卡（实时回写 wiki）与**台账表内
 5. **回流不删除历史**：上一周期的快照页里该条仍然是「未闭环」原样保留，新周期页里是**新的一条**，
    两条通过标题（`[逾期 N 天] <原标题>`）互相对应，不做原地覆盖。
 
+## 动态一层 · 评测落盘（.todo-eval）
+
+CEO 口径：MVP 起即记录 check 结果数据，先搭评测体系再搭数据体系。动态一层的判定结果（每期谁闭环了、
+谁回流了、谁顺延了）是这套数据里最核心的一块——落成结构化评测记录，形成个人跨周期连续性序列，
+供前后对比、准确率评估与后续训练复用。
+
+本技能每跑完一轮五要素判定，对**上一周期台账的每一行**写一条评测记录（落盘失败要明说，不静默丢结论）：
+
+| 字段 | 含义 |
+|---|---|
+| date | 判定日（ISO） |
+| cycle | 被审计的上一周期日期 |
+| person | 负责人（open_id） |
+| item | 标题 |
+| item_type | 层级：大目标 / 小目标 / todo |
+| verdict | 已闭环 / 未闭环逾期 / 回流[逾期 N 天] / 请假顺延 / 持续逾期 |
+| missing_elements | 闭环五要素的缺项名（未闭环时才写） |
+| evidence_level | 依据源：台账 / 任务 completed_at / wiki 回写 |
+| evidence_refs | 台账 record_id、task_guid、wiki 快照页 |
+| rules_hit | 命中的判定 / 回流规则 |
+
+落点两处，同一条写两份：
+
+1. workspace 评测数据目录 `.todo-eval/YYYY-MM-DD.json`：当日文件，**同 (cycle, person, item) 幂等覆盖**，
+   重跑不重复积累；先读回当日已有记录再合并写回，不整文件覆盖丢历史。
+2. `feishu_bitable_create_records` 同步飞书「评测记录」表（无则按与 JSON 一致的字段名新建；表结构沿用
+   台账基建设计，人员列恒为人员类型）。
+
+**用途**：跨周期拉同一人的记录即得连续性序列（闭环率、回流次数、持续逾期段、顺延段），是「动态一层
+前后对比」与后续「动态二层成长评价」的数据底座。
+
+## 前后对比摘要（上期 vs 本期，逐人）
+
+在闭环判定之外，给**每个负责人**一份跨周期连续性摘要。数据源：本周期台账表（`company-todo-sync` 本周期
+已建）+ 上一周期历史表（台账每周期一张表，历史表原样保留）+ LLM wiki 快照链（`company-todo-sync` 维护）。
+对每人数六项：
+
+| 项 | 口径 |
+|---|---|
+| 新开 | 本期台账出现、上期无 |
+| 承接 | 跨周期延续：标题相同 / 高度相似，沿用 `company-todo-sync` 的跨周期任务去重口径（复用原 task_guid），不重复建任务 |
+| 消失 | 上期有、本期无 → 归 `todo-completion-standard` 的「推断已完成／待确认」，**不在这里判未闭环，更不判失实** |
+| 已闭环 | 本期五要素齐 |
+| 回流 | 上期未闭环回流进本期，含 [逾期 N 天] |
+| 请假顺延 | 整周期 / 部分周期请假（不计入逾期天数） |
+
+两份产出：
+
+- **mentor 视图**（私聊，只含自己名下成员）：逐人六项 + 一句话连续性结论；连续两个周期未闭环的项单列
+  「持续逾期」并同步该 mentor 上级（见回流规则第 3 条）。
+- **boss 视图**：全公司汇总，每个 mentor 团队加「较上期」趋势列（闭环数、回流数、顺延数）。
+
+**纪律**：消失 ≠ 未闭环 ≠ 失实；请假顺延不计逾期；承接只对任务做去重、不对填报文本硬匹配（当前多数人
+todo 还没写好父子关联，父项留空是常态，不强挂）。比对只读台账与 wiki 快照两处权威源，不接受口头 / 聊天
+记录里的「说已经做完了」。
+
 ## 给 boss 的整体统计
 
 `feishu_chart` 或直接文本卡列出：本周期大目标/小目标/todo 各多少条、已闭环多少、逾期多少、
-请假顺延多少、各 mentor 下属平均分。boss 只读，不写 todo、不被派发——统计卡是私聊推送，不进群。
+请假顺延多少、各 mentor 下属平均分。整体统计与「前后对比摘要」的 boss 视图同源，一次查询合并出卡，
+不重复读台账。boss 只读，不写 todo、不被派发——统计卡是私聊推送，不进群。
 
 ## 边界
 

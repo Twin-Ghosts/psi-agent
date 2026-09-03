@@ -1,0 +1,10 @@
+{
+  "language.name": "中文",
+  "repl.connected": "已连接到 Session。回车换行，Alt+Enter 发送（Ctrl+D 退出）。",
+  "repl.panel_title": "psi-agent REPL — 回车换行，Alt+Enter 发送",
+  "repl.exit_hint": "Ctrl+D 退出",
+  "repl.goodbye": "再见！",
+  "cli.error": "错误：",
+  "cli.connection_error": "连接错误：",
+  "cli.unexpected_error": "意外错误："
+}

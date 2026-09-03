@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import _runtime_paths as _paths
 import anyio
 from openpyxl import Workbook
 from openpyxl.styles import Font
@@ -43,13 +44,18 @@ async def write_excel(file_path: str, rows_json: str, sheet_name: str = "Sheet1"
 
     Args:
         file_path: Output path for the .xlsx file (e.g. "report.xlsx").
+            Relative paths (including bare filenames) resolve under the
+            **session workspace** — never under the agent package directory.
+            Absolute paths are used as-is, except writes into the agent
+            package itself, which are refused.
         rows_json: JSON-encoded 2D array of rows, e.g.
             '[["Name", "Score"], ["Alice", 92], ["Bob", 88]]'.
         sheet_name: Worksheet name (truncated to Excel's 31-char limit).
         header: When True, bold the first row as a header.
 
     Returns:
-        Success message with the row count, or an error message.
+        Success message with the row count and the **resolved** output path
+        (the path a ``[SEND:…]`` marker should point at), or an error message.
     """
     if not file_path.lower().endswith(".xlsx"):
         file_path = f"{file_path}.xlsx"
@@ -64,14 +70,22 @@ async def write_excel(file_path: str, rows_json: str, sheet_name: str = "Sheet1"
     if not rows:
         return "[Error] rows_json is empty; provide at least one row"
 
-    path = anyio.Path(file_path)
+    # Deliverables belong in the session workspace: bare/relative names resolve
+    # there (the framework binds get_workspace() per turn), never against the
+    # process cwd — which is the agent package dir. Writing into the package
+    # silently breaks [SEND:] delivery (markers point at the workspace) and
+    # pollutes the version-controlled tree, so it is refused outright.
+    path = _paths.resolve_user_path(file_path)
+    refusal = _paths.refuse_agent_write(str(path))
+    if refusal is not None:
+        return refusal
     parent = path.parent
     if not await parent.exists():
         await parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        count = await anyio.to_thread.run_sync(_build_workbook, file_path, rows, sheet_name, header)  # ty: ignore
+        count = await anyio.to_thread.run_sync(_build_workbook, str(path), rows, sheet_name, header)  # ty: ignore
     except Exception as e:  # openpyxl raises assorted errors on bad values
         return f"[Error] Failed to write Excel file: {e!r}"
 
-    return f"[OK] Wrote {count} row(s) to {file_path}"
+    return f"[OK] Wrote {count} row(s) to {path}"

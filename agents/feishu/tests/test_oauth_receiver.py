@@ -66,6 +66,48 @@ def test_explicit_loopback_redirect_is_still_automatic() -> None:
     assert plan.redirect_uri == f"http://127.0.0.1:{port}/oauth/callback"
 
 
+def test_loopback_stays_automatic_when_own_watcher_holds_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    """本进程自己的 watcher 占着端口 = 「等授权中」的正常形态, 不能降级成手工贴码。
+
+    env_check / plan_receiver 曾把活着的自持监听误判成「被占 → manual」, 于是对着一台
+    明明在自动收码的部署喊用户去复制 code (线上实际发生过)。
+    """
+    port = _free_port()
+    monkeypatch.setenv("PSI_OAUTH_LOOPBACK_PORT", str(port))
+    _rx.mark_self_listening(port)
+    try:
+        plan = _rx.plan_receiver("")
+    finally:
+        _rx.unmark_self_listening(port)
+    assert plan.mode == "loopback"
+    assert plan.automatic is True
+    assert plan.redirect_uri == f"http://127.0.0.1:{port}/oauth/callback"
+
+
+def test_explicit_loopback_redirect_stays_automatic_when_self_held() -> None:
+    """显式回环 redirect 分支同样认得自持监听。"""
+    port = _free_port()
+    _rx.mark_self_listening(port)
+    try:
+        plan = _rx.plan_receiver(f"http://127.0.0.1:{port}/oauth/callback")
+    finally:
+        _rx.unmark_self_listening(port)
+    assert plan.mode == "loopback"
+    assert plan.automatic is True
+
+
+def test_foreign_port_holder_still_means_manual(monkeypatch: pytest.MonkeyPatch) -> None:
+    """别人的进程占着端口仍是 manual —— 自持识别不能把真冲突也放行。"""
+    port = _free_port()
+    monkeypatch.setenv("PSI_OAUTH_LOOPBACK_PORT", str(port))
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as held:
+        held.bind(("127.0.0.1", port))
+        held.listen(1)
+        plan = _rx.plan_receiver("")
+    assert plan.mode == "manual"
+    assert plan.automatic is False
+
+
 def test_explicit_public_redirect_falls_back_to_manual(monkeypatch: pytest.MonkeyPatch) -> None:
     """显式登记的公网地址我们无从监听 —— 尊重它, 但只能手工贴码。"""
     monkeypatch.setenv("PSI_OAUTH_CALLBACK_BASE", "https://gw.example.com")

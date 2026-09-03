@@ -14,11 +14,12 @@ import {
 import { type ClipboardEvent, type FormEvent, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { NEW_TASK_PRESETS } from "./demo-fixtures";
-import { OVERVIEW_LABEL, type Task, type TaskTemplate } from "./model";
+import { type Task, type TaskTemplate } from "./model";
 import { AgentMark, BrandLogo } from "./primitives";
 import { filesFromClipboard } from "../services/clipboardFiles";
 import { useComposerFileDrop } from "../services/composerFileDrop";
 import { onComposerEnterKey } from "../services/composerKeys";
+import { useI18n } from "../i18n";
 
 export function NewTaskWorkspace({
   draft,
@@ -46,9 +47,16 @@ export function NewTaskWorkspace({
   /** Override back-button label (default: 返回任务总览). */
   backLabel?: string;
 }) {
+  const { t } = useI18n();
   const [typing, setTyping] = useState(false);
   const [attachments, setAttachments] = useState<File[]>([]);
   const attachmentRef = useRef<HTMLInputElement | null>(null);
+  const presets = NEW_TASK_PRESETS.map((preset) => ({
+    ...preset,
+    label: t(`preset.${preset.id}.label`),
+    prompt: t(`preset.${preset.id}.prompt`),
+    category: t(`preset.${preset.id}.category`),
+  }));
   const { isFileDragOver, dropProps } = useComposerFileDrop({
     enabled: !typing,
     onFiles: (files) => setAttachments((current) => [...current, ...files]),
@@ -78,7 +86,7 @@ export function NewTaskWorkspace({
   };
 
   return (
-    <section className="new-task-workspace" aria-label="新建任务/聊天对话">
+    <section className="new-task-workspace" aria-label={t("newTask.aria")}>
       <div className="new-task-ambient one" />
       <div className="new-task-ambient two" />
 
@@ -89,9 +97,9 @@ export function NewTaskWorkspace({
         </div>
 
         <div className="new-task-greeting">
-          <span className="eyebrow">新建任务/聊天</span>
-          <h1>有什么可以帮您？</h1>
-          <p>描述希望得到的结果、截止时间，以及手头已有的材料。发送后会进入任务分屏继续对话。</p>
+          <span className="eyebrow">{t("newTask.eyebrow")}</span>
+          <h1>{t("newTask.title")}</h1>
+          <p>{t("newTask.desc")}</p>
         </div>
 
         <div
@@ -100,7 +108,7 @@ export function NewTaskWorkspace({
         >
           {!typing && (
             <div className="new-task-presets">
-              {NEW_TASK_PRESETS.map((preset) => {
+              {presets.map((preset) => {
                 const Icon = preset.icon;
                 return (
                   <button
@@ -136,7 +144,7 @@ export function NewTaskWorkspace({
                     data-attach-control
                     disabled={typing}
                     onClick={() => setAttachments((current) => current.filter((_, i) => i !== index))}
-                    aria-label={`移除 ${file.name}`}
+                    aria-label={t("app.removeFile", { name: file.name })}
                   >
                     <X size={12} />
                   </button>
@@ -151,7 +159,7 @@ export function NewTaskWorkspace({
               className="chat-attach-button"
               data-attach-control
               onClick={() => attachmentRef.current?.click()}
-              aria-label="添加附件"
+              aria-label={t("app.attach")}
               disabled={typing}
             >
               <Paperclip size={20} />
@@ -190,12 +198,12 @@ export function NewTaskWorkspace({
                   });
                 });
               }}
-              placeholder={typing ? "正在创建任务…" : "描述一个任务，发送后进入分屏与 Agent 对话…"}
-              aria-label="描述新任务"
+              placeholder={typing ? t("newTask.creating") : t("newTask.placeholder")}
+              aria-label={t("newTask.ariaComposer")}
               autoFocus
               disabled={typing}
             />
-            <button type="submit" className="send-button" disabled={!canSend || typing} aria-label="发送任务描述">
+            <button type="submit" className="send-button" disabled={!canSend || typing} aria-label={t("newTask.sendAria")}>
               <Send size={16} />
             </button>
           </form>
@@ -203,10 +211,10 @@ export function NewTaskWorkspace({
 
         <div className="new-task-secondary-actions">
           {showTemplatesEntry ? (
-            <button type="button" onClick={onOpenTemplates} disabled={typing}><SquareStack size={15} /> 从任务模板开始</button>
+            <button type="button" onClick={onOpenTemplates} disabled={typing}><SquareStack size={15} /> {t("newTask.startFromTemplate")}</button>
           ) : <span />}
           <button type="button" onClick={onBack} disabled={typing}>
-            <ArrowLeft size={15} /> {backLabel ?? `返回${OVERVIEW_LABEL}`}
+            <ArrowLeft size={15} /> {backLabel ?? t("app.backOverview")}
           </button>
         </div>
       </div>
@@ -226,36 +234,37 @@ export function TemplateLibrary({
   onUseTemplate: (template: TaskTemplate) => void;
   onCreateTemplate: (title: string, category: string, prompt: string) => void;
 }) {
+  const { t } = useI18n();
   const [searchText, setSearchText] = useState(initialSearch);
   const [builderOpen, setBuilderOpen] = useState(false);
   const [templateTitle, setTemplateTitle] = useState("");
-  const [templateCategory, setTemplateCategory] = useState("自定义模板");
+  const [templateCategory, setTemplateCategory] = useState(t("templates.custom"));
   const [templatePrompt, setTemplatePrompt] = useState("");
   const filteredTemplates = templates.filter((template) => `${template.title}${template.category}${template.description}`.includes(searchText.trim()));
 
   const saveTemplate = (event: FormEvent) => {
     event.preventDefault();
     if (!templateTitle.trim() || !templatePrompt.trim()) return;
-    onCreateTemplate(templateTitle.trim(), templateCategory.trim() || "自定义模板", templatePrompt.trim());
+    onCreateTemplate(templateTitle.trim(), templateCategory.trim() || t("templates.custom"), templatePrompt.trim());
     setTemplateTitle("");
     setTemplatePrompt("");
     setBuilderOpen(false);
   };
 
   return (
-    <section className="template-library" aria-label="任务模板库">
+    <section className="template-library" aria-label={t("templates.aria")}>
       <header className="template-library-header">
         <div>
-          <span className="eyebrow">可复用工作方式</span>
-          <h1>任务模板</h1>
-          <p>把高频任务沉淀下来，下次只需要补充本次上下文。</p>
+          <span className="eyebrow">{t("templates.eyebrow")}</span>
+          <h1>{t("templates.title")}</h1>
+          <p>{t("templates.desc")}</p>
         </div>
-        <button type="button" className="template-create-button" onClick={() => setBuilderOpen(true)}><Plus size={17} /> 新建模板</button>
+        <button type="button" className="template-create-button" onClick={() => setBuilderOpen(true)}><Plus size={17} /> {t("templates.create")}</button>
       </header>
 
       <div className="template-toolbar">
-        <label><Search size={16} /><input value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder="搜索模板或场景" /></label>
-        <span>已沉淀 {templates.length} 个模板</span>
+        <label><Search size={16} /><input value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder={t("templates.searchPlaceholder")} /></label>
+        <span>{t("templates.count", { count: templates.length })}</span>
       </div>
 
       <div className="template-grid">
@@ -267,25 +276,25 @@ export function TemplateLibrary({
               <h2>{template.title}</h2>
               <p>{template.description}</p>
               <div className="template-output"><FileArchive size={14} /><span>{template.deliverables.join(" · ")}</span></div>
-              <footer><span>{template.cadence}</span><button type="button" onClick={() => onUseTemplate(template)}>使用模板 <ArrowRight size={14} /></button></footer>
+              <footer><span>{template.cadence}</span><button type="button" onClick={() => onUseTemplate(template)}>{t("templates.use")} <ArrowRight size={14} /></button></footer>
             </article>
           );
         })}
       </div>
 
-      <button type="button" className="template-back-link" onClick={onBack}><ArrowLeft size={15} /> 返回{OVERVIEW_LABEL}</button>
+      <button type="button" className="template-back-link" onClick={onBack}><ArrowLeft size={15} /> {t("app.backOverview")}</button>
 
       {builderOpen && createPortal(
         <div className="template-builder-layer" role="presentation">
-          <button type="button" className="template-builder-scrim" onClick={() => setBuilderOpen(false)} aria-label="关闭模板编辑器" />
-          <aside className="template-builder" role="dialog" aria-modal="true" aria-label="新建任务模板">
-            <header><div><span className="eyebrow">模板库</span><h2>新建模板</h2></div><button type="button" className="icon-button" onClick={() => setBuilderOpen(false)} aria-label="关闭"><X size={19} /></button></header>
+          <button type="button" className="template-builder-scrim" onClick={() => setBuilderOpen(false)} aria-label={t("templates.closeBuilder")} />
+          <aside className="template-builder" role="dialog" aria-modal="true" aria-label={t("templates.builderAria")}>
+            <header><div><span className="eyebrow">{t("templates.builderEyebrow")}</span><h2>{t("templates.builderTitle")}</h2></div><button type="button" className="icon-button" onClick={() => setBuilderOpen(false)} aria-label={t("templates.close")}><X size={19} /></button></header>
             <form onSubmit={saveTemplate}>
-              <label><span>模板名称</span><input value={templateTitle} onChange={(event) => setTemplateTitle(event.target.value)} placeholder="例如：新品发布复盘" autoFocus /></label>
-              <label><span>适用场景</span><input value={templateCategory} onChange={(event) => setTemplateCategory(event.target.value)} /></label>
-              <label><span>默认任务描述</span><textarea value={templatePrompt} onChange={(event) => setTemplatePrompt(event.target.value)} placeholder="描述目标、输入材料和期望交付物…" /></label>
-              <div className="template-builder-note"><Sparkles size={14} /> 保存后会出现在模板库中，使用时仍可修改任务描述。</div>
-              <button type="submit" className="primary-button" disabled={!templateTitle.trim() || !templatePrompt.trim()}><Check size={16} /> 保存模板</button>
+              <label><span>{t("templates.nameLabel")}</span><input value={templateTitle} onChange={(event) => setTemplateTitle(event.target.value)} placeholder={t("templates.namePlaceholder")} autoFocus /></label>
+              <label><span>{t("templates.sceneLabel")}</span><input value={templateCategory} onChange={(event) => setTemplateCategory(event.target.value)} /></label>
+              <label><span>{t("templates.promptLabel")}</span><textarea value={templatePrompt} onChange={(event) => setTemplatePrompt(event.target.value)} placeholder={t("templates.promptPlaceholder")} /></label>
+              <div className="template-builder-note"><Sparkles size={14} /> {t("templates.note")}</div>
+              <button type="submit" className="primary-button" disabled={!templateTitle.trim() || !templatePrompt.trim()}><Check size={16} /> {t("templates.save")}</button>
             </form>
           </aside>
         </div>,

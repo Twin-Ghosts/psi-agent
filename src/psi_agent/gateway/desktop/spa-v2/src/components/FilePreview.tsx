@@ -4,6 +4,7 @@ import { Download, FileText, FolderOpen, X } from 'lucide-react'
 import type { ChatFile } from '../haitun-agent/model'
 import { downloadChatFile, revealDeliverableInFolder } from '../utils/filePreviewUtils'
 import { ArtifactFileBody } from './ArtifactFileBody'
+import { useI18n } from '../i18n'
 
 /**
  * In-app preview drawer for chat blobs — same render path as 宝箱 ArtifactFileBody.
@@ -17,6 +18,7 @@ export default function FilePreview({
   workspaceRoot?: string
   onClose: () => void
 }) {
+  const { t } = useI18n();
   const [revealBusy, setRevealBusy] = useState(false)
   const [revealError, setRevealError] = useState('')
   const canReveal = Boolean(file.path?.trim())
@@ -43,8 +45,8 @@ export default function FilePreview({
 
   return createPortal(
     <div className="preview-drawer-shell">
-      <button type="button" className="preview-scrim" aria-label="关闭预览" onClick={onClose} />
-      <aside className="file-preview preview-drawer" role="dialog" aria-modal="true" aria-label="文件预览">
+      <button type="button" className="preview-scrim" aria-label={t('preview.closeAria')} onClick={onClose} />
+      <aside className="file-preview preview-drawer" role="dialog" aria-modal="true" aria-label={t('preview.aria')}>
         <header className="preview-drawer-header">
           <div className="preview-title-wrap">
             <FileText size={18} />
@@ -54,17 +56,17 @@ export default function FilePreview({
             <button
               type="button"
               className="preview-icon-btn"
-              title={canReveal ? (revealBusy ? '正在打开…' : '在文件夹中显示') : '无磁盘路径，无法定位'}
+              title={canReveal ? (revealBusy ? t('chat.opening') : t('chat.showInFolder')) : t('preview.noPath')}
               disabled={!canReveal || revealBusy}
               onClick={handleReveal}
-              aria-label="在文件夹中显示"
+              aria-label={t('chat.showInFolder')}
             >
               <FolderOpen size={16} />
             </button>
-            <button type="button" className="preview-icon-btn" title="下载" onClick={() => downloadChatFile(file)}>
+            <button type="button" className="preview-icon-btn" title={t('drawer.download')} onClick={() => downloadChatFile(file)}>
               <Download size={16} />
             </button>
-            <button type="button" className="preview-icon-btn" title="关闭" onClick={onClose}>
+            <button type="button" className="preview-icon-btn" title={t('preview.close')} onClick={onClose}>
               <X size={16} />
             </button>
           </div>

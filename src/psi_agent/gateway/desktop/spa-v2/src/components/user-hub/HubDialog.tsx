@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import { ChevronLeft, X } from 'lucide-react'
+import { useI18n } from '../../i18n'
 
 type Props = {
   show: boolean
@@ -28,6 +29,7 @@ export default function HubDialog({
   onBack,
   blocking = false,
 }: Props) {
+  const { t } = useI18n();
   if (!show) return null
   return (
     <div className="hub-dialog-layer" role="dialog" aria-modal="true">
@@ -36,12 +38,12 @@ export default function HubDialog({
       {blocking ? (
         <div className="hub-dialog-backdrop" aria-hidden="true" />
       ) : (
-        <button type="button" className="hub-dialog-backdrop" aria-label="关闭" onClick={onClose} />
+        <button type="button" className="hub-dialog-backdrop" aria-label={t('app.close')} onClick={onClose} />
       )}
       <div className="hub-dialog" style={{ width: `min(${width}px, 94vw)` }}>
         <header className="hub-dialog-header">
           {onBack ? (
-            <button type="button" className="hub-dialog-close" onClick={onBack} aria-label="返回">
+            <button type="button" className="hub-dialog-close" onClick={onBack} aria-label={t('auth.back')}>
               <ChevronLeft size={18} />
             </button>
           ) : null}
@@ -49,7 +51,7 @@ export default function HubDialog({
             {title}
           </div>
           {blocking ? null : (
-            <button type="button" className="hub-dialog-close" onClick={onClose} aria-label="关闭">
+            <button type="button" className="hub-dialog-close" onClick={onClose} aria-label={t('app.close')}>
               <X size={18} />
             </button>
           )}

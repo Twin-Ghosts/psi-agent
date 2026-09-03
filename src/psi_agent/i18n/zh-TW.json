@@ -1,0 +1,10 @@
+{
+  "language.name": "繁體中文",
+  "repl.connected": "已連線到 Session。Enter 換行，Alt+Enter 傳送（Ctrl+D 結束）。",
+  "repl.panel_title": "psi-agent REPL — Enter 換行，Alt+Enter 傳送",
+  "repl.exit_hint": "Ctrl+D 結束",
+  "repl.goodbye": "再見！",
+  "cli.error": "錯誤：",
+  "cli.connection_error": "連線錯誤：",
+  "cli.unexpected_error": "未預期的錯誤："
+}

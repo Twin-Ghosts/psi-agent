@@ -1,0 +1,84 @@
+# 公司 TODO SOP —— 用户可编辑的判定口径（真知 v1.0）
+# skills 与 tools 的判定要求一律读本文件，不要写死在 SKILL.md / 代码里。
+# 换一家公司 = 替换本文件；引擎段与执行流程零改动。
+# 字段名与结构是契约，不要改（引擎 / 工具按字段名读取）；只改值。
+
+schema:
+  levels:
+    - name: 大目标
+      time_granularity: 3-6 个月
+      count: 1 或多个
+      required: [事情描述, 时间, 标准]
+      relation: 与组织上一级大目标对齐;成果来自外部
+    - name: 小目标
+      time_granularity: 1 周-1 个月
+      count: 1 或多个
+      required: [事情本身, 标准]
+      relation: 大目标的拆解;大目标可暂无小目标(暂不做),但至少 1 个大目标有对应小目标
+    - name: TODO
+      time_granularity: 1-2 天,最长 3 天
+      count: 1 或多个
+      required: [时间节点, 标准, 优先级]
+      relation: 小目标的拆解;不是「要干什么」而是「什么时间干成满足什么标准的什么事」
+
+priority:
+  terms: [重要且紧急, 重要不紧急, 紧急不重要, 不重要不紧急]
+  order: 重要且紧急 > 重要不紧急 > 紧急不重要 > 不重要不紧急
+  scope: 仅 TODO 层;大目标 / 小目标不强求
+
+rules:
+  todo_quota: 5
+  mentor_check_hours: 24
+  remind_time: 周一/三/五 14:30
+  check_time: 周一/三/五 14:50
+  report_delivery: 私聊;boss 视图给 boss,mentor 视图给对应 mentor
+
+leave:
+  leave_approval_code: 99EEC396-536A-4C7A-8B2D-412584E35CE3
+  makeup_approval_code: 09D3F0F3-2A0B-4E05-B40D-9D5565D2A27B
+
+closure_elements:
+  - 有明确验收人
+  - 有自设截止时间且已到期或提前完成
+  - 负责人已勾选并提交成果物
+  - mentor 已给出评价与打分
+  - 评价已回写进本人 wiki 该条 todo 之后
+
+ledger_schema:
+  base_name_prefix: TODO 台账-
+  table_name: 台账
+  fields:
+    - {field_name: 周期日期, type: 5}
+    - {field_name: 负责人, type: 11}
+    - {field_name: mentor, type: 11}
+    - {field_name: 层级, type: 3, property: {options: []}}
+    - {field_name: 父项, type: 3, property: {options: []}}
+    - {field_name: 标题, type: 1}
+    - {field_name: 截止日期, type: 5}
+    - {field_name: 状态, type: 3, property: {options: [{name: 待开始, color: 0}, {name: 进行中, color: 1}, {name: 已交付, color: 2}, {name: 已闭环, color: 3}, {name: 未闭环逾期, color: 4}, {name: 请假顺延, color: 5}]}}
+    - {field_name: 闭环五要素, type: 4, property: {options: [{name: 有验收人}, {name: 截止到期或提前}, {name: 已勾选提交成果}, {name: mentor已评分}, {name: 评价已回写wiki}]}}
+    - {field_name: mentor打分, type: 2}
+    - {field_name: mentor评语, type: 1}
+    - {field_name: 外部成果, type: 1}
+    - {field_name: 友商对比, type: 1}
+    - {field_name: 任务GUID, type: 1}
+
+completion_verdicts:
+  - 已完成
+  - 推断已完成／待确认
+  - 进行中
+  - 未闭环
+
+truthfulness:
+  verdicts:
+    - 属实
+    - 存疑／待跟进
+    - 失实（涉嫌弄虚作假）
+    - 无法跟进
+  dimensions:
+    D1: 可跟进性
+    D2: 时间合规
+    D3: 进度真实性
+    D4: 前后一致性
+    D5: 闭环要素
+    D6: 对齐与粒度

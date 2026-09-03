@@ -210,9 +210,9 @@ export const INITIAL_TEMPLATES: TaskTemplate[] = [
 ];
 
 export const NEW_TASK_PRESETS = [
-  { label: "学习新知识", prompt: "请帮我学习以下新知识，提炼核心概念、关键要点和可验证的结论：", category: "知识学习", icon: BookOpen },
-  { label: "管理工作SOP", prompt: "请帮我梳理并管理以下工作的 SOP，形成清晰可执行的流程步骤：", category: "流程管理", icon: ClipboardList },
-  { label: "做一份领导汇报", prompt: "请帮我整理一份面向管理层的汇报，材料包括：", category: "内容整理", icon: Layers3 },
-  { label: "研究市场或竞品", prompt: "请研究以下市场或竞品，核验公开来源并给出证据：", category: "深度研究", icon: Search },
-  { label: "整理会议与行动项", prompt: "请把以下会议材料整理为结论和行动项：", category: "会议协作", icon: MessageCircle },
+  { id: "learn", label: "学习新知识", prompt: "请帮我学习以下新知识，提炼核心概念、关键要点和可验证的结论：", category: "知识学习", icon: BookOpen },
+  { id: "sop", label: "管理工作SOP", prompt: "请帮我梳理并管理以下工作的 SOP，形成清晰可执行的流程步骤：", category: "流程管理", icon: ClipboardList },
+  { id: "report", label: "做一份领导汇报", prompt: "请帮我整理一份面向管理层的汇报，材料包括：", category: "内容整理", icon: Layers3 },
+  { id: "research", label: "研究市场或竞品", prompt: "请研究以下市场或竞品，核验公开来源并给出证据：", category: "深度研究", icon: Search },
+  { id: "meeting", label: "整理会议与行动项", prompt: "请把以下会议材料整理为结论和行动项：", category: "会议协作", icon: MessageCircle },
 ];

@@ -3,23 +3,24 @@ import type { HistoryMessage, HistoryToolCall, SessionInfo, SessionTodo } from '
 import { stripTransferMarkers } from './sendMarkers'
 import { applyTaskProgress } from './taskProgress'
 import { summarizeToolCall } from './turnProgress'
+import { translate, DEFAULT_LANGUAGE, type Language } from '../i18n'
 
 const ACCENTS = ['#007bff', '#27a06b', '#d8a62a', '#ff6b57', '#4d8eff', '#7c5cfc']
 
-export function shortTitleOf(title: string, max = 10): string {
-  const t = title.trim() || '新任务'
+export function shortTitleOf(title: string, max = 10, language: Language = DEFAULT_LANGUAGE): string {
+  const t = title.trim() || translate(language, 'app.newTaskDefault')
   return t.length > max ? `${t.slice(0, max)}…` : t
 }
 
-export function titleFromPrompt(description: string): string {
-  const clean = description.split(/[。！？\n]/)[0]?.trim() || '新任务'
+export function titleFromPrompt(description: string, language: Language = DEFAULT_LANGUAGE): string {
+  const clean = description.split(/[。！？\n]/)[0]?.trim() || translate(language, 'app.newTaskDefault')
   return clean.slice(0, 30)
 }
 
-export function workspaceLabel(path: string): string {
+export function workspaceLabel(path: string, language: Language = DEFAULT_LANGUAGE): string {
   const p = path.replace(/\\/g, '/').replace(/\/+$/, '')
   const parts = p.split('/').filter(Boolean)
-  return parts[parts.length - 1] || p || '海豚工作室'
+  return parts[parts.length - 1] || p || translate(language, 'session.workspaceFallback')
 }
 
 export function basenameOf(path: string): string {
@@ -58,7 +59,10 @@ export function pathsByName(paths: string[]): Record<string, string> {
  * 「Step N ✅ …」+ 短计划各占一行；流式 UI 累进临时气泡，结算只留最后一段。
  * 刷新合并时同样**只保留最后一段**正文，前面的步骤叙述丢弃（不对齐进工具区）。
  */
-export function historyToChat(messages: HistoryMessage[]): ChatMessage[] {
+export function historyToChat(
+  messages: HistoryMessage[],
+  language: Language = DEFAULT_LANGUAGE,
+): ChatMessage[] {
   const out: ChatMessage[] = []
   for (const m of messages) {
     // Defense in depth: never surface silent schedule rows if a proxy leaks them.
@@ -74,7 +78,7 @@ export function historyToChat(messages: HistoryMessage[]): ChatMessage[] {
       role === 'agent' && typeof m.reasoning === 'string' && m.reasoning.trim()
         ? m.reasoning
         : undefined
-    const tools = role === 'agent' ? toolSummariesFromHistory(m.tools) : []
+    const tools = role === 'agent' ? toolSummariesFromHistory(m.tools, language) : []
     const last = out[out.length - 1]
     if (role === 'agent' && last?.role === 'agent') {
       const mergedFiles = mergeChatFiles(last.files, files)
@@ -104,13 +108,16 @@ export function historyToChat(messages: HistoryMessage[]): ChatMessage[] {
   return out
 }
 
-function toolSummariesFromHistory(tools: HistoryToolCall[] | undefined): string[] {
+function toolSummariesFromHistory(
+  tools: HistoryToolCall[] | undefined,
+  language: Language,
+): string[] {
   if (!Array.isArray(tools) || !tools.length) return []
   const out: string[] = []
   for (const t of tools) {
     if (!t || typeof t.name !== 'string' || !t.name.trim()) continue
     const args = typeof t.arguments === 'string' ? t.arguments : '{}'
-    const line = summarizeToolCall(t.name, args)
+    const line = summarizeToolCall(t.name, args, language)
     if (out[out.length - 1] === line) continue
     out.push(line)
   }
@@ -198,23 +205,24 @@ export function sessionToTask(
     newDeliverables?: string[]
     deliverablePaths?: Record<string, string>
   },
+  language: Language = DEFAULT_LANGUAGE,
 ): Task {
-  const display = title.trim() || '新任务'
+  const display = title.trim() || translate(language, 'app.newTaskDefault')
   const accent = ACCENTS[Math.abs(hash(session.id)) % ACCENTS.length]
   const status = opts?.status ?? 'working'
   const base: Task = {
     id: session.id,
     title: display,
-    shortTitle: shortTitleOf(display),
-    category: workspaceLabel(session.workspace),
+    shortTitle: shortTitleOf(display, 10, language),
+    category: workspaceLabel(session.workspace, language),
     summary:
       opts?.summary
-      ?? '任务已接入 Gateway Session。在下方对话中继续推进，Agent 会真实执行工具并回复。',
+      ?? translate(language, 'session.summaryPlaceholder'),
     progress: opts?.progress ?? 0,
     status,
-    statusLabel: statusLabelFor(status),
-    eta: status === 'completed' ? '已完成' : '进行中',
-    updated: '刚刚同步',
+    statusLabel: statusLabelFor(status, language),
+    eta: status === 'completed' ? translate(language, 'session.etaCompleted') : translate(language, 'session.etaWorking'),
+    updated: translate(language, 'session.updatedJustSynced'),
     accent,
     deliverables: opts?.deliverables ?? [],
     newDeliverables: opts?.newDeliverables ?? [],
@@ -224,24 +232,73 @@ export function sessionToTask(
     turnSettled: status === 'completed',
     todoItems: [],
   }
-  return applyTaskProgress(base, {
-    streaming: false,
-    turnSettled: base.turnSettled,
-    todos: [],
-  })
+  return applyTaskProgress(
+    base,
+    {
+      streaming: false,
+      turnSettled: base.turnSettled,
+      todos: [],
+    },
+    language,
+  )
 }
 
-function statusLabelFor(status: Task['status']): string {
+export function statusLabelFor(status: Task['status'], language: Language): string {
   switch (status) {
     case 'attention':
-      return '待您处理'
+      return translate(language, 'session.statusAttention')
     case 'completed':
-      return '已完成'
+      return translate(language, 'session.statusCompleted')
     case 'continuous':
-      return '持续运行'
+      return translate(language, 'session.statusContinuous')
     default:
-      return '进行中'
+      return translate(language, 'session.statusWorking')
   }
+}
+
+const REVISE_LABELS = new Set(['按意见修改中', 'Revising per feedback', '按意見修改中'])
+const STATUS_LABEL_VARIANTS: Record<Task['status'], Set<string>> = {
+  attention: new Set(['待您处理', 'Needs your input', '待您處理']),
+  completed: new Set(['已完成', 'Completed', '已完成']),
+  continuous: new Set(['持续运行', 'Continuous', '持續運行']),
+  working: new Set(['进行中', 'In progress', '進行中']),
+}
+
+/** 把缓存的任务状态标签按当前语言实时翻译（切换语言后旧状态立即跟随）。 */
+export function displayTaskStatusLabel(
+  status: Task['status'],
+  label: string,
+  language: Language,
+): string {
+  if (REVISE_LABELS.has(label)) return translate(language, 'app.statusRevising')
+  if (STATUS_LABEL_VARIANTS[status]?.has(label)) return statusLabelFor(status, language)
+  return label
+}
+
+const UPDATED_KEYS: [Set<string>, string][] = [
+  [new Set(['刚刚同步', 'Just synced', '剛剛同步']), 'session.updatedJustSynced'],
+  [new Set(['已从历史同步交付物', 'Deliverables synced from history', '已從歷史同步交付物']), 'session.updatedSynced'],
+  [new Set(['刚刚收到交付物', 'Deliverables received just now', '剛剛收到交付物']), 'session.updatedReceived'],
+  [new Set(['本轮回复已完成', 'This round replied', '本輪回覆已完成']), 'progress.updatedDone'],
+  [new Set(['正在产出', 'Producing', '正在產出']), 'progress.updatedDelivering'],
+  [new Set(['Agent 处理中', 'Agent processing']), 'progress.updatedAgentWorking'],
+  [new Set(['待继续', 'To continue', '待繼續']), 'progress.updatedWaiting'],
+  [new Set(['已从 todo 同步进度', 'Progress synced from todo', '已從 todo 同步進度']), 'progress.checklistSynced'],
+  [new Set(['刚刚收到修改要求', 'Revision request received', '剛剛收到修改要求']), 'app.updatedReviseRequest'],
+  [new Set(['刚刚保存交付物', 'Deliverables saved just now', '剛剛保存交付物']), 'app.updatedSavedDeliverables'],
+  [new Set(['已从历史同步', 'Synced from history', '已從歷史同步']), 'app.updatedHistorySync'],
+]
+
+/** 把缓存的任务更新时间文案按当前语言实时翻译。 */
+export function localizedTaskUpdated(updated: string, language: Language): string {
+  for (const [variants, key] of UPDATED_KEYS) {
+    if (variants.has(updated)) return translate(language, key)
+  }
+  const checklist = updated.match(
+    /^(?:本轮已回复 · 清单|本輪已回覆 · 清單|This round replied · checklist) (.+)$/,
+  )
+  if (checklist?.[1]) return translate(language, 'progress.checklistRepliedWithList', { label: checklist[1] })
+  return updated
 }
 
 export type TodoProgressOpts = {
@@ -257,26 +314,36 @@ export function withTodoProgress(
   task: Task,
   todos: SessionTodo[],
   opts?: TodoProgressOpts,
+  language: Language = DEFAULT_LANGUAGE,
 ): Task {
-  return applyTaskProgress(task, {
-    todos,
-    streaming: opts?.streaming === true,
-    turnSettled: opts?.turnSettled,
-    summary: opts?.summary,
-  })
+  return applyTaskProgress(
+    task,
+    {
+      todos,
+      streaming: opts?.streaming === true,
+      turnSettled: opts?.turnSettled,
+      summary: opts?.summary,
+    },
+    language,
+  )
 }
 
 /** Mark turn settled and project 「done」 (or keep deliver if still streaming). */
 export function withCompletedTurn(
   task: Task,
   opts?: { summary?: string; streaming?: boolean },
+  language: Language = DEFAULT_LANGUAGE,
 ): Task {
-  return applyTaskProgress(task, {
-    turnSettled: true,
-    streaming: opts?.streaming === true,
-    summary: opts?.summary,
-    todos: task.todoItems,
-  })
+  return applyTaskProgress(
+    task,
+    {
+      turnSettled: true,
+      streaming: opts?.streaming === true,
+      summary: opts?.summary,
+      todos: task.todoItems,
+    },
+    language,
+  )
 }
 
 function hash(s: string): number {
@@ -293,6 +360,7 @@ export function withDeliverables(
   task: Task,
   names: string[],
   opts?: { asNew?: boolean; paths?: Record<string, string>; streaming?: boolean },
+  language: Language = DEFAULT_LANGUAGE,
 ): Task {
   const incoming = names.filter(Boolean)
   if (!incoming.length && !opts?.paths) return task
@@ -319,15 +387,19 @@ export function withDeliverables(
     newDeliverables: mergedNew,
     deliverablePaths: mergedPaths,
     deliveryState,
-    updated: asNew ? '刚刚收到交付物' : '已从历史同步交付物',
+    updated: asNew ? translate(language, 'session.updatedReceived') : translate(language, 'session.updatedSynced'),
   }
   // Re-project phase so mid-stream blobs can surface 「产出与确认」 when appropriate.
-  return applyTaskProgress(next, {
-    streaming: opts?.streaming === true,
-    turnSettled: next.turnSettled,
-    todos: next.todoItems,
-    hasDeliverables: true,
-  })
+  return applyTaskProgress(
+    next,
+    {
+      streaming: opts?.streaming === true,
+      turnSettled: next.turnSettled,
+      todos: next.todoItems,
+      hasDeliverables: true,
+    },
+    language,
+  )
 }
 
 /** Apply history-derived deliverables without treating them as unread "new". */
@@ -335,6 +407,7 @@ export function withHistoricalDeliverables(
   task: Task,
   names: string[],
   paths: Record<string, string> = {},
+  language: Language = DEFAULT_LANGUAGE,
 ): Task {
-  return withDeliverables(task, names, { asNew: false, paths })
+  return withDeliverables(task, names, { asNew: false, paths }, language)
 }

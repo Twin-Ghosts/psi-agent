@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import "./task-status-tip.css";
+import { useI18n } from "../i18n";
 
 type Props = {
   onClose: () => void;
@@ -18,6 +19,7 @@ function clamp(value: number, min: number, max: number) {
 }
 
 export default function TaskStatusTip({ onClose }: Props) {
+  const { t } = useI18n();
   const [rect, setRect] = useState<TargetRect | null>(null);
 
   useEffect(() => {
@@ -77,9 +79,9 @@ export default function TaskStatusTip({ onClose }: Props) {
         }}
       >
         <span className="task-status-tip-arrow" style={{ left: arrowLeft }} />
-        <h3>当前任务状态区</h3>
-        <p>依次标识 Agent 思考状态、执行状态与当前任务的新交付物。</p>
-        <button type="button" onClick={onClose}>知道了</button>
+        <h3>{t("statusTip.title")}</h3>
+        <p>{t("statusTip.desc")}</p>
+        <button type="button" onClick={onClose}>{t("statusTip.gotIt")}</button>
       </div>
     </>
   );

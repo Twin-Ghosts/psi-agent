@@ -7,6 +7,8 @@
  * Cursor's "Planning next moves" under the short summaries above it.
  */
 
+import { translate, DEFAULT_LANGUAGE, type Language } from '../i18n'
+
 const TOOL_CALL_FULL = /\[Tool Call:\s*([A-Za-z0-9_.-]+)\(([\s\S]*)\)\]\s*$/
 
 /** Fixed vocabulary for the live trailer only. */
@@ -23,8 +25,8 @@ export type ProgressLog = {
   current: string
 }
 
-export function progressLogStart(): ProgressLog {
-  return { lines: [], current: TURN_PROGRESS.planning }
+export function progressLogStart(language: Language = DEFAULT_LANGUAGE): ProgressLog {
+  return { lines: [], current: translate(language, 'turn.planning') }
 }
 
 function basename(path: string): string {
@@ -67,7 +69,11 @@ function commandArg(args: Record<string, unknown>): string {
 }
 
 /** Brief Cursor-like one-liner for a tool call (no raw JSON, no planning trailer). */
-export function summarizeToolCall(name: string, argsRaw: string): string {
+export function summarizeToolCall(
+  name: string,
+  argsRaw: string,
+  language: Language = DEFAULT_LANGUAGE,
+): string {
   const key = name.trim().toLowerCase()
   const args = parseToolArgs(argsRaw)
   const path = pathArg(args)
@@ -75,55 +81,58 @@ export function summarizeToolCall(name: string, argsRaw: string): string {
   const query = queryArg(args)
   const cmd = commandArg(args)
 
-  if (key === 'read') return file ? `读取 \`${file}\`` : '读取文件'
-  if (key === 'write') return file ? `写入 \`${file}\`` : '写入文件'
-  if (key === 'edit') return file ? `编辑 \`${file}\`` : '编辑文件'
-  if (key === 'list_dir') return file ? `浏览 \`${file}\`` : '浏览目录'
-  if (key === 'find_files') return query ? `查找 ${query}` : '查找文件'
+  if (key === 'read') return file ? translate(language, 'turn.readFile', { file }) : translate(language, 'turn.readFiles')
+  if (key === 'write') return file ? translate(language, 'turn.writeFile', { file }) : translate(language, 'turn.writeFiles')
+  if (key === 'edit') return file ? translate(language, 'turn.editFile', { file }) : translate(language, 'turn.editFiles')
+  if (key === 'list_dir') return file ? translate(language, 'turn.listDirFile', { file }) : translate(language, 'turn.listDir')
+  if (key === 'find_files') return query ? translate(language, 'turn.findFilesQuery', { query }) : translate(language, 'turn.findFiles')
   if (key === 'bash' || key === 'powershell') {
-    if (!cmd) return '执行命令'
+    if (!cmd) return translate(language, 'turn.runCommand')
     const short = cmd.length > 36 ? `${cmd.slice(0, 36)}…` : cmd
-    return `执行 \`${short}\``
+    return translate(language, 'turn.runCommandShort', { cmd: short })
   }
-  if (key === 'todo') return '更新任务清单'
+  if (key === 'todo') return translate(language, 'turn.updateTodo')
   if (key === 'search' || key === 'web_search') {
-    return query ? `检索 ${query}` : '网页检索'
+    return query ? translate(language, 'turn.searchQuery', { query }) : translate(language, 'turn.search')
   }
-  if (key === 'fetch') return '拉取网页'
-  if (key === 'clarify') return '等待确认'
-  if (key === 'skill_manage') return '管理技能'
-  if (key === 'schedule_manage') return '安排定时任务'
-  if (key === 'flow_manage') return '编排流程'
+  if (key === 'fetch') return translate(language, 'turn.fetchPage')
+  if (key === 'clarify') return translate(language, 'turn.waitingConfirm')
+  if (key === 'skill_manage') return translate(language, 'turn.manageSkill')
+  if (key === 'schedule_manage') return translate(language, 'turn.manageSchedule')
+  if (key === 'flow_manage') return translate(language, 'turn.orchestrateFlow')
 
   const prefix = key.split('_')[0] ?? key
-  if (prefix === 'browser') return '浏览页面'
-  if (prefix === 'feishu') return '飞书操作'
-  if (prefix === 'wiki' || prefix === 'goal') return '更新知识'
-  if (prefix === 'memory') return '读写记忆'
-  if (prefix === 'session' || prefix === 'sessions') return '会话操作'
-  if (!key) return TURN_PROGRESS.toolGeneric
-  return `调用 ${name}`
+  if (prefix === 'browser') return translate(language, 'turn.browsePage')
+  if (prefix === 'feishu') return translate(language, 'turn.feishuOp')
+  if (prefix === 'wiki' || prefix === 'goal') return translate(language, 'turn.updateKnowledge')
+  if (prefix === 'memory') return translate(language, 'turn.memoryOp')
+  if (prefix === 'session' || prefix === 'sessions') return translate(language, 'turn.sessionOp')
+  if (!key) return translate(language, 'turn.toolGeneric')
+  return translate(language, 'turn.callTool', { name })
 }
 
-export function summarizeToolCallText(text: string): string | null {
+export function summarizeToolCallText(
+  text: string,
+  language: Language = DEFAULT_LANGUAGE,
+): string | null {
   const m = text.match(TOOL_CALL_FULL) ?? text.match(/\[Tool Call:\s*([A-Za-z0-9_.-]+)/)
   if (!m) return null
-  return summarizeToolCall(m[1] ?? '', m[2] ?? '{}')
+  return summarizeToolCall(m[1] ?? '', m[2] ?? '{}', language)
 }
 
 /** @deprecated prefer summarizeToolCall — kept for call sites that only have a name. */
-export function labelForToolName(name: string): string {
-  return summarizeToolCall(name, '{}')
+export function labelForToolName(name: string, language: Language = DEFAULT_LANGUAGE): string {
+  return summarizeToolCall(name, '{}', language)
 }
 
-function pushSummary(log: ProgressLog, summary: string): ProgressLog {
+function pushSummary(log: ProgressLog, summary: string, language: Language): ProgressLog {
   const last = log.lines[log.lines.length - 1]
   if (last === summary) {
-    return { lines: log.lines, current: TURN_PROGRESS.planning }
+    return { lines: log.lines, current: translate(language, 'turn.planning') }
   }
   return {
     lines: [...log.lines, summary],
-    current: TURN_PROGRESS.planning,
+    current: translate(language, 'turn.planning'),
   }
 }
 
@@ -138,20 +147,21 @@ export function applyProgressEvent(
   log: ProgressLog,
   kind: string | undefined,
   text: string,
+  language: Language = DEFAULT_LANGUAGE,
 ): ProgressLog {
   if (kind === 'tool_call') {
-    const summary = summarizeToolCallText(text) ?? TURN_PROGRESS.toolGeneric
-    return pushSummary(log, summary)
+    const summary = summarizeToolCallText(text, language) ?? translate(language, 'turn.toolGeneric')
+    return pushSummary(log, summary, language)
   }
   if (kind === 'tool_result') {
-    return { lines: log.lines, current: TURN_PROGRESS.planning }
+    return { lines: log.lines, current: translate(language, 'turn.planning') }
   }
   if (kind === 'content') {
-    return { lines: log.lines, current: TURN_PROGRESS.writing }
+    return { lines: log.lines, current: translate(language, 'turn.writing') }
   }
   // thinking / unknown — live trailer only
-  if (log.current === TURN_PROGRESS.writing) {
-    return { lines: log.lines, current: TURN_PROGRESS.writing }
+  if (log.current === translate(language, 'turn.writing')) {
+    return { lines: log.lines, current: translate(language, 'turn.writing') }
   }
-  return { lines: log.lines, current: TURN_PROGRESS.planning }
+  return { lines: log.lines, current: translate(language, 'turn.planning') }
 }

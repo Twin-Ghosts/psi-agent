@@ -17,6 +17,7 @@ from psi_agent.gateway._defaults import (
     resolve_default_workspace,
 )
 from psi_agent.gateway._openapi import render_openapi
+from psi_agent.i18n import DEFAULT_LANGUAGE, normalize_language
 from psi_agent.runtime._ai_manager import AIManager
 from psi_agent.runtime._chat_manager import ChatManager
 from psi_agent.runtime._history_manager import HistoryManager
@@ -130,6 +131,7 @@ async def create_core_app(
     *,
     default_agent: str = "",
     default_workspace: str = "",
+    language: str = DEFAULT_LANGUAGE,
     appdata: str = "",
     scheduler_ai_id: str = "",
     schedm: SchedulerManager | None = None,
@@ -175,6 +177,7 @@ async def create_core_app(
     app["todom"] = TodoManager()
     app["default_agent"] = default_agent
     app["default_workspace"] = default_workspace
+    app["language"] = normalize_language(language)
     app["appdata"] = appdata
     # ``GET /openapi.json`` 只报本进程真的注册了的那些 path —— 各 register_* 把自己
     # 那面旗子立起来 (见 ``_openapi.build_openapi_spec`` 的三个开关)。
@@ -471,7 +474,10 @@ async def _get_defaults(request: web.Request) -> web.Response:
     agent = request.app.get("default_agent") or await resolve_default_agent()
     workspace = request.app.get("default_workspace") or await resolve_default_workspace()
     appdata = request.app.get("appdata") or await resolve_appdata_root()
-    return _json({"agent": agent, "workspace": workspace, "appdata": appdata})
+    prefs = request.app.get("uiprefs")
+    saved = await prefs.language() if prefs is not None else ""
+    language = normalize_language(saved or request.app.get("language") or DEFAULT_LANGUAGE)
+    return _json({"agent": agent, "workspace": workspace, "appdata": appdata, "language": language})
 
 
 async def _get_history(request: web.Request) -> web.Response:

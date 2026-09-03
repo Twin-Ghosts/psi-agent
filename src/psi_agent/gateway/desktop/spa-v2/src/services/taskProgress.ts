@@ -1,6 +1,7 @@
 import type { SessionTodo } from './api'
 import type { Task, TaskStep } from '../haitun-agent/model'
 import { plainTextPreview } from './assistantDisplay'
+import { translate, DEFAULT_LANGUAGE, type Language } from '../i18n'
 
 /** Upper-level lifecycle for a task card (independent of todo UI detail). */
 export type TaskPhase = 'advance' | 'deliver' | 'done'
@@ -73,29 +74,45 @@ function activityCopy(input: {
   phase: TaskPhase
   streaming: boolean
   hasDeliverables: boolean
-}): { label: string; detail?: string; state: TaskStep['state']; updated: string } {
+}, language: Language): { label: string; detail?: string; state: TaskStep['state']; updated: string } {
   if (input.phase === 'done') {
-    return { label: '本轮已完成', state: 'done', updated: '本轮回复已完成' }
+    return {
+      label: translate(language, 'progress.phaseDone'),
+      state: 'done',
+      updated: translate(language, 'progress.updatedDone'),
+    }
   }
   if (input.phase === 'deliver') {
     return {
-      label: '正在整理交付',
-      detail: input.hasDeliverables ? '交付物生成中' : undefined,
+      label: translate(language, 'progress.phaseDeliver'),
+      detail: input.hasDeliverables ? translate(language, 'progress.deliverDetail') : undefined,
       state: 'working',
-      updated: '正在产出',
+      updated: translate(language, 'progress.updatedDelivering'),
     }
   }
   if (input.streaming) {
-    return { label: '正在处理', state: 'working', updated: 'Agent 处理中' }
+    return {
+      label: translate(language, 'progress.phaseWorking'),
+      state: 'working',
+      updated: translate(language, 'progress.updatedAgentWorking'),
+    }
   }
-  return { label: '待继续', detail: '等待你的下一条', state: 'waiting', updated: '待继续' }
+  return {
+    label: translate(language, 'progress.phaseWaiting'),
+    detail: translate(language, 'progress.waitingDetail'),
+    state: 'waiting',
+    updated: translate(language, 'progress.updatedWaiting'),
+  }
 }
 
 /**
  * Layer 1 — lifecycle phase.
  * Layer 2 — with todos: real checklist steps + N/M; without: single activity line (no fake 3-step track).
  */
-export function resolveTaskProgress(input: ProgressInput): ProgressProjection {
+export function resolveTaskProgress(
+  input: ProgressInput,
+  language: Language = DEFAULT_LANGUAGE,
+): ProgressProjection {
   const active = activeTodos(input.todos)
   const hasTodoTrack = active.length > 0
   const middle = hasTodoTrack
@@ -133,7 +150,7 @@ export function resolveTaskProgress(input: ProgressInput): ProgressProjection {
     }))
     if (phase === 'deliver') {
       // Only reached when middle.done while streaming — append deliver line.
-      steps = [...steps, { label: '产出与确认', state: 'working' }]
+      steps = [...steps, { label: translate(language, 'progress.checklistDeliver'), state: 'working' }]
     }
 
     progress = Math.round((middle.completed / Math.max(middle.total, 1)) * 100)
@@ -143,27 +160,27 @@ export function resolveTaskProgress(input: ProgressInput): ProgressProjection {
     phaseLabel =
       phase === 'done'
         ? middle.done
-          ? '已完成'
-          : `本轮已回复 · ${middle.label}`
+          ? translate(language, 'progress.checklistDone')
+          : translate(language, 'progress.checklistReplied', { label: middle.label })
         : phase === 'deliver'
-          ? '产出与确认'
+          ? translate(language, 'progress.checklistDeliver')
           : middle.detail
             ? `${middle.label} · ${middle.detail}`
             : middle.label
     updated =
       phase === 'done'
         ? middle.done
-          ? '本轮回复已完成'
-          : `本轮已回复 · 清单 ${middle.label}`
+          ? translate(language, 'progress.updatedChecklistDone')
+          : translate(language, 'progress.checklistRepliedWithList', { label: middle.label })
         : phase === 'deliver'
-          ? '正在产出'
-          : '已从 todo 同步进度'
+          ? translate(language, 'progress.updatedDelivering')
+          : translate(language, 'progress.checklistSynced')
   } else {
     const activity = activityCopy({
       phase,
       streaming: input.streaming,
       hasDeliverables: input.hasDeliverables,
-    })
+    }, language)
     steps = [{ label: activity.label, state: activity.state, detail: activity.detail }]
     progress = phase === 'done' ? 100 : 0
     indeterminate = phase === 'advance' || phase === 'deliver'
@@ -200,7 +217,11 @@ export type ApplyProgressPatch = {
 }
 
 /** Project phase → steps onto a task (single write path for the card). */
-export function applyTaskProgress(task: Task, patch: ApplyProgressPatch = {}): Task {
+export function applyTaskProgress(
+  task: Task,
+  patch: ApplyProgressPatch = {},
+  language: Language = DEFAULT_LANGUAGE,
+): Task {
   const todos = patch.todos ?? task.todoItems ?? []
   const turnSettled = patch.turnSettled !== undefined ? patch.turnSettled : (task.turnSettled ?? false)
   const streaming = patch.streaming === true
@@ -213,7 +234,7 @@ export function applyTaskProgress(task: Task, patch: ApplyProgressPatch = {}): T
     turnSettled,
     todos,
     hasDeliverables,
-  })
+  }, language)
 
   const summary = patch.summary?.trim()
   return {

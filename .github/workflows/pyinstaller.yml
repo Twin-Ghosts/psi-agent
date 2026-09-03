@@ -102,6 +102,7 @@ jobs:
         --distpath pyinstaller-dist
         --add-data src/psi_agent/gateway/desktop/spa/dist:psi_agent/gateway/desktop/spa/dist
         --add-data src/psi_agent/gateway/desktop/spa-v2/dist:psi_agent/gateway/desktop/spa-v2/dist
+        --add-data src/psi_agent/i18n:psi_agent/i18n
         --collect-submodules any_llm
         --collect-submodules mcp
         --collect-submodules serper_mcp_server
@@ -132,6 +133,10 @@ jobs:
       # 这一步防的是「改了 md 忘了重新生成」—— 那会让安装器与产品内展示过时协议。
       - name: Check legal HTML is in sync with docs
         run: uv run python scripts/gen_legal_html.py --check
+      # macOS 图标源 (haitun-1024.png) 是 Windows ico 的生成物, 同样入库守同步:
+      # 改了 ico 忘了重新生成, dmg 的图标就是旧的。
+      - name: Check macOS icon PNG is in sync with haitun.ico
+        run: uv run python scripts/gen_haitun_icon_png.py --check
       - run: uv pip install pyinstaller "mcp[cli,rich,ws]" "any-llm-sdk[all]"
       - uses: actions/setup-node@v7
         with:
@@ -160,6 +165,11 @@ jobs:
   haitun-inno-setup:
     needs: pyinstaller
     runs-on: windows-latest
+    # OIDC is needed only for the trusted release path. The installer job still
+    # runs for PRs and feature branches, but those artifacts remain unsigned.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -195,6 +205,72 @@ jobs:
           Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments "-arch=amd64"
           & ".github\inno-setup\build-haitun-launcher.ps1"
+      # Keep the Windows path parallel to macOS: sign the executable after it
+      # has been assembled and before it is embedded in the installers. OIDC is
+      # deliberately restricted to main, matching the Azure federated
+      # credential configured for this repository. Manual runs are useful for
+      # an initial HSM test and use the same branch subject.
+      - name: Azure login for Windows code signing
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID || vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID || vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID || vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Download AzureSignTool
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        shell: pwsh
+        run: |
+          $tool = Join-Path $env:RUNNER_TEMP 'AzureSignTool-7.0.1-x64.exe'
+          Invoke-WebRequest `
+            -Uri 'https://github.com/vcsjones/AzureSignTool/releases/download/v7.0.1/AzureSignTool-x64.exe' `
+            -OutFile $tool
+          if (-not (Test-Path -LiteralPath $tool)) {
+            throw 'AzureSignTool download did not produce an executable.'
+          }
+          "AZURE_SIGN_TOOL=$tool" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Sign application executables
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        shell: pwsh
+        env:
+          AZURE_KEY_VAULT_URL: ${{ vars.AZURE_KEY_VAULT_URL || secrets.AZURE_KEY_VAULT_URL }}
+          AZURE_KEY_VAULT_NAME: ${{ vars.AZURE_KEY_VAULT_NAME || secrets.AZURE_KEY_VAULT_NAME }}
+          AZURE_CERTIFICATE_NAME: ${{ vars.AZURE_CERTIFICATE_NAME || vars.AZURE_KEY_VAULT_CERTIFICATE || secrets.AZURE_CERTIFICATE_NAME }}
+          GLOBALSIGN_TSA_URL: ${{ vars.GLOBALSIGN_TSA_URL || secrets.GLOBALSIGN_TSA_URL }}
+        run: |
+          $vaultUrl = ($env:AZURE_KEY_VAULT_URL ?? '').Trim()
+          if ([string]::IsNullOrWhiteSpace($vaultUrl)) {
+            $vaultName = ($env:AZURE_KEY_VAULT_NAME ?? '').Trim()
+            if ([string]::IsNullOrWhiteSpace($vaultName)) {
+              throw 'Set repository Variable AZURE_KEY_VAULT_URL or AZURE_KEY_VAULT_NAME.'
+            }
+            $vaultUrl = "https://$vaultName.vault.azure.net/"
+          }
+          $certificateName = ($env:AZURE_CERTIFICATE_NAME ?? '').Trim()
+          $tsaUrl = ($env:GLOBALSIGN_TSA_URL ?? '').Trim()
+          if ([string]::IsNullOrWhiteSpace($certificateName)) {
+            throw 'Set repository Variable AZURE_CERTIFICATE_NAME.'
+          }
+          if ([string]::IsNullOrWhiteSpace($tsaUrl)) {
+            throw 'Set repository Variable GLOBALSIGN_TSA_URL.'
+          }
+          $files = @(
+            (Resolve-Path 'agents\feishu\psi-agent.exe').Path,
+            (Resolve-Path '.github\inno-setup\haitun.exe').Path
+          )
+          & $env:AZURE_SIGN_TOOL sign `
+            --azure-key-vault-url $vaultUrl `
+            --azure-key-vault-managed-identity `
+            --azure-key-vault-certificate $certificateName `
+            --description 'HaiTun Agent' `
+            --timestamp-rfc3161 $tsaUrl `
+            --timestamp-digest sha256 `
+            --file-digest sha256 `
+            --verbose `
+            $files
+          if ($LASTEXITCODE -ne 0) {
+            throw "AzureSignTool failed for application executables (exit code $LASTEXITCODE)."
+          }
       - name: Inject runtime .env
         shell: pwsh
         env:
@@ -211,6 +287,7 @@ jobs:
       - shell: pwsh
         run: |
           Invoke-WebRequest -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl" -OutFile ".github\inno-setup\ChineseSimplified.isl"
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseTraditional.isl" -OutFile ".github\inno-setup\ChineseTraditional.isl"
       - name: Build installers
         shell: pwsh
         run: |
@@ -226,6 +303,66 @@ jobs:
         run: |
           Copy-Item -Force "agents\feishu\haitun-version.txt" "installer-output\"
           Copy-Item -Force "agents\feishu\msys64\msys-version.txt" "installer-output\"
+      - name: Sign and verify installer executables
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        shell: pwsh
+        env:
+          AZURE_KEY_VAULT_URL: ${{ vars.AZURE_KEY_VAULT_URL || secrets.AZURE_KEY_VAULT_URL }}
+          AZURE_KEY_VAULT_NAME: ${{ vars.AZURE_KEY_VAULT_NAME || secrets.AZURE_KEY_VAULT_NAME }}
+          AZURE_CERTIFICATE_NAME: ${{ vars.AZURE_CERTIFICATE_NAME || vars.AZURE_KEY_VAULT_CERTIFICATE || secrets.AZURE_CERTIFICATE_NAME }}
+          GLOBALSIGN_TSA_URL: ${{ vars.GLOBALSIGN_TSA_URL || secrets.GLOBALSIGN_TSA_URL }}
+        run: |
+          $vaultUrl = ($env:AZURE_KEY_VAULT_URL ?? '').Trim()
+          if ([string]::IsNullOrWhiteSpace($vaultUrl)) {
+            $vaultName = ($env:AZURE_KEY_VAULT_NAME ?? '').Trim()
+            if ([string]::IsNullOrWhiteSpace($vaultName)) {
+              throw 'Set repository Variable AZURE_KEY_VAULT_URL or AZURE_KEY_VAULT_NAME.'
+            }
+            $vaultUrl = "https://$vaultName.vault.azure.net/"
+          }
+          $certificateName = ($env:AZURE_CERTIFICATE_NAME ?? '').Trim()
+          $tsaUrl = ($env:GLOBALSIGN_TSA_URL ?? '').Trim()
+          if ([string]::IsNullOrWhiteSpace($certificateName)) {
+            throw 'Set repository Variable AZURE_CERTIFICATE_NAME.'
+          }
+          if ([string]::IsNullOrWhiteSpace($tsaUrl)) {
+            throw 'Set repository Variable GLOBALSIGN_TSA_URL.'
+          }
+          $files = @(Get-ChildItem -LiteralPath 'installer-output' -Filter '*.exe' -File |
+            ForEach-Object { $_.FullName } | Sort-Object)
+          if ($files.Count -ne 3) {
+            throw "Expected three installer executables, found $($files.Count)."
+          }
+          & $env:AZURE_SIGN_TOOL sign `
+            --azure-key-vault-url $vaultUrl `
+            --azure-key-vault-managed-identity `
+            --azure-key-vault-certificate $certificateName `
+            --description 'HaiTun Agent installer' `
+            --timestamp-rfc3161 $tsaUrl `
+            --timestamp-digest sha256 `
+            --file-digest sha256 `
+            --verbose `
+            $files
+          if ($LASTEXITCODE -ne 0) {
+            throw "AzureSignTool failed for installer executables (exit code $LASTEXITCODE)."
+          }
+          $signtool = Get-ChildItem `
+            -LiteralPath "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+            -Filter 'signtool.exe' -File -Recurse -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if ($null -eq $signtool) {
+            throw 'Windows SDK signtool.exe was not found for signature verification.'
+          }
+          $applicationFiles = @(
+            (Resolve-Path 'agents\feishu\psi-agent.exe').Path,
+            (Resolve-Path '.github\inno-setup\haitun.exe').Path
+          )
+          foreach ($file in ($applicationFiles + $files)) {
+            & $signtool.FullName verify /pa /all /v $file
+            if ($LASTEXITCODE -ne 0) {
+              throw "signtool verification failed for $file (exit code $LASTEXITCODE)."
+            }
+          }
       - uses: actions/upload-artifact@v7
         with:
           name: haitun-agent-installers
@@ -325,8 +462,9 @@ jobs:
           path: macos-dist/HaiTun_Agent.dmg
       # 版本号元数据单独一个 artifact, 只给 oss-publish.yml 消费。
       #
-      # 不设 `if: always()`: 版本文件由 build-dmg.sh 在成功路径上写出, 构建挂了就
-      # 该缺席 —— oss-publish 那边下载失败会让整条 publish 红, 这正是要的效果
+      # 不设 `if: always()`: build-dmg.sh 在打包早期就会写出版本文件, 但只有整个
+      # Build dmg step 成功这个 artifact 才会上传 —— 构建挂了 (如 smoke 硬闸) 它
+      # 就缺席, oss-publish 那边下载失败会让整条 publish 红, 这正是要的效果
       # (见 oss-publish.yml 里"两平台共用版本文件"那段注释)。
       - uses: actions/upload-artifact@v7
         with:

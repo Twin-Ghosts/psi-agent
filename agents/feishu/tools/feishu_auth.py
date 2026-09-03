@@ -84,7 +84,7 @@ if str(TOOLS_DIR) not in sys.path:
 import _feishu_impl as _f
 
 
-async def feishu_auth_start(user_key: str = "", capabilities: str = "") -> str:
+async def feishu_auth_start(user_key: str = "", capabilities: str = "", chat_id: str = "") -> str:
     """Begin Feishu user authorization for ONLY the permissions the task needs.
 
     Send ``authorize_url`` to the user and have them approve. If the result says
@@ -114,8 +114,12 @@ async def feishu_auth_start(user_key: str = "", capabilities: str = "") -> str:
             Do NOT pass raw Feishu scope strings — an invalid scope makes Feishu
             reject the whole authorize page (error 20043), so unknown keys are refused
             here instead.
+        chat_id: Optional ``oc_`` chat id of the conversation the user will come
+            back to (from ``<feishu_context>`` ``chat_id``). When given, the
+            post-approval landing page shows a "回到飞书对话" button that deep-links
+            straight back into that chat.
     """
-    return _f.dumps_result(await _f.auth_start_impl(capabilities, user_key))
+    return _f.dumps_result(await _f.auth_start_impl(capabilities, user_key, chat_id))
 
 
 async def feishu_auth_request(
@@ -123,8 +127,15 @@ async def feishu_auth_request(
     capabilities: str = "",
     reason: str = "",
     receive_id: str = "",
+    chat_id: str = "",
 ) -> str:
     """Ask a user to authorize — **start here**; it picks the best available method.
+
+    **Always pass ``chat_id``**: take it from this message's ``<feishu_context>``
+    (the ``chat_id:`` line, ``oc_``-prefixed) and pass it verbatim. The landing
+    page after approval then shows a "回到飞书对话" button so the user lands
+    straight back in this conversation; without it the page only has a close
+    button.
 
     One call handles the whole "I need this user's authorization" case. It tries the three
     ways in a fixed order and returns the first that works, so you don't have to know what
@@ -162,8 +173,11 @@ async def feishu_auth_request(
             A non-``ou_`` value (e.g. a group chat) skips tier 1, because a card tapped in a
             group is routed to the tapper's own session, which cannot see the pending
             authorization recorded here.
+        chat_id: The current conversation's ``oc_`` chat id (from ``<feishu_context>``
+            ``chat_id``). Required for the "回到飞书对话" landing-page button; when empty
+            the page shows only the close button.
     """
-    return _f.dumps_result(await _f.auth_request_impl(user_key, capabilities, reason, receive_id))
+    return _f.dumps_result(await _f.auth_request_impl(user_key, capabilities, reason, receive_id, chat_id))
 
 
 async def feishu_auth_card(
@@ -171,6 +185,7 @@ async def feishu_auth_card(
     capabilities: str = "",
     reason: str = "",
     receive_id: str = "",
+    chat_id: str = "",
 ) -> str:
     """Send the one-click authorization card specifically (tier 1 only).
 
@@ -210,8 +225,10 @@ async def feishu_auth_card(
             normally right. Must be an ``ou_`` open_id: a card tapped in a group chat is
             routed to the tapper's own private session, which cannot see the pending
             authorization recorded here.
+        chat_id: The current conversation's ``oc_`` chat id (from ``<feishu_context>``
+            ``chat_id``); powers the "回到飞书对话" landing-page button.
     """
-    return _f.dumps_result(await _f.auth_card_impl(user_key, capabilities, reason, receive_id))
+    return _f.dumps_result(await _f.auth_card_impl(user_key, capabilities, reason, receive_id, chat_id))
 
 
 async def feishu_auth_collect(user_key: str = "", timeout_seconds: int = 600) -> str:

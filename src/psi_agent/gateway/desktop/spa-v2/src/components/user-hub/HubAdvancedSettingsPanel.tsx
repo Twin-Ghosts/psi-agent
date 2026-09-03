@@ -1,4 +1,5 @@
 import { ChevronRight, Package } from 'lucide-react'
+import { useI18n } from '../../i18n'
 import HubDialog from './HubDialog'
 
 type Props = {
@@ -9,10 +10,10 @@ type Props = {
   onChangeAgent?: () => void
 }
 
-function pathLabel(path: string): string {
+function pathLabel(path: string, fallback = '未选择'): string {
   const p = path.replace(/\\/g, '/').replace(/\/+$/, '')
   const parts = p.split('/').filter(Boolean)
-  return parts[parts.length - 1] || p || '未选择'
+  return parts[parts.length - 1] || p || fallback
 }
 
 /** Advanced settings page of the settings dialog: Agent package path switch. */
@@ -23,6 +24,7 @@ export default function HubAdvancedSettingsPanel({
   agent,
   onChangeAgent,
 }: Props) {
+  const { t } = useI18n();
   const backToSettings = () => {
     if (onBackToSettings) {
       onBackToSettings()
@@ -36,9 +38,9 @@ export default function HubAdvancedSettingsPanel({
       show={show}
       title={(
         <div className="hub-models-title">
-          <span>高级设置</span>
+          <span>{t('app.advancedSettings')}</span>
           <button type="button" className="hub-link" onClick={backToSettings}>
-            返回设置
+            {t('advanced.backToSettings')}
           </button>
         </div>
       )}
@@ -46,8 +48,8 @@ export default function HubAdvancedSettingsPanel({
       onClose={onClose}
       actions={(
         <>
-          <button type="button" className="hub-btn ghost" onClick={backToSettings}>返回设置</button>
-          <button type="button" className="hub-btn primary" onClick={onClose}>关闭</button>
+          <button type="button" className="hub-btn ghost" onClick={backToSettings}>{t('advanced.backToSettings')}</button>
+          <button type="button" className="hub-btn primary" onClick={onClose}>{t('app.close')}</button>
         </>
       )}
     >
@@ -65,9 +67,9 @@ export default function HubAdvancedSettingsPanel({
               <Package size={18} />
             </span>
             <span>
-              <strong>切换 Agent 包</strong>
+              <strong>{t('advanced.switchAgent')}</strong>
               <em title={agent || undefined}>
-                {agent ? pathLabel(agent) : '选择能力包目录'}
+                {agent ? pathLabel(agent, t('advanced.unselected')) : t('advanced.chooseAgentDir')}
               </em>
             </span>
             <ChevronRight size={16} className="hub-settings-row-chevron" />
@@ -77,7 +79,7 @@ export default function HubAdvancedSettingsPanel({
           <p className="hub-settings-workspace-path" title={agent}>{agent}</p>
         ) : null}
         <p className="hub-settings-foot">
-          Agent 包包含 tools / schedules / systems，用于定义 Agent 的工具能力、定时任务与工作规则；您也可以在此切换为自己构建的 Agent。
+          {t('advanced.agentFoot')}
         </p>
       </section>
     </HubDialog>

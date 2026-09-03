@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type MouseEvent } from 'react'
 import { downloadMatrixXlsx, matrixToTsv, tableToMatrix } from '../services/mdTable'
 import type { ChatFile } from '../haitun-agent/model'
 import { renderBlobPreview } from '../utils/renderBlobPreview'
+import { useI18n } from '../i18n'
 
 /**
  * Render a chat/deliverable blob into a host element.
@@ -9,6 +10,7 @@ import { renderBlobPreview } from '../utils/renderBlobPreview'
  * Shared by chat FilePreview drawer and ArtifactDrawer (宝箱).
  */
 export function ArtifactFileBody({ file }: { file: ChatFile }) {
+  const { t } = useI18n();
   const hostRef = useRef<HTMLDivElement | null>(null)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -26,7 +28,10 @@ export function ArtifactFileBody({ file }: { file: ChatFile }) {
     host.replaceChildren()
 
     void (async () => {
-      const handle = await renderBlobPreview(host, { name: file.name, data: file.data })
+      const handle = await renderBlobPreview(host, { name: file.name, data: file.data }, {
+        unsupported: t('preview.unsupported'),
+        partial: t('preview.partial'),
+      })
       if (cancelled) {
         handle.cleanup()
         return
@@ -81,7 +86,7 @@ export function ArtifactFileBody({ file }: { file: ChatFile }) {
 
   return (
     <div className="artifact-preview-scroll" onClick={(e) => void onPreviewClick(e)}>
-      {loading ? <div className="artifact-preview-state">正在生成预览…</div> : null}
+      {loading ? <div className="artifact-preview-state">{t('preview.generating')}</div> : null}
       {notice && !error ? <div className="artifact-preview-notice">{notice}</div> : null}
       {error ? <div className="artifact-preview-state">{error}</div> : null}
       <div ref={hostRef} className="artifact-preview-host" />

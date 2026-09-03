@@ -19,6 +19,8 @@ authorized senders, sandbox, sub-agent delegation) have been dropped.
 
 from __future__ import annotations
 
+import os
+
 # ---------------------------------------------------------------------------
 # Identity (always emitted, even when SOUL.md is absent)
 # ---------------------------------------------------------------------------
@@ -49,6 +51,34 @@ Reply in the SAME language the user wrote in. Match their language for the whole
 - Format numbers, dates, times, and units the way the user's language/region does (e.g. 2026年7月3日 vs July 3, 2026), and honor any format the user has already used.
 - This governs the language of your reply only; it never overrides your fixed Haitun identity.\
 """
+
+
+def build_default_language_section() -> str:
+    """Default reply language from ``HAITUN_LANG`` (set by Gateway/installer).
+
+    The user's own input language still wins for that turn; this only sets the
+    default when the user does not signal one.
+    """
+    lang = os.environ.get("HAITUN_LANG", "").strip().lower().replace("_", "-")
+    if lang == "en-us":
+        return (
+            "## Default Reply Language\n"
+            "The app is configured for English. Unless the user clearly writes in another "
+            "language, reply in English by default. When the user does write in another "
+            "language, follow the user's language for that reply."
+        )
+    if lang == "zh-tw":
+        return (
+            "## 預設回覆語言\n"
+            "應用介面預設使用繁體中文。除非使用者明確使用其他語言，預設以繁體中文回覆；"
+            "使用者切換語言時以使用者當前語言為準。"
+        )
+    return (
+        "## 默认回复语言\n"
+        "应用界面默认使用中文。除非用户明确使用其他语言，默认用中文回复；"
+        "用户切换语言时以用户当前语言为准。"
+    )
+
 
 # ---------------------------------------------------------------------------
 # Tooling

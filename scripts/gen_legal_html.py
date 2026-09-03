@@ -31,14 +31,15 @@ OUT_DIR = _SPA_V2 / "public"
 #   - vite 把 public/* 拷进 dist/, PyInstaller 再打包 dist → 产品内登录面板的协议链接
 #   - .github/inno-setup/haitun.iss 以 dontcopy 引同一路径 → 安装期协议页
 _H1_LINE = 0
-_H2_RE = re.compile(r"^[一二三四五六七八九十]+、")
-_H3_RE = re.compile(r"^\d+\.\d+ ")
-_META_RE = re.compile(r"^(更新日期|生效日期)：")  # noqa: RUF001  全角冒号是源文件里的字面量, 不能换成半角
+_H2_RE = re.compile(r"^(?:\*\*)?(?:[一二三四五六七八九十]+、|[IVX]+\.\s)")
+_H3_RE = re.compile(r"^(?:\*\*)?\d+\.\d+ ")
+_META_RE = re.compile(r"^(?:更新日期|生效日期|Last Updated|Effective Date)[：:]")  # noqa: RUF001
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
-_UNNUMBERED_H2 = ("导言",)
+_UNNUMBERED_H2 = ("导言", "Introduction")
 # 「3.1 我们可能通过以下几种方式收集用户个人信息：」是正文引出语而非小标题, 靠尾字符区分。  # noqa: RUF003
 _NOT_HEADING_TAIL = ("：", "。", "，", "、", "）")  # noqa: RUF001  同上, 这些是要匹配的正文字面量
 _H3_MAX_LEN = 30
+_H3_MAX_LEN_BY_LANG: dict[str, int] = {"zh": 30, "en": 60}
 # 目录块判定阈值: 连续 N 行以上「一、」式标题且中间无正文夹杂, 判为目录。
 # 隐私政策 :12-23 是与正文逐字重复的 12 行目录, 照 h2 规则处理会产出重复标题并撞 id;
 # 许可协议无此块(:12 起即正文, 每个标题后紧跟正文), 同一规则对它是空操作。
@@ -52,14 +53,28 @@ class LegalDoc:
     src: Path
     out: Path
     browser_title: str
+    lang: str = "zh"
 
 
 DOCS_TO_BUILD: tuple[LegalDoc, ...] = (
     LegalDoc(SRC_DIR / "Haitun_软件许可及服务协议_1.0.md", OUT_DIR / "terms.html", "软件许可及服务协议"),
     LegalDoc(SRC_DIR / "Haitun_隐私保护政策_1.0.md", OUT_DIR / "privacy.html", "隐私保护政策"),
+    LegalDoc(
+        SRC_DIR / "Haitun_Software_License_and_Service_Agreement_1.0_EN.md",
+        OUT_DIR / "terms-en.html",
+        "Haitun Agent Software License and Service Agreement",
+        lang="en",
+    ),
+    LegalDoc(
+        SRC_DIR / "Haitun_Privacy_Protection_Policy_1.0_EN.md",
+        OUT_DIR / "privacy-en.html",
+        "Haitun Agent Privacy Protection Policy",
+        lang="en",
+    ),
 )
 
 _PUBLISHER = "合肥真知人工智能应用软件有限公司"
+_PUBLISHER_EN = "Hefei Genuine Knowledge Artificial Intelligence Application Software Co., Ltd."
 
 
 def _inline(text: str) -> str:
@@ -67,12 +82,20 @@ def _inline(text: str) -> str:
     return _BOLD_RE.sub(r"<strong>\1</strong>", html.escape(text))
 
 
+def _strip_bold(line: str) -> str:
+    """去掉 ``**`` 标记, 让标题/目录判定不受加粗包裹影响。"""
+    return line.replace("**", "")
+
+
 def _is_heading(line: str) -> bool:
-    return bool(_H2_RE.match(line)) or _is_h3(line) or line in _UNNUMBERED_H2
+    clean = _strip_bold(line)
+    return bool(_H2_RE.match(clean)) or _is_h3(clean) or clean in _UNNUMBERED_H2
 
 
-def _is_h3(line: str) -> bool:
-    return bool(_H3_RE.match(line)) and len(line) <= _H3_MAX_LEN and not line.endswith(_NOT_HEADING_TAIL)
+def _is_h3(line: str, lang: str = "zh") -> bool:
+    clean = _strip_bold(line)
+    max_len = _H3_MAX_LEN_BY_LANG.get(lang, _H3_MAX_LEN)
+    return bool(_H3_RE.match(clean)) and len(clean) <= max_len and not clean.endswith(_NOT_HEADING_TAIL)
 
 
 def _find_toc_range(lines: list[str]) -> tuple[int, int] | None:
@@ -85,7 +108,7 @@ def _find_toc_range(lines: list[str]) -> tuple[int, int] | None:
     run_start: int | None = None
     seen: set[str] = set()
     for i, raw in enumerate(lines):
-        line = raw.strip()
+        line = _strip_bold(raw.strip())
         if _H2_RE.match(line) and line not in seen:
             if run_start is None:
                 run_start = i
@@ -106,7 +129,7 @@ def _heading_ids(lines: list[str], toc: tuple[int, int] | None) -> dict[str, str
     ids: dict[str, str] = {}
     section = 0
     for i, raw in enumerate(lines):
-        line = raw.strip()
+        line = _strip_bold(raw.strip())
         if i == _H1_LINE or (toc and toc[0] <= i < toc[1]) or "\t" in line:
             continue
         if _H2_RE.match(line) or line in _UNNUMBERED_H2:
@@ -127,7 +150,7 @@ def _render_table(rows: list[str]) -> list[str]:
     return out
 
 
-def _render_body(lines: list[str]) -> tuple[str, list[str]]:
+def _render_body(lines: list[str], lang: str = "zh") -> tuple[str, list[str]]:
     """按解析规则渲染正文, 返回 (HTML, 元信息行)。"""
     toc = _find_toc_range(lines)
     ids = _heading_ids(lines, toc)
@@ -135,7 +158,8 @@ def _render_body(lines: list[str]) -> tuple[str, list[str]]:
     meta: list[str] = []
     i = 0
     while i < len(lines):
-        line = lines[i].strip()
+        raw_line = lines[i].strip()
+        line = _strip_bold(raw_line)
         if not line or i == _H1_LINE:  # h1 由调用方从首行单独渲染
             i += 1
             continue
@@ -147,25 +171,25 @@ def _render_body(lines: list[str]) -> tuple[str, list[str]]:
             if i == toc[0]:
                 body.append('<nav class="toc"><ul>')
             anchor = ids.get(line)
-            item = f'<a href="#{anchor}">{_inline(line)}</a>' if anchor else _inline(line)
+            item = f'<a href="#{anchor}">{_inline(raw_line)}</a>' if anchor else _inline(raw_line)
             body.append(f"<li>{item}</li>")
             if i == toc[1] - 1:
                 body.append("</ul></nav>")
             i += 1
             continue
-        if "\t" in line:
+        if "\t" in raw_line:
             block = []
             while i < len(lines) and "\t" in lines[i]:
-                block.append(lines[i].strip())
+                block.append(_strip_bold(lines[i].strip()))
                 i += 1
             body += _render_table(block)
             continue
         if _H2_RE.match(line) or line in _UNNUMBERED_H2:
-            body.append(f'<h2 id="{ids[line]}">{_inline(line)}</h2>')
-        elif _is_h3(line):
-            body.append(f"<h3>{_inline(line)}</h3>")
+            body.append(f'<h2 id="{ids[line]}">{_inline(_strip_bold(raw_line))}</h2>')
+        elif _is_h3(line, lang):
+            body.append(f"<h3>{_inline(_strip_bold(raw_line))}</h3>")
         else:
-            body.append(f"<p>{_inline(line)}</p>")
+            body.append(f"<p>{_inline(raw_line)}</p>")
         i += 1
     return "\n".join(body), meta
 
@@ -175,11 +199,13 @@ def render(doc: LegalDoc) -> str:
     lines = doc.src.read_text(encoding="utf-8").splitlines()
     if not lines:
         raise ValueError(f"{doc.src} 是空文件")
-    title = lines[_H1_LINE].strip()
-    body, meta = _render_body(lines)
+    title = _strip_bold(lines[_H1_LINE].strip())
+    body, meta = _render_body(lines, doc.lang)
     meta_html = f'<p class="meta">{_inline(" · ".join(meta))}</p>' if meta else ""
+    html_lang = "en" if doc.lang == "en" else "zh-CN"
+    publisher = _PUBLISHER_EN if doc.lang == "en" else _PUBLISHER
     return f"""<!doctype html>
-<html lang="zh-CN">
+<html lang="{html_lang}">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -193,7 +219,7 @@ def render(doc: LegalDoc) -> str:
   {meta_html}
 {body}
 </main>
-<footer>{html.escape(_PUBLISHER)}</footer>
+<footer>{html.escape(publisher)}</footer>
 </body>
 </html>
 """

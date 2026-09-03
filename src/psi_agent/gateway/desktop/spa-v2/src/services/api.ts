@@ -36,6 +36,8 @@ export type SessionInfo = {
 export type GatewayDefaults = {
   agent: string
   workspace: string
+  /** Effective app UI language from the Gateway (zh-CN / en-US). */
+  language?: string
 }
 
 export type AiInfo = {
@@ -482,5 +484,18 @@ export async function fetchSurveyDone() {
 
 export async function markSurveyDone() {
   return api<{ done: boolean }>('POST', '/ui/prefs/survey', { done: true })
+}
+
+export type LanguagePref = {
+  language: string
+}
+
+/** App UI language, persisted server-side in AppData (port changes per boot). */
+export async function fetchLanguage() {
+  return api<LanguagePref>('GET', '/ui/prefs/language')
+}
+
+export async function saveLanguage(language: string) {
+  return api<LanguagePref>('POST', '/ui/prefs/language', { language })
 }
 

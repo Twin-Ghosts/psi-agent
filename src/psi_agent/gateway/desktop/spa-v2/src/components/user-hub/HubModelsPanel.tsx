@@ -1,25 +1,25 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Bot, Trash2 } from 'lucide-react'
+import { Bot, Pencil, Trash2 } from 'lucide-react'
 import type { AiInfo } from '../../services/api'
 import { createAi, deleteAi, listAis } from '../../services/api'
 import {
   aiConfigKey,
   DEFAULT_REMOTE_AI,
-  dedupeAisForDisplay,
   hydrateAiForSessions,
   isPlaceholderAi,
+  labelAisForDisplay,
+  readAiAlias,
+  writeAiAlias,
   writeStoredAiId,
 } from '../../services/bootstrapAi'
 import {
   getModelPreset,
   MODEL_PRESETS,
+  type ModelPreset,
   presetToAiPayload,
 } from '../../services/modelPresets'
+import { useI18n } from '../../i18n'
 import HubDialog from './HubDialog'
-
-export const FREE_MODEL_NOTICE_TITLE = '已切换为免费模型（远程 deepseek-v4-flash）'
-export const FREE_MODEL_NOTICE_BODY = '免费模型由远程服务提供，响应速度受服务负载与网络影响，可能较慢或出现波动'
-export const FREE_MODEL_NOTICE = `${FREE_MODEL_NOTICE_TITLE}。${FREE_MODEL_NOTICE_BODY}`
 
 type Props = {
   show: boolean
@@ -42,21 +42,28 @@ export default function HubModelsPanel({
   onFreeModelNotice,
   onAisChanged,
 }: Props) {
+  const { t } = useI18n();
   const [ais, setAis] = useState<AiInfo[]>([])
   const [presetId, setPresetId] = useState<string | null>(null)
   const [apiKey, setApiKey] = useState('')
   const [connecting, setConnecting] = useState(false)
   const [pendingConnectedId, setPendingConnectedId] = useState<string | null>(null)
+  /** Bumps when aliases change so ``labelAisForDisplay`` re-reads localStorage. */
+  const [aliasEpoch, setAliasEpoch] = useState(0)
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
 
   const preset = useMemo(
     () => (presetId ? getModelPreset(presetId) : undefined),
     [presetId],
   )
 
-  const visibleAis = useMemo(
-    () => dedupeAisForDisplay(ais, selectedAiId),
-    [ais, selectedAiId],
+  const visibleRows = useMemo(
+    () => labelAisForDisplay(ais, selectedAiId),
+    [ais, selectedAiId, aliasEpoch],
   )
+  const labelFor = (p: ModelPreset) => t(`presetModel.${p.id}.label`)
+  const hintFor = (p: ModelPreset) => t(`presetModel.${p.id}.hint`)
 
   useEffect(() => {
     if (!show) return
@@ -64,12 +71,14 @@ export default function HubModelsPanel({
     setApiKey('')
     setConnecting(false)
     setPendingConnectedId(null)
+    setRenamingId(null)
+    setRenameDraft('')
     void listAis()
       .then((list) => {
         setAis(list)
         onAisChanged?.(list)
       })
-      .catch((e) => onToast?.(e instanceof Error ? e.message : '加载模型失败'))
+      .catch((e) => onToast?.(e instanceof Error ? e.message : t('models.loadFailed')))
   }, [show, onAisChanged, onToast])
 
   const connect = async () => {
@@ -83,19 +92,16 @@ export default function HubModelsPanel({
         onClose()
         return
       }
-      // 上面那个 early return 已经保证走到这里 preset 必有值, 但 TS 收窄不到,
-      // 这里显式再判一次 (比非空断言安全: 将来上面的条件改了也不会静默解引用 undefined)。
-      if (!preset) return
       const info = await createAi(presetToAiPayload(preset, apiKey))
       const list = await listAis()
       setAis(list)
       onAisChanged?.(list)
       onSelectAi(info.id)
       writeStoredAiId(info.id)
-      onToast?.(`${preset.label} 已连接`)
+      onToast?.(t('models.connected', { name: labelFor(preset) }))
       onClose()
     } catch (e) {
-      onToast?.(e instanceof Error ? e.message : '连接失败')
+      onToast?.(e instanceof Error ? e.message : t('models.connectFailed'))
     } finally {
       setConnecting(false)
     }
@@ -123,23 +129,22 @@ export default function HubModelsPanel({
       if (free?.id) {
         onSelectAi(free.id)
         writeStoredAiId(free.id)
-        onToast?.(FREE_MODEL_NOTICE, 6000)
+        onToast?.(t('models.freeNotice'), 6000)
         onFreeModelNotice?.()
       } else {
         onSelectAi(null)
-        onToast?.('免费模型暂时不可用，请检查网络或改连自有 API')
+        onToast?.(t('models.freeUnavailable'))
       }
       onClose()
     } catch (e) {
-      onToast?.(e instanceof Error ? e.message : '切换免费模型失败')
+      onToast?.(e instanceof Error ? e.message : t('models.freeSwitchFailed'))
     } finally {
       setConnecting(false)
     }
   }
 
-  const removeAi = async (a: AiInfo) => {
-    const name = a.model || a.id
-    if (!window.confirm(`确认删除已连接模型「${name}」？`)) return
+  const removeAi = async (a: AiInfo, displayName: string) => {
+    if (!window.confirm(t('models.confirmDelete', { name: displayName }))) return
     // One row can represent several same-config instances (e.g. free remotes
     // revived per Session); delete the whole config group in one click.
     const group = ais.filter((x) => aiConfigKey(x) === aiConfigKey(a))
@@ -147,18 +152,46 @@ export default function HubModelsPanel({
     const removedSelected = selectedAiId != null && groupIds.has(selectedAiId)
     try {
       await Promise.all(group.map((x) => deleteAi(x.id)))
+      writeAiAlias(a, null)
       if (removedSelected) {
         onSelectAi(null)
         writeStoredAiId(null)
       }
       setPendingConnectedId((cur) => (cur && groupIds.has(cur) ? null : cur))
+      if (renamingId && groupIds.has(renamingId)) {
+        setRenamingId(null)
+        setRenameDraft('')
+      }
       const list = await listAis()
       setAis(list)
       onAisChanged?.(list)
-      onToast?.(`已删除 ${name}`)
+      setAliasEpoch((n) => n + 1)
+      onToast?.(t('models.deleted', { name: displayName }))
     } catch (e) {
-      onToast?.(e instanceof Error ? e.message : '删除失败')
+      onToast?.(e instanceof Error ? e.message : t('models.deleteFailed'))
     }
+  }
+
+  const beginRename = (a: AiInfo, currentTitle: string) => {
+    setPendingConnectedId(null)
+    setPresetId(null)
+    setApiKey('')
+    setRenamingId(a.id)
+    // Draft = stored alias, else model (strip any auto `` (n)`` from the row title).
+    setRenameDraft(readAiAlias(a) ?? a.model ?? currentTitle.replace(/ \(\d+\)$/, ''))
+  }
+
+  const commitRename = (a: AiInfo) => {
+    writeAiAlias(a, renameDraft)
+    setRenamingId(null)
+    setRenameDraft('')
+    setAliasEpoch((n) => n + 1)
+    onToast?.(renameDraft.trim() ? t('models.renamed') : t('models.renameCleared'))
+  }
+
+  const cancelRename = () => {
+    setRenamingId(null)
+    setRenameDraft('')
   }
 
   return (
@@ -168,7 +201,7 @@ export default function HubModelsPanel({
       onClose={onClose}
       title={(
         <div className="hub-models-title">
-          <span>模型池</span>
+          <span>{t('app.models')}</span>
           <button
             type="button"
             className="hub-link"
@@ -177,7 +210,7 @@ export default function HubModelsPanel({
               onOpenAdvanced()
             }}
           >
-            高级配置
+            {t('models.advanced')}
           </button>
         </div>
       )}
@@ -189,7 +222,7 @@ export default function HubModelsPanel({
             disabled={connecting}
             onClick={() => void useFreeModel()}
           >
-            使用免费模型
+            {t('models.useFree')}
           </button>
           <button
             type="button"
@@ -197,43 +230,90 @@ export default function HubModelsPanel({
             disabled={connecting || !((preset && apiKey.trim()) || pendingConnectedId)}
             onClick={() => void connect()}
           >
-            {connecting ? '连接中…' : '连接'}
+            {connecting ? t('models.connecting') : t('models.connect')}
           </button>
         </>
       )}
     >
-      {visibleAis.length > 0 && (
+      {visibleRows.length > 0 && (
         <section className="hub-section">
-          <h4>已连接</h4>
+          <h4>{t('models.connectedSection')}</h4>
           <ul className="hub-ai-list">
-            {visibleAis.map((a) => (
+            {visibleRows.map(({ ai: a, title, subtitle }) => (
               <li key={a.id}>
                 <div className="hub-ai-row-wrap">
-                  <button
-                    type="button"
-                    className={`hub-ai-row ${a.id === selectedAiId || a.id === pendingConnectedId ? 'active' : ''}`}
-                    onClick={() => {
-                      setPendingConnectedId(a.id)
-                      setPresetId(null)
-                      setApiKey('')
-                    }}
-                  >
-                    <Bot size={18} />
-                    <span className="hub-ai-info">
-                      <strong>{a.model || a.id}</strong>
-                      <em>{a.provider}</em>
-                    </span>
-                    {a.id === selectedAiId ? <span className="hub-badge">当前</span> : a.id === pendingConnectedId ? <span className="hub-badge">待连接</span> : null}
-                  </button>
-                  <button
-                    type="button"
-                    className="hub-ai-delete"
-                    onClick={() => void removeAi(a)}
-                    aria-label={`删除模型 ${a.model || a.id}`}
-                    title="删除"
-                  >
-                    <Trash2 size={15} />
-                  </button>
+                  {renamingId === a.id ? (
+                    <div className="hub-ai-rename">
+                      <input
+                        type="text"
+                        value={renameDraft}
+                        placeholder={a.model || a.id}
+                        autoFocus
+                        aria-label={t('models.renameAria')}
+                        onChange={(e) => setRenameDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault()
+                            commitRename(a)
+                          } else if (e.key === 'Escape') {
+                            e.preventDefault()
+                            cancelRename()
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="hub-btn primary soft"
+                        onClick={() => commitRename(a)}
+                      >
+                        {t('models.renameSave')}
+                      </button>
+                      <button
+                        type="button"
+                        className="hub-btn"
+                        onClick={cancelRename}
+                      >
+                        {t('models.renameCancel')}
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        className={`hub-ai-row ${a.id === selectedAiId || a.id === pendingConnectedId ? 'active' : ''}`}
+                        onClick={() => {
+                          setPendingConnectedId(a.id)
+                          setPresetId(null)
+                          setApiKey('')
+                        }}
+                      >
+                        <Bot size={18} />
+                        <span className="hub-ai-info">
+                          <strong>{title}</strong>
+                          <em>{subtitle}</em>
+                        </span>
+                        {a.id === selectedAiId ? <span className="hub-badge">{t('models.current')}</span> : a.id === pendingConnectedId ? <span className="hub-badge">{t('models.pendingConnect')}</span> : null}
+                      </button>
+                      <button
+                        type="button"
+                        className="hub-ai-rename-btn"
+                        onClick={() => beginRename(a, title)}
+                        aria-label={t('models.renameAriaFor', { name: title })}
+                        title={t('models.rename')}
+                      >
+                        <Pencil size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        className="hub-ai-delete"
+                        onClick={() => void removeAi(a, title)}
+                        aria-label={t('models.deleteAria', { model: title })}
+                        title={t('models.delete')}
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </>
+                  )}
                 </div>
               </li>
             ))}
@@ -242,16 +322,17 @@ export default function HubModelsPanel({
       )}
 
       <section className="hub-section">
-        <h4>选择模型</h4>
+        <h4>{t('models.selectModel')}</h4>
         <div className="hub-preset-grid">
           {MODEL_PRESETS.map((p) => (
             <button
               key={p.id}
               type="button"
               className={`hub-preset-card ${presetId === p.id ? 'active' : ''}`}
-              title={p.hint || p.label}
+              title={hintFor(p) || p.label}
               onClick={() => {
                 setPendingConnectedId(null)
+                setRenamingId(null)
                 setPresetId(p.id)
                 setApiKey('')
               }}
@@ -259,7 +340,7 @@ export default function HubModelsPanel({
               <span className="hub-preset-mark" style={{ background: `${p.accent}22`, color: p.accent }}>
                 {p.mark}
               </span>
-              <span>{p.label}</span>
+              <span>{labelFor(p)}</span>
             </button>
           ))}
         </div>
@@ -267,9 +348,9 @@ export default function HubModelsPanel({
 
       {preset && (
         <section className="hub-section hub-key-box">
-          <h4>API Key</h4>
+          <h4>{t('models.apiKey')}</h4>
           <p>
-            连接 <strong>{preset.label}</strong>
+            {t('models.connectTo')} <strong>{labelFor(preset)}</strong>
             <span> · {preset.model}</span>
           </p>
           <input

@@ -139,6 +139,7 @@ from prompt_sections import (
     SUBAGENT_DELEGATION_SECTION,
     TOOL_CALL_STYLE_SECTION,
     WEB_SEARCH_RECENCY_SECTION,
+    build_default_language_section,
     build_model_identity_line,
     build_runtime_line,
     build_skills_section,
@@ -1209,6 +1210,7 @@ this workspace, generated workflows, instruction files, or committed `.env` file
         budget = PromptBudget()
         budget.add("identity (SOUL.md)", identity)
         budget.add("static: language localization", "", LANGUAGE_LOCALIZATION_SECTION)
+        budget.add("static: default language", "", build_default_language_section())
 
         help_skill_md = ws / "skills" / HELP_SKILL_NAME / "SKILL.md"
         if await help_skill_md.exists():

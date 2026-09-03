@@ -22,6 +22,8 @@ import {
 import { mobileHaptic, prefersReducedMotion } from "./client-feedback";
 import type { ChatFile, Task } from "./model";
 import { TreasureVisual } from "./primitives";
+import { useI18n } from "../i18n";
+import { displayTaskStatusLabel } from "../services/sessionBridge";
 
 function fileIcon(name: string) {
   const n = name.toLowerCase();
@@ -60,6 +62,7 @@ export function ArtifactDrawer({
   onSave: (task: Task) => void;
   onRevise: (task: Task) => void;
 }) {
+  const { t, language } = useI18n();
   const fileNames = useMemo(() => {
     if (listMode === "new") {
       return task.newDeliverables.length ? task.newDeliverables : [];
@@ -75,6 +78,14 @@ export function ArtifactDrawer({
   const [loading, setLoading] = useState(false);
   const [revealBusy, setRevealBusy] = useState(false);
   const acceptTimer = useRef<number | null>(null);
+  const previewErrorText = (err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err)
+    return msg === '没有可打开的文件路径。'
+      ? t('fileError.noPath')
+      : msg === '历史记录中没有该文件的路径，无法从磁盘读取预览。'
+        ? t('fileError.readPath')
+        : msg
+  }
 
   useEffect(() => {
     setSelectedFile(() => {
@@ -113,7 +124,7 @@ export function ArtifactDrawer({
     }
     const path = selectedBlob?.path?.trim() || task.deliverablePaths[selectedName];
     if (!path) {
-      setLoadError("历史记录中没有该文件的路径，无法从海豚工作室读取。");
+      setLoadError(t("drawer.loadErrorRead"));
       return;
     }
     let cancelled = false;
@@ -129,7 +140,7 @@ export function ArtifactDrawer({
       })
       .catch((e) => {
         if (cancelled) return;
-        setLoadError(e instanceof Error ? e.message : String(e));
+        setLoadError(previewErrorText(e));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -158,7 +169,7 @@ export function ArtifactDrawer({
     }
     const path = blob?.path || task.deliverablePaths[selectedName];
     if (!path) {
-      setLoadError("历史记录中没有该文件的路径，无法下载。");
+      setLoadError(t("drawer.loadErrorDownload"));
       return;
     }
     void ensureChatFileData({ name: selectedName, data: "", path }, workspaceRoot)
@@ -170,7 +181,7 @@ export function ArtifactDrawer({
         downloadChatFile(loaded);
       })
       .catch((e) => {
-        setLoadError(e instanceof Error ? e.message : String(e));
+        setLoadError(previewErrorText(e));
       });
   };
 
@@ -181,22 +192,22 @@ export function ArtifactDrawer({
     setLoadError(null);
     void revealDeliverableInFolder(revealPath, workspaceRoot)
       .catch((e) => {
-        setLoadError(e instanceof Error ? e.message : String(e));
+        setLoadError(previewErrorText(e));
       })
       .finally(() => setRevealBusy(false));
   };
 
   const kicker = empty
-    ? "交付物"
+    ? t("drawer.kickerDeliverables")
     : listMode === "new"
-      ? (task.deliveryState === "saved" ? "已保存的交付物" : "新交付物已就绪")
-      : "历史交付物";
+      ? (task.deliveryState === "saved" ? t("drawer.kickerSaved") : t("drawer.kickerReady"))
+      : t("drawer.kickerHistory");
 
   const showSave = listMode === "new" && task.newDeliverables.length > 0;
 
   return (
-    <div className="drawer-layer" role="dialog" aria-modal="true" aria-label={`${task.shortTitle}交付物预览`}>
-      <button className="drawer-backdrop" type="button" onClick={onClose} aria-label="关闭预览" />
+    <div className="drawer-layer" role="dialog" aria-modal="true" aria-label={t("drawer.ariaPreview", { title: task.shortTitle })}>
+      <button className="drawer-backdrop" type="button" onClick={onClose} aria-label={t("drawer.closePreviewAria")} />
       <aside className="artifact-drawer">
         <header className="drawer-header">
           <div>
@@ -209,11 +220,11 @@ export function ArtifactDrawer({
               <CheckCircle2 size={13} />
               {" "}
               {listMode === "history"
-                ? `本会话累计 ${task.deliverables.length} 份历史交付物`
-                : `任务状态：${task.statusLabel} · 新交付 ${task.newDeliverables.length} 份`}
+                ? t("drawer.stateHistory", { count: task.deliverables.length })
+                : t("drawer.stateNew", { status: displayTaskStatusLabel(task.status, task.statusLabel, language), count: task.newDeliverables.length })}
             </span>
           </div>
-          <button type="button" className="icon-button" onClick={onClose} aria-label="关闭交付物预览">
+          <button type="button" className="icon-button" onClick={onClose} aria-label={t("drawer.closeDrawerAria")}>
             <X size={20} />
           </button>
         </header>
@@ -221,11 +232,11 @@ export function ArtifactDrawer({
         {empty ? (
           <div className="artifact-empty">
             <TreasureVisual state="none" size="card" />
-            <strong>{listMode === "new" ? "暂时没有新的交付物" : "暂时没有历史交付物"}</strong>
+            <strong>{listMode === "new" ? t("drawer.emptyNew") : t("drawer.emptyHistory")}</strong>
             <p>
               {listMode === "new"
-                ? "Agent 产出文件后，新交付物会出现在宝箱里；本会话全部交付物可在左侧「历史交付物」查看。"
-                : "Agent 通过 [SEND:] 交付文件后，会按当前会话累计在这里。"}
+                ? t("drawer.emptyNewDesc")
+                : t("drawer.emptyHistoryDesc")}
             </p>
           </div>
         ) : (
@@ -248,15 +259,15 @@ export function ArtifactDrawer({
             <div className="document-preview">
               <div className="document-toolbar">
                 <span className="document-toolbar-label" title={revealPath || selectedName}>
-                  预览 · {selectedName || "未选择"}
+                  {t("drawer.previewLabel", { name: selectedName || t("drawer.notSelected") })}
                 </span>
                 <div className="document-toolbar-actions">
                   <button
                     type="button"
                     disabled={!revealPath || revealBusy}
                     onClick={handleReveal}
-                    title={revealPath ? (revealBusy ? "正在打开…" : "在文件夹中显示") : "无磁盘路径，无法定位"}
-                    aria-label={`在文件夹中显示 ${selectedName}`}
+                    title={revealPath ? (revealBusy ? t("chat.opening") : t("chat.showInFolder")) : t("drawer.noPath")}
+                    aria-label={t("chat.showInFolderAria", { name: selectedName })}
                   >
                     <FolderOpen size={16} />
                   </button>
@@ -264,8 +275,8 @@ export function ArtifactDrawer({
                     type="button"
                     disabled={!selectedBlob?.data.trim() && !selectedBlob?.path && !task.deliverablePaths[selectedName]}
                     onClick={handleDownload}
-                    aria-label={`下载 ${selectedName}`}
-                    title="下载"
+                    aria-label={t("drawer.downloadAria", { name: selectedName })}
+                    title={t("drawer.download")}
                   >
                     <Download size={16} />
                   </button>
@@ -276,29 +287,28 @@ export function ArtifactDrawer({
               ) : loading ? (
                 <div className="artifact-preview-missing">
                   <FileText size={28} />
-                  <strong>正在从海豚工作室读取…</strong>
+                  <strong>{t("drawer.reading")}</strong>
                 </div>
               ) : (
                 <div className="artifact-preview-missing">
                   <FileText size={28} />
-                  <strong>暂无文件内容可预览</strong>
+                  <strong>{t("drawer.noPreview")}</strong>
                   <p>
-                    {loadError
-                      ?? "本会话尚未收到该文件的附件数据，且无法从海豚工作室路径读取。请让 Agent 再次通过 [SEND:] 交付。"}
+                    {loadError ?? t("drawer.noPreviewDesc")}
                   </p>
                 </div>
               )}
             </div>
 
             <footer className="drawer-footer">
-              <button type="button" className="secondary-button" disabled={accepting} onClick={() => onRevise(task)}><MessageCircle size={16} /> 让 Agent 修改</button>
+              <button type="button" className="secondary-button" disabled={accepting} onClick={() => onRevise(task)}><MessageCircle size={16} /> {t("drawer.revise")}</button>
               {showSave ? (
                 <button type="button" className={`gold-button ${accepting ? "accepting" : ""}`} disabled={accepting || task.deliveryState === "saved"} onClick={acceptWithCelebration}>
                   <TreasureVisual state={task.deliveryState} size="mini" opening={accepting} />
-                  {task.deliveryState === "saved" ? "已保存到成果库" : accepting ? "正在保存成果" : "保存到成果库"}
+                  {task.deliveryState === "saved" ? t("drawer.savedToLibrary") : accepting ? t("drawer.saving") : t("drawer.saveToLibrary")}
                 </button>
               ) : (
-                <button type="button" className="secondary-button" onClick={onClose}>关闭</button>
+                <button type="button" className="secondary-button" onClick={onClose}>{t("drawer.close")}</button>
               )}
             </footer>
             {accepting && (
@@ -308,8 +318,8 @@ export function ArtifactDrawer({
                 <div className="celebration-coins" aria-hidden="true">
                   {Array.from({ length: 14 }, (_, index) => <i key={index} />)}
                 </div>
-                <strong>{task.newDeliverables.length} 份新交付物已保存</strong>
-                <span>历史交付物列表仍会保留本会话全部产出</span>
+                <strong>{t("drawer.savedCount", { count: task.newDeliverables.length })}</strong>
+                <span>{t("drawer.savedNote")}</span>
               </div>
             )}
           </>
@@ -334,19 +344,20 @@ export function SidebarSettings({
   onAction: (label: string) => void;
   onClose: () => void;
 }) {
+  const { t, language } = useI18n();
   return (
-    <div className="settings-popover" role="menu" aria-label="HaiTun Agent 设置">
-      <header><span><Settings2 size={15} /> 设置</span><button type="button" onClick={onClose} aria-label="关闭设置"><X size={14} /></button></header>
+    <div className="settings-popover" role="menu" aria-label={t("drawer.settingsAria")}>
+      <header><span><Settings2 size={15} /> {t("app.settings")}</span><button type="button" onClick={onClose} aria-label={t("drawer.closeSettingsAria")}><X size={14} /></button></header>
       <button type="button" className="settings-toggle" onClick={onToggleNotifications} role="menuitem">
-        <span><strong>通知与提醒</strong><em>任务状态更新时提醒</em></span><i className={notificationsEnabled ? "on" : ""} />
+        <span><strong>{t("drawer.notifications")}</strong><em>{t("drawer.notificationsDesc")}</em></span><i className={notificationsEnabled ? "on" : ""} />
       </button>
       <button type="button" className="settings-toggle" onClick={onToggleHaptics} role="menuitem">
-        <span><strong>动效与触觉反馈</strong><em>金币动画与手机轻震</em></span><i className={hapticsEnabled ? "on" : ""} />
+        <span><strong>{t("drawer.haptics")}</strong><em>{t("drawer.hapticsDesc")}</em></span><i className={hapticsEnabled ? "on" : ""} />
       </button>
-      <button type="button" className="settings-row" role="menuitem" onClick={() => onAction("默认交付位置：成果库")}><span><strong>默认交付位置</strong><em>成果库</em></span><ChevronRight size={14} /></button>
-      <button type="button" className="settings-row" role="menuitem" onClick={() => onAction("语言与称呼：简体中文 · 您")}><span><strong>语言与称呼</strong><em>简体中文 · 您</em></span><ChevronRight size={14} /></button>
-      <button type="button" className="settings-row" role="menuitem" onClick={() => onAction("快捷键：⌘/Ctrl K 搜索 · ⌘/Ctrl N 新建")}><span><strong>键盘快捷键</strong><em>⌘/Ctrl K 搜索 · ⌘/Ctrl N 新建</em></span><ChevronRight size={14} /></button>
-      <button type="button" className="settings-row" role="menuitem" onClick={() => onAction("帮助与反馈入口已预留")}><span><strong>帮助与反馈</strong><em>产品说明与问题反馈</em></span><ChevronRight size={14} /></button>
+      <button type="button" className="settings-row" role="menuitem" onClick={() => onAction(t("drawer.actionDeliveryLocation"))}><span><strong>{t("drawer.deliveryLocation")}</strong><em>{t("drawer.library")}</em></span><ChevronRight size={14} /></button>
+      <button type="button" className="settings-row" role="menuitem" onClick={() => onAction(t("drawer.actionLanguage"))}><span><strong>{t("drawer.languageAndName")}</strong><em>{language === "zh-TW" ? t("drawer.languageValueTw") : language === "en-US" ? t("drawer.languageValueEn") : t("drawer.languageValueZh")}</em></span><ChevronRight size={14} /></button>
+      <button type="button" className="settings-row" role="menuitem" onClick={() => onAction(t("drawer.actionShortcuts"))}><span><strong>{t("drawer.shortcuts")}</strong><em>{t("drawer.shortcutsValue")}</em></span><ChevronRight size={14} /></button>
+      <button type="button" className="settings-row" role="menuitem" onClick={() => onAction(t("drawer.actionHelp"))}><span><strong>{t("drawer.help")}</strong><em>{t("drawer.helpDesc")}</em></span><ChevronRight size={14} /></button>
       <footer>HaiTun Agent · Demo</footer>
     </div>
   );

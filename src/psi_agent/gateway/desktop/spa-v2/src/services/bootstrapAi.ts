@@ -30,6 +30,8 @@ export const DEFAULT_REMOTE_AI = {
 export const PLACEHOLDER_API_KEY = 'haitun-default'
 
 const LS_SELECTED_AI = 'spa-v2-selected-ai'
+/** User-chosen display names, keyed by ``aiConfigKey`` (survives id rebind). */
+const LS_AI_ALIASES = 'spa-v2-ai-aliases'
 
 /** Config fingerprint — same provider/model/key/base ⇒ one row in the Hub list. */
 export function aiConfigKey(
@@ -61,6 +63,114 @@ export function dedupeAisForDisplay(
     if (prefer && a.id === prefer) byKey.set(key, a)
   }
   return [...byKey.values()]
+}
+
+export type AiDisplayRow = {
+  ai: AiInfo
+  /** Primary label shown in the pool (alias or model, plus (n) when needed). */
+  title: string
+  /** Secondary line: free vs own-key tip + provider. */
+  subtitle: string
+}
+
+function readAliasMap(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(LS_AI_ALIASES)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as unknown
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    const out: Record<string, string> = {}
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v === 'string' && v.trim()) out[k] = v.trim()
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+function writeAliasMap(map: Record<string, string>): void {
+  try {
+    if (Object.keys(map).length === 0) localStorage.removeItem(LS_AI_ALIASES)
+    else localStorage.setItem(LS_AI_ALIASES, JSON.stringify(map))
+  } catch {
+    // ignore quota / private mode
+  }
+}
+
+/** Custom display name for this config, or ``null`` when unset. */
+export function readAiAlias(
+  ai: Pick<AiInfo, 'provider' | 'model' | 'api_key' | 'base_url'>,
+): string | null {
+  const name = readAliasMap()[aiConfigKey(ai)]
+  return name?.trim() || null
+}
+
+/** Persist / clear a custom display name. Empty string clears. */
+export function writeAiAlias(
+  ai: Pick<AiInfo, 'provider' | 'model' | 'api_key' | 'base_url'>,
+  alias: string | null,
+): void {
+  const key = aiConfigKey(ai)
+  const map = readAliasMap()
+  const next = (alias ?? '').trim()
+  if (!next) delete map[key]
+  else map[key] = next
+  writeAliasMap(map)
+}
+
+/** Last 4 chars of a key for UI tips (never the full secret). */
+export function maskApiKeyTip(apiKey: string | null | undefined): string {
+  const key = (apiKey ?? '').trim()
+  if (!key) return '无 Key'
+  if (key.length <= 4) return `···${key}`
+  return `···${key.slice(-4)}`
+}
+
+function baseTitle(
+  ai: AiInfo,
+  aliases: Record<string, string>,
+): string {
+  const alias = aliases[aiConfigKey(ai)]
+  if (alias?.trim()) return alias.trim()
+  return (ai.model || ai.id || '未命名模型').trim()
+}
+
+function subtitleFor(ai: AiInfo): string {
+  const provider = (ai.provider || '').trim() || 'unknown'
+  if (isPlaceholderAi(ai)) return `免费 · ${provider}`
+  return `自有 Key ${maskApiKeyTip(ai.api_key)} · ${provider}`
+}
+
+/**
+ * Dedupe then label rows for the Hub list.
+ *
+ * Same model name across different keys stays as separate rows (dedupe already
+ * keeps them). Titles that still collide get `` (1)`` / `` (2)``; the subtitle
+ * always shows free vs own-key so paid entries are distinguishable without
+ * opening the full key.
+ */
+export function labelAisForDisplay(
+  ais: AiInfo[],
+  preferredId?: string | null,
+): AiDisplayRow[] {
+  const rows = dedupeAisForDisplay(ais, preferredId)
+  if (rows.length === 0) return []
+  const aliases = readAliasMap()
+  const bases = rows.map((ai) => baseTitle(ai, aliases))
+  const counts = new Map<string, number>()
+  for (const t of bases) counts.set(t, (counts.get(t) ?? 0) + 1)
+  const seen = new Map<string, number>()
+  return rows.map((ai, i) => {
+    const base = bases[i] ?? '未命名模型'
+    let title = base
+    if ((counts.get(base) ?? 0) > 1) {
+      const n = (seen.get(base) ?? 0) + 1
+      seen.set(base, n)
+      title = `${base} (${n})`
+    }
+    return { ai, title, subtitle: subtitleFor(ai) }
+  })
 }
 
 /** True for free-path / broken placeholder entries (must not win over real keys). */

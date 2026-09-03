@@ -2,6 +2,8 @@ import { AlertCircle, CheckCircle2, Clock3, Sparkles } from "lucide-react";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { mobileHaptic, prefersReducedMotion } from "./client-feedback";
 import type { DeliveryState, Task } from "./model";
+import { useI18n } from "../i18n";
+import { displayTaskStatusLabel } from "../services/sessionBridge";
 
 export function BrandLogo({ size = "sidebar" }: { size?: "mini" | "sidebar" | "hero" }) {
   return (
@@ -29,6 +31,7 @@ export function ProgressRing({
   /** Prefer over numeric % (e.g. todo ``2/5``). */
   label?: string;
 }) {
+  const { t } = useI18n();
   const text = label?.trim() || (showValue ? `${value}` : null);
   return (
     <span
@@ -36,10 +39,10 @@ export function ProgressRing({
       style={{ "--progress": continuous ? undefined : `${value * 3.6}deg` } as CSSProperties}
       aria-label={
         continuous
-          ? "任务处理中"
+          ? t("progress.ringWorking")
           : label?.trim()
-            ? `进度 ${label.trim()}`
-            : `进度 ${value}%`
+            ? t("progress.ringLabel", { label: label.trim() })
+            : t("progress.ringValue", { value })
       }
     >
       <span>{continuous && !label ? <Clock3 size={["micro", "sm"].includes(size) ? 11 : 15} /> : text ?? <i />}</span>
@@ -48,7 +51,9 @@ export function ProgressRing({
 }
 
 export function StatusPill({ task }: { task: Task }) {
-  const { status, statusLabel } = task;
+  const { status } = task;
+  const { language } = useI18n();
+  const statusLabel = displayTaskStatusLabel(status, task.statusLabel, language);
   const Icon = status === "attention" ? AlertCircle : CheckCircle2;
   const busy = ["working", "continuous"].includes(status) || task.progressIndeterminate;
   return (
@@ -101,6 +106,7 @@ export function TreasureButton({
   onOpen: (task: Task) => void;
   compact?: boolean;
 }) {
+  const { t } = useI18n();
   const [opening, setOpening] = useState(false);
   const openTimer = useRef<number | null>(null);
   useEffect(() => () => {
@@ -139,17 +145,17 @@ export function TreasureButton({
       }}
       aria-label={
         hasNew
-          ? `打开 ${task.shortTitle} 的新交付物`
+          ? t("treasure.openNew", { title: task.shortTitle })
           : hasHistorical
-            ? `查看 ${task.shortTitle} 的历史交付物`
-            : `查看 ${task.shortTitle} 的交付物（暂无）`
+            ? t("treasure.viewHistory", { title: task.shortTitle })
+            : t("treasure.viewNone", { title: task.shortTitle })
       }
       title={
         hasNew
-          ? (task.deliveryState === "saved" ? "已保存到成果库，点击查看" : "新交付物已就绪，点击查看")
+          ? (task.deliveryState === "saved" ? t("treasure.savedTitle") : t("treasure.readyTitle"))
           : hasHistorical
-            ? "查看本会话历史交付物"
-            : "暂时没有交付物，点击查看"
+            ? t("treasure.historyTitle")
+            : t("treasure.noneTitle")
       }
     >
       <TreasureVisual state={visualState} size={compact ? "compact" : "card"} opening={opening} />

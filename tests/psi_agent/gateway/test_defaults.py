@@ -11,8 +11,10 @@ from psi_agent.gateway._defaults import (
     DEFAULT_USER_WORKSPACE_NAME,
     appdata_history_path,
     ensure_workspace_dir,
+    read_install_language,
     resolve_appdata_root,
     resolve_default_agent,
+    resolve_default_language,
     resolve_default_workspace,
     resolve_history_read_path,
 )
@@ -178,3 +180,69 @@ def test_session_info_includes_agent_field() -> None:
     )
     assert info.agent == "/agent"
     assert info.ai_id == "ai-1"
+
+
+@pytest.mark.anyio
+async def test_resolve_default_language_explicit_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HAITUN_LANG", raising=False)
+    assert await resolve_default_language("en_US") == "en-US"
+    assert await resolve_default_language("zh") == "zh-CN"
+
+
+@pytest.mark.anyio
+async def test_resolve_default_language_env_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HAITUN_LANG", "en-US")
+    assert await resolve_default_language() == "en-US"
+
+
+@pytest.mark.anyio
+async def test_resolve_default_language_reads_install_file(tmp_path: Path) -> None:
+    hint = tmp_path / "agent"
+    await anyio.Path(hint).mkdir()
+    await (anyio.Path(hint) / "haitun-language.txt").write_text("en-US\n", encoding="utf-8")
+    assert await read_install_language(str(hint)) == "en-US"
+    assert await resolve_default_language(install_language="en-US") == "en-US"
+
+
+@pytest.mark.anyio
+async def test_read_install_language_missing(tmp_path: Path) -> None:
+    hint = tmp_path / "missing-agent"
+    await anyio.Path(hint).mkdir()
+    assert await read_install_language(str(hint)) == ""
+
+
+@pytest.mark.anyio
+async def test_resolve_default_language_falls_back_to_chinese(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HAITUN_LANG", raising=False)
+    assert await resolve_default_language() == "zh-CN"
+
+
+@pytest.mark.anyio
+async def test_resolve_default_language_same_install_language_keeps_user_choice() -> None:
+    """Same-language update/install must not override the in-app choice."""
+    assert (
+        await resolve_default_language(
+            install_language="zh-CN",
+            user_language="en-US",
+            install_language_seen="zh-CN",
+        )
+        == "en-US"
+    )
+
+
+@pytest.mark.anyio
+async def test_resolve_default_language_changed_install_language_wins() -> None:
+    """User changed the language in the installer → installer wins."""
+    assert (
+        await resolve_default_language(
+            install_language="zh-CN",
+            user_language="en-US",
+            install_language_seen="en-US",
+        )
+        == "zh-CN"
+    )
+
+
+@pytest.mark.anyio
+async def test_resolve_default_language_fresh_install_uses_installer() -> None:
+    assert await resolve_default_language(install_language="zh-TW") == "zh-TW"

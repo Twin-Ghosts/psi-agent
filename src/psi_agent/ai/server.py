@@ -64,11 +64,24 @@ _MESSAGE_REASONING_FIELDS = ("reasoning_content", "reasoning", "thinking")
 # 自我对话直接写进 ``content`` —— 这就是线上看到的泄漏 (复述提问 + 自问自答)。
 # 实测同一 prompt: 不传 = 0/9 个 chunk 带思维链, 传 "medium" = 20/23。
 #
+# **兜底必须只作用于会误关思维的 provider, 不能无条件对全部 provider 生效**
+# (2026-09 修正): 最初这段默认对**所有** provider 全局生效, 而 ``openai`` provider
+# 直连 DeepSeek 兼容端点 (ToB 部署形态: provider=openai + api_base=api.deepseek.com)
+# 并没有 auto→disabled 逻辑 —— 不传 ``reasoning_effort`` 时 thinking 本来就开着,
+# 思考照常进 ``reasoning_content``。强制传 ``"medium"`` 反而把思考档位压到中档,
+# 模型于是把**过程叙述**写进 ``content`` (每轮 tool call 前一段自述), 用户在飞书
+# 里看到整段自我对话 —— 与本注释描述的泄漏形态一致。实测同一 tool-call prompt:
+# 不传 reasoning_effort → content=0 / reasoning=306; 传 "medium" → content=34 /
+# reasoning=345。
+#
 # 该默认值是 1.21.0 之后引入的 (1.21.0 的同一文件里没有 thinking 分支), 而依赖写的
 # 是 ``any-llm-sdk>=1.21.0``, 所以是一次静默的上游行为变更改掉了我们的线上语义。
 #
 # 只在调用方**没给**时兜底, 给了就用它的 —— 这里是转发层, 不该覆盖上游意图。
 _DEFAULT_REASONING_EFFORT = "medium"
+# 只对会因缺省 auto 而关掉 thinking 的 provider 兜底 (见上); 其余 provider 保持
+# 不传, 交给上游默认行为。
+_REASONING_EFFORT_DEFAULT_PROVIDERS = frozenset({"deepseek"})
 
 
 def _describe_delta(data: str) -> str:
@@ -222,7 +235,10 @@ async def _forward_chat_completion(request: web.Request, body: dict[str, Any]) -
     body.pop("routing", None)
     # 见 ``_DEFAULT_REASONING_EFFORT``: 不传等于让 DeepSeek provider 关掉思维模式。
     # ``setdefault`` 而非赋值 —— 调用方显式给的值 (含 ``"none"``) 优先。
-    body.setdefault("reasoning_effort", _DEFAULT_REASONING_EFFORT)
+    # 只对会误关思维的 provider (deepseek) 兜底; openai 打 DeepSeek 兼容端点时强制
+    # medium 反而让模型把过程叙述写进 content (线上泄漏), 见常量注释。
+    if provider in _REASONING_EFFORT_DEFAULT_PROVIDERS:
+        body.setdefault("reasoning_effort", _DEFAULT_REASONING_EFFORT)
     stream_opts = body.get("stream_options", {})
     if isinstance(stream_opts, dict):
         stream_opts["include_usage"] = True

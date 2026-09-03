@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Check, ChevronRight } from "lucide-react";
 import type { TaskStep } from "./model";
+import { useI18n } from "../i18n";
 
 /**
  * 独立折叠面板：聊天消息底部、输入框上方。
@@ -11,10 +12,11 @@ export function ExecutionStepsPanel({
 }: {
   steps: TaskStep[];
 }) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
 
   return (
-    <section className={`execution-steps-panel${open ? " is-open" : ""}`} aria-label="执行步骤">
+    <section className={`execution-steps-panel${open ? " is-open" : ""}`} aria-label={t("steps.execution")}>
       <button
         type="button"
         className="execution-steps-toggle"
@@ -22,12 +24,12 @@ export function ExecutionStepsPanel({
         onClick={() => setOpen((value) => !value)}
       >
         <ChevronRight size={14} className="execution-steps-chevron" aria-hidden />
-        <span className="execution-steps-title">执行步骤</span>
+        <span className="execution-steps-title">{t("steps.execution")}</span>
         <em>
-          {steps.length > 0 ? `${steps.length} 步` : "暂无步骤"}
+          {steps.length > 0 ? t("steps.count", { count: steps.length }) : t("steps.none")}
         </em>
       </button>
-      <div className="execution-steps-body" role="list" aria-label="任务执行步骤" aria-live="polite">
+      <div className="execution-steps-body" role="list" aria-label={t("steps.listAria")} aria-live="polite">
         {steps.length > 0 ? (
           steps.map((step, index) => (
             <div className={`execution-steps-card ${step.state}`} role="listitem" key={`${index}-${step.label}`}>
@@ -41,7 +43,7 @@ export function ExecutionStepsPanel({
             </div>
           ))
         ) : (
-          <div className="execution-steps-empty">暂无执行步骤</div>
+          <div className="execution-steps-empty">{t("steps.empty")}</div>
         )}
       </div>
     </section>

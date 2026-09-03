@@ -2,6 +2,7 @@ import { marked, Renderer } from 'marked'
 import katex from 'katex'
 import hljs from 'highlight.js/lib/common'
 import { wrapMdTableHtml } from './mdTable'
+import { DEFAULT_LANGUAGE, type Language } from '../i18n'
 import 'katex/dist/katex.min.css'
 
 marked.setOptions({ gfm: true, breaks: true })
@@ -22,42 +23,44 @@ function highlightCode(code: string, lang: string) {
   }
 }
 
-const markedRenderer = new Renderer()
-markedRenderer.code = function ({ text, lang }: { text: string; lang?: string }) {
-  const { html, language } = highlightCode(text, (lang || '').trim())
-  const cls = language ? ` class="hljs language-${language}"` : ' class="hljs"'
-  return `<pre><code${cls}>${html}</code></pre>\n`
-}
-markedRenderer.table = function (token: {
-  header: unknown[]
-  rows: unknown[][]
-}) {
-  let header = ''
-  for (let i = 0; i < token.header.length; i++) {
-    header += this.tablecell(token.header[i] as never)
+function makeRenderer(language: Language): Renderer {
+  const markedRenderer = new Renderer()
+  markedRenderer.code = function ({ text, lang }: { text: string; lang?: string }) {
+    const { html, language: hl } = highlightCode(text, (lang || '').trim())
+    const cls = hl ? ` class="hljs language-${hl}"` : ' class="hljs"'
+    return `<pre><code${cls}>${html}</code></pre>\n`
   }
-  header = this.tablerow({ text: header } as never)
-  let body = ''
-  for (let i = 0; i < token.rows.length; i++) {
-    const row = token.rows[i]
-    let cells = ''
-    for (let j = 0; j < row.length; j++) {
-      cells += this.tablecell(row[j] as never)
+  markedRenderer.table = function (token: {
+    header: unknown[]
+    rows: unknown[][]
+  }) {
+    let header = ''
+    for (let i = 0; i < token.header.length; i++) {
+      header += this.tablecell(token.header[i] as never)
     }
-    body += this.tablerow({ text: cells } as never)
+    header = this.tablerow({ text: header } as never)
+    let body = ''
+    for (let i = 0; i < token.rows.length; i++) {
+      const row = token.rows[i]
+      let cells = ''
+      for (let j = 0; j < row.length; j++) {
+        cells += this.tablecell(row[j] as never)
+      }
+      body += this.tablerow({ text: cells } as never)
+    }
+    if (body) body = `<tbody>${body}</tbody>`
+    const tableHtml = `<table>\n<thead>\n${header}</thead>\n${body}</table>\n`
+    return wrapMdTableHtml(tableHtml, language)
   }
-  if (body) body = `<tbody>${body}</tbody>`
-  const tableHtml = `<table>\n<thead>\n${header}</thead>\n${body}</table>\n`
-  return wrapMdTableHtml(tableHtml)
+  // Markdown / autolink → new browser tab. File chips / preview drawers are
+  // buttons, not <a>, so they stay in-page.
+  markedRenderer.link = function (token: Parameters<Renderer['link']>[0]) {
+    const html = Renderer.prototype.link.call(this, token)
+    if (!html.startsWith('<a ')) return html
+    return html.replace('<a ', '<a target="_blank" rel="noopener noreferrer" ')
+  }
+  return markedRenderer
 }
-// Markdown / autolink → new browser tab. File chips / preview drawers are
-// buttons, not <a>, so they stay in-page.
-markedRenderer.link = function (token: Parameters<Renderer['link']>[0]) {
-  const html = Renderer.prototype.link.call(this, token)
-  if (!html.startsWith('<a ')) return html
-  return html.replace('<a ', '<a target="_blank" rel="noopener noreferrer" ')
-}
-marked.use({ renderer: markedRenderer })
 
 const TABLE_ROW_RE = /^\s*\|.+\|\s*$/
 const TABLE_SEP_RE = /^\s*\|(?:\s*:?-+:?\s*\|)+\s*$/
@@ -119,7 +122,7 @@ function unwrapFencedTables(text: string) {
 }
 
 /** Render assistant Markdown (GFM tables, KaTeX, code highlight) — spa v1 parity. */
-export function renderMd(text: string): string {
+export function renderMd(text: string, language: Language = DEFAULT_LANGUAGE): string {
   const macros: { block: boolean; tex: string }[] = []
   const normalized = normalizeGfmTables(unwrapFencedTables(text))
   const s = normalized
@@ -133,7 +136,7 @@ export function renderMd(text: string): string {
       macros.push({ block: false, tex: m.trim() })
       return `\x00MATH${i}\x00`
     })
-  let html = String(marked.parse(s))
+  let html = String(marked.parse(s, { renderer: makeRenderer(language) }))
   macros.forEach((m, i) => {
     try {
       const rendered = katex.renderToString(m.tex, { displayMode: m.block, throwOnError: false })

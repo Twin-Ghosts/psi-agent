@@ -32,6 +32,8 @@ import _feishu_impl as _core
 from lark_channel.core.enum import AccessTokenType, HttpMethod
 from lark_channel.core.model import BaseRequest
 
+from _feishu.todo_sop import load_todo_sop
+
 _LEDGER_NAME_PREFIX = "TODO 台账-"
 
 # Fixed column definition for directly-provisioned ledgers. 负责人/mentor are
@@ -144,7 +146,7 @@ def _build_create_app_request(name: str, folder_token: str) -> BaseRequest:
     return req
 
 
-def _build_create_table_request(app_token: str, table_name: str) -> BaseRequest:
+def _build_create_table_request(app_token: str, table_name: str, fields: list[dict[str, Any]]) -> BaseRequest:
     req = BaseRequest()
     req.http_method = HttpMethod.POST
     req.uri = "/open-apis/bitable/v1/apps/:app_token/tables"
@@ -153,15 +155,15 @@ def _build_create_table_request(app_token: str, table_name: str) -> BaseRequest:
     # Fields must live INSIDE the table object — a top-level "fields" key is
     # silently ignored by Feishu and yields a table with only placeholder columns.
     req.body = {
-        "table": {"name": table_name, "fields": _LEDGER_SCHEMA_FIELDS},
+        "table": {"name": table_name, "fields": fields},
     }
     return req
 
 
 async def _provision_direct(
-    folder_token: str, base_name: str, table_name: str, user_key: str, identity: str
+    folder_token: str, base_name: str, table_name: str, user_key: str, identity: str, fields: list[dict[str, Any]]
 ) -> tuple[str | None, dict[str, Any] | None]:
-    """Create a fresh base + table from ``_LEDGER_SCHEMA_FIELDS`` (no template).
+    """Create a fresh base + table from the given ``fields`` (no template).
 
     Feishu auto-creates a blank default "数据表" alongside the new app — the
     caller (per ``company-todo-sync``) deletes it via the confirm-code flow, so
@@ -177,7 +179,7 @@ async def _provision_direct(
         return None, _core._error(f"App creation succeeded but the response carried no app_token: {data!r}")
 
     table_res = await _core._invoke(
-        _build_create_table_request(app_token, table_name), user_key=user_key, identity=identity
+        _build_create_table_request(app_token, table_name, fields), user_key=user_key, identity=identity
     )
     if not table_res["ok"]:
         return None, table_res
@@ -320,7 +322,11 @@ async def mentor_ledger_ensure_impl(
                 return _core._error(f"Copy succeeded but the response carried no app_token: {data!r}")
             provision_mode = "copy"
         else:
-            app_token, direct = await _provision_direct(folder_token.strip(), base_name, "台账", user_key, identity)
+            cfg = await load_todo_sop()
+            fields = (cfg.get("ledger_schema") or {}).get("fields") or _LEDGER_SCHEMA_FIELDS
+            app_token, direct = await _provision_direct(
+                folder_token.strip(), base_name, "台账", user_key, identity, fields
+            )
             if app_token is None or direct is None:
                 return direct if direct is not None else _core._error("provision direct failed without error detail")
             table_id_direct = direct["table_id"]

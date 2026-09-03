@@ -48,6 +48,10 @@ so opening Haitun does not leave an empty Desktop folder. Not AppData.
 
 from __future__ import annotations
 
+import os
+
+import anyio
+
 from psi_agent._appdata import (
     appdata_history_path,
     appdata_state_dir,
@@ -67,9 +71,12 @@ from psi_agent._workspace_paths import (
     resolve_agent_package,
     resolve_user_workspace,
 )
+from psi_agent.i18n import DEFAULT_LANGUAGE, normalize_language
 
 # Soft default under the OS Desktop — layered for non-technical users.
 DEFAULT_USER_WORKSPACE_NAME = "haitun交付"
+# Written by the installer next to the agent package: ``{app}\app\haitun-language.txt``.
+INSTALL_LANGUAGE_FILENAME = "haitun-language.txt"
 # Repo-local agent package, relative to cwd (developers starting from repo root).
 DEFAULT_AGENT_REPO_CANDIDATE = "agents/feishu"
 # 短名的搜索目录: ``--default-agent desktop`` → ``agents/desktop``。
@@ -83,6 +90,7 @@ __all__ = [
     "DEFAULT_AGENT_REPO_CANDIDATE",
     "DEFAULT_AGENT_SHORT_NAME_ROOT",
     "DEFAULT_USER_WORKSPACE_NAME",
+    "INSTALL_LANGUAGE_FILENAME",
     "appdata_history_path",
     "appdata_state_dir",
     "appdata_state_latest_path",
@@ -92,8 +100,10 @@ __all__ = [
     "legacy_history_path",
     "legacy_state_latest_path",
     "legacy_todo_path",
+    "read_install_language",
     "resolve_appdata_root",
     "resolve_default_agent",
+    "resolve_default_language",
     "resolve_default_workspace",
     "resolve_history_read_path",
     "resolve_state_read_path",
@@ -126,3 +136,48 @@ async def resolve_default_agent(explicit: str = "") -> str:
         short_name_root=DEFAULT_AGENT_SHORT_NAME_ROOT,
         label="--default-agent",
     )
+
+
+async def read_install_language(install_hint: str) -> str:
+    """Read the installer-written language file, normalized (empty if absent)."""
+    hint = install_hint.strip()
+    if not hint:
+        return ""
+    candidate = anyio.Path(hint) / INSTALL_LANGUAGE_FILENAME
+    try:
+        content = (await candidate.read_text(encoding="utf-8")).strip()
+    except OSError:
+        return ""
+    return normalize_language(content) if content else ""
+
+
+async def resolve_default_language(
+    explicit: str = "",
+    install_language: str = "",
+    user_language: str = "",
+    install_language_seen: str = "",
+) -> str:
+    """Resolve the app UI language in priority order.
+
+    CLI ``--language`` / ``HAITUN_LANG`` env wins.  Otherwise the **last
+    explicit choice** wins:
+
+    - If the installer language differs from ``install_language_seen`` (the
+      language already applied on a previous boot), the user just changed it in
+      the installer → installer wins.
+    - Else the user's in-app choice wins when present.
+    - Else the installer language (fresh install) or ``zh-CN``.
+
+    ``install_language_seen`` is persisted by the Gateway after applying, so a
+    same-language update/install never overrides the in-app choice.
+    """
+    raw = explicit.strip() or os.environ.get("HAITUN_LANG", "").strip()
+    if raw:
+        return normalize_language(raw)
+    if install_language and install_language != install_language_seen:
+        return normalize_language(install_language)
+    if user_language:
+        return normalize_language(user_language)
+    if install_language:
+        return normalize_language(install_language)
+    return DEFAULT_LANGUAGE

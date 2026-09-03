@@ -436,15 +436,60 @@ def register_auth_routes(app: web.Application) -> web.Application:
 
 
 _OAUTH_DONE_HTML = (
-    "<!doctype html><meta charset=utf-8><title>授权完成</title>"
-    "<body style='font:16px/1.7 system-ui;padding:3rem;text-align:center'>"
-    "<h2>{title}</h2><p style='color:#666'>{note}</p></body>"
+    "<!doctype html><html lang='zh-CN'><meta charset='utf-8'>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>授权完成</title><style>"
+    "html,body{{width:100%;height:100%;margin:0;padding:0;}}"
+    "body{{display:grid;place-items:center;"
+    "font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;"
+    "background:linear-gradient(160deg,#f4f7fd,#e8eefb);}}"
+    ".card{{background:#fff;border-radius:20px;box-shadow:0 14px 44px rgba(38,72,150,.14);"
+    "padding:40px 52px;max-width:400px;width:100%;box-sizing:border-box;text-align:center;}}"
+    ".icon{{font-size:52px;line-height:1;margin-bottom:12px;}}"
+    "h1{{font-size:21px;margin:0 0 10px;color:#1c2b4a;}}"
+    "p{{margin:0 0 26px;color:#5a6b8c;font-size:14.5px;line-height:1.75;}}"
+    ".btn{{display:inline-block;padding:9px 26px;border:1px solid #d3daea;border-radius:999px;"
+    "background:#fff;color:#5a6b8c;font-size:14px;cursor:pointer;text-decoration:none;}}"
+    ".btn:hover{{background:#f2f5fc;color:#1c2b4a;}}"
+    ".btn.primary{{background:#3370ff;border-color:#3370ff;color:#fff;}}"
+    ".btn.primary:hover{{background:#275fe0;color:#fff;}}"
+    "#hint{{display:none;margin-top:14px;color:#9aa7bd;font-size:12.5px;}}"
+    "</style></head><body><div class='card'>"
+    "<div class='icon'>{icon}</div><h1>{title}</h1><p>{note}</p>"
+    "<button class='btn' onclick='closePage()'>✕ 关闭页面</button>"
+    "{feishu_btn}"
+    "<p id='hint'>浏览器未允许自动关闭, 请手动关闭本标签页后回到飞书。</p>"
+    "</div>"
+    "<script>function closePage(){{try{{window.close();}}catch(e){{}}"
+    "setTimeout(function(){{document.getElementById('hint').style.display='block';}},400);}}</script>"
+    "</body></html>"
 )
 
 
-def _oauth_html(title: str, note: str, status: int = 200) -> web.Response:
+def _oauth_chat_from_state(state: str) -> str:
+    """从 ``<random>.oc_xxx`` 形态的 state 里取回 chat_id (授权发起时拼入的尾巴)。"""
+    return state.split(".", 1)[1] if "." in state else ""
+
+
+def _oauth_chat_btn(chat_id: str) -> str:
+    """「回到飞书对话」按钮: applink 深链直接打开该会话, 让用户授权完就回到聊天。"""
+    if not chat_id:
+        return ""
+    from urllib.parse import quote  # noqa: PLC0415
+
+    href = f"https://applink.feishu.cn/client/chat/open?chatId={quote(chat_id, safe='')}"
+    return f"<p style='margin:12px 0 0'><a class='btn primary' href='{href}'>回到飞书对话</a></p>"
+
+
+def _oauth_html(title: str, note: str, status: int = 200, feishu_chat: str = "") -> web.Response:
+    icon = "✅" if "成功" in title else "⚠️"
     return web.Response(
-        text=_OAUTH_DONE_HTML.format(title=title, note=note),
+        text=_OAUTH_DONE_HTML.format(
+            icon=icon,
+            title=title,
+            note=note,
+            feishu_btn=_oauth_chat_btn(feishu_chat),
+        ),
         content_type="text/html",
         charset="utf-8",
         status=status,
@@ -466,9 +511,10 @@ async def _oauth_callback(request: web.Request) -> web.Response:
     if not code and not error:
         error = "callback carried neither code nor error"
     await relay.deliver(state, code=code, error=error)
+    chat = _oauth_chat_from_state(state)
     if error:
-        return _oauth_html("授权未完成", "可以回到对话里重新发起授权。", status=400)
-    return _oauth_html("授权成功 ✅", "可以关掉这个页面, 回到对话继续 —— 不用复制任何东西。")
+        return _oauth_html("授权未完成", "可以回到对话里重新发起授权。", status=400, feishu_chat=chat)
+    return _oauth_html("授权成功", "授权已完成, 现在可以回到飞书继续对话了。", feishu_chat=chat)
 
 
 async def _oauth_take_code(request: web.Request) -> web.Response:

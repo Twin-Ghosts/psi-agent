@@ -1,5 +1,6 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import "./first-run-spotlight.css";
+import { useI18n } from "../i18n";
 
 type SpotlightStep = 1 | 2 | 3 | 4;
 
@@ -16,25 +17,6 @@ const STEP_TARGETS: Record<SpotlightStep, string> = {
   4: ".user-hub-shortcuts > button:nth-child(2)",
 };
 
-const STEP_COPY: Record<SpotlightStep, { title: string; desc: string }> = {
-  1: {
-    title: "待您处理",
-    desc: "显示待处理任务数，点击可查看需要您介入的任务。",
-  },
-  2: {
-    title: "新交付物",
-    desc: "显示新成果数，点击可查看 Agent 刚生成的交付物。",
-  },
-  3: {
-    title: "模型池",
-    desc: "用于选择可用模型，也可以在这里连接新的大模型。",
-  },
-  4: {
-    title: "设置",
-    desc: "可切换海豚工作室与 Agent 包。",
-  },
-};
-
 const TOOLTIP_WIDTH = 504;
 const TOOLTIP_MARGIN = 16;
 const TOOLTIP_HEIGHT = 244;
@@ -44,6 +26,7 @@ function clamp(value: number, min: number, max: number) {
 }
 
 export default function FirstRunSpotlight({ step, onConfirm, onSkip }: Props) {
+  const { t } = useI18n();
   const [rect, setRect] = useState<DOMRect | null>(null);
 
   useEffect(() => {
@@ -60,7 +43,10 @@ export default function FirstRunSpotlight({ step, onConfirm, onSkip }: Props) {
     };
   }, [step]);
 
-  const copy = STEP_COPY[step];
+  const copy = {
+    title: t(`firstRunSpot.step${step}.title`),
+    desc: t(`firstRunSpot.step${step}.desc`),
+  };
   const below = step <= 2;
   const tooltipWidth = Math.min(TOOLTIP_WIDTH, window.innerWidth - TOOLTIP_MARGIN * 2);
   const tooltipStyle: CSSProperties = { left: TOOLTIP_MARGIN, top: TOOLTIP_MARGIN };
@@ -81,7 +67,7 @@ export default function FirstRunSpotlight({ step, onConfirm, onSkip }: Props) {
   return (
     <div className="spotlight-layer" role="dialog" aria-modal="true" aria-label={copy.title}>
       <button type="button" className="spotlight-skip" onClick={onSkip}>
-        跳过新手引导
+        {t("firstRunSpot.skip")}
       </button>
       {rect && (
         <div
@@ -102,7 +88,7 @@ export default function FirstRunSpotlight({ step, onConfirm, onSkip }: Props) {
           </div>
           <div className="spotlight-actions">
             <button type="button" className="spotlight-confirm" onClick={onConfirm}>
-              知道了
+              {t("firstRunSpot.gotIt")}
             </button>
           </div>
         </div>

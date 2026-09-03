@@ -7,6 +7,7 @@ import {
   readStoredName,
   writeStoredProfile,
 } from '../../services/userProfile'
+import { useI18n } from '../../i18n'
 
 type Props = {
   show: boolean
@@ -16,6 +17,7 @@ type Props = {
 }
 
 export default function HubProfilePanel({ show, onClose, onSaved, onToast }: Props) {
+  const { t } = useI18n();
   const [name, setName] = useState('')
   const [avatar, setAvatar] = useState('')
 
@@ -32,7 +34,15 @@ export default function HubProfilePanel({ show, onClose, onSaved, onToast }: Pro
     try {
       setAvatar(await readAvatarDataUrl(file))
     } catch (e) {
-      onToast?.(e instanceof Error ? e.message : '上传失败')
+      const msg = e instanceof Error ? e.message : ''
+      const text = msg === '请选择图片文件'
+        ? t('profile.errNotImage')
+        : msg === '图片请小于 3MB'
+          ? t('profile.errTooLarge')
+          : msg === '读取图片失败'
+            ? t('profile.errRead')
+            : (msg || t('profile.uploadFailed'))
+      onToast?.(text)
     }
   }
 
@@ -45,13 +55,13 @@ export default function HubProfilePanel({ show, onClose, onSaved, onToast }: Pro
   return (
     <HubDialog
       show={show}
-      title="我的资料"
+      title={t('app.profile')}
       width={440}
       onClose={onClose}
       actions={(
         <>
-          <button type="button" className="hub-btn ghost" onClick={onClose}>取消</button>
-          <button type="button" className="hub-btn primary" onClick={save}>保存</button>
+          <button type="button" className="hub-btn ghost" onClick={onClose}>{t('profile.cancel')}</button>
+          <button type="button" className="hub-btn primary" onClick={save}>{t('profile.save')}</button>
         </>
       )}
     >
@@ -70,19 +80,19 @@ export default function HubProfilePanel({ show, onClose, onSaved, onToast }: Pro
                 e.target.value = ''
               }}
             />
-            <Upload size={16} /> 上传头像
+            <Upload size={16} /> {t('profile.uploadAvatar')}
           </label>
           {avatar ? (
-            <button type="button" className="hub-link" onClick={() => setAvatar('')}>移除头像</button>
+            <button type="button" className="hub-link" onClick={() => setAvatar('')}>{t('profile.removeAvatar')}</button>
           ) : null}
         </div>
       </div>
       <label className="hub-field">
-        <span>称呼</span>
+        <span>{t('profile.nameLabel')}</span>
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
-          placeholder="希望 HaiTun 怎么称呼您？"
+          placeholder={t('profile.namePlaceholder')}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
               e.preventDefault()

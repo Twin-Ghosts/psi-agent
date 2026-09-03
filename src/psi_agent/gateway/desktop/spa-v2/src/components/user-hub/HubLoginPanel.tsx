@@ -21,7 +21,6 @@ import {
 } from '../../services/api'
 import {
   attemptsExhausted,
-  attemptsText,
   codeTtlMinutes,
   cooldownFrom,
   errorCodeOf,
@@ -41,6 +40,7 @@ import {
 } from '../../services/authFlow'
 import HubDialog from './HubDialog'
 import HubOtpInput from './HubOtpInput'
+import { useI18n } from '../../i18n'
 
 type Props = {
   show: boolean
@@ -92,6 +92,7 @@ export default function HubLoginPanel({
   mandatory = false,
   onLoginStateChanged,
 }: Props) {
+  const { t } = useI18n();
   const [status, setStatus] = useState<AuthStatus | null>(null)
   const [channel, setChannel] = useState<Channel>('phone')
   // 两条链路各自留一份，切 Tab 不互相清（原型 B1）
@@ -179,7 +180,7 @@ export default function HubLoginPanel({
       // 在一次网络抖动后丢失已知信息。body 选择靠 D3 抢在 status === null
       // 之前来保证能渲染出错误屏（见下方注释）。
       setFail('D3')
-      setError(humanize(e))
+      setError(authErrorText(e))
       return false
     }
   }, [])
@@ -225,7 +226,7 @@ export default function HubLoginPanel({
     const value = account.trim()
     const invalid = validateAccount(channel, value)
     if (invalid) {
-      setError(invalid)
+      setError(validationText(invalid))
       return
     }
     setBusy(true)
@@ -246,7 +247,7 @@ export default function HubLoginPanel({
       } else if (screen === 'D3') {
         setFail('D3')
       } else {
-        setError(humanize(e))
+        setError(authErrorText(e))
       }
     } finally {
       setBusy(false)
@@ -277,7 +278,7 @@ export default function HubLoginPanel({
         }
         // 老用户登录成功：关窗回工作台，不停在账户面板（原型 D4）
         // 传 false：不进账户面板, 否则关窗前会闪一下空的 C1
-        if (await refresh(false)) finishAndClose('已登录')
+        if (await refresh(false)) finishAndClose(t('auth.toastLoggedIn'))
       } catch (e) {
         const c = errorCodeOf(e)
         const screen = failScreenFor(c)
@@ -287,7 +288,7 @@ export default function HubLoginPanel({
           /* 校验侧也有限频（R7：同号 5 次 / 300s）。这一支必须单列 ——
            * 归到下面的 D1 会把「校验太频繁」显示成「验证码不正确」，用户会以为
            * 是自己抄错了码，继续猛试，撞得更死。 */
-          setError(humanize(e))
+          setError(authErrorText(e))
           setCode('')
         } else {
           /* D1 就地报错。但只有"确实是码错了"才说码错并递减次数 ——
@@ -296,11 +297,11 @@ export default function HubLoginPanel({
            * 界面却说不正确）。其余错误按码给出真实文案。 */
           if (isCodeWrong(c)) {
             const remaining = remainingOf(e)
-            setError(attemptsText(remaining))
+            setError(attemptsTextT(remaining))
             // 次数耗尽：清空已填，配合按钮禁用逼用户重新获取
             if (attemptsExhausted(remaining)) setCode('')
           } else {
-            setError(humanize(e))
+            setError(authErrorText(e))
           }
         }
       } finally {
@@ -326,7 +327,7 @@ export default function HubLoginPanel({
     // 8s 无响应转 D3 并保留重试入口，不无限转圈（原型 D4 第二条）
     const slow = window.setTimeout(() => {
       setFail('D3')
-      setError('建号请求超时，请重试')
+      setError(t('auth.error.completeTimeout'))
     }, 8000)
     try {
       // 注册凭证由 api 层内部持有，此处只提交昵称，组件不碰凭证
@@ -334,20 +335,20 @@ export default function HubLoginPanel({
       await completeAuth(wanted ? { displayName: wanted } : {})
       // 建号成功同样关窗回工作台，侧栏就地更新（原型 D4）
       // 同上传 false：D4 的转圈屏直接接关窗, 中间不插一屏空账户面板
-      if (await refresh(false)) finishAndClose('账号已创建')
+      if (await refresh(false)) finishAndClose(t('auth.toastAccountCreated'))
     } catch (e) {
       if (isTempTokenExpired(errorCodeOf(e))) {
         // tempToken 过期（10 分钟）：退回 A1，说清要重新获取验证码
         setStage('input')
         setCode('')
-        setError('验证已超时，请重新获取验证码')
+        setError(t('auth.error.tempTokenExpired'))
       } else if (failScreenFor(errorCodeOf(e)) === 'D3') {
         setFail('D3')
-        setError(humanize(e))
+        setError(authErrorText(e))
       } else {
         // 其余错误退回 A3，昵称还在，用户改一下即可重试
         setStage('complete')
-        setError(humanize(e))
+        setError(authErrorText(e))
       }
     } finally {
       window.clearTimeout(slow)
@@ -371,7 +372,7 @@ export default function HubLoginPanel({
          关不掉的输入屏, 而不是先闪一下账户面板。 */
       onLoginStateChanged?.()
     } catch (e) {
-      setError(humanize(e))
+      setError(authErrorText(e))
     } finally {
       setBusy(false)
     }
@@ -395,7 +396,7 @@ export default function HubLoginPanel({
       await revokeAuthDevice(id)
       await refresh()
     } catch (e) {
-      setError(humanize(e))
+      setError(authErrorText(e))
     } finally {
       setBusy(false)
     }
@@ -409,7 +410,7 @@ export default function HubLoginPanel({
       await refresh()
     } catch (e) {
       // 云端拦「解绑最后一个身份」会回 409，humanize 给出可读文案
-      setError(humanize(e))
+      setError(authErrorText(e))
     } finally {
       setBusy(false)
     }
@@ -419,19 +420,39 @@ export default function HubLoginPanel({
   const emailValid = useMemo(() => validateAccount('email', account.trim()) === '', [account])
   const canSend = channel === 'phone' ? phoneValid : emailValid
 
+  const authErrorText = (err: unknown): string => {
+    const code = errorCodeOf(err)
+    const key = `auth.error.${code}`
+    const localized = t(key)
+    if (localized !== key) return localized
+    return humanize(err)
+  }
+  const validationText = (invalid: string): string => {
+    if (invalid === '请输入 11 位大陆手机号') return t('auth.error.invalidPhone')
+    if (invalid === '请输入有效的邮箱地址') return t('auth.error.invalidEmail')
+    return invalid
+  }
+  const attemptsTextT = (remaining: unknown): string => {
+    if (typeof remaining !== 'number' || !Number.isFinite(remaining)) return t('auth.error.codeWrong')
+    if (remaining <= 0) return t('auth.error.attemptsExhausted')
+    return t('auth.error.attemptsLeft', { count: remaining })
+  }
+
   // ---- 品牌头（A1/B1；D3 灰度）----
   const brand = (offline = false) => (
     <div className={`hub-login-brand${offline ? ' offline' : ''}`}>
       <div className="mark">{offline ? null : <img src={DOLPHIN} alt="HaiTun" />}</div>
-      <h3>{offline ? '暂时无法连接' : '欢迎使用 HaiTun Agent'}</h3>
+      <h3>{offline ? t('auth.offlineTitle') : t('auth.welcome')}</h3>
       <p>
         {/* 硬门禁下不能再说「本机功能不受影响」—— 登录成了使用前置条件, 断网时
             人是真进不去。原先那句是软门禁时代留下的, 会让用户以为可以绕过。 */}
         {offline
           ? mandatory
-            ? '登录需要联网，请检查网络后重试'
-            : '登录需要联网，本机功能不受影响'
-          : `验证${channel === 'phone' ? '手机号' : '邮箱'}即可登录，未注册将自动创建账号`}
+            ? t('auth.offlineMandatory')
+            : t('auth.offlineLocal')
+          : channel === 'phone'
+            ? t('auth.verifyPhone')
+            : t('auth.verifyEmail')}
       </p>
     </div>
   )
@@ -439,10 +460,10 @@ export default function HubLoginPanel({
   const tabs = (
     <div className="hub-login-tabs" role="tablist">
       <button role="tab" aria-selected={channel === 'phone'} onClick={() => switchChannel('phone')}>
-        手机号
+        {t('auth.phoneTab')}
       </button>
       <button role="tab" aria-selected={channel === 'email'} onClick={() => switchChannel('email')}>
-        邮箱
+        {t('auth.emailTab')}
       </button>
     </div>
   )
@@ -457,7 +478,7 @@ export default function HubLoginPanel({
       {bindMode ? (
         <div className="hub-tip info">
           <span className="ico">ⓘ</span>
-          <span>为当前账号绑定{bindMode === 'phone' ? '手机号' : '邮箱'}，验证后即生效。</span>
+          <span>{bindMode === 'phone' ? t('auth.bindPhoneTip') : t('auth.bindEmailTip')}</span>
         </div>
       ) : (
         <>
@@ -470,8 +491,8 @@ export default function HubLoginPanel({
           <span className="ico">⚠</span>
           <span>
             {dailyCap
-              ? '今日发送次数已达上限，请改用邮箱登录。'
-              : `发送过于频繁，请 ${cooldown} 秒后重试。若仍未收到，可换用邮箱登录。`}
+              ? t('auth.dailyCap')
+              : t('auth.cooldown', { seconds: cooldown })}
           </span>
         </div>
       ) : null}
@@ -486,10 +507,10 @@ export default function HubLoginPanel({
               inputMode="numeric"
               autoComplete="tel"
               disabled={busy}
-              aria-label="手机号"
+              aria-label={t('auth.phoneAria')}
             />
             {account ? (
-              <button type="button" className="clear" onClick={() => setAccount('')} aria-label="清空">
+              <button type="button" className="clear" onClick={() => setAccount('')} aria-label={t('auth.clear')}>
                 ✕
               </button>
             ) : null}
@@ -505,10 +526,10 @@ export default function HubLoginPanel({
               inputMode="email"
               autoComplete="email"
               disabled={busy}
-              aria-label="邮箱"
+              aria-label={t('auth.emailAria')}
             />
             {account ? (
-              <button type="button" className="clear" onClick={() => setAccount('')} aria-label="清空">
+              <button type="button" className="clear" onClick={() => setAccount('')} aria-label={t('auth.clear')}>
                 ✕
               </button>
             ) : null}
@@ -522,7 +543,7 @@ export default function HubLoginPanel({
         disabled={busy || !canSend || cooldown > 0}
       >
         {busy ? <Loader2 size={15} className="hub-spin" /> : null}
-        {cooldown > 0 ? `重新获取（${cooldown}s）` : busy ? '正在发送…' : '获取验证码'}
+        {cooldown > 0 ? t('auth.resendCooldown', { seconds: cooldown }) : busy ? t('auth.sending') : t('auth.getCode')}
       </button>
       {error ? <p className="hub-login-err"><span>⊘</span><span>{error}</span></p> : null}
       {/* 硬门禁下没有「暂不登录」出口 —— 登录是使用前置条件。 */}
@@ -532,8 +553,8 @@ export default function HubLoginPanel({
   const renderCode = () => (
     <>
       <p className="hub-login-sent-to">
-        验证码已发送至 <b>{maskAccount(channel, account)}</b>
-        <br />请在 {codeTtlMinutes(channel)} 分钟内完成验证
+        {t('auth.codeSentTo')} <b>{maskAccount(channel, account)}</b>
+        <br />{t('auth.codeTtl', { minutes: codeTtlMinutes(channel) })}
       </p>
       <HubOtpInput
         value={code}
@@ -547,10 +568,10 @@ export default function HubLoginPanel({
         <p className="hub-login-err"><span>⊘</span><span>{error}</span></p>
       ) : null}
       {cooldown > 0 ? (
-        <p className="hub-login-resend">重新获取验证码（<b>{cooldown}s</b>）</p>
+        <p className="hub-login-resend">{t('auth.resendCooldownShort', { seconds: cooldown })}</p>
       ) : (
         <button type="button" className="hub-login-resend" onClick={() => void onSend()} disabled={busy}>
-          重新获取验证码
+          {t('auth.resendCode')}
         </button>
       )}
       <div style={{ marginTop: 16 }}>
@@ -560,19 +581,19 @@ export default function HubLoginPanel({
           onClick={() => void runVerify(code)}
           disabled={busy || !isOtpComplete(code)}
         >
-          {busy ? <Loader2 size={15} className="hub-spin" /> : null} 登录
+          {busy ? <Loader2 size={15} className="hub-spin" /> : null} {t('auth.login')}
         </button>
       </div>
       <div className="hub-login-center">
         {channel === 'phone' ? (
           // 手机收不到码要给真出口：切到邮箱链路
           <button type="button" className="hub-link" onClick={() => switchChannel('email')}>
-            收不到验证码？换用邮箱登录
+            {t('auth.noCodeUseEmail')}
           </button>
         ) : (
           /* 邮箱侧是纯文案不可点（原型 B2 第三条）：邮件送达率本期无监控，
            * 这句是唯一的自助手段，做成按钮会让人以为点了能重发。 */
-          <p className="hub-login-resend">没收到？请检查垃圾邮件文件夹</p>
+          <p className="hub-login-resend">{t('auth.checkSpam')}</p>
         )}
       </div>
     </>
@@ -583,28 +604,28 @@ export default function HubLoginPanel({
     <>
       <div className="hub-tip ok">
         <span className="ico">✓</span>
-        <span>{channel === 'phone' ? '手机号' : '邮箱'}验证通过，为您创建新账号</span>
+        <span>{channel === 'phone' ? t('auth.verifiedPhoneCreate') : t('auth.verifiedEmailCreate')}</span>
       </div>
       <div className="hub-field">
-        <span>昵称</span>
+        <span>{t('auth.nickname')}</span>
         <input
           value={displayName}
           onChange={(e) => setDisplayName(e.target.value)}
-          placeholder="海豚用户"
+          placeholder={t('auth.nicknamePlaceholder')}
           disabled={busy}
-          aria-label="昵称"
+          aria-label={t('auth.nickname')}
         />
       </div>
       <div className="hub-tip info">
         <span className="ico">ⓘ</span>
-        <span>您的任务数据保存在本机，账号仅用于身份识别与设备管理。</span>
+        <span>{t('auth.localDataNote')}</span>
       </div>
     </>
   )
   // ---- 屏 C1：已登录账户面板 ----
   const renderAccount = () => {
     if (!me) return null
-    const name = me.user?.displayName || me.user?.id || '用户'
+    const name = me.user?.displayName || me.user?.id || t('auth.userFallback')
     const ids = me.identities ?? []
     const phone = ids.find((i) => i.provider === 'phone')
     const email = ids.find((i) => i.provider === 'email')
@@ -616,54 +637,54 @@ export default function HubLoginPanel({
           <div className="avatar">{name.slice(0, 1)}</div>
           <div>
             <h4>
-              {name} <span className="hub-badge">已登录</span>
+              {name} <span className="hub-badge">{t('auth.loggedInBadge')}</span>
             </h4>
             <p>{phone ? maskAccount('phone', phone.identifier) : email?.identifier}</p>
           </div>
         </div>
-        <div className="hub-sec-title">登录方式</div>
+        <div className="hub-sec-title">{t('auth.loginMethods')}</div>
         <div className="hub-rows">
           <div className="hub-row">
             <span className="ico2"><Smartphone size={15} /></span>
             <span className="txt">
-              <b>手机号</b>
-              <span>{phone ? maskAccount('phone', phone.identifier) : '未绑定'}</span>
+              <b>{t('auth.phoneLabel')}</b>
+              <span>{phone ? maskAccount('phone', phone.identifier) : t('auth.notBound')}</span>
             </span>
             {phone ? (
               canUnbind ? (
-                <button type="button" className="hub-btn danger" onClick={() => void onUnbind('phone')} disabled={busy}>解绑</button>
+                <button type="button" className="hub-btn danger" onClick={() => void onUnbind('phone')} disabled={busy}>{t('auth.unbind')}</button>
               ) : (
-                <span className="hub-badge">已验证</span>
+                <span className="hub-badge">{t('auth.verified')}</span>
               )
             ) : (
-              <button type="button" className="hub-btn primary soft" onClick={() => startBind('phone')}>绑定</button>
+              <button type="button" className="hub-btn primary soft" onClick={() => startBind('phone')}>{t('auth.bind')}</button>
             )}
           </div>
           <div className="hub-row">
             <span className="ico2"><Mail size={15} /></span>
             <span className="txt">
-              <b>邮箱</b>
-              <span>{email ? email.identifier : '未绑定'}</span>
+              <b>{t('auth.emailLabel')}</b>
+              <span>{email ? email.identifier : t('auth.notBound')}</span>
             </span>
             {email ? (
               canUnbind ? (
-                <button type="button" className="hub-btn danger" onClick={() => void onUnbind('email')} disabled={busy}>解绑</button>
+                <button type="button" className="hub-btn danger" onClick={() => void onUnbind('email')} disabled={busy}>{t('auth.unbind')}</button>
               ) : (
-                <span className="hub-badge">已验证</span>
+                <span className="hub-badge">{t('auth.verified')}</span>
               )
             ) : (
-              <button type="button" className="hub-btn primary soft" onClick={() => startBind('email')}>绑定</button>
+              <button type="button" className="hub-btn primary soft" onClick={() => startBind('email')}>{t('auth.bind')}</button>
             )}
           </div>
         </div>
         <div className="hub-tip info" style={{ marginTop: 14 }}>
           <span className="ico">ⓘ</span>
-          <span>您的任务与文件仅保存在本机，退出登录不会删除任何本地数据。</span>
+          <span>{t('auth.localFilesNote')}</span>
         </div>
         {!status?.credentialEncrypted ? (
           <div className="hub-tip warn">
             <span className="ico">⚠</span>
-            <span>系统钥匙串不可用，本机凭证以明文保存。建议安装 keyring 后重启客户端。</span>
+            <span>{t('auth.keyringWarning')}</span>
           </div>
         ) : null}
         {error ? <p className="hub-login-err"><span>⊘</span><span>{error}</span></p> : null}
@@ -676,7 +697,7 @@ export default function HubLoginPanel({
     <>
       <div className="hub-tip info">
         <span className="ico">ⓘ</span>
-        <span>移除设备后，该设备将立即退出登录并需要重新验证。</span>
+        <span>{t('auth.removeDeviceNote')}</span>
       </div>
       <div className="hub-rows">
         {devices.map((d) => (
@@ -688,10 +709,10 @@ export default function HubLoginPanel({
             <span className="txt">
               <b>
                 {d.name || d.platform}
-                {d.current ? <span className="hub-badge">本机</span> : null}
+                {d.current ? <span className="hub-badge">{t('auth.thisDevice')}</span> : null}
               </b>
               <span>
-                {d.platform} · 最近活跃 {d.lastSeenAt || d.createdAt}
+                {t('auth.lastActive', { platform: d.platform, time: d.lastSeenAt || d.createdAt })}
               </span>
             </span>
             {d.current ? null : (
@@ -700,9 +721,9 @@ export default function HubLoginPanel({
                 className="hub-btn danger"
                 onClick={() => void onRevoke(d.id)}
                 disabled={busy}
-                aria-label="移除设备"
+                aria-label={t('auth.removeDeviceAria')}
               >
-                <Trash2 size={14} /> 移除
+                <Trash2 size={14} /> {t('auth.remove')}
               </button>
             )}
           </div>
@@ -720,31 +741,31 @@ export default function HubLoginPanel({
         <span className="ico">⊘</span>
         <span>
           {mandatory
-            ? '无法连接认证服务。登录后才能使用，请检查网络后重试。'
-            : '无法连接认证服务，请检查网络后重试。'}
+            ? t('auth.offlineMandatoryBody')
+            : t('auth.offlineBody')}
         </span>
       </div>
       <button type="button" className="hub-btn primary block" onClick={() => void refresh()} disabled={busy}>
-        {busy ? <Loader2 size={15} className="hub-spin" /> : null} 重试
+        {busy ? <Loader2 size={15} className="hub-spin" /> : null} {t('auth.retry')}
       </button>
       {/* 硬门禁下断网也不放行: 默认模型的 key 由云端按登录态下发, 放进去只会在
           第一次对话时报一个与产品无关的上游错误(见 gateway/desktop/_free_model.py)。 */}
       {mandatory ? null : (
         <div className="hub-login-center">
           <button type="button" className="hub-btn ghost" style={{ border: 0, background: 'none' }} onClick={onClose}>
-            暂不登录，继续使用
+            {t('auth.skipForNow')}
           </button>
         </div>
       )}
     </>
   )
   // ---- 标题随屏切换 ----
-  let title = '登录'
-  if (bindMode) title = bindMode === 'phone' ? '绑定手机号' : '绑定邮箱'
-  else if (stage === 'complete') title = '完善资料'
-  else if (stage === 'code') title = '输入验证码'
-  else if (stage === 'finishing') title = '登录'
-  else if (stage === 'done') title = manageDevices ? '登录设备' : '账户'
+  let title = t('auth.titleLogin')
+  if (bindMode) title = bindMode === 'phone' ? t('auth.titleBindPhone') : t('auth.titleBindEmail')
+  else if (stage === 'complete') title = t('auth.titleComplete')
+  else if (stage === 'code') title = t('auth.titleCode')
+  else if (stage === 'finishing') title = t('auth.titleLogin')
+  else if (stage === 'done') title = manageDevices ? t('auth.titleDevices') : t('auth.titleAccount')
 
   // ---- 页脚动作随屏切换 ----
   let actions: React.ReactNode = null
@@ -754,10 +775,10 @@ export default function HubLoginPanel({
         {/* 「稍后设置」= 不提交昵称，由服务端给默认值；「开始使用」= 提交所填。
             两者若都提交输入框内容，前者就名不副实（用户填了字还点它，字会被存下）。 */}
         <button type="button" className="hub-btn ghost" onClick={() => void onComplete(true)} disabled={busy}>
-          稍后设置
+          {t('auth.setupLater')}
         </button>
         <button type="button" className="hub-btn primary" onClick={() => void onComplete()} disabled={busy}>
-          开始使用
+          {t('auth.startUsing')}
         </button>
       </>
     )
@@ -765,18 +786,18 @@ export default function HubLoginPanel({
     actions = (
       <>
         <button type="button" className="hub-btn ghost" style={{ border: 0, background: 'none' }} onClick={() => setManageDevices(true)}>
-          管理登录设备（{devices.length}）
+          {t('auth.manageDevices', { count: devices.length })}
         </button>
         <span style={{ flex: 1 }} />
         <button type="button" className="hub-btn danger" onClick={() => void onLogout()} disabled={busy}>
-          退出登录
+          {t('auth.logout')}
         </button>
       </>
     )
   } else if (stage === 'done' && manageDevices) {
     actions = (
       <button type="button" className="hub-btn ghost" onClick={() => setManageDevices(false)}>
-        返回
+        {t('auth.back')}
       </button>
     )
   }
@@ -794,7 +815,7 @@ export default function HubLoginPanel({
     body = (
       <div className="hub-login-loading">
         <div className="ring" />
-        <p>正在检查登录状态…</p>
+        <p>{t('auth.checkingStatus')}</p>
       </div>
     )
   } else if (!status.available) {
@@ -803,11 +824,10 @@ export default function HubLoginPanel({
     body = (
       <>
         <p className="hub-login-body">
-          当前为<strong>本地 Gateway 模式</strong>，无需登录即可使用 Web 控制台。
+          {t('auth.localModePrefix')}<strong>{t('auth.localMode')}</strong>{t('auth.localModeSuffix')}
         </p>
         <p className="hub-login-hint">
-          账号登录默认开启。若需要它，请确认网关是最新版本，且没有把{' '}
-          <code>PSI_AUTH_ENDPOINT</code> 设成空值。
+          {t('auth.localModeHint')}
         </p>
       </>
     )
@@ -818,7 +838,7 @@ export default function HubLoginPanel({
     body = (
       <div className="hub-login-loading">
         <div className="ring" />
-        <p>正在为您准备账号…</p>
+        <p>{t('auth.preparingAccount')}</p>
       </div>
     )
   } else if (stage === 'complete') {

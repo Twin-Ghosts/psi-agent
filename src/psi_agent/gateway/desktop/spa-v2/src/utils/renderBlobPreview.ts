@@ -155,6 +155,7 @@ function createTable(rows: unknown[][]): HTMLElement {
 export async function renderBlobPreview(
   host: HTMLElement,
   file: BlobPreviewFile,
+  labels?: { unsupported?: string; partial?: string },
 ): Promise<BlobPreviewHandle> {
   let objectUrl = ''
   let editorView: { destroy: () => void } | null = null
@@ -177,7 +178,7 @@ export async function renderBlobPreview(
     host.replaceChildren()
   }
 
-  const fail = (msg = FALLBACK): BlobPreviewHandle => {
+  const fail = (msg = labels?.unsupported || FALLBACK): BlobPreviewHandle => {
     cleanup()
     return { cleanup, error: msg }
   }
@@ -234,7 +235,7 @@ export async function renderBlobPreview(
 
     if (MARKDOWN_EXTS.has(ext)) {
       const bounded = boundedText(decodeText(bytes))
-      if (bounded.partial) notice = PARTIAL
+      if (bounded.partial) notice = labels?.partial || PARTIAL
       const article = document.createElement('article')
       article.className = 'file-preview-md'
       article.innerHTML = renderMd(bounded.text)
@@ -244,7 +245,7 @@ export async function renderBlobPreview(
 
     if (HTML_EXTS.has(ext)) {
       const bounded = boundedText(decodeText(bytes))
-      if (bounded.partial) notice = PARTIAL
+      if (bounded.partial) notice = labels?.partial || PARTIAL
       const iframe = document.createElement('iframe')
       iframe.className = 'file-preview-html'
       iframe.title = file.name || 'HTML preview'
@@ -261,7 +262,7 @@ export async function renderBlobPreview(
       if (ext === 'json') text = formatJson(text)
       if (ext === 'jsonl') text = formatJsonl(text)
       const bounded = boundedText(text)
-      if (bounded.partial) notice = PARTIAL
+      if (bounded.partial) notice = labels?.partial || PARTIAL
       try {
         const { EditorView, basicSetup } = await import('codemirror')
         editorView = new EditorView({
@@ -309,7 +310,7 @@ export async function renderBlobPreview(
         rows.length > CSV_ROW_LIMIT
         || rows.some((row) => Array.isArray(row) && row.length > TABLE_COL_LIMIT)
       ) {
-        notice = PARTIAL
+        notice = labels?.partial || PARTIAL
       }
       host.append(
         createTable(
@@ -325,7 +326,7 @@ export async function renderBlobPreview(
       const XLSX = await import('xlsx')
       const workbook = XLSX.read(bytesToArrayBuffer(bytes), { type: 'array' })
       const sheetNames = workbook.SheetNames.slice(0, SHEET_LIMIT)
-      if (workbook.SheetNames.length > SHEET_LIMIT) notice = PARTIAL
+      if (workbook.SheetNames.length > SHEET_LIMIT) notice = labels?.partial || PARTIAL
       if (!sheetNames.length) return fail()
       for (const name of sheetNames) {
         const section = document.createElement('section')
@@ -343,7 +344,7 @@ export async function renderBlobPreview(
           rows.length > TABLE_ROW_LIMIT
           || rows.some((row) => normalizeRow(row).length > TABLE_COL_LIMIT)
         ) {
-          notice = PARTIAL
+          notice = labels?.partial || PARTIAL
         }
         section.append(
           createTable(
@@ -365,7 +366,7 @@ export async function renderBlobPreview(
       ).toString()
       const pdf = await pdfjsLib.getDocument({ data: bytesToArrayBuffer(bytes) }).promise
       const pageCount = Math.min(pdf.numPages, PDF_PAGE_LIMIT)
-      if (pdf.numPages > PDF_PAGE_LIMIT) notice = PARTIAL
+      if (pdf.numPages > PDF_PAGE_LIMIT) notice = labels?.partial || PARTIAL
       const wrap = document.createElement('div')
       wrap.className = 'pdf-pages'
       host.append(wrap)
