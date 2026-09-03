@@ -11,11 +11,11 @@ launched once and reused, driving the *shared* single browser (owned by
 :mod:`_browser_shared`) through ``--cdp-endpoint``, so every short-lived client
 connection sees the same pages.
 
-Because both this server and ``browser_cdp`` attach to the one browser from
-:mod:`_browser_shared`, a session has exactly one browser window no matter which tool is
-used. The user may close that window at any time; the shared owner then reports the
-closure (once) instead of silently relaunching, and this server is restarted against the
-next browser on the following call.
+Because the server attaches to the one browser from :mod:`_browser_shared`, a session has
+exactly one browser window no matter how many times the tools are called. The user may
+close that window at any time; the shared owner then reports the closure (once) instead
+of silently relaunching, and this server is restarted against the next browser on the
+following call.
 """
 
 from __future__ import annotations

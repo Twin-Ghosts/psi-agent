@@ -1,14 +1,10 @@
-"""Shared single-Chromium owner for both the ``browser_*`` and ``browser_cdp`` tools.
+"""Single-Chromium owner for the Playwright-MCP ``browser_*`` tools.
 
 One headed system browser (Edge, then Chrome) with ``--remote-debugging-port`` and one
-isolated profile is launched lazily and reused by BOTH tool families in this process:
-
-- the Playwright-MCP ``browser_*`` tools attach to it through ``--cdp-endpoint``
-  (see ``_browser_impl``), and
-- ``browser_cdp`` talks to it directly over CDP.
-
-Per process there is therefore exactly **one** browser window, no matter which tool is
-used or how many times — no new window per call.
+isolated profile is launched lazily and drives the whole ``browser_*`` family: the
+Playwright-MCP server (see ``_browser_impl``) attaches to it through ``--cdp-endpoint``,
+so a session has exactly **one** browser window no matter how many times the tools are
+called — no new window per call.
 
 **User-close contract.** The browser is a normal window the user may close at any time.
 Closing it mid-task is *respected*, not fought:
