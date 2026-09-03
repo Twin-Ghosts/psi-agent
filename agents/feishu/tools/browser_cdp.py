@@ -6,9 +6,9 @@ raw CDP command in any domain (``Page.*``, ``Network.*``, ``Emulation.*``, ``Run
 ``Browser.*``, ``Target.*``, …), e.g. capturing a full-page PDF, throttling the network,
 overriding geolocation, or reading the accessibility tree.
 
-It talks to a dedicated debug browser it launches on first use (Edge, then Chrome, with
-``--remote-debugging-port`` and an isolated profile — separate from the Playwright MCP
-browser), or to an already-running browser when ``CDP_ENDPOINT`` is set. CDP is a
+It talks to the **single shared browser** this session uses — the same window the
+Playwright-MCP ``browser_*`` tools drive (see :mod:`_browser_shared`). Set
+``CDP_ENDPOINT`` to target an already-running browser instead. CDP is a
 JSON-over-WebSocket protocol; this sends one command and returns its reply.
 
 Prerequisites: a Chromium-family browser (Edge/Chrome) installed, OR ``CDP_ENDPOINT``
@@ -16,8 +16,9 @@ pointing at a browser started with ``--remote-debugging-port``. All IO is async
 (``aiohttp`` WebSocket, already a core dependency — no extra packages).
 
 Env knobs (all optional): ``CDP_ENDPOINT`` (connect to an existing browser instead of
-launching), ``CDP_BROWSER_CHANNEL`` (``msedge``/``chrome``), ``CDP_HEADLESS`` (``1``/``0``,
-default headed), ``CDP_STARTUP_TIMEOUT``, ``CDP_COMMAND_TIMEOUT``.
+launching), ``CDP_COMMAND_TIMEOUT``, plus the shared-browser knobs in
+:mod:`_browser_shared` (``BROWSER_CHANNEL``/``CDP_BROWSER_CHANNEL``,
+``BROWSER_HEADLESS``/``CDP_HEADLESS``, ``BROWSER_PROFILE_DIR``).
 """
 
 from __future__ import annotations
@@ -51,11 +52,13 @@ async def browser_cdp(
     ``Network.emulateNetworkConditions`` to throttle; ``Runtime.evaluate``
     ``{"expression": "document.title", "returnByValue": true}``.
 
-    On first use a dedicated debug browser (Edge, then Chrome) is launched with remote
-    debugging and reused across calls; set ``CDP_ENDPOINT`` (e.g. ``http://localhost:9222``)
-    to target an already-running browser instead. Many domains must be enabled first —
-    e.g. call ``Network.enable`` before ``Network.*`` events, or ``Page.enable`` before
-    some ``Page`` methods.
+    On first use this attaches to the session's single shared browser (launched once with
+    remote debugging and reused; the same window ``browser_*`` drives); set ``CDP_ENDPOINT``
+    (e.g. ``http://localhost:9222``) to target an already-running browser instead. If the
+    shared browser window was closed by the user, the reply explains that and does not
+    silently reopen it — ask the user before continuing. Many domains must be enabled
+    first — e.g. call ``Network.enable`` before ``Network.*`` events, or ``Page.enable``
+    before some ``Page`` methods.
 
     Args:
         method: CDP method name, ``Domain.command`` (e.g. ``"Page.navigate"``). Required.
