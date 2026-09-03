@@ -1,6 +1,6 @@
 # Desktop Fusion Memory 内嵌接入设计
 
-> 状态：设计已确认，等待书面复核
+> 状态：设计已确认，实施计划已编写
 >
 > psi-agent 基线：`origin/main@f82ee9a32816e1bb140409fe15ea8396d6d6f421`
 >
@@ -118,6 +118,9 @@ psi-agent 继续按照原有逻辑写入 AppData `histories/{session_id}.jsonl`�
 
 每个完整回合产生两个 evidence span，分别保留 user 和 assistant 的可见原文。只移除 `[SEND:]`/`[RECV:]` 等传输层标记；不摘要、不改写、不截断、不做语义清洗。仅含传输标记而没有可见文本的 assistant 不能完成一个可写回合。
 
+history 行如果自带可验证的源时间则原样保留为 provenance；现有 history 通常没有逐消息时间戳，
+此时 evidence 时间必须显式记为未知，不能用扫描时间或不断变化的文件 mtime 伪造。
+
 以下内容一律不写入 evidence journal：
 
 - `system`、`tool`、`compacted` role 或 kind。
@@ -224,7 +227,7 @@ Fusion Memory runtime 因此按规范化后的 `(workspace_id, session_id)` 保�
 4. 以首条 user 原文查询 FTS；有向量时融合 dense 候选；有 DashScope key 时可 rerank。
 5. 把有明确来源的少量原始 evidence 注入首轮 prompt 的动态区。
 
-注入块必须把召回内容标为“不可信历史数据”，禁止把其中的指令当系统指令执行。每条证据带 `span_id`、原 session 和时间信息；没有命中或 runtime 降级时不注入空说明。
+注入块必须把召回内容标为“不可信历史数据”，禁止把其中的指令当系统指令执行。每条证据带 `span_id`、原 session 和源时间（history 未记录时明确为未知）；没有命中或 runtime 降级时不注入空说明。
 
 ### 后续按需召回
 
