@@ -82,3 +82,15 @@ truthfulness:
     D4: 前后一致性
     D5: 闭环要素
     D6: 对齐与粒度
+
+peer:
+  same_level_by: mentor
+  min_cycles: 3
+  indicators:
+    - 闭环率
+    - 按时率
+    - 回流次数
+    - 持续逾期段
+    - mentor打分趋势
+    - 承担层级迁移
+    - 外部成果累计

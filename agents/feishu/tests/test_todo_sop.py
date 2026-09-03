@@ -29,6 +29,7 @@ SOP_SKILLS = (
     "company-todo-sync",
     "todo-completion-standard",
     "company-todo-review",
+    "todo-peer-contrast",
 )
 
 
@@ -72,6 +73,13 @@ def test_ledger_schema_fields_are_typed() -> None:
 
 def test_completion_verdicts_have_four() -> None:
     assert len(_config()["completion_verdicts"]) == 4
+
+
+def test_peer_section_is_present() -> None:
+    peer = _config()["peer"]
+    assert peer["same_level_by"] == "mentor"
+    assert peer["min_cycles"] >= 1
+    assert len(peer["indicators"]) == 7
 
 
 def test_judgment_skills_point_at_the_config() -> None:
