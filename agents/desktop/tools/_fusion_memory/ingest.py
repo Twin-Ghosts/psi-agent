@@ -13,7 +13,7 @@ from pathlib import Path
 import anyio
 from anyio import to_thread
 
-from psi_agent._appdata import resolve_history_read_path, resolve_state_read_path
+from psi_agent._appdata import appdata_state_latest_path, resolve_history_read_path
 
 from .journal import EvidenceSpan
 from .store import IngestCheckpoint, MemoryStore
@@ -109,8 +109,8 @@ def _read_rows(path: Path, start_line: int = 1) -> Iterator[tuple[int, dict[str,
                 yield line_no, value
 
 
-def _read_rows_reverse(path: Path, start_line: int = 1) -> Iterator[tuple[int, dict[str, object]]]:
-    """Yield JSON rows from the tail without materializing the history file."""
+def _read_rows_reverse(path: Path, start_line: int, end_line: int) -> Iterator[tuple[int, dict[str, object]]]:
+    """Yield a committed tail range without scanning or materializing its prefix."""
     with path.open("rb") as handle:
         handle.seek(0, os.SEEK_END)
         size = handle.tell()
@@ -118,10 +118,8 @@ def _read_rows_reverse(path: Path, start_line: int = 1) -> Iterator[tuple[int, d
             return
         handle.seek(-1, os.SEEK_END)
         trailing_newline = handle.read(1) == b"\n"
-        handle.seek(0)
-        total_lines = sum(1 for _ in handle)
         position = size
-        line_no = total_lines
+        line_no = end_line
         buffer = b""
         skip_trailing_empty = trailing_newline
         while position:
@@ -146,7 +144,7 @@ def _read_rows_reverse(path: Path, start_line: int = 1) -> Iterator[tuple[int, d
                     continue
                 if isinstance(value, dict):
                     yield current_line, value
-        if line_no >= start_line and (buffer or total_lines > 0):
+        if line_no >= start_line and buffer:
             try:
                 value = json.loads(buffer.decode("utf-8"))
             except json.JSONDecodeError, UnicodeDecodeError:
@@ -216,9 +214,28 @@ def parse_latest_completed_turn(
     scope: WorkspaceScope,
     source: HistorySource,
     start_line: int = 1,
+    end_line: int | None = None,
 ) -> list[EvidenceSpan]:
+    if end_line is None:
+        latest: list[EvidenceSpan] = []
+        pending: tuple[int, dict[str, object], str] | None = None
+        for line_no, row in _read_rows(Path(source.path), start_line):
+            if row.get("role") == "user":
+                pending = None
+                user_text = _visible_content(row)
+                if _kind(row) == "chat" and user_text.strip():
+                    pending = (line_no, row, user_text)
+                continue
+            assistant_text = _eligible_assistant(row)
+            if assistant_text is None or pending is None:
+                continue
+            user_line, user_row, user_text = pending
+            latest = list(_span_pair(scope, source, user_line, user_row, user_text, line_no, row, assistant_text))
+            pending = None
+        return latest
+
     candidate: tuple[int, dict[str, object], str] | None = None
-    for line_no, row in _read_rows_reverse(Path(source.path), start_line):
+    for line_no, row in _read_rows_reverse(Path(source.path), start_line, end_line):
         assistant_text = _eligible_assistant(row)
         if assistant_text is not None:
             candidate = (line_no, row, assistant_text)
@@ -295,7 +312,7 @@ async def _owned_history_source(
 
 async def _appdata_history_is_owned(appdata_root: Path, scope: WorkspaceScope, session_id: str) -> bool:
     """Require the Gateway snapshot to bind shared AppData history to a workspace."""
-    state_path = await resolve_state_read_path(appdata_root=str(appdata_root))
+    state_path = appdata_state_latest_path(str(appdata_root))
     try:
         raw = await state_path.read_text(encoding="utf-8")
         snapshot = json.loads(raw)
@@ -303,12 +320,11 @@ async def _appdata_history_is_owned(appdata_root: Path, scope: WorkspaceScope, s
         return False
     if not isinstance(snapshot, dict) or not isinstance(snapshot.get("sessions"), list):
         return False
-    return any(
-        isinstance(item, dict)
-        and item.get("id") == session_id
-        and isinstance(item.get("workspace"), str)
-        and normalize_workspace(item["workspace"]) == scope.normalized
-        for item in snapshot["sessions"]
+    owners = [item for item in snapshot["sessions"] if isinstance(item, dict) and item.get("id") == session_id]
+    return (
+        len(owners) == 1
+        and isinstance(owners[0].get("workspace"), str)
+        and normalize_workspace(owners[0]["workspace"]) == scope.normalized
     )
 
 
@@ -327,9 +343,13 @@ async def discover_current_history(
     scope: WorkspaceScope,
     current_session_id: str,
     appdata_root: Path,
+    committed_path: str = "",
 ) -> HistorySource | None:
     if re.fullmatch(r"[a-zA-Z0-9_-]+", current_session_id) is None:
         return None
+    if committed_path:
+        owned = await _owned_history_source(scope, current_session_id, Path(committed_path), appdata_root)
+        return owned[1] if owned else None
     current_path = Path(
         str(
             await resolve_history_read_path(
@@ -347,13 +367,45 @@ async def discover_current_history(
 
 
 def _prefix_hash(path: Path, line_count: int) -> str:
+    """Fingerprint only raw chat evidence; mutable context rows are irrelevant."""
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for index, line in enumerate(handle):
-            if index >= line_count:
-                break
-            digest.update(line)
+    for line_no, row in _read_rows(path):
+        if line_no > line_count:
+            break
+        role = row.get("role")
+        if role == "user":
+            content = _visible_content(row)
+            if _kind(row) != "chat" or not content.strip():
+                continue
+        elif role == "assistant":
+            content = _eligible_assistant(row)
+            if content is None:
+                continue
+        else:
+            continue
+        digest.update(json.dumps([line_no, role, content], ensure_ascii=False).encode("utf-8"))
     return digest.hexdigest()
+
+
+def _committed_lines(message: dict[str, object]) -> tuple[str, int, int] | None:
+    provenance = message.get("_psi_history_provenance")
+    if not isinstance(provenance, dict):
+        return None
+    path = provenance.get("path")
+    user_line = provenance.get("user_line")
+    assistant_line = provenance.get("assistant_line")
+    if (
+        not isinstance(path, str)
+        or not path
+        or not isinstance(user_line, int)
+        or isinstance(user_line, bool)
+        or not isinstance(assistant_line, int)
+        or isinstance(assistant_line, bool)
+        or user_line < 1
+        or assistant_line <= user_line
+    ):
+        return None
+    return path, user_line, assistant_line
 
 
 def ingest_confirmed_turn(
@@ -387,31 +439,58 @@ def ingest_confirmed_turn(
 
     stat = path.stat()
     checkpoint = store.read_checkpoint(scope.workspace_id, str(path.resolve()))
-    checkpoint_valid = bool(
-        checkpoint
-        and stat.st_size >= checkpoint.file_size
-        and _prefix_hash(path, checkpoint.confirmed_line_count) == checkpoint.prefix_hash
-    )
-    rescanned = int(bool(checkpoint and not checkpoint_valid))
-    start_line = checkpoint.confirmed_line_count + 1 if checkpoint_valid and checkpoint else 1
-    parsed = parse_latest_completed_turn(scope, source, start_line)
+    committed = _committed_lines(user_message)
+    if committed is not None:
+        committed_path, user_line, assistant_line = committed
+        if normalize_workspace(committed_path) != normalize_workspace(path):
+            return IngestReport(files_scanned=1), []
+        if (
+            checkpoint
+            and checkpoint.session_id == source.session_id
+            and assistant_line <= checkpoint.confirmed_line_count
+        ):
+            return IngestReport(files_scanned=1), []
+        rescanned = 0
+        parsed = parse_latest_completed_turn(scope, source, user_line, assistant_line)
+    else:
+        checkpoint_valid = bool(
+            checkpoint and _prefix_hash(path, checkpoint.confirmed_line_count) == checkpoint.prefix_hash
+        )
+        rescanned = int(bool(checkpoint and not checkpoint_valid))
+        start_line = checkpoint.confirmed_line_count + 1 if checkpoint_valid and checkpoint else 1
+        parsed = parse_latest_completed_turn(scope, source, start_line)
     selected: list[EvidenceSpan] = []
     terminal_turn = parsed[-2:]
-    if len(terminal_turn) == 2 and terminal_turn[0].content == user_text and terminal_turn[1].content == assistant_text:
+    lines_match = committed is None or (
+        len(terminal_turn) == 2
+        and terminal_turn[0].line_no == committed[1]
+        and terminal_turn[1].line_no == committed[2]
+    )
+    if (
+        len(terminal_turn) == 2
+        and lines_match
+        and terminal_turn[0].content == user_text
+        and terminal_turn[1].content == assistant_text
+    ):
         selected = terminal_turn
     if not selected:
         return IngestReport(files_scanned=1, rescanned_files=rescanned), []
 
     new = store.index_spans(selected)
     confirmed_line = selected[-1].line_no
-    prior = checkpoint if checkpoint_valid else None
+    prior = checkpoint if checkpoint and checkpoint.session_id == source.session_id else None
+    prefix_hash = (
+        f"committed:{selected[0].content_hash}:{selected[1].content_hash}"
+        if committed
+        else _prefix_hash(path, confirmed_line)
+    )
     store.write_checkpoint(
         IngestCheckpoint(
             workspace_id=scope.workspace_id,
             history_path=str(path.resolve()),
             session_id=source.session_id,
             confirmed_line_count=confirmed_line,
-            prefix_hash=_prefix_hash(path, confirmed_line),
+            prefix_hash=prefix_hash,
             file_size=stat.st_size,
             mtime_ns=stat.st_mtime_ns,
             extraction_line=prior.extraction_line if prior else 0,

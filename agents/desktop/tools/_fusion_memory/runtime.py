@@ -101,7 +101,14 @@ class MemoryRuntime:
             try:
                 appdata = Path(await resolve_appdata_root())
                 scope = workspace_scope(self.settings.workspace)
-                source = await discover_current_history(scope, session_id, appdata)
+                provenance = user_message.get("_psi_history_provenance")
+                committed_path = provenance.get("path", "") if isinstance(provenance, dict) else ""
+                source = await discover_current_history(
+                    scope,
+                    session_id,
+                    appdata,
+                    committed_path=committed_path if isinstance(committed_path, str) else "",
+                )
                 if source is None:
                     return {"ok": False, "error": "HistoryUnavailable"}
                 report, _ = await to_thread.run_sync(

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 # ruff: noqa: RUF001
 import json
+from dataclasses import replace
 from pathlib import Path
 
+import _fusion_memory.ingest as ingest_module
 import pytest
 from _fusion_memory.ingest import (
     HistorySource,
@@ -111,6 +113,73 @@ def test_ingest_is_idempotent_and_updates_checkpoint(tmp_path: Path) -> None:
     history.write_text(json.dumps({"role": "user", "content": "changed", "kind": "chat"}) + "\n", encoding="utf-8")
     third, _ = ingest_confirmed_turn(store, scope, source, {"role": "user", "content": "changed"}, assistant_message)
     assert third.rescanned_files == 1
+    store.close()
+
+
+def test_confirmed_ingest_uses_committed_line_provenance_without_prefix_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    history = tmp_path / "s1.jsonl"
+    rows = [
+        {"role": "system", "content": "large mutable prompt"},
+        {"role": "user", "content": "question", "kind": "chat"},
+        {"role": "assistant", "tool_calls": [{"id": "call-1"}], "kind": "chat"},
+        {"role": "tool", "content": "non-raw tool output", "kind": "chat"},
+        {"role": "assistant", "content": "answer", "kind": "chat"},
+    ]
+    history.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    scope = workspace_scope(tmp_path)
+    store = MemoryStore(
+        tmp_path / "memory.sqlite3", JsonlJournal(tmp_path / "evidence.jsonl", fsync=False), scope.workspace_id
+    ).open()
+
+    def reject_prefix_scan(*_args, **_kwargs):
+        raise AssertionError("trusted after-turn provenance must not scan the history prefix")
+
+    monkeypatch.setattr(ingest_module, "_prefix_hash", reject_prefix_scan)
+    user_message = {
+        **rows[1],
+        "_psi_history_provenance": {"path": str(history), "user_line": 2, "assistant_line": 5},
+    }
+
+    report, spans = ingest_confirmed_turn(store, scope, HistorySource("s1", history), user_message, rows[4])
+
+    assert report.completed_turns == 1
+    assert [(span.line_no, span.content) for span in spans] == [(2, "question"), (5, "answer")]
+    store.close()
+
+
+def test_system_prompt_rewrite_does_not_reset_derivation_progress(tmp_path: Path) -> None:
+    history = tmp_path / "s1.jsonl"
+    first_rows = [
+        {"role": "system", "content": "prompt v1"},
+        {"role": "user", "content": "question 1", "kind": "chat"},
+        {"role": "assistant", "content": "answer 1", "kind": "chat"},
+    ]
+    history.write_text("\n".join(json.dumps(row) for row in first_rows) + "\n", encoding="utf-8")
+    scope = workspace_scope(tmp_path)
+    store = MemoryStore(
+        tmp_path / "memory.sqlite3", JsonlJournal(tmp_path / "evidence.jsonl", fsync=False), scope.workspace_id
+    ).open()
+    source = HistorySource("s1", history)
+    ingest_confirmed_turn(store, scope, source, first_rows[1], first_rows[2])
+    checkpoint = store.read_checkpoint(scope.workspace_id, str(history.resolve()))
+    assert checkpoint is not None
+    store.write_checkpoint(replace(checkpoint, extraction_line=3, card_line=3))
+
+    second_rows = [
+        {"role": "system", "content": "prompt v2"},
+        *first_rows[1:],
+        {"role": "user", "content": "question 2", "kind": "chat"},
+        {"role": "assistant", "content": "answer 2", "kind": "chat"},
+    ]
+    history.write_text("\n".join(json.dumps(row) for row in second_rows) + "\n", encoding="utf-8")
+
+    report, _ = ingest_confirmed_turn(store, scope, source, second_rows[-2], second_rows[-1])
+
+    updated = store.read_checkpoint(scope.workspace_id, str(history.resolve()))
+    assert report.rescanned_files == 0
+    assert updated is not None and updated.extraction_line == 3 and updated.card_line == 3
     store.close()
 
 
@@ -237,6 +306,83 @@ async def test_discover_current_history_rejects_appdata_history_owned_by_other_w
     )
 
     found = await discover_current_history(workspace_scope(workspace_b), "shared", appdata)
+
+    assert found is None
+
+
+@pytest.mark.anyio
+async def test_discover_current_history_does_not_use_legacy_state_for_appdata_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appdata = tmp_path / "appdata"
+    histories = appdata / "histories"
+    histories.mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    (histories / "shared.jsonl").write_text("{}\n", encoding="utf-8")
+    legacy = tmp_path / "state"
+    legacy.mkdir()
+    (legacy / "latest.json").write_text(
+        json.dumps({"sessions": [{"id": "shared", "workspace": str(workspace)}]}), encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    found = await discover_current_history(workspace_scope(workspace), "shared", appdata)
+
+    assert found is None
+
+
+@pytest.mark.anyio
+async def test_discover_current_history_rejects_ambiguous_appdata_session_ownership(tmp_path: Path) -> None:
+    appdata = tmp_path / "appdata"
+    histories = appdata / "histories"
+    histories.mkdir(parents=True)
+    workspace_a = tmp_path / "workspace-a"
+    workspace_b = tmp_path / "workspace-b"
+    (histories / "shared.jsonl").write_text("{}\n", encoding="utf-8")
+    (appdata / "state").mkdir()
+    (appdata / "state" / "latest.json").write_text(
+        json.dumps(
+            {
+                "sessions": [
+                    {"id": "shared", "workspace": str(workspace_a)},
+                    {"id": "shared", "workspace": str(workspace_b)},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert await discover_current_history(workspace_scope(workspace_a), "shared", appdata) is None
+    assert await discover_current_history(workspace_scope(workspace_b), "shared", appdata) is None
+
+
+@pytest.mark.anyio
+async def test_discover_current_history_accepts_trusted_standalone_commit_path(tmp_path: Path) -> None:
+    appdata = tmp_path / "appdata"
+    histories = appdata / "histories"
+    histories.mkdir(parents=True)
+    history = histories / "standalone.jsonl"
+    history.write_text("{}\n", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+
+    found = await discover_current_history(
+        workspace_scope(workspace), "standalone", appdata, committed_path=str(history)
+    )
+
+    assert found == HistorySource("standalone", history)
+
+
+@pytest.mark.anyio
+async def test_discover_current_history_rejects_untrusted_commit_path(tmp_path: Path) -> None:
+    appdata = tmp_path / "appdata"
+    (appdata / "histories").mkdir(parents=True)
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text("{}\n", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+
+    found = await discover_current_history(
+        workspace_scope(workspace), "standalone", appdata, committed_path=str(outside)
+    )
 
     assert found is None
 

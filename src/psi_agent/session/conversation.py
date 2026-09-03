@@ -60,6 +60,11 @@ class Conversation:
         """Identifier derived from the history file path stem."""
         return self._path.stem if self._path else ""
 
+    @property
+    def history_path(self) -> Path | None:
+        """Backing history path used for the most recent successful commit."""
+        return self._path
+
     # -- construction ----------------------------------------------------------
 
     @classmethod

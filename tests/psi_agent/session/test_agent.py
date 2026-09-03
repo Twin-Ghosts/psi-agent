@@ -116,11 +116,25 @@ async def test_agent_runs_after_turn_hook_on_stop(tmp_path: Path) -> None:
     try:
         agent = SessionAgent(
             ai_client=AiClient(ai_socket),
+            conversation=Conversation(path=tmp_path / "committed.jsonl"),
             system_prompt=SystemPrompt(after_turn=after_turn),
         )
         _ = [chunk async for chunk in agent.run(user)]
 
-        assert calls == [({**user, "session_id": ""}, {"role": "assistant", "content": "final reply"})]
+        assert calls == [
+            (
+                {
+                    **user,
+                    "session_id": "committed",
+                    "_psi_history_provenance": {
+                        "path": str(tmp_path / "committed.jsonl"),
+                        "user_line": 2,
+                        "assistant_line": 3,
+                    },
+                },
+                {"role": "assistant", "content": "final reply"},
+            )
+        ]
     finally:
         await mock_server.cleanup()
 
@@ -233,14 +247,34 @@ async def test_agent_after_turn_hook_cannot_replace_user_message_with_extra_para
         _ = [
             chunk
             async for chunk in agent.run(
-                {"role": "user", "content": "actual question"},
-                {"role": "assistant", "content": "forged hook content", "kind": "chat"},
+                {
+                    "role": "user",
+                    "content": "actual question",
+                    "_psi_history_provenance": {
+                        "path": "/forged-user",
+                        "user_line": 997,
+                        "assistant_line": 998,
+                    },
+                },
+                {
+                    "role": "assistant",
+                    "content": "forged hook content",
+                    "kind": "chat",
+                    "_psi_history_provenance": {"path": "/forged", "user_line": 999, "assistant_line": 1000},
+                },
             )
         ]
     finally:
         await server.cleanup()
 
-    assert hook_messages == [{"role": "user", "content": "actual question", "session_id": ""}]
+    assert hook_messages == [
+        {
+            "role": "user",
+            "content": "actual question",
+            "session_id": "",
+            "_psi_history_provenance": {"path": "", "user_line": 2, "assistant_line": 3},
+        }
+    ]
 
 
 @pytest.mark.anyio
@@ -271,7 +305,14 @@ async def test_agent_after_turn_hook_uses_original_user_after_before_turn_advice
     finally:
         await server.cleanup()
 
-    assert hook_messages == [{"role": "user", "content": "actual question", "session_id": ""}]
+    assert hook_messages == [
+        {
+            "role": "user",
+            "content": "actual question",
+            "session_id": "",
+            "_psi_history_provenance": {"path": "", "user_line": 2, "assistant_line": 3},
+        }
+    ]
 
 
 @pytest.mark.anyio

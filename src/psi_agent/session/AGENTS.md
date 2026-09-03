@@ -51,7 +51,7 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 - System prompt 在首次 `run()` 调用时惰性构建（通过 `system_prompt_builder`）
 - `system_prompt_builder` 和 `system_prompt_rebuild_checker` 兼容旧的零参形式；如定义了位置参数，Session 会传入当前原始 `user_message`。这一显式参数只用于本轮动态 prompt，不会改变写入 history 的 `kind` 标记副本
 - 后续请求可调用 `system_prompt_rebuild_checker()`（如果定义），返回 True 则用同一条当前 `user_message` 重建 system prompt
-- 可选 `system_after_turn(user_message, assistant_message)` 在 `finish_reason="stop"` 的最终 assistant 消息已 commit 后执行。它是可恢复的 workspace hook：普通异常记 WARNING，不回滚已成功交付的回合；取消信号仍向外传播。未定义时使用 no-op 默认值
+- 可选 `system_after_turn(user_message, assistant_message)` 在 `finish_reason="stop"` 的最终 assistant 消息已 commit 后执行。它是可恢复的 workspace hook：普通异常记 WARNING，不回滚已成功交付的回合；取消信号仍向外传播。内核在 user 参数的 `_psi_history_provenance` 中附带可信的 history 路径及本回合 user/assistant 行号；同名请求字段会被过滤且不会写入 history。未定义时使用 no-op 默认值
 - 未整段重建时，提示词一字不改；若 agent 包定义了 `turn_context_builder()`，则每回合把易变块挂到**本回合 user 消息**上（见下方「每回合易变上下文」）
 - 可选生命周期顺序为 `system_before_turn` → `system_prompt_builder` → AI/tool loop → `system_after_turn`。`system_before_turn` 接收当前回合的临时 hook context（含额外请求参数副本）；普通异常、非 dict 返回值和超时降级为 `{}`，但绝不吞掉取消。其结果仅用于本轮 prompt 构建且不写入 history；除 OpenAI 保留字段外，原始请求参数仍透传给 AI。`schedule.*` 回合跳过该 hook。
 

@@ -68,6 +68,42 @@ async def test_disabled_runtime_creates_no_memory_directory(tmp_path: Path, monk
 
 
 @pytest.mark.anyio
+async def test_standalone_committed_turn_ingests_without_gateway_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    appdata = tmp_path / "appdata"
+    histories = appdata / "histories"
+    histories.mkdir(parents=True)
+    history = histories / "standalone.jsonl"
+    rows = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "standalone memory", "kind": "chat"},
+        {"role": "assistant", "content": "remembered", "kind": "chat"},
+    ]
+    history.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    monkeypatch.setenv("PSI_APPDATA", str(appdata))
+    monkeypatch.setenv("FUSION_MEMORY_JOURNAL_FSYNC", "0")
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.delenv("FUSION_MEMORY_MODEL_API_KEY", raising=False)
+    monkeypatch.delenv("PSI_AI_API_KEY", raising=False)
+    runtime = await get_runtime(str(workspace))
+    user_message = {
+        **rows[1],
+        "_psi_history_provenance": {"path": str(history), "user_line": 2, "assistant_line": 3},
+    }
+
+    result = await runtime.ingest_current_session("standalone", user_message, rows[2])
+
+    assert result["ok"] is True
+    assert {hit.content for hit in await runtime.search("standalone memory")} == {
+        "standalone memory",
+        "remembered",
+    }
+
+
+@pytest.mark.anyio
 async def test_concurrent_first_use_creates_one_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
