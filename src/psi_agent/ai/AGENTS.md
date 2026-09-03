@@ -57,7 +57,7 @@ Session ── POST /chat/completions ──► AI
 
 Session 发送的 body 中，除 `model` 被启动配置覆盖、`messages` 被显式提取、`stream` 被剥离（AI 层始终强制 `stream=True`）、`provider`/`api_key`/`api_base`/`routing` 防御性剥离（避免与启动配置冲突）外，其余字段（`tools`, `temperature`, `max_tokens` 等）全部通过 `**body` 透传给 any-llm-sdk。
 
-`reasoning_effort` 是唯一被**补默认值**的字段（`setdefault("reasoning_effort", "medium")`，调用方给了就用它的，含 `"none"`）。
+`reasoning_effort` 是唯一被**补默认值**的字段（`setdefault("reasoning_effort", "medium")`，调用方给了就用它的，含 `"none"`）。**兜底只对 `deepseek` provider 生效**（白名单在 `_REASONING_EFFORT_DEFAULT_PROVIDERS`）——只有它会缺省值误读；其余 provider 保持不传，交给上游默认行为。
 
 ### 为什么必须显式传 `reasoning_effort`
 
@@ -67,7 +67,7 @@ any-llm 的 DeepSeek provider 把缺省值 `"auto"` 读成「调用方没要思�
 
 该默认值在 1.21.0 之后引入（1.21.0 的同一文件里没有 `thinking` 分支），而依赖声明是 `any-llm-sdk>=1.21.0` —— 一次静默的上游行为变更改掉了线上语义。
 
-**ToC 装机版不受影响，但那是巧合**：它与 ToB 共用同一份代码与同一个 any-llm，只因 `spa-v2/src/services/bootstrapAi.ts` 的 `DEFAULT_REMOTE_AI` 配 `provider: 'openai'`（打的是云端 OpenAI 兼容网关）而绕开了这个默认值。改成 `deepseek` 泄漏立刻出现。
+**兜底必须 provider 感知，不能无条件对全部 provider 生效（2026-09 修正）**：最初这段默认对**所有** provider 全局生效。ToC 装机版不经过 psi-agent 的 `ai/server.py`（SPA 的 `DEFAULT_REMOTE_AI` 直接打云端 OpenAI 兼容网关），所以恰好没吃到这个默认；但 ToB 自部署若用 `provider: 'openai'` 直连 DeepSeek 兼容端点（如 `api.deepseek.com/v1`）就会吃到 —— 而 `openai` provider 并没有 auto→disabled 逻辑：不传 `reasoning_effort` 时 thinking 本来就开着，思考照常进 `reasoning_content`。强制传 `"medium"` 反而把思考档位压到中档，模型于是把**过程叙述**写进 `content`（每轮 tool call 前一段自述），用户在飞书看到整段自我对话 —— 与本页描述的泄漏形态一致。故兜底范围收敛到 `_REASONING_EFFORT_DEFAULT_PROVIDERS`（`{"deepseek"}`）。实测同一 tool-call prompt：不传 `reasoning_effort` → content=0 / reasoning=306；传 `"medium"` → content=34 / reasoning=345。
 
 ## Provider 支持
 

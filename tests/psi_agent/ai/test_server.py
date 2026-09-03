@@ -50,6 +50,8 @@ async def _serve_handler(
     monkeypatch: pytest.MonkeyPatch,
     stream: _TrackingStream,
     received_provider_kwargs: dict[str, Any] | None = None,
+    *,
+    provider: str = "openai",
 ) -> tuple[web.AppRunner, str]:
     async def fake_acompletion(**kwargs: Any) -> _TrackingStream:
         if received_provider_kwargs is not None:
@@ -59,7 +61,7 @@ async def _serve_handler(
     monkeypatch.setattr("psi_agent.ai.server.acompletion", fake_acompletion)
 
     app = web.Application()
-    app["provider"] = "openai"
+    app["provider"] = provider
     app["model"] = "test"
     app["api_key"] = "k"
     app["base_url"] = "http://upstream"
@@ -177,7 +179,7 @@ async def test_handler_omits_client_args_without_http_client(tmp_path: Path, mon
 
 
 async def test_handler_requests_thinking_mode_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """不传 ``reasoning_effort`` 时必须兜一个默认值, 否则思维模式被上游关掉。
+    """``deepseek`` provider 不传 ``reasoning_effort`` 时必须兜一个默认值, 否则思维模式被上游关掉。
 
     any-llm 的 DeepSeek provider 把缺省的 ``"auto"`` 读成「没要思维」, 转而下发
     ``extra_body.thinking={"type": "disabled"}``。模型被关掉思维通道后仍要推理,
@@ -185,13 +187,35 @@ async def test_handler_requests_thinking_mode_by_default(tmp_path: Path, monkeyp
     """
     received: dict[str, Any] = {}
     stream = _TrackingStream([_FakeChunk()])
-    runner, socket_path = await _serve_handler(tmp_path, monkeypatch, stream, received)
+    # 兜底只对会误关思维的 provider (deepseek) 生效
+    runner, socket_path = await _serve_handler(tmp_path, monkeypatch, stream, received, provider="deepseek")
     try:
         await _drain(socket_path)
     finally:
         await runner.cleanup()
 
     assert received["reasoning_effort"] == "medium"
+
+
+async def test_handler_openai_provider_keeps_upstream_reasoning_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``openai`` provider 直连 DeepSeek 兼容端点时, 不传 ``reasoning_effort`` 不能兜默认值。
+
+    openai provider 没有 any-llm deepseek provider 的 auto→disabled 逻辑: 不传时
+    thinking 本来就开着, 思考照常进 ``reasoning_content``。若强制 ``"medium"``,
+    模型反而把过程叙述写进 ``content`` —— 用户在飞书看到整段自我对话 (线上泄漏)。
+    """
+    received: dict[str, Any] = {}
+    stream = _TrackingStream([_FakeChunk()])
+    # _serve_handler 默认 provider="openai"
+    runner, socket_path = await _serve_handler(tmp_path, monkeypatch, stream, received)
+    try:
+        await _drain(socket_path)
+    finally:
+        await runner.cleanup()
+
+    assert "reasoning_effort" not in received
 
 
 async def test_handler_keeps_caller_supplied_reasoning_effort(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
