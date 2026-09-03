@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
+import _fusion_memory.runtime as runtime_module
+import anyio
 import pytest
 from _fusion_memory.runtime import get_runtime, reset_runtime_cache_for_tests
 
@@ -65,3 +68,31 @@ async def test_disabled_runtime_creates_no_memory_directory(tmp_path: Path, monk
     assert not runtime.enabled
     assert not (workspace / ".fusion-memory").exists()
     assert await runtime.search("anything") == []
+
+
+@pytest.mark.anyio
+async def test_concurrent_first_use_creates_one_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("FUSION_MEMORY_JOURNAL_FSYNC", "0")
+    original = runtime_module._create_runtime
+    count = 0
+    count_lock = threading.Lock()
+
+    def counted(settings):
+        nonlocal count
+        with count_lock:
+            count += 1
+        return original(settings)
+
+    monkeypatch.setattr(runtime_module, "_create_runtime", counted)
+    results = []
+
+    async def load() -> None:
+        results.append(await get_runtime(str(workspace)))
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(load)
+        group.start_soon(load)
+    assert len(results) == 2 and results[0] is results[1]
+    assert count == 1

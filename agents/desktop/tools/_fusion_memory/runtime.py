@@ -233,22 +233,17 @@ _runtimes: dict[str, MemoryRuntime] = {}
 
 async def get_runtime(workspace_raw: str = "") -> MemoryRuntime:
     settings = RuntimeSettings.from_env(workspace_raw)
+    return await to_thread.run_sync(_get_or_create_runtime, settings)
+
+
+def _get_or_create_runtime(settings: RuntimeSettings) -> MemoryRuntime:
     with _cache_lock:
         existing = _runtimes.get(settings.workspace)
         if existing is not None:
             return existing
-    runtime = await to_thread.run_sync(_create_runtime, settings)
-    duplicate: MemoryRuntime | None = None
-    with _cache_lock:
-        existing = _runtimes.get(settings.workspace)
-        if existing is not None:
-            duplicate = runtime
-            runtime = existing
-        else:
-            _runtimes[settings.workspace] = runtime
-    if duplicate is not None:
-        await duplicate.close()
-    return runtime
+        runtime = _create_runtime(settings)
+        _runtimes[settings.workspace] = runtime
+        return runtime
 
 
 def _create_runtime(settings: RuntimeSettings) -> MemoryRuntime:
