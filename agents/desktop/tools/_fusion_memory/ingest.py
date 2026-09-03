@@ -85,12 +85,15 @@ def _timestamp(row: dict[str, object]) -> str | None:
     return value
 
 
-def _turn_id(row: dict[str, object], session_id: str, user_line: int) -> str:
-    for key in ("turn_id", "turn", "id"):
-        value = row.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return f"{session_id}:turn:{user_line}"
+def _turn_id(
+    session_id: str,
+    user_line: int,
+    assistant_line: int,
+    user_content_hash: str,
+    assistant_content_hash: str,
+) -> str:
+    seed = f"{session_id}|{user_line}|{assistant_line}|{user_content_hash}|{assistant_content_hash}"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()
 
 
 def _span_id(scope: WorkspaceScope, session_id: str, line_no: int, speaker: str, content: str) -> tuple[str, str]:
@@ -137,9 +140,9 @@ def parse_completed_turns(scope: WorkspaceScope, source: HistorySource, start_li
         if pending is None:
             continue
         user_line, user_row, user_text = pending
-        turn_id = _turn_id(user_row, source.session_id, user_line)
         user_id, user_hash = _span_id(scope, source.session_id, user_line, "user", user_text)
         assistant_id, assistant_hash = _span_id(scope, source.session_id, line_no, "assistant", visible)
+        turn_id = _turn_id(source.session_id, user_line, line_no, user_hash, assistant_hash)
         result.extend(
             (
                 EvidenceSpan(

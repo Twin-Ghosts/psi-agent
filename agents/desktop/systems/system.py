@@ -68,6 +68,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import anyio
 
 from _fusion_memory.runtime import get_runtime
+from psi_agent.session.history_display import message_kind as _message_kind
 
 try:
     from psi_agent.session.runtime_context import get_agent as _runtime_agent
@@ -1548,7 +1549,7 @@ async def system_prompt_builder(
     profile_text = ""
     policy_text = ""
     recall_text = ""
-    kind = user_message.get("kind", "chat") if isinstance(user_message, dict) else "chat"
+    kind = _message_kind(user_message) if isinstance(user_message, dict) else "chat"
     if kind == "chat":
         try:
             runtime = await get_runtime(str(user_workspace))

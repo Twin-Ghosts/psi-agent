@@ -95,24 +95,32 @@ class MemoryRuntime:
                 scope = workspace_scope(self.settings.workspace)
                 sources = await discover_histories(scope, session_id, appdata)
                 report = await to_thread.run_sync(ingest_histories, store, scope, sources)
-                source_batches: list[tuple[IngestCheckpoint, list[list[EvidenceSpan]]]] = []
+                source_batches: list[tuple[IngestCheckpoint, list[list[EvidenceSpan]], list[list[EvidenceSpan]]]] = []
                 for source in sources:
                     checkpoint = await to_thread.run_sync(
                         store.read_checkpoint, self.workspace_id, str(source.path.resolve())
                     )
                     if checkpoint is None:
                         continue
-                    spans_by_turn: dict[str, list[EvidenceSpan]] = {}
+                    all_spans_by_turn: dict[str, list[EvidenceSpan]] = {}
+                    for span in await to_thread.run_sync(parse_completed_turns, scope, source):
+                        all_spans_by_turn.setdefault(span.turn_id, []).append(span)
+                    missing_card_ids = await to_thread.run_sync(
+                        store.missing_turn_cards, self.workspace_id, all_spans_by_turn
+                    )
+                    card_batch = [all_spans_by_turn[turn_id] for turn_id in missing_card_ids[:_EXTRACTION_TURN_LIMIT]]
+                    extraction_spans_by_turn: dict[str, list[EvidenceSpan]] = {}
                     for span in await to_thread.run_sync(
                         parse_completed_turns, scope, source, checkpoint.extraction_line + 1
                     ):
-                        spans_by_turn.setdefault(span.turn_id, []).append(span)
-                    batch = list(spans_by_turn.values())[:_EXTRACTION_TURN_LIMIT]
-                    if batch:
-                        source_batches.append((checkpoint, batch))
-                for checkpoint, batch in source_batches:
+                        extraction_spans_by_turn.setdefault(span.turn_id, []).append(span)
+                    extraction_batch = list(extraction_spans_by_turn.values())[:_EXTRACTION_TURN_LIMIT]
+                    if extraction_batch or card_batch:
+                        source_batches.append((checkpoint, extraction_batch, card_batch))
+                for checkpoint, extraction_batch, card_batch in source_batches:
+                    extraction_line = checkpoint.extraction_line
                     if self.models.llm is not None:
-                        for spans in batch:
+                        for spans in extraction_batch:
                             try:
                                 drafts = await extract_memory_items(self.models, spans)
                                 items = [
@@ -134,8 +142,17 @@ class MemoryRuntime:
                                     await to_thread.run_sync(store.upsert_memory_items, self.workspace_id, items)
                             except Exception as exc:
                                 self._warn("extraction", exc)
-                    extraction_line = checkpoint.extraction_line
-                    for raw_spans in batch:
+                                break
+                            assistants = [span for span in spans if span.speaker == "assistant"]
+                            if not assistants:
+                                break
+                            extraction_line = max(span.line_no for span in assistants)
+                    if extraction_line > checkpoint.extraction_line:
+                        await to_thread.run_sync(
+                            store.write_checkpoint,
+                            replace(checkpoint, extraction_line=extraction_line, updated_at=""),
+                        )
+                    for raw_spans in card_batch:
                         spans = sorted(raw_spans, key=lambda span: span.line_no)
                         users = [span for span in spans if span.speaker == "user"]
                         assistants = [span for span in spans if span.speaker == "assistant"]
@@ -153,12 +170,6 @@ class MemoryRuntime:
                         except Exception as exc:
                             self._warn("card", exc)
                             break
-                        extraction_line = assistants[-1].line_no
-                    if extraction_line > checkpoint.extraction_line:
-                        await to_thread.run_sync(
-                            store.write_checkpoint,
-                            replace(checkpoint, extraction_line=extraction_line, updated_at=""),
-                        )
                 if self.models.embedding.api_key:
                     try:
                         pending = await to_thread.run_sync(store.pending_embeddings, self.workspace_id, 32)

@@ -44,6 +44,26 @@ def test_parse_filters_non_raw_rows_and_preserves_history(tmp_path: Path) -> Non
     assert history.read_bytes() == before
 
 
+def test_turn_id_is_derived_from_each_completed_source_pair(tmp_path: Path) -> None:
+    history = tmp_path / "s1.jsonl"
+    rows = [
+        {"id": "duplicate", "role": "user", "content": "first question", "kind": "chat"},
+        {"role": "assistant", "content": "first answer", "kind": "chat"},
+        {"id": "duplicate", "role": "user", "content": "second question", "kind": "chat"},
+        {"role": "assistant", "content": "second answer", "kind": "chat"},
+    ]
+    history.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    scope = workspace_scope(tmp_path)
+    source = HistorySource("s1", history)
+
+    spans = parse_completed_turns(scope, source)
+
+    assert spans[0].turn_id == spans[1].turn_id
+    assert spans[2].turn_id == spans[3].turn_id
+    assert spans[0].turn_id != spans[2].turn_id
+    assert [span.turn_id for span in parse_completed_turns(scope, source)] == [span.turn_id for span in spans]
+
+
 def test_ingest_is_idempotent_and_updates_checkpoint(tmp_path: Path) -> None:
     history = tmp_path / "s1.jsonl"
     history.write_text(

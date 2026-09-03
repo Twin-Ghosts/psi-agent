@@ -127,10 +127,84 @@ async def test_extraction_checkpoint_advances_one_bounded_turn_batch(
     assert (await runtime.ingest_current_session("s1"))["ok"] is True
     assert runtime.store is not None
     checkpoint = runtime.store.read_checkpoint(runtime.workspace_id, str(history.resolve()))
-    assert checkpoint is not None and checkpoint.extraction_line == 16
+    assert checkpoint is not None and checkpoint.extraction_line == 0
     assert runtime.store.conn.execute("select count(*) from summary_cards").fetchone()[0] == 8
 
     assert (await runtime.ingest_current_session("s1"))["ok"] is True
     checkpoint = runtime.store.read_checkpoint(runtime.workspace_id, str(history.resolve()))
-    assert checkpoint is not None and checkpoint.extraction_line == 20
+    assert checkpoint is not None and checkpoint.extraction_line == 0
     assert runtime.store.conn.execute("select count(*) from summary_cards").fetchone()[0] == 10
+
+    await reset_runtime_cache_for_tests()
+    monkeypatch.setenv("PSI_AI_PROVIDER", "openai")
+    monkeypatch.setenv("PSI_AI_MODEL", "agent-model")
+    monkeypatch.setenv("PSI_AI_API_KEY", "agent-key")
+    monkeypatch.setenv("PSI_AI_BASE_URL", "https://agent.example/v1")
+    extracted_lines = []
+
+    async def extract(_models, spans):
+        extracted_lines.append([span.line_no for span in spans])
+        return []
+
+    monkeypatch.setattr(runtime_module, "extract_memory_items", extract)
+    runtime = await get_runtime(str(workspace))
+    assert (await runtime.ingest_current_session("s1"))["ok"] is True
+    assert runtime.store is not None
+    checkpoint = runtime.store.read_checkpoint(runtime.workspace_id, str(history.resolve()))
+    assert checkpoint is not None and checkpoint.extraction_line == 16
+    assert len(extracted_lines) == 8
+
+    assert (await runtime.ingest_current_session("s1"))["ok"] is True
+    checkpoint = runtime.store.read_checkpoint(runtime.workspace_id, str(history.resolve()))
+    assert checkpoint is not None and checkpoint.extraction_line == 20
+    assert len(extracted_lines) == 10
+
+
+@pytest.mark.anyio
+async def test_failed_extraction_is_retried_without_blocking_turn_card(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    appdata = tmp_path / "appdata"
+    histories = appdata / "histories"
+    histories.mkdir(parents=True)
+    history = histories / "s1.jsonl"
+    history.write_text(
+        "\n".join(
+            (
+                json.dumps({"role": "user", "content": "question", "kind": "chat"}),
+                json.dumps({"role": "assistant", "content": "answer", "kind": "chat"}),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PSI_APPDATA", str(appdata))
+    monkeypatch.setenv("FUSION_MEMORY_JOURNAL_FSYNC", "0")
+    monkeypatch.setenv("PSI_AI_PROVIDER", "openai")
+    monkeypatch.setenv("PSI_AI_MODEL", "agent-model")
+    monkeypatch.setenv("PSI_AI_API_KEY", "agent-key")
+    monkeypatch.setenv("PSI_AI_BASE_URL", "https://agent.example/v1")
+    calls = 0
+
+    async def extract(_models, _spans):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("temporary failure")
+        return []
+
+    monkeypatch.setattr(runtime_module, "extract_memory_items", extract)
+    runtime = await get_runtime(str(workspace))
+
+    assert (await runtime.ingest_current_session("s1"))["ok"] is True
+    assert runtime.store is not None
+    checkpoint = runtime.store.read_checkpoint(runtime.workspace_id, str(history.resolve()))
+    assert checkpoint is not None and checkpoint.extraction_line == 0
+    assert runtime.store.conn.execute("select count(*) from summary_cards").fetchone()[0] == 1
+
+    assert (await runtime.ingest_current_session("s1"))["ok"] is True
+    checkpoint = runtime.store.read_checkpoint(runtime.workspace_id, str(history.resolve()))
+    assert checkpoint is not None and checkpoint.extraction_line == 2
+    assert calls == 2

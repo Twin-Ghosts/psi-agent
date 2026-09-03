@@ -59,6 +59,20 @@ def test_index_writes_journal_before_sqlite_and_enforces_scope(tmp_path: Path) -
     store.close()
 
 
+def test_incremental_index_does_not_replay_the_full_journal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    journal, store = opened(tmp_path)
+
+    def reject_replay():
+        raise AssertionError("incremental indexing must not replay the authority")
+
+    monkeypatch.setattr(journal, "iter_active_spans", reject_replay)
+    assert store.index_spans([]) == []
+    span = make_span("span-1")
+    assert store.index_spans([span]) == [span]
+    assert store.get_source_spans("workspace-a", ["span-1"]) == [span]
+    store.close()
+
+
 def test_promote_card_embeddings_and_checkpoint_round_trip(tmp_path: Path) -> None:
     _, store = opened(tmp_path)
     store.index_spans([make_span("u", content="用户偏好", line_no=1), make_span("a", content="助手记住", line_no=2)])

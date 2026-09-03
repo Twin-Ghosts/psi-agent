@@ -83,6 +83,10 @@ def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
     return dot / (norm_left * norm_right) if norm_left and norm_right else 0.0
 
 
+def _turn_card_id(turn_id: str) -> str:
+    return hashlib.sha256(f"turn:{turn_id}".encode()).hexdigest()
+
+
 class MemoryStore:
     """Workspace-scoped SQLite projection over the authoritative JSONL journal."""
 
@@ -306,18 +310,16 @@ class MemoryStore:
 
     def index_spans(self, spans: Iterable[EvidenceSpan]) -> list[EvidenceSpan]:
         batch = list(spans)
+        if not batch:
+            return []
         for span in batch:
             if span.workspace_id != self.workspace_id:
                 raise ValueError("span workspace does not match store scope")
         new = self.journal.append_spans(batch)
-        active_ids = {
-            span.span_id for span in self.journal.iter_active_spans() if span.workspace_id == self.workspace_id
-        }
         self.conn.execute("begin")
         try:
-            for span in batch:
-                if span.span_id in active_ids:
-                    self._insert_span(span)
+            for span in new:
+                self._insert_span(span)
             self.conn.commit()
         except Exception:
             self.conn.rollback()
@@ -547,7 +549,7 @@ class MemoryStore:
         ids = tuple(dict.fromkeys(source_span_ids))
         if not ids or len(self.get_source_spans(workspace_id, ids)) != len(ids):
             raise ValueError("card source spans are missing or cross-workspace")
-        card_id = hashlib.sha256(f"turn:{turn_id}".encode()).hexdigest()
+        card_id = _turn_card_id(turn_id)
         retrieval_key = user_text[:240]
         snippet = assistant_text[:500]
         self.conn.execute(
@@ -561,6 +563,19 @@ class MemoryStore:
         )
         self.conn.commit()
         return card_id
+
+    def missing_turn_cards(self, workspace_id: str, turn_ids: Iterable[str]) -> list[str]:
+        if workspace_id != self.workspace_id:
+            return []
+        missing: list[str] = []
+        for turn_id in dict.fromkeys(turn_ids):
+            row = self.conn.execute(
+                "select 1 from summary_cards where workspace_id=? and card_id=?",
+                (workspace_id, _turn_card_id(turn_id)),
+            ).fetchone()
+            if row is None:
+                missing.append(turn_id)
+        return missing
 
     def pending_embeddings(self, workspace_id: str, limit: int = 100) -> list[tuple[str, str, str]]:
         if workspace_id != self.workspace_id:
