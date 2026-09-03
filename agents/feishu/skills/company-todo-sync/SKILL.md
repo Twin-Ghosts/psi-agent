@@ -6,6 +6,8 @@ category: productivity
 
 # 公司 TODO 管理体系 · 采集与派发
 
+> 判定口径读 `config/todo-sop.yaml`，用户可编辑，换公司只改此文件；本文保留引擎与通用纪律，参数值以该文件为准。
+
 按固定节奏（周一三五 15:00）把一张飞书 todo 看板表格采集成结构化数据，建/更 LLM wiki 工作树，
 写各 mentor 的独立台账，推报表，把每条 todo 作为 TODO 卡 + 飞书任务派给负责人。
 

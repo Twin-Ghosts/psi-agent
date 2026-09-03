@@ -6,6 +6,8 @@ category: productivity
 
 # TODO 填报情况判定(空白 ≠ 没填)
 
+> 判定口径读 `config/todo-sop.yaml`，用户可编辑，换公司只改此文件；本文保留引擎与通用纪律，参数值以该文件为准。
+
 回答「谁没填 todo」「我的填报是否合规」这类问题时,**表格里的空白格子不是结论,是一个待查的问号**。
 同一个空白有三种完全不同的成因,处置也不同:
 
@@ -37,8 +39,8 @@ feishu_leave_query(approval_code=<请假模板 code>, date_from=<最早空白日
 
 | 用途 | approval_code |
 |---|---|
-| 请假 Leave | `99EEC396-536A-4C7A-8B2D-412584E35CE3` |
-| 补卡 | `09D3F0F3-2A0B-4E05-B40D-9D5565D2A27B` |
+| 请假 Leave | `config/todo-sop.yaml` 的 `leave.leave_approval_code`(当前 `99EEC396-536A-4C7A-8B2D-412584E35CE3`) |
+| 补卡 | `config/todo-sop.yaml` 的 `leave.makeup_approval_code`(当前 `09D3F0F3-2A0B-4E05-B40D-9D5565D2A27B`) |
 
 拿不到或换了租户:`feishu_api` 打 `GET /open-apis/approval/v4/tasks/query`(带 `topic=3`),
 看返回里的 `definition_code` / `process_code`。

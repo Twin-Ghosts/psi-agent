@@ -6,6 +6,8 @@ category: productivity
 
 # TODO 填报规范与自动化闭环(规范即配置)
 
+> 判定口径读 `config/todo-sop.yaml`，用户可编辑，换公司只改此文件；本文保留引擎与通用纪律，参数值以该文件为准。
+
 公司 TODO 填报有两层规范:**内容格式**(怎么写)和**执行纪律**(按时/按质/按量/按优先级)。
 本文档把两层规范结构化写死在文档里,海豚读文档执行 —— 与
 [`company-todo-fill-check`](../company-todo-fill-check/SKILL.md)(请假判定口径)、
@@ -232,10 +234,10 @@ mentor check 的标记**只认载体段指定的 mentor check 列** —— 聊�
 
 | 参数 | 当前值 |
 |---|---|
-| 每期 TODO 条数上限 | **5 条** |
-| mentor check 时限 | 填报后 **24h** |
-| 提醒时间点 | **周一/三/五 14:30**(本机墙钟) |
-| 检查时间点 | **周一/三/五 14:50**(本机墙钟) |
+| 每期 TODO 条数上限 | `config/todo-sop.yaml` 的 `rules.todo_quota`(当前 **5 条**) |
+| mentor check 时限 | `config/todo-sop.yaml` 的 `rules.mentor_check_hours`(当前填报后 **24h**) |
+| 提醒时间点 | `config/todo-sop.yaml` 的 `rules.remind_time`(当前 **周一/三/五 14:30**) |
+| 检查时间点 | `config/todo-sop.yaml` 的 `rules.check_time`(当前 **周一/三/五 14:50**) |
 | mentor check 标记形态 | 看板表上的 **mentor check 列**有标记即算 |
 | 检查报告投递 | **私聊**:boss 视图给 boss,mentor 视图给对应 mentor |
 | 层级术语 | 大目标 / 小目标 / TODO |

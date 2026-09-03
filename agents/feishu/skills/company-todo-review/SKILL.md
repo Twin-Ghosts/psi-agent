@@ -6,6 +6,8 @@ category: productivity
 
 # 公司 TODO 管理体系 · 评价回写
 
+> 判定口径读 `config/todo-sop.yaml`，用户可编辑，换公司只改此文件；本文保留引擎与通用纪律，参数值以该文件为准。
+
 一条 todo 交付后，让其 mentor 打分评语，回写权威台账并追加进本人 wiki 快照页——这一步是
 闭环五要素里的第 4、5 项，缺了任何一半都停在「未闭环」（见 `company-todo-audit`）。
 

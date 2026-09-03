@@ -6,6 +6,8 @@ category: knowledge-base
 
 # TODO 完成度判定总纲
 
+> 判定口径读 `config/todo-sop.yaml`，用户可编辑，换公司只改此文件；本文保留引擎与通用纪律，参数值以该文件为准。
+
 判断「某人的活做完了没」只有这一套口径。假勤/报销分级看
 [`admin-finance-governance`]，本文管的是**完成度**。
 
