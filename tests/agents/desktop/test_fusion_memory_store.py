@@ -275,3 +275,14 @@ def test_version_one_database_with_unknown_table_is_migrated(tmp_path: Path) -> 
     assert "rogue_business_data" not in names
     assert list(tmp_path.glob("memory.sqlite3.legacy-*"))
     migrated.close()
+
+
+def test_current_schema_reopens_without_legacy_migration(tmp_path: Path) -> None:
+    journal, store = opened(tmp_path)
+    store.close()
+
+    reopened = MemoryStore(tmp_path / "memory.sqlite3", journal, "workspace-a").open()
+
+    assert reopened.conn.execute("pragma user_version").fetchone()[0] == 2
+    assert list(tmp_path.glob("memory.sqlite3.legacy-*")) == []
+    reopened.close()

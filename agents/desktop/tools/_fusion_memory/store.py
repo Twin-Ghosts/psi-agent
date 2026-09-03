@@ -270,7 +270,7 @@ class MemoryStore:
               doc_type unindexed, doc_id unindexed, workspace_id unindexed, text,
               tokenize='trigram'
             );
-            pragma user_version = 1;
+            pragma user_version = 2;
             """
         )
         self.conn.commit()
