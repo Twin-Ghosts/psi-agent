@@ -29,7 +29,7 @@ The brief's exact pytest command (`uv run pytest ... -q`) reaches all five tests
 
 ## Commit
 
-Commit SHA: `7aa37dff`
+Implementation commit SHA: `2f3c276589a96ffa70da489916d2a5379c77adb6`
 
 ## Concerns
 
