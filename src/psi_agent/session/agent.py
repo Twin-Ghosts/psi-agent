@@ -58,7 +58,7 @@ from psi_agent.session.runtime_context import runtime_scope
 from psi_agent.session.schedule_registry import ScheduleRegistry
 from psi_agent.session.system_prompt import SystemPrompt
 from psi_agent.session.tool_convergence import ToolCallConvergence
-from psi_agent.session.tool_defs import ToolDefsCache, build_tool_defs
+from psi_agent.session.tool_defs import ToolDefsCache, build_tool_defs, tmpfix_m2_gate
 from psi_agent.session.tool_registry import ToolRegistry
 from psi_agent.session.trigger_registry import TriggerRegistry
 
@@ -748,7 +748,10 @@ class SessionAgent:
                     # Frozen after the first non-empty assembly: a tool that shows
                     # up mid-Session would otherwise rewrite this array and
                     # re-prefill every cached turn behind it.
-                    tool_defs = self._tool_defs_cache.freeze(build_tool_defs(self._tool_registry.tools))
+                    # TMPFIX-20260902 (M2), deploy-only: see ``tool_defs`` module.
+                    _gated_tools = tmpfix_m2_gate(self._tool_registry.tools)
+                    tool_defs = self._tool_defs_cache.freeze(build_tool_defs(_gated_tools))
+                    logger.info(f"TMPFIX-M2 tools_exposed={len(tool_defs)} of {len(self._tool_registry.tools)}")
 
                     # Logged next to the prompt breakdown, not inside it: these
                     # schemas are their own request field, so they are a
