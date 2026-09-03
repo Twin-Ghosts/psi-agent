@@ -139,7 +139,12 @@ def test_confirmed_ingest_uses_committed_line_provenance_without_prefix_scan(
     monkeypatch.setattr(ingest_module, "_prefix_hash", reject_prefix_scan)
     user_message = {
         **rows[1],
-        "_psi_history_provenance": {"path": str(history), "user_line": 2, "assistant_line": 5},
+        "_psi_history_provenance": {
+            "path": str(history),
+            "appdata_root": str(tmp_path),
+            "user_line": 2,
+            "assistant_line": 5,
+        },
     }
 
     report, spans = ingest_confirmed_turn(store, scope, HistorySource("s1", history), user_message, rows[4])

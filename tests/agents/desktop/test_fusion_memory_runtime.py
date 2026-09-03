@@ -73,8 +73,8 @@ async def test_standalone_committed_turn_ingests_without_gateway_state(
 ) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    appdata = tmp_path / "appdata"
-    histories = appdata / "histories"
+    explicit_appdata = tmp_path / "explicit-appdata"
+    histories = explicit_appdata / "histories"
     histories.mkdir(parents=True)
     history = histories / "standalone.jsonl"
     rows = [
@@ -83,7 +83,7 @@ async def test_standalone_committed_turn_ingests_without_gateway_state(
         {"role": "assistant", "content": "remembered", "kind": "chat"},
     ]
     history.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
-    monkeypatch.setenv("PSI_APPDATA", str(appdata))
+    monkeypatch.setenv("PSI_APPDATA", str(tmp_path / "environment-appdata"))
     monkeypatch.setenv("FUSION_MEMORY_JOURNAL_FSYNC", "0")
     monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
     monkeypatch.delenv("FUSION_MEMORY_MODEL_API_KEY", raising=False)
@@ -91,7 +91,12 @@ async def test_standalone_committed_turn_ingests_without_gateway_state(
     runtime = await get_runtime(str(workspace))
     user_message = {
         **rows[1],
-        "_psi_history_provenance": {"path": str(history), "user_line": 2, "assistant_line": 3},
+        "_psi_history_provenance": {
+            "path": str(history),
+            "appdata_root": str(explicit_appdata),
+            "user_line": 2,
+            "assistant_line": 3,
+        },
     }
 
     result = await runtime.ingest_current_session("standalone", user_message, rows[2])
@@ -101,6 +106,45 @@ async def test_standalone_committed_turn_ingests_without_gateway_state(
         "standalone memory",
         "remembered",
     }
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "provenance",
+    [
+        {"path": "{history}"},
+        {"path": "{history}", "user_line": 2, "assistant_line": 3},
+        {"path": "{history}", "appdata_root": "{appdata}"},
+    ],
+)
+async def test_incomplete_committed_provenance_cannot_bypass_gateway_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provenance: dict[str, object]
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    appdata = tmp_path / "appdata"
+    histories = appdata / "histories"
+    histories.mkdir(parents=True)
+    history = histories / "standalone.jsonl"
+    rows = [
+        {"role": "user", "content": "untrusted memory", "kind": "chat"},
+        {"role": "assistant", "content": "must not be indexed", "kind": "chat"},
+    ]
+    history.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    monkeypatch.setenv("PSI_APPDATA", str(appdata))
+    monkeypatch.setenv("FUSION_MEMORY_JOURNAL_FSYNC", "0")
+    runtime = await get_runtime(str(workspace))
+    resolved_provenance = {
+        key: str(history) if value == "{history}" else str(appdata) if value == "{appdata}" else value
+        for key, value in provenance.items()
+    }
+    user_message = {**rows[0], "_psi_history_provenance": resolved_provenance}
+
+    result = await runtime.ingest_current_session("standalone", user_message, rows[1])
+
+    assert result == {"ok": False, "error": "HistoryUnavailable"}
+    assert runtime.store is not None
+    assert runtime.store.conn.execute("select count(*) from evidence_spans").fetchone()[0] == 0
 
 
 @pytest.mark.anyio

@@ -35,6 +35,14 @@ class HistorySource:
 
 
 @dataclass(frozen=True, slots=True)
+class CommittedHistoryProvenance:
+    path: str
+    appdata_root: str
+    user_line: int
+    assistant_line: int
+
+
+@dataclass(frozen=True, slots=True)
 class IngestReport:
     files_scanned: int = 0
     completed_turns: int = 0
@@ -387,16 +395,19 @@ def _prefix_hash(path: Path, line_count: int) -> str:
     return digest.hexdigest()
 
 
-def _committed_lines(message: dict[str, object]) -> tuple[str, int, int] | None:
+def committed_history_provenance(message: dict[str, object]) -> CommittedHistoryProvenance | None:
     provenance = message.get("_psi_history_provenance")
     if not isinstance(provenance, dict):
         return None
     path = provenance.get("path")
+    appdata_root = provenance.get("appdata_root")
     user_line = provenance.get("user_line")
     assistant_line = provenance.get("assistant_line")
     if (
         not isinstance(path, str)
-        or not path
+        or not path.strip()
+        or not isinstance(appdata_root, str)
+        or not appdata_root.strip()
         or not isinstance(user_line, int)
         or isinstance(user_line, bool)
         or not isinstance(assistant_line, int)
@@ -405,7 +416,7 @@ def _committed_lines(message: dict[str, object]) -> tuple[str, int, int] | None:
         or assistant_line <= user_line
     ):
         return None
-    return path, user_line, assistant_line
+    return CommittedHistoryProvenance(path, appdata_root, user_line, assistant_line)
 
 
 def ingest_confirmed_turn(
@@ -439,19 +450,18 @@ def ingest_confirmed_turn(
 
     stat = path.stat()
     checkpoint = store.read_checkpoint(scope.workspace_id, str(path.resolve()))
-    committed = _committed_lines(user_message)
+    committed = committed_history_provenance(user_message)
     if committed is not None:
-        committed_path, user_line, assistant_line = committed
-        if normalize_workspace(committed_path) != normalize_workspace(path):
+        if normalize_workspace(committed.path) != normalize_workspace(path):
             return IngestReport(files_scanned=1), []
         if (
             checkpoint
             and checkpoint.session_id == source.session_id
-            and assistant_line <= checkpoint.confirmed_line_count
+            and committed.assistant_line <= checkpoint.confirmed_line_count
         ):
             return IngestReport(files_scanned=1), []
         rescanned = 0
-        parsed = parse_latest_completed_turn(scope, source, user_line, assistant_line)
+        parsed = parse_latest_completed_turn(scope, source, committed.user_line, committed.assistant_line)
     else:
         checkpoint_valid = bool(
             checkpoint and _prefix_hash(path, checkpoint.confirmed_line_count) == checkpoint.prefix_hash
@@ -463,8 +473,8 @@ def ingest_confirmed_turn(
     terminal_turn = parsed[-2:]
     lines_match = committed is None or (
         len(terminal_turn) == 2
-        and terminal_turn[0].line_no == committed[1]
-        and terminal_turn[1].line_no == committed[2]
+        and terminal_turn[0].line_no == committed.user_line
+        and terminal_turn[1].line_no == committed.assistant_line
     )
     if (
         len(terminal_turn) == 2

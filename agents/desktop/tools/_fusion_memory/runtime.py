@@ -15,7 +15,7 @@ from psi_agent._appdata import resolve_appdata_root
 from psi_agent.session.runtime_context import get_agent, get_workspace
 
 from .embedding import ModelConfig, embed_texts, extract_memory_items, load_model_config
-from .ingest import discover_current_history, ingest_confirmed_turn, workspace_scope
+from .ingest import committed_history_provenance, discover_current_history, ingest_confirmed_turn, workspace_scope
 from .journal import JsonlJournal
 from .retrieval import AnswerContext, EvidenceHit, build_answer_context, render_first_recall, search_evidence
 from .store import MemoryItem, MemoryStore
@@ -99,15 +99,16 @@ class MemoryRuntime:
         assert store is not None
         async with self.lock:
             try:
-                appdata = Path(await resolve_appdata_root())
                 scope = workspace_scope(self.settings.workspace)
-                provenance = user_message.get("_psi_history_provenance")
-                committed_path = provenance.get("path", "") if isinstance(provenance, dict) else ""
+                provenance = committed_history_provenance(user_message)
+                appdata = (
+                    Path(provenance.appdata_root) if provenance is not None else Path(await resolve_appdata_root())
+                )
                 source = await discover_current_history(
                     scope,
                     session_id,
                     appdata,
-                    committed_path=committed_path if isinstance(committed_path, str) else "",
+                    committed_path=provenance.path if provenance is not None else "",
                 )
                 if source is None:
                     return {"ok": False, "error": "HistoryUnavailable"}

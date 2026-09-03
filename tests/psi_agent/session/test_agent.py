@@ -113,10 +113,12 @@ async def test_agent_runs_after_turn_hook_on_stop(tmp_path: Path) -> None:
     mock_server = MockAIServer(tmp_path)
     ai_socket = await mock_server.start(handler)
     user = {"role": "user", "content": "question"}
+    appdata = tmp_path / "appdata"
+    history = appdata / "histories" / "committed.jsonl"
     try:
         agent = SessionAgent(
             ai_client=AiClient(ai_socket),
-            conversation=Conversation(path=tmp_path / "committed.jsonl"),
+            conversation=Conversation(path=history),
             system_prompt=SystemPrompt(after_turn=after_turn),
         )
         _ = [chunk async for chunk in agent.run(user)]
@@ -127,7 +129,8 @@ async def test_agent_runs_after_turn_hook_on_stop(tmp_path: Path) -> None:
                     **user,
                     "session_id": "committed",
                     "_psi_history_provenance": {
-                        "path": str(tmp_path / "committed.jsonl"),
+                        "path": str(history),
+                        "appdata_root": str(appdata),
                         "user_line": 2,
                         "assistant_line": 3,
                     },
@@ -272,7 +275,12 @@ async def test_agent_after_turn_hook_cannot_replace_user_message_with_extra_para
             "role": "user",
             "content": "actual question",
             "session_id": "",
-            "_psi_history_provenance": {"path": "", "user_line": 2, "assistant_line": 3},
+            "_psi_history_provenance": {
+                "path": "",
+                "appdata_root": "",
+                "user_line": 2,
+                "assistant_line": 3,
+            },
         }
     ]
 
@@ -310,7 +318,12 @@ async def test_agent_after_turn_hook_uses_original_user_after_before_turn_advice
             "role": "user",
             "content": "actual question",
             "session_id": "",
-            "_psi_history_provenance": {"path": "", "user_line": 2, "assistant_line": 3},
+            "_psi_history_provenance": {
+                "path": "",
+                "appdata_root": "",
+                "user_line": 2,
+                "assistant_line": 3,
+            },
         }
     ]
 

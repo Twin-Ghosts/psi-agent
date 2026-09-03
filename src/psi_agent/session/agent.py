@@ -686,8 +686,14 @@ class SessionAgent:
 
                 self._conversation.add(stored_user_message)
                 await self._conversation.commit()
+                history_path = self._conversation.history_path
                 after_turn_message[_HISTORY_PROVENANCE_KEY] = {
-                    "path": str(self._conversation.history_path or ""),
+                    "path": str(history_path or ""),
+                    "appdata_root": (
+                        str(history_path.parent.parent)
+                        if history_path is not None and history_path.parent.name == "histories"
+                        else ""
+                    ),
                     "user_line": len(self._conversation.messages),
                 }
                 logger.debug(f"History now has {len(self._conversation.messages)} messages")
