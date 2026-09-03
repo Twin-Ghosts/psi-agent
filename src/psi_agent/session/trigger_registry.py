@@ -80,7 +80,7 @@ def tool_result_is_noop(result: str) -> bool:
     """
     try:
         parsed = json.loads(result)
-    except (json.JSONDecodeError, TypeError):
+    except json.JSONDecodeError, TypeError:
         return False
     if not isinstance(parsed, dict):
         return False

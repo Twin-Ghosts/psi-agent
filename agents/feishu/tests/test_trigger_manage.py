@@ -128,7 +128,9 @@ def test_shipped_triggers_declare_wildcard_explicitly(trigger_name: str) -> None
     header, _body = tm._parse_header(raw)
     assert header["filter"] == {"match": "all"}, f"{trigger_name} 的 filter 在新语义下不匹配任何事件"
     if header.get("raw_event"):
-        assert header.get("raw_filter") == {"match": "all"}, f"{trigger_name} 声明了 raw_event 但 raw_filter 会拦掉 raw 路"
+        assert header.get("raw_filter") == {"match": "all"}, (
+            f"{trigger_name} 声明了 raw_event 但 raw_filter 会拦掉 raw 路"
+        )
 
 
 @pytest.mark.anyio
