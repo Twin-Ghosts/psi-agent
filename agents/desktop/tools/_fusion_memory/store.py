@@ -310,10 +310,14 @@ class MemoryStore:
             if span.workspace_id != self.workspace_id:
                 raise ValueError("span workspace does not match store scope")
         new = self.journal.append_spans(batch)
+        active_ids = {
+            span.span_id for span in self.journal.iter_active_spans() if span.workspace_id == self.workspace_id
+        }
         self.conn.execute("begin")
         try:
             for span in batch:
-                self._insert_span(span)
+                if span.span_id in active_ids:
+                    self._insert_span(span)
             self.conn.commit()
         except Exception:
             self.conn.rollback()

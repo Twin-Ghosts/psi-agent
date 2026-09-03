@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,15 +16,16 @@ from psi_agent._appdata import (
     legacy_state_latest_path,
     resolve_history_read_path,
 )
+from psi_agent.session.history_display import message_kind, strip_transfer_markers, wire_role
 
 from .journal import EvidenceSpan
 from .store import IngestCheckpoint, MemoryStore
 
-_TRANSFER_MARKER = re.compile(r"\[(?:SEND|RECV):[^\]]*\]")
 _MAX_ROUND_MARKERS = (
     "maximum context length",
     "max rounds",
     "max_rounds",
+    "max tool rounds reached",
     "达到最大轮数",
     "达到最大回合",
 )
@@ -63,15 +63,14 @@ def workspace_scope(path: str | Path) -> WorkspaceScope:
 
 
 def _visible_content(row: dict[str, object]) -> str:
-    value = row.get("content", row.get("text", ""))
+    value = row.get("content", "")
     if not isinstance(value, str):
         return ""
-    return _TRANSFER_MARKER.sub("", value).strip()
+    return strip_transfer_markers(value).strip()
 
 
 def _kind(row: dict[str, object]) -> str:
-    value = row.get("kind", "chat")
-    return value if isinstance(value, str) else ""
+    return message_kind(row)
 
 
 def _timestamp(row: dict[str, object]) -> str | None:
@@ -118,7 +117,7 @@ def parse_completed_turns(scope: WorkspaceScope, source: HistorySource, start_li
     for line_no, row in _read_rows(path):
         if line_no < start_line:
             continue
-        role = row.get("role")
+        role = wire_role(row.get("role"))
         kind = _kind(row)
         if role == "user":
             pending = None

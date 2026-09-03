@@ -26,6 +26,10 @@ def test_parse_filters_non_raw_rows_and_preserves_history(tmp_path: Path) -> Non
         {"role": "assistant", "content": "好的，已记录。[SEND:/tmp/result.md]", "reasoning": "hidden", "kind": "chat"},
         {"role": "user", "content": "heartbeat", "kind": "schedule.silent"},
         {"role": "assistant", "content": "HEARTBEAT_OK", "kind": "schedule.silent"},
+        {"role": "user_schedule", "content": "legacy trigger", "chat_type": "schedule"},
+        {"role": "assistant_schedule", "content": "legacy output", "chat_type": "schedule"},
+        {"role": "user", "content": "tool loop", "kind": "chat"},
+        {"role": "assistant", "content": "[Max tool rounds reached]", "kind": "chat"},
         {"role": "user", "content": "unfinished", "kind": "chat"},
     ]
     history.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
@@ -61,6 +65,33 @@ def test_ingest_is_idempotent_and_updates_checkpoint(tmp_path: Path) -> None:
     history.write_text(json.dumps({"role": "user", "content": "changed", "kind": "chat"}) + "\n", encoding="utf-8")
     third = ingest_histories(store, scope, [source])
     assert third.rescanned_files == 1
+    store.close()
+
+
+def test_full_rescan_cannot_resurrect_tombstoned_history(tmp_path: Path) -> None:
+    history = tmp_path / "s1.jsonl"
+    history.write_text(
+        json.dumps({"role": "user", "content": "secret", "kind": "chat"})
+        + "\n"
+        + json.dumps({"role": "assistant", "content": "saved", "kind": "chat"})
+        + "\n",
+        encoding="utf-8",
+    )
+    scope = workspace_scope(tmp_path)
+    journal = JsonlJournal(tmp_path / "evidence.jsonl", fsync=False)
+    store = MemoryStore(tmp_path / "memory.sqlite3", journal, scope.workspace_id).open()
+    source = HistorySource("s1", history)
+    ingest_histories(store, scope, [source])
+    journal.append_scope_clear(scope.workspace_id)
+    store.rebuild_index()
+    store.connection.execute("delete from ingest_checkpoints")
+    store.connection.commit()
+    ingest_histories(store, scope, [source])
+    assert (
+        store.get_source_spans(scope.workspace_id, [span.span_id for span in parse_completed_turns(scope, source)])
+        == []
+    )
+    assert list(journal.iter_active_spans()) == []
     store.close()
 
 
