@@ -112,6 +112,28 @@ def test_replay_repairs_conflicting_projection_from_jsonl_authority(tmp_path: Pa
     store.close()
 
 
+def test_replay_removes_sqlite_only_evidence_and_fts_rows(tmp_path: Path) -> None:
+    journal, store = opened(tmp_path)
+    authority = make_span("authority", content="authority")
+    stale = make_span("stale", content="sqlite only")
+    store.index_spans([authority])
+    store._insert_span(stale)
+    store.conn.execute(
+        "insert into fts_memory(doc_type, doc_id, workspace_id, text) values ('memory_item', 'ghost', ?, 'ghost')",
+        ("workspace-a",),
+    )
+    store.conn.commit()
+
+    store.replay_journal()
+
+    assert store.get_source_spans("workspace-a", ["authority"]) == [authority]
+    assert store.get_source_spans("workspace-a", ["stale"]) == []
+    assert store.search_fts("sqlite", "workspace-a") == []
+    assert store.search_fts("ghost", "workspace-a") == []
+    journal.copy_to(tmp_path / "authority-copy.jsonl")
+    store.close()
+
+
 def test_promote_card_embeddings_and_checkpoint_round_trip(tmp_path: Path) -> None:
     _, store = opened(tmp_path)
     store.index_spans([make_span("u", content="用户偏好", line_no=1), make_span("a", content="助手记住", line_no=2)])

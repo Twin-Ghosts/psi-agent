@@ -1450,6 +1450,18 @@ def _resolve_workspace(workspace_raw: str = "", agent_raw: str = "") -> anyio.Pa
     return anyio.Path(os.path.realpath(os.path.abspath(raw)))
 
 
+def _memory_recall_allowed(message: dict[str, Any] | None) -> bool:
+    """Fail closed for explicitly tagged non-chat or unknown turns."""
+    if not isinstance(message, dict):
+        return False
+    if "kind" in message:
+        return isinstance(message["kind"], str) and message["kind"].strip().casefold() == "chat"
+    if "chat_type" in message:
+        return message["chat_type"] == "common"
+    role = message.get("role")
+    return role not in {"user_schedule", "assistant_schedule", "user_trigger", "assistant_trigger"}
+
+
 def _get_supervisor_manager(workspace: anyio.Path) -> Any:
     key = os.path.realpath(os.path.abspath(str(workspace)))
     manager = _SUPERVISOR_MANAGERS.get(key)
@@ -1550,7 +1562,7 @@ async def system_prompt_builder(
     policy_text = ""
     recall_text = ""
     kind = _message_kind(user_message) if isinstance(user_message, dict) else "chat"
-    if kind == "chat":
+    if kind == "chat" and _memory_recall_allowed(user_message):
         try:
             runtime = await get_runtime(str(user_workspace))
             recall_text = await runtime.first_turn_recall(_runtime_session_id(), user_text)

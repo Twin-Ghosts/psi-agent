@@ -13,7 +13,7 @@ from pathlib import Path
 import anyio
 from anyio import to_thread
 
-from psi_agent._appdata import resolve_history_read_path
+from psi_agent._appdata import resolve_history_read_path, resolve_state_read_path
 
 from .journal import EvidenceSpan
 from .store import IngestCheckpoint, MemoryStore
@@ -109,6 +109,135 @@ def _read_rows(path: Path, start_line: int = 1) -> Iterator[tuple[int, dict[str,
                 yield line_no, value
 
 
+def _read_rows_reverse(path: Path, start_line: int = 1) -> Iterator[tuple[int, dict[str, object]]]:
+    """Yield JSON rows from the tail without materializing the history file."""
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        if not size:
+            return
+        handle.seek(-1, os.SEEK_END)
+        trailing_newline = handle.read(1) == b"\n"
+        handle.seek(0)
+        total_lines = sum(1 for _ in handle)
+        position = size
+        line_no = total_lines
+        buffer = b""
+        skip_trailing_empty = trailing_newline
+        while position:
+            chunk_size = min(64 * 1024, position)
+            position -= chunk_size
+            handle.seek(position)
+            buffer = handle.read(chunk_size) + buffer
+            parts = buffer.split(b"\n")
+            buffer = parts[0]
+            for raw in reversed(parts[1:]):
+                if skip_trailing_empty and raw == b"":
+                    skip_trailing_empty = False
+                    continue
+                skip_trailing_empty = False
+                current_line = line_no
+                line_no -= 1
+                if current_line < start_line:
+                    return
+                try:
+                    value = json.loads(raw.decode("utf-8"))
+                except json.JSONDecodeError, UnicodeDecodeError:
+                    continue
+                if isinstance(value, dict):
+                    yield current_line, value
+        if line_no >= start_line and (buffer or total_lines > 0):
+            try:
+                value = json.loads(buffer.decode("utf-8"))
+            except json.JSONDecodeError, UnicodeDecodeError:
+                return
+            if isinstance(value, dict):
+                yield line_no, value
+
+
+def _span_pair(
+    scope: WorkspaceScope,
+    source: HistorySource,
+    user_line: int,
+    user_row: dict[str, object],
+    user_text: str,
+    assistant_line: int,
+    assistant_row: dict[str, object],
+    assistant_text: str,
+) -> tuple[EvidenceSpan, EvidenceSpan]:
+    path = Path(source.path)
+    user_id, user_hash = _span_id(scope, source.session_id, user_line, "user", user_text)
+    assistant_id, assistant_hash = _span_id(scope, source.session_id, assistant_line, "assistant", assistant_text)
+    turn_id = _turn_id(source.session_id, user_line, assistant_line, user_hash, assistant_hash)
+    return (
+        EvidenceSpan(
+            span_id=user_id,
+            workspace_id=scope.workspace_id,
+            session_id=source.session_id,
+            turn_id=turn_id,
+            line_no=user_line,
+            speaker="user",
+            content=user_text,
+            content_hash=user_hash,
+            timestamp=_timestamp(user_row),
+            source_uri=f"history://{path.as_posix()}#L{user_line}",
+        ),
+        EvidenceSpan(
+            span_id=assistant_id,
+            workspace_id=scope.workspace_id,
+            session_id=source.session_id,
+            turn_id=turn_id,
+            line_no=assistant_line,
+            speaker="assistant",
+            content=assistant_text,
+            content_hash=assistant_hash,
+            timestamp=_timestamp(assistant_row),
+            source_uri=f"history://{path.as_posix()}#L{assistant_line}",
+        ),
+    )
+
+
+def _eligible_assistant(row: dict[str, object]) -> str | None:
+    visible = _visible_content(row)
+    tool_calls = row.get("tool_calls") or row.get("tools")
+    if (
+        row.get("role") != "assistant"
+        or _kind(row) != "chat"
+        or not visible.strip()
+        or tool_calls
+        or visible.strip() == "HEARTBEAT_OK"
+        or visible.strip().casefold() in _MAX_ROUND_MESSAGES
+    ):
+        return None
+    return visible
+
+
+def parse_latest_completed_turn(
+    scope: WorkspaceScope,
+    source: HistorySource,
+    start_line: int = 1,
+) -> list[EvidenceSpan]:
+    candidate: tuple[int, dict[str, object], str] | None = None
+    for line_no, row in _read_rows_reverse(Path(source.path), start_line):
+        assistant_text = _eligible_assistant(row)
+        if assistant_text is not None:
+            candidate = (line_no, row, assistant_text)
+            continue
+        if row.get("role") != "user":
+            continue
+        user_text = _visible_content(row)
+        if _kind(row) != "chat" or not user_text.strip():
+            candidate = None
+            continue
+        if candidate is None:
+            continue
+        user_line, user_row, assistant_text = line_no, row, candidate[2]
+        return list(
+            _span_pair(scope, source, user_line, user_row, user_text, candidate[0], candidate[1], assistant_text)
+        )
+    return []
+
+
 def parse_completed_turns(
     scope: WorkspaceScope,
     source: HistorySource,
@@ -141,37 +270,7 @@ def parse_completed_turns(
         if pending is None:
             continue
         user_line, user_row, user_text = pending
-        user_id, user_hash = _span_id(scope, source.session_id, user_line, "user", user_text)
-        assistant_id, assistant_hash = _span_id(scope, source.session_id, line_no, "assistant", visible)
-        turn_id = _turn_id(source.session_id, user_line, line_no, user_hash, assistant_hash)
-        result.extend(
-            (
-                EvidenceSpan(
-                    span_id=user_id,
-                    workspace_id=scope.workspace_id,
-                    session_id=source.session_id,
-                    turn_id=turn_id,
-                    line_no=user_line,
-                    speaker="user",
-                    content=user_text,
-                    content_hash=user_hash,
-                    timestamp=_timestamp(user_row),
-                    source_uri=f"history://{path.as_posix()}#L{user_line}",
-                ),
-                EvidenceSpan(
-                    span_id=assistant_id,
-                    workspace_id=scope.workspace_id,
-                    session_id=source.session_id,
-                    turn_id=turn_id,
-                    line_no=line_no,
-                    speaker="assistant",
-                    content=visible,
-                    content_hash=assistant_hash,
-                    timestamp=_timestamp(row),
-                    source_uri=f"history://{path.as_posix()}#L{line_no}",
-                ),
-            )
-        )
+        result.extend(_span_pair(scope, source, user_line, user_row, user_text, line_no, row, visible))
         pending = None
         completed += 1
         if max_turns is not None and completed >= max_turns:
@@ -192,6 +291,25 @@ async def _owned_history_source(
     if key not in expected or not await anyio.Path(path).is_file():
         return None
     return key, HistorySource(session_id, path)
+
+
+async def _appdata_history_is_owned(appdata_root: Path, scope: WorkspaceScope, session_id: str) -> bool:
+    """Require the Gateway snapshot to bind shared AppData history to a workspace."""
+    state_path = await resolve_state_read_path(appdata_root=str(appdata_root))
+    try:
+        raw = await state_path.read_text(encoding="utf-8")
+        snapshot = json.loads(raw)
+    except OSError, json.JSONDecodeError, UnicodeDecodeError:
+        return False
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("sessions"), list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and item.get("id") == session_id
+        and isinstance(item.get("workspace"), str)
+        and normalize_workspace(item["workspace"]) == scope.normalized
+        for item in snapshot["sessions"]
+    )
 
 
 def _history_ownership(path: Path, allowed_roots: tuple[Path, Path], session_id: str) -> tuple[str, set[str]]:
@@ -219,13 +337,23 @@ async def discover_current_history(
             )
         )
     )
+    appdata_path = Path(appdata_root) / "histories" / f"{current_session_id}.jsonl"
+    if normalize_workspace(current_path) == normalize_workspace(appdata_path) and not await _appdata_history_is_owned(
+        appdata_root, scope, current_session_id
+    ):
+        return None
     owned = await _owned_history_source(scope, current_session_id, current_path, appdata_root)
     return owned[1] if owned else None
 
 
 def _prefix_hash(path: Path, line_count: int) -> str:
-    lines = path.read_bytes().splitlines(keepends=True)
-    return hashlib.sha256(b"".join(lines[:line_count])).hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for index, line in enumerate(handle):
+            if index >= line_count:
+                break
+            digest.update(line)
+    return digest.hexdigest()
 
 
 def ingest_confirmed_turn(
@@ -266,12 +394,11 @@ def ingest_confirmed_turn(
     )
     rescanned = int(bool(checkpoint and not checkpoint_valid))
     start_line = checkpoint.confirmed_line_count + 1 if checkpoint_valid and checkpoint else 1
-    parsed = parse_completed_turns(scope, source, start_line)
+    parsed = parse_latest_completed_turn(scope, source, start_line)
     selected: list[EvidenceSpan] = []
-    for offset in range(0, len(parsed), 2):
-        turn = parsed[offset : offset + 2]
-        if len(turn) == 2 and turn[0].content == user_text and turn[1].content == assistant_text:
-            selected = turn
+    terminal_turn = parsed[-2:]
+    if len(terminal_turn) == 2 and terminal_turn[0].content == user_text and terminal_turn[1].content == assistant_text:
+        selected = terminal_turn
     if not selected:
         return IngestReport(files_scanned=1, rescanned_files=rescanned), []
 

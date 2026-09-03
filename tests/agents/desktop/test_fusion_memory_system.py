@@ -99,6 +99,11 @@ async def test_schedule_prompt_does_not_consume_first_recall(monkeypatch: pytest
         agent_raw=str(DESKTOP),
     )
     await module.system_prompt_builder(
+        {"role": "user", "content": "unknown metadata", "kind": "heartbeat"},
+        workspace_raw=str(tmp_path),
+        agent_raw=str(DESKTOP),
+    )
+    await module.system_prompt_builder(
         {"role": "user", "content": "first chat", "kind": "chat"},
         workspace_raw=str(tmp_path),
         agent_raw=str(DESKTOP),

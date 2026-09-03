@@ -47,6 +47,7 @@ async def test_cache_is_workspace_scoped_and_survives_session_restart(
     assert runtime_a1 is not runtime_b
     assert runtime_a1.workspace_id != runtime_b.workspace_id
     assert (await runtime_a1.ingest_current_session("s1", user_message, assistant_message))["ok"] is True
+    assert (await runtime_b.ingest_current_session("s1", user_message, assistant_message))["ok"] is False
     hits = await runtime_a1.search("PostgreSQL")
     assert hits and hits[0].session_id == "s1"
     assert await runtime_b.search("PostgreSQL") == []
@@ -104,6 +105,10 @@ async def test_only_hook_confirmed_turn_is_derived_and_recovery_is_bounded(
     histories = appdata / "histories"
     histories.mkdir(parents=True)
     history = histories / "s1.jsonl"
+    (appdata / "state").mkdir()
+    (appdata / "state" / "latest.json").write_text(
+        json.dumps({"sessions": [{"id": "s1", "workspace": str(workspace)}]}), encoding="utf-8"
+    )
     rows = []
     for turn in range(1, 11):
         rows.extend(
@@ -170,6 +175,10 @@ async def test_ingest_without_successful_hook_provenance_is_rejected(
         json.dumps({"role": "assistant", "content": "unproven history text", "kind": "chat"}) + "\n",
         encoding="utf-8",
     )
+    (appdata / "state").mkdir()
+    (appdata / "state" / "latest.json").write_text(
+        json.dumps({"sessions": [{"id": "s1", "workspace": str(workspace)}]}), encoding="utf-8"
+    )
     monkeypatch.setenv("PSI_APPDATA", str(appdata))
     monkeypatch.setenv("FUSION_MEMORY_JOURNAL_FSYNC", "0")
     runtime = await get_runtime(str(workspace))
@@ -189,6 +198,10 @@ async def test_turn_card_failure_retries_from_confirmed_evidence(
     histories = appdata / "histories"
     histories.mkdir(parents=True)
     history = histories / "s1.jsonl"
+    (appdata / "state").mkdir()
+    (appdata / "state" / "latest.json").write_text(
+        json.dumps({"sessions": [{"id": "s1", "workspace": str(workspace)}]}), encoding="utf-8"
+    )
     rows = []
     for turn in range(10):
         rows.extend(
@@ -235,6 +248,10 @@ async def test_failed_extraction_is_retried_without_blocking_turn_card(
     histories = appdata / "histories"
     histories.mkdir(parents=True)
     history = histories / "s1.jsonl"
+    (appdata / "state").mkdir()
+    (appdata / "state" / "latest.json").write_text(
+        json.dumps({"sessions": [{"id": "s1", "workspace": str(workspace)}]}), encoding="utf-8"
+    )
     history.write_text(
         "\n".join(
             (

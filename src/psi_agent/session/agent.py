@@ -617,10 +617,17 @@ class SessionAgent:
 
         request_params = dict(extra_params or {})
         hook_message = dict(user_message)
-        hook_message |= request_params
+        hook_message.update(
+            {
+                key: value
+                for key, value in request_params.items()
+                if key not in {"role", "content", "kind", "turn_context", "session_id"}
+            }
+        )
         # Hooks must see the trusted Conversation identity. Request extras still
         # pass through to the AI, but cannot impersonate another Session here.
         hook_message["session_id"] = self._conversation.session_id
+        after_turn_message = dict(hook_message)
 
         user_kind = message_kind(user_message)
         turn_response_kind = response_kind if response_kind is not None else user_kind
@@ -879,8 +886,11 @@ class SessionAgent:
                             assistant_msg["reasoning"] = accumulated_reasoning
                         if accumulated_content:
                             self._conversation.add(with_kind(assistant_msg, turn_response_kind))
-                        await self._conversation.commit()
-                        await self._system_prompt.run_after_turn(hook_message, assistant_msg)
+                        committed = await self._conversation.commit()
+                        if committed:
+                            await self._system_prompt.run_after_turn(after_turn_message, assistant_msg)
+                        else:
+                            logger.warning("Skipping system after-turn hook because history commit failed")
                         await self._schedule_registry.refresh()
                         if _compaction_needed:
                             await self._maybe_compact(_compaction_prompt_tokens, _compaction_threshold)

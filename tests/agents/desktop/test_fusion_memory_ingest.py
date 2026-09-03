@@ -141,6 +141,34 @@ def test_confirmed_ingest_excludes_prior_turn_without_finish_provenance(tmp_path
     store.close()
 
 
+def test_ingest_does_not_match_stale_duplicate_before_history_tail(tmp_path: Path) -> None:
+    history = tmp_path / "s1.jsonl"
+    rows = [
+        {"role": "user", "content": "重复问题", "kind": "chat"},
+        {"role": "assistant", "content": "重复回答", "kind": "chat"},
+        {"role": "user", "content": "后续问题", "kind": "chat"},
+        {"role": "assistant", "content": "后续回答", "kind": "chat"},
+    ]
+    history.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+    scope = workspace_scope(tmp_path)
+    journal = JsonlJournal(tmp_path / "evidence.jsonl", fsync=False)
+    store = MemoryStore(tmp_path / "memory.sqlite3", journal, scope.workspace_id).open()
+
+    report, spans = ingest_confirmed_turn(
+        store,
+        scope,
+        HistorySource("s1", history),
+        rows[0],
+        rows[1],
+    )
+
+    assert report.completed_turns == 0
+    assert spans == []
+    assert list(journal.iter_active_spans()) == []
+    assert store.read_checkpoint(scope.workspace_id, str(history.resolve())) is None
+    store.close()
+
+
 def test_full_rescan_cannot_resurrect_tombstoned_history(tmp_path: Path) -> None:
     history = tmp_path / "s1.jsonl"
     history.write_text(
@@ -193,6 +221,24 @@ async def test_discover_current_history_ignores_other_gateway_sessions(tmp_path:
     )
     found = await discover_current_history(workspace_scope(workspace_a), "s1", appdata)
     assert found is not None and found.session_id == "s1"
+
+
+@pytest.mark.anyio
+async def test_discover_current_history_rejects_appdata_history_owned_by_other_workspace(tmp_path: Path) -> None:
+    appdata = tmp_path / "appdata"
+    histories = appdata / "histories"
+    histories.mkdir(parents=True)
+    workspace_a = tmp_path / "workspace-a"
+    workspace_b = tmp_path / "workspace-b"
+    (histories / "shared.jsonl").write_text("{}\n", encoding="utf-8")
+    (appdata / "state").mkdir()
+    (appdata / "state" / "latest.json").write_text(
+        json.dumps({"sessions": [{"id": "shared", "workspace": str(workspace_a)}]}), encoding="utf-8"
+    )
+
+    found = await discover_current_history(workspace_scope(workspace_b), "shared", appdata)
+
+    assert found is None
 
 
 @pytest.mark.anyio

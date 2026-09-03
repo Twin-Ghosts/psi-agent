@@ -407,6 +407,31 @@ class MemoryStore:
             clears += 1
 
         report = self.journal.replay(on_span, on_clear)
+        stale_ids = [
+            str(row[0])
+            for row in self.conn.execute(
+                "select span_id from evidence_spans where workspace_id = ?", (self.workspace_id,)
+            )
+            if str(row[0]) not in replay_active
+        ]
+        self._delete_spans(stale_ids)
+        self.conn.execute(
+            """
+            delete from fts_memory
+            where workspace_id = ? and (
+              (doc_type = 'evidence' and not exists (
+                select 1 from evidence_spans where span_id = fts_memory.doc_id
+              ))
+              or (doc_type = 'memory_item' and not exists (
+                select 1 from memory_items where item_id = fts_memory.doc_id
+              ))
+              or (doc_type = 'summary_card' and not exists (
+                select 1 from summary_cards where card_id = fts_memory.doc_id
+              ))
+            )
+            """,
+            (self.workspace_id,),
+        )
         return ReplayReport(
             records=report.records,
             inserted=inserted,
