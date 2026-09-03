@@ -39,7 +39,6 @@ from psi_agent.session.history_display import (
     KIND_COMPACTED,
     TURN_CONTEXT_KEY,
     message_kind,
-    messages_for_ai,
     truncate_tool_result,
     with_kind,
 )
@@ -53,6 +52,7 @@ from psi_agent.session.protocol import (
     AgentRunStatus,
     AgentStopCause,
 )
+from psi_agent.session.request_assembly import RequestAssembler
 from psi_agent.session.runtime_context import runtime_scope
 from psi_agent.session.schedule_registry import ScheduleRegistry
 from psi_agent.session.system_prompt import SystemPrompt
@@ -266,6 +266,8 @@ class SessionAgent:
         max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS,
         workspace_path: Path | None = None,
         agent_path: Path | None = None,
+        max_context_tokens: int = -1,
+        request_assembler: RequestAssembler | None = None,
     ) -> None:
         self._ai_client = ai_client
         self._channel_adapter = channel_adapter or ChannelAdapter()
@@ -279,6 +281,10 @@ class SessionAgent:
         self._workspace_path = workspace_path
         self._agent_path = agent_path
         self._tokens_at_last_compaction: int | None = None
+        # One per session: it carries the calibrated chars/token ratio and the
+        # set of rows already elided, both of which must persist across turns
+        # for hysteresis to mean anything.
+        self._request_assembler = request_assembler or RequestAssembler(max_context_tokens=max_context_tokens)
 
     @property
     def workspace_path(self) -> Path | None:
@@ -702,18 +708,20 @@ class SessionAgent:
                     # per-turn fixed cost the prompt total does not include.
                     log_tool_schema_size(tool_defs, context=f"session={self._conversation.session_id}")
 
-                    ai_messages = messages_for_ai(self._conversation.messages)
-                    request_body: dict[str, Any] = {
-                        "messages": ai_messages,
-                        "tools": tool_defs,
-                        "stream": True,
-                    }
-                    if request_params:
-                        request_params.pop("messages", None)
-                        request_params.pop("tools", None)
-                        request_params.pop("stream", None)
-                        request_body |= request_params
-                    request_body["routing"] = {"session_id": self._conversation.session_id}
+                    # The budget is enforced *here*, at the one place a request
+                    # is assembled, rather than observed downstream after the
+                    # fact: an over-budget payload can no longer be built, so it
+                    # can no longer be sent. See ``request_assembly``.
+                    extra: dict[str, Any] = dict(request_params) if request_params else {}
+                    extra["routing"] = {"session_id": self._conversation.session_id}
+                    assembled = self._request_assembler.build(
+                        self._conversation.messages,
+                        tool_defs,
+                        extra,
+                    )
+                    request_body = assembled.body
+                    ai_messages = assembled.body["messages"]
+                    _sent_chars = assembled.chars
 
                     logger.info("Sending request to AI via AiClient")
                     logger.debug(f"Request messages count: {len(ai_messages)}, tools: {len(tool_defs)}")
@@ -725,6 +733,7 @@ class SessionAgent:
                     _compaction_needed = False
                     _compaction_prompt_tokens = 0
                     _compaction_threshold = 0
+                    _usage_prompt_tokens = 0
 
                     async with aclosing(self._ai_client.stream(request_body)) as stream:
                         async for delta in stream:
@@ -743,10 +752,23 @@ class SessionAgent:
                                 yield AgentChunk(reasoning=delta.reasoning, kind=r_kind)
                                 accumulated_reasoning += delta.reasoning
 
+                            if delta.usage_prompt_tokens:
+                                # Calibrate as soon as the number arrives, not at
+                                # the end of the round: the tool-calls branch
+                                # ``break``s out of this loop, so anything left
+                                # for afterwards would never run on the very
+                                # turns that spend the most context.
+                                _usage_prompt_tokens = delta.usage_prompt_tokens
+                                self._request_assembler.calibrate(_sent_chars, _usage_prompt_tokens)
+
                             if delta.compaction_needed:
                                 _compaction_needed = True
                                 _compaction_prompt_tokens = delta.prompt_tokens
                                 _compaction_threshold = delta.compaction_threshold
+                                # The signal carries the AI layer's own ceiling.
+                                # Adopting it keeps the two layers on one number
+                                # even if only one of them was configured.
+                                self._request_assembler.adopt_threshold(delta.compaction_threshold)
 
                             if delta.finish_reason and not finish_reason:
                                 finish_reason = delta.finish_reason
@@ -981,7 +1003,7 @@ class SessionAgent:
     async def _maybe_compact(self, prompt_tokens: int = 0, threshold: int = 0) -> None:
         """Invoke compact_history from system.py, insert compaction message
         into conversation.  system prompt merge + old-message trimming is
-        deferred to ``messages_for_ai()``.
+        deferred to ``project_history_for_wire()``.
 
         A cooldown guards against back-to-back compactions: the signal only says
         "prompt_tokens exceeded the threshold", and compaction cannot shrink the

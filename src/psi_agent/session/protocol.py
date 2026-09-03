@@ -207,3 +207,13 @@ class AiDelta:
     """Upstream-reported prompt tokens carried by the compaction signal (0 = unknown)."""
     compaction_threshold: int = 0
     """The threshold the signal was raised against (0 = unknown)."""
+    usage_prompt_tokens: int = 0
+    """Prompt tokens from the stream's own ``usage`` chunk (0 = not reported yet).
+
+    Distinct from ``prompt_tokens`` on purpose: that one rides the compaction
+    signal and therefore only appears once the threshold is already exceeded,
+    which is far too late to calibrate anything.  This one arrives on every
+    successful turn (the AI layer forces ``stream_options.include_usage``), and
+    is what ``RequestAssembler.calibrate`` divides into the character count we
+    measured for that same request.
+    """

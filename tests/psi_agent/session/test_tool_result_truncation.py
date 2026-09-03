@@ -7,7 +7,7 @@ arrives after a stream completes, and the request never got that far, so every
 retry rebuilt the same payload and a restart changed nothing.
 
 Two layers are pinned here: ``agent.py`` caps what is written, and
-``messages_for_ai`` caps what goes out — the second matters because oversized
+``project_history_for_wire`` caps what goes out — the second matters because oversized
 rows written before the cap existed are already on disk.
 """
 
@@ -17,7 +17,7 @@ import pytest
 
 from psi_agent.session.history_display import (
     MAX_TOOL_RESULT_CHARS,
-    messages_for_ai,
+    project_history_for_wire,
     truncate_tool_result,
 )
 
@@ -61,13 +61,13 @@ def test_custom_limit_is_honoured() -> None:
 def test_only_tool_rows_are_truncated_on_the_wire(role: str) -> None:
     """A long user message is the user's own text; truncating it would edit them."""
     long_text = "q" * (MAX_TOOL_RESULT_CHARS + 500)
-    out = messages_for_ai([{"role": role, "content": long_text}])
+    out = project_history_for_wire([{"role": role, "content": long_text}])
     assert out[0]["content"] == long_text
 
 
 def test_wire_projection_truncates_oversized_tool_row() -> None:
     long_text = "w" * (MAX_TOOL_RESULT_CHARS + 500)
-    out = messages_for_ai(
+    out = project_history_for_wire(
         [
             {"role": "system", "content": "SYS"},
             {"role": "assistant", "tool_calls": [{"id": "c1"}]},
@@ -87,13 +87,13 @@ def test_wire_projection_truncates_oversized_tool_row() -> None:
 def test_wire_projection_leaves_non_string_tool_content_alone() -> None:
     """Only ``str`` is capped; a structured payload has no meaningful prefix."""
     payload = {"items": list(range(10))}
-    out = messages_for_ai([{"role": "tool", "tool_call_id": "c1", "content": payload}])
+    out = project_history_for_wire([{"role": "tool", "tool_call_id": "c1", "content": payload}])
     assert out[0]["content"] == payload
 
 
 def test_wire_projection_is_idempotent() -> None:
     """Projecting an already-truncated row must not stack a second notice."""
     long_text = "e" * (MAX_TOOL_RESULT_CHARS + 500)
-    once = messages_for_ai([{"role": "tool", "tool_call_id": "c1", "content": long_text}])
-    twice = messages_for_ai([{"role": "tool", "tool_call_id": "c1", "content": once[0]["content"]}])
+    once = project_history_for_wire([{"role": "tool", "tool_call_id": "c1", "content": long_text}])
+    twice = project_history_for_wire([{"role": "tool", "tool_call_id": "c1", "content": once[0]["content"]}])
     assert twice[0]["content"] == once[0]["content"]
