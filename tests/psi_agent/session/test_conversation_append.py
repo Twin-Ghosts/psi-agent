@@ -302,7 +302,7 @@ async def test_replace_system_then_add_in_one_turn_rewrites(tmp_path: Path) -> N
 @pytest.mark.anyio
 async def test_compaction_message_is_appended(tmp_path: Path, counter: WriteCounter) -> None:
     """Compaction adds a ``compacted`` row (trimming is deferred to
-    ``messages_for_ai``), so it stays on the cheap path."""
+    ``project_history_for_wire``), so it stays on the cheap path."""
     path = tmp_path / "s.jsonl"
     conv = Conversation(path=path)
     conv.add({"role": "user", "content": "q" * 50_000})

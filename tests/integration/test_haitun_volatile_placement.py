@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 
-from psi_agent.session.history_display import TURN_CONTEXT_KEY, messages_for_ai
+from psi_agent.session.history_display import TURN_CONTEXT_KEY, project_history_for_wire
 
 REPO_ROOT = Path(__file__).parents[2]
 PACKS = ("feishu", "desktop")
@@ -200,14 +200,14 @@ async def test_earlier_history_projects_identically_as_the_profile_moves(
         {"role": "system", "content": prompt},
         {"role": "user", "content": "turn one", TURN_CONTEXT_KEY: first_block},
     ]
-    first_projection = messages_for_ai(history)
+    first_projection = project_history_for_wire(history)
     grown = [
         *history,
         {"role": "assistant", "content": "reply one"},
         {"role": "user", "content": "turn two", TURN_CONTEXT_KEY: second_block},
     ]
 
-    second_projection = messages_for_ai(grown)
+    second_projection = project_history_for_wire(grown)
 
     assert second_projection[: len(first_projection)] == first_projection
     assert ADVICE_MARKER in second_projection[-1]["content"]
@@ -223,7 +223,7 @@ async def test_volatile_text_never_reaches_the_stored_row(
     block = await module.turn_context_builder(_learning_message(), workspace_raw=str(tmp_path))
     stored: list[dict[str, Any]] = [{"role": "user", "content": "hi", TURN_CONTEXT_KEY: block}]
 
-    messages_for_ai(stored)
+    project_history_for_wire(stored)
 
     assert stored[0] == {"role": "user", "content": "hi", TURN_CONTEXT_KEY: block}
 
