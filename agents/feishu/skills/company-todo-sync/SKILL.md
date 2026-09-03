@@ -30,7 +30,7 @@ category: productivity
 - `feishu_api`（GET `/open-apis/wiki/v2/spaces/get_node`）— wiki 链接换 `obj_token`（表格若挂在 wiki 下）
 - `feishu_sheet_read` / `feishu_api`（GET `/open-apis/sheets/v3/spreadsheets/:spreadsheet_token/sheets/query`）— 探结构、定位本周期列、逐人取值
 - `feishu_leave_query` — 判请假（事实源是飞书假勤审批：按 `approval_code` 模板 + 时间窗枚举已通过申请）
-- `sync_org_tree`（⚠️ 工具入口未建，已知缺口）— 按飞书组织架构（每人自带的 `leader_user_id` 直属上级字段）自动建/更工作树：每人一页写「组织关系」区块（上级+下属），根页《公司工作树》全量重写
+- `feishu_sync_org_tree` — 按飞书组织架构（每人自带的 `leader_user_id` 直属上级字段）自动建/更工作树：每人一页写「组织关系」区块（上级+下属），根页《公司工作树》全量重写
 - `wiki_read` / `wiki_write` / `wiki_links` — 建/更工作树历史快照
 - `feishu_mentor_ledger_ensure` — 幂等开通 mentor 台账
 - `feishu_bitable_create_records` / `feishu_bitable_update_records` — 写台账行
@@ -90,10 +90,10 @@ category: productivity
 ### 3. 建/更 LLM wiki 工作树（R2 / R3）
 
 **wiki_write 只有整页覆盖、没有 append 模式** —— 「只累加」必须由本步骤自己保证。工作树分两部分，
-职责不重叠：**组织关系**（谁的上级是谁、谁的下属是谁）由 `sync_org_tree` 从飞书组织架构自动生成；
+职责不重叠：**组织关系**（谁的上级是谁、谁的下属是谁）由 `feishu_sync_org_tree` 从飞书组织架构自动生成；
 **历史快照/当前目标**由本步骤手工维护。两者写同一批人员汇总页，但各自只碰自己的区块。
 
-0. 本周期第一次运行时（或组织架构发生变动后）先调 `sync_org_tree(root_department_id="0",
+0. 本周期第一次运行时（或组织架构发生变动后）先调 `feishu_sync_org_tree(root_department_id="0",
    boss_open_id=<boss 的 open_id>)`：它会读全公司成员，按每人自带的 `leader_user_id`（飞书通讯录里
    的直属上级字段，比按部门负责人反推更准——两者在"上级不是部门一把手"时会不一致）自动生成整棵树，
    写进每人汇总页的「组织关系」区块，并全量重写根页《公司工作树》。**这一步是幂等的**，组织架构没
