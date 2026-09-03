@@ -56,6 +56,7 @@ from psi_agent.session.request_assembly import RequestAssembler
 from psi_agent.session.runtime_context import runtime_scope
 from psi_agent.session.schedule_registry import ScheduleRegistry
 from psi_agent.session.system_prompt import SystemPrompt
+from psi_agent.session.tool_defs import ToolDefsCache, build_tool_defs
 from psi_agent.session.tool_registry import ToolRegistry
 from psi_agent.session.trigger_registry import TriggerRegistry
 
@@ -285,6 +286,10 @@ class SessionAgent:
         # set of rows already elided, both of which must persist across turns
         # for hysteresis to mean anything.
         self._request_assembler = request_assembler or RequestAssembler(max_context_tokens=max_context_tokens)
+        # ``tools`` is part of the upstream prefix-cache key, and the registry is
+        # re-read every turn — so the array is frozen per Session rather than
+        # rebuilt. See ``session/tool_defs.py``.
+        self._tool_defs_cache = ToolDefsCache()
 
     @property
     def workspace_path(self) -> Path | None:
@@ -678,7 +683,11 @@ class SessionAgent:
                 # turn's user message instead of the prompt, so the per-turn
                 # change lands at the request tail and leaves the prefix —
                 # prompt plus every earlier turn — byte-identical.
-                turn_context = await self._system_prompt.turn_context()
+                # ``hook_message`` rather than the stored row: it carries what
+                # the before-turn hook attached (supervisor advice) plus the
+                # trusted session identity, which is what the volatile blocks
+                # key off.
+                turn_context = await self._system_prompt.turn_context(hook_message)
                 if turn_context:
                     stored_user_message = stored_user_message | {TURN_CONTEXT_KEY: turn_context}
 
@@ -691,17 +700,10 @@ class SessionAgent:
                     logger.debug(f"Agent loop round {_round + 1}/{self._max_tool_rounds}")
                     model_turns = _round + 1
 
-                    tool_defs = [
-                        {
-                            "type": "function",
-                            "function": {
-                                "name": t.name,
-                                "description": t.description,
-                                "parameters": t.parameters,
-                            },
-                        }
-                        for t in self._tool_registry.tools.values()
-                    ]
+                    # Frozen after the first non-empty assembly: a tool that shows
+                    # up mid-Session would otherwise rewrite this array and
+                    # re-prefill every cached turn behind it.
+                    tool_defs = self._tool_defs_cache.freeze(build_tool_defs(self._tool_registry.tools))
 
                     # Logged next to the prompt breakdown, not inside it: these
                     # schemas are their own request field, so they are a

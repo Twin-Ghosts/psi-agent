@@ -155,7 +155,7 @@ class SystemPrompt:
         except Exception as e:
             logger.warning(f"System after-turn hook failed: {e!r}")
 
-    async def turn_context(self) -> str:
+    async def turn_context(self, user_message: dict[str, Any] | None = None) -> str:
         """Render this turn's volatile block, or ``""`` if the workspace has none.
 
         The prompt is built once and reused for the life of the history, which
@@ -183,11 +183,23 @@ class SystemPrompt:
         don't get no block. A builder that raises or returns a non-string is
         likewise treated as "no block", because losing a clock line is a far
         smaller problem than losing the turn.
+
+        *user_message* is passed to builders that declare a positional parameter
+        for it, on the same opt-in-by-signature terms as ``ensure``. Volatile
+        text derived from the turn — a learning profile keyed on this message, or
+        advice attached to it — has to reach the builder somehow, and the tail is
+        where such text belongs; without this it could only be spliced into the
+        prompt, which is exactly the placement this method exists to avoid.
         """
         if self._turn_context_fn is None:
             return ""
         try:
-            block = await self._turn_context_fn(**self._agent_kwargs(self._turn_context_fn))
+            kwargs = self._agent_kwargs(self._turn_context_fn)
+            block = (
+                await self._turn_context_fn(user_message, **kwargs)
+                if self._accepts_message(self._turn_context_fn)
+                else await self._turn_context_fn(**kwargs)
+            )
         except Exception as e:
             logger.error(f"Turn context build failed: {e}")
             return ""

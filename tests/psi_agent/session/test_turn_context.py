@@ -40,6 +40,41 @@ async def test_no_builder_yields_no_block() -> None:
 
 
 @pytest.mark.anyio
+async def test_turn_message_reaches_a_builder_that_asks_for_it() -> None:
+    """Volatile text derived from the turn has to arrive here, not in the prompt.
+
+    A learning profile keyed on this message, and advice attached to it, are
+    per-turn by nature. Without the message on this path the only place they
+    could be assembled is the prompt — the placement this whole mechanism
+    exists to avoid.
+    """
+    seen: list[dict[str, Any] | None] = []
+
+    async def turn_context_builder(user_message: dict[str, Any] | None = None) -> str:
+        seen.append(user_message)
+        return f"advice={(user_message or {}).get('supervisor_advice')}"
+
+    sp = SystemPrompt(turn_context_fn=turn_context_builder)
+
+    block = await sp.turn_context({"role": "user", "content": "hi", "supervisor_advice": {"focus": "depth"}})
+
+    assert seen == [{"role": "user", "content": "hi", "supervisor_advice": {"focus": "depth"}}]
+    assert block == "advice={'focus': 'depth'}"
+
+
+@pytest.mark.anyio
+async def test_builder_that_takes_no_message_is_called_unchanged() -> None:
+    """Opt-in by signature: a pack that never asked for a message must not break."""
+
+    async def turn_context_builder(*, agent_raw: str = "") -> str:
+        return "Date: 2026-07-29"
+
+    sp = SystemPrompt(turn_context_fn=turn_context_builder)
+
+    assert await sp.turn_context({"role": "user", "content": "hi"}) == "Date: 2026-07-29"
+
+
+@pytest.mark.anyio
 async def test_builder_failure_degrades_to_no_block() -> None:
     """Losing a clock line beats losing the turn."""
 

@@ -1457,6 +1457,73 @@ def _build_profile_policy(topic_profile: dict[str, Any]) -> str:
     )
 
 
+async def _build_volatile_turn_blocks(
+    user_message: dict[str, Any] | None,
+    user_workspace: anyio.Path,
+) -> str:
+    """Render this turn's profile / advice / policy blocks, or ``""``.
+
+    These three are re-derived every turn: the profile is re-read from disk (its
+    turn counter and dimensions move), the advice comes off *this* message, and
+    the policy is a function of the turn number. They belong at the request tail
+    for the same reason the clock does — see ``build_turn_context``.
+
+    They used to be spliced into the system prompt instead. Because the prompt
+    is ``messages[0]``, that put per-turn text ahead of the whole history no
+    matter how late in the prompt it landed, invalidating every cached turn
+    behind it (production: 181218 stable chars, 880 changing). AGENTS.md 坑 19
+    records the same conclusion and the boundary-marker scheme that was deleted
+    for it.
+
+    Failure is degradation, not an error: a missing profile costs teaching
+    nuance, while raising here would cost the turn.
+    """
+    profile_text = ""
+    policy_text = ""
+    try:
+        profile_module = importlib.import_module("_user_profile")
+        identity = {
+            name: value
+            for name in ("profile_id", "user_id", "session_id")
+            if isinstance(user_message, dict) and isinstance((value := user_message.get(name)), str) and value
+        }
+        profile = await profile_module.get_profile(str(user_workspace), **identity)
+        content = user_message.get("content") if isinstance(user_message, dict) else ""
+        user_text = content if isinstance(content, str) else ""
+        topic_profile = None
+        if user_text.strip():
+            _topic_key, topic_profile = profile.get_topic(user_text)
+        if topic_profile:
+            dimensions = profile.effective_dimensions(topic_profile)
+            profile_text = (
+                "## 当前知识点学习画像 (每轮从持久化画像重新读取)\n"
+                f"- 当前知识点: {topic_profile['label']}\n"
+                f"- 累计轮次: {topic_profile['turns']}\n"
+                f"- 深度: {dimensions['depth']:.2f} (0=框架概览, 1=系统推导)\n"
+                f"- 目标: {dimensions['goal']:.2f} (0=兴趣, 1=决策)\n"
+                f"- 熟悉度: {dimensions['familiarity']:.2f} (0=新手, 1=专家)\n"
+                f"- 教学指令: {profile.teaching_hint(topic_profile)}\n"
+            )
+            policy_text = _build_profile_policy(topic_profile)
+    except Exception as exc:
+        logger.warning("Adaptive profile unavailable: %r", exc, exc_info=True)
+
+    raw_advice = user_message.get("supervisor_advice") if isinstance(user_message, dict) else None
+    advice_text = ""
+    if isinstance(raw_advice, dict):
+        try:
+            protocol = importlib.import_module("supervisor_protocol")
+            advice_text = protocol.render_advice_prompt(protocol.validate_advice(raw_advice))
+            if advice_text:
+                advice_text += (
+                    "\n- 用户当前消息中的直接范围和深度要求优先; 若用户要求不展开, 则抑制破圈, 不得强制扩展。"
+                )
+        except Exception as exc:
+            logger.warning("Supervisor advice unavailable: %r", exc, exc_info=True)
+
+    return "\n".join(part for part in (profile_text, advice_text, policy_text) if part)
+
+
 async def system_before_turn(
     user_message: dict[str, Any] | None,
     *,
@@ -1511,81 +1578,27 @@ async def system_prompt_builder(
     if raw:
         user_workspace = anyio.Path(raw)
     await _activate_fusion_memory(agent_dir)
-    content = user_message.get("content") if isinstance(user_message, dict) else ""
-    user_text = content if isinstance(content, str) else ""
     system = System(agent_dir, user_workspace=user_workspace)
     prompt = await system.build_system_prompt()
-    profile_text = ""
-    policy_text = ""
-    try:
-        profile_module = importlib.import_module("_user_profile")
-        identity = {
-            name: value
-            for name in ("profile_id", "user_id", "session_id")
-            if isinstance(user_message, dict) and isinstance((value := user_message.get(name)), str) and value
-        }
-        profile = await profile_module.get_profile(str(user_workspace), **identity)
-        topic_profile = None
-        if user_text.strip():
-            _topic_key, topic_profile = profile.get_topic(user_text)
-        if topic_profile:
-            dimensions = profile.effective_dimensions(topic_profile)
-            profile_text = (
-                "## 当前知识点学习画像 (每轮从持久化画像重新读取)\n"
-                f"- 当前知识点: {topic_profile['label']}\n"
-                f"- 累计轮次: {topic_profile['turns']}\n"
-                f"- 深度: {dimensions['depth']:.2f} (0=框架概览, 1=系统推导)\n"
-                f"- 目标: {dimensions['goal']:.2f} (0=兴趣, 1=决策)\n"
-                f"- 熟悉度: {dimensions['familiarity']:.2f} (0=新手, 1=专家)\n"
-                f"- 教学指令: {profile.teaching_hint(topic_profile)}\n"
-            )
-            policy_text = _build_profile_policy(topic_profile)
-    except Exception as exc:
-        logger.warning("Adaptive profile unavailable: %r", exc, exc_info=True)
 
-    raw_advice = user_message.get("supervisor_advice") if isinstance(user_message, dict) else None
-    if isinstance(raw_advice, dict):
-        protocol = importlib.import_module("supervisor_protocol")
-        advice_text = protocol.render_advice_prompt(protocol.validate_advice(raw_advice))
-        if advice_text:
-            advice_text += "\n- 用户当前消息中的直接范围和深度要求优先; 若用户要求不展开, 则抑制破圈, 不得强制扩展。"
-    else:
-        advice_text = ""
-    injected = "\n".join(part for part in (profile_text, advice_text, policy_text) if part)
-    spliced_at_boundary = False
-    if injected:
-        # The per-turn splice happens after build_system_prompt, so it is
-        # charged here rather than inside the budget's own assembly.
-        boundary = "<!-- HAITUN_CACHE_BOUNDARY -->"
-        if boundary in prompt:
-            index = prompt.find(boundary) + len(boundary)
-            final = prompt[:index] + "\n" + injected + "\n" + prompt[index:]
-            spliced_at_boundary = True
-        else:
-            final = prompt + "\n" + injected
-    else:
-        final = prompt
-
+    # No per-turn splice happens here any more: profile / advice / policy ride
+    # the request tail via ``turn_context_builder``. The prompt this returns is
+    # exactly what the budget assembled, so the reconciliation is a straight
+    # one — but it is still charged against the returned string, because that is
+    # what makes a nonzero residual mean anything.
     budget = system._last_budget
     if budget is not None:
-        if injected:
-            # The two splice paths cost a different number of newlines, and the
-            # separator count follows the number of fragments appended: the
-            # boundary path wraps the block in two newlines, the tail path only
-            # prefixes one. Charging both the same way leaves a 1-char residual.
-            label = "per-turn splice (profile/advice/policy)"
-            if spliced_at_boundary:
-                budget.add(label, injected, "")
-            else:
-                budget.add(label, injected)
-        # ``actual=final`` on purpose: reconciling against the string actually
-        # returned is what makes a nonzero residual mean something.
-        budget.log(context=f"agent={agent_dir.name}", actual=final)
+        budget.log(context=f"agent={agent_dir.name}", actual=prompt)
 
-    return final
+    return prompt
 
 
-async def turn_context_builder(*, agent_raw: str = "") -> str:
+async def turn_context_builder(
+    user_message: dict[str, Any] | None = None,
+    *,
+    workspace_raw: str = "",
+    agent_raw: str = "",
+) -> str:
     """Render the volatile block for the turn about to run.
 
     ``system_prompt_builder`` runs once per Session, so every "now" it renders
@@ -1601,14 +1614,33 @@ async def turn_context_builder(*, agent_raw: str = "") -> str:
     conversation behind it. This block is delivered at the **tail** instead,
     on the turn's own user message, so the prompt and every earlier turn stay
     byte-identical.
+
+    *user_message* is what lets the per-turn learning blocks live here rather
+    than in the prompt: the profile keys off this turn's text and identity, and
+    the supervisor advice arrives on the message itself. Turns that have no
+    message (schedules) still get the clock.
     """
     agent_dir = _resolve_agent(agent_raw)
     user_workspace = agent_dir
-    raw = (_runtime_workspace() or "").strip()
+    raw = (workspace_raw or _runtime_workspace() or "").strip()
     if raw:
         user_workspace = anyio.Path(raw)
     system = System(agent_dir, user_workspace=user_workspace)
-    return await system.build_turn_context()
+
+    # Charged like the prompt is, for the same reason: this block is per-turn
+    # cost that reaches the model, so it needs its own itemisation rather than
+    # being invisible next to a reconciled prompt. ``actual=block`` keeps the
+    # residual honest about the join.
+    budget = PromptBudget()
+    budget.add("turn context: clock", await system.build_turn_context())
+    budget.add_if(
+        volatile := await _build_volatile_turn_blocks(user_message, user_workspace),
+        "turn context: profile/advice/policy",
+        volatile,
+    )
+    block = budget.render()
+    budget.log(context=f"agent={agent_dir.name} turn-context", actual=block)
+    return block
 
 
 async def system_prompt_rebuild_checker(
