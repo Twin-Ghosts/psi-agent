@@ -468,10 +468,19 @@ provider 只认 `reasoning_content`（any-llm 的 `REASONING_FIELD_NAMES` 首项
 | **event** | 业务稳定名；Session **不**维护名单 |
 | **信封** | ``source`` + ``event`` + ``payload``；可选 ``raw_event`` / ``raw_payload`` |
 | **匹配（刻意为之）** | 先 ``event``+``filter``；未命中再 ``raw_event``+``raw_filter`` |
+| **空 filter（刻意为之）** | **不匹配任何事件**；放行一切要显式写 ``filter: {match: all}`` |
 | **落盘挂钩** | ``{Session.agent}/triggers/``；haitun ``trigger_manage`` |
 | **kind** | ``trigger.silent`` / ``trigger.display`` |
 
 无 TRIGGER 时事件仍可进门，matched/fired 为空（能力开、钩子关）。
+
+**空 filter 语义（刻意为之，2026-09-03 收口）**：``filter_matches`` 曾用 ``all([])`` 为 ``True``，于是**留空等于放行一切** —— 最宽的设置也是最容易误撞的设置。2026-09-02 生产实测：某 trigger 写了 ``filter: {chat_id: …}`` 与 ``raw_event:`` 却没写 ``raw_filter``，normalized 路按 chat_id 正确拒绝后落到 raw 路，空 ``raw_filter`` 放行**所有人所有会话的每条飞书消息**，一句「你好」跑两个回合；1056 次注入已烤进 ``compacted`` 摘要，删 TRIGGER.md 也带不走。
+
+现在：空 filter 匹配**零个**事件；要放行一切必须显式写 ``{match: all}``（``event_protocol.MATCH_ALL``）。因此 **raw 路不可能比 normalized 路更宽** —— 结构性消除，不是加一条校验。``trigger_manage`` 创建时直接拒绝空 ``filter``，以及「有 ``raw_event`` 却空 ``raw_filter``」，免得造出永不触发的钩子。
+
+**``fire=tool`` 无变更不写历史（件二A 写入准入）**：定时 trigger 每几分钟写 2 行，无论有没有实际变更，而那些行不携带信息、却让此后每回合的装配都变贵。``tool_result_is_noop`` 判定「工具报告什么都没变」（``ok: true`` + 至少一个已识别的变更计数 + 全为 0 + 无 ``errors``），此时两行都不写；非 JSON、不认识的形状、失败、任何 error 一律照写 —— 吞掉一次**失败**等于用一行便宜历史换一次看不见的故障。跳过时历史前缀逐字节不变，上游前缀缓存继续命中。
+
+代价（刻意为之）：``_fire_tool`` 现在**先跑工具再写**，不再先落 user 行做崩溃恢复基线 —— ``fire=tool`` 没有要续跑的 LLM 回合，而那条基线会强迫「什么都没变」也写一次。工具跑到一半崩溃现在历史里不留痕（点火本身仍进日志）。
 
 **``fire=tool`` 与动态 payload（刻意为之）**：TRIGGER.md 里 ``tool_args`` 是静态的。若 tool 形参声明了
 ``event_payload_json`` / ``event_name`` / ``raw_event`` / ``event_source``，且 YAML 未给非空值，

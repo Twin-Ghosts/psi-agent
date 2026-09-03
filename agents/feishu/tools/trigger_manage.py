@@ -92,6 +92,22 @@ def _parse_filter(filter_json: str) -> tuple[dict[str, object] | None, str | Non
     return parsed, None
 
 
+def _require_explicit_filter(filt: dict[str, object], *, field: str) -> str | None:
+    """Reject an empty filter on create — it no longer matches anything.
+
+    Session's ``filter_matches`` used to treat ``{}`` as "match everything"
+    (``all([])`` is ``True``), which made the widest setting also the easiest to
+    reach by accident. It now matches nothing, so writing ``{}`` here would
+    produce a trigger that silently never fires. Say which one you mean.
+    """
+    if filt:
+        return None
+    return (
+        f"{field} must not be empty. An empty {field} matches nothing. "
+        f'Use {{"match":"all"}} to fire on every payload, or name the payload keys to match.'
+    )
+
+
 def _validate_fire_tool(*, fire: str, tool: str, tool_args: dict[str, object]) -> str | None:
     mode = fire.strip().casefold() or "prompt"
     if mode not in {"prompt", "tool"}:
@@ -160,7 +176,9 @@ def _format_trigger_document(
     platform_raw = raw_event.strip()
     if platform_raw:
         header["raw_event"] = platform_raw
-    if raw_filter:
+    # Written whenever the raw path exists: an omitted raw_filter is no longer a
+    # harmless default (empty matches nothing), so it must be stated.
+    if platform_raw and raw_filter:
         header["raw_filter"] = raw_filter
     if fire_mode == "tool":
         header["tool"] = tool.strip()
@@ -320,6 +338,14 @@ async def trigger_manage(
             return f"[Error] {err}"
         if err := _validate_event(event):
             return f"[Error] {err}"
+        if err := _require_explicit_filter(filt, field="filter"):
+            return f"[Error] {err}"
+        resolved_raw = _resolve_raw_event(event, raw_event)
+        # ``raw_filter`` only gates the raw fallback path, so it is required
+        # exactly when that path exists. Leaving it empty used to make the raw
+        # path wider than the narrowed normalized one (2026-09-02 production).
+        if resolved_raw and (err := _require_explicit_filter(raw_filt, field="raw_filter")):
+            return f"[Error] {err}"
         if fire_mode == "tool" and tool.strip() == "feishu_message_send" and not parsed_args.get("receive_id"):
             return (
                 "[Error] feishu_message_send tool_args must include receive_id "
@@ -329,7 +355,6 @@ async def trigger_manage(
         if await task_dir.exists():
             return f"[Error] Trigger already exists: {trigger_name!r}."
 
-        resolved_raw = _resolve_raw_event(event, raw_event)
         now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         await _atomic_write(
             task_dir / "TRIGGER.md",

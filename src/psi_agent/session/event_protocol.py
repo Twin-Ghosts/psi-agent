@@ -31,6 +31,11 @@ EVENT_FEISHU_CHAT_MEMBER_REMOVED = "feishu.chat.member_removed"
 EVENT_FEISHU_IM_MESSAGE_RECEIVED = "feishu.im.message_received"
 EVENT_TELEGRAM_CHAT_MEMBER_JOINED = "telegram.chat.member_joined"
 
+# Explicit wildcard filter — the only way to say "match every payload".
+MATCH_ALL_KEY = "match"
+MATCH_ALL_VALUE = "all"
+MATCH_ALL: dict[str, Any] = {MATCH_ALL_KEY: MATCH_ALL_VALUE}
+
 
 @dataclass(slots=True)
 class EventEnvelope:
@@ -129,5 +134,30 @@ def parse_event_envelope(raw: object) -> EventEnvelope:
 
 
 def filter_matches(payload: dict[str, Any], filt: dict[str, Any]) -> bool:
-    """Exact subset match: every filter key must equal ``payload[key]``."""
+    """Exact subset match: every filter key must equal ``payload[key]``.
+
+    **An empty filter matches nothing** (刻意为之). It used to mean "match
+    everything" because ``all([])`` is ``True``, which made *omitting* the
+    filter the widest possible setting — the dangerous direction for a
+    default. 2026-09-02 实测: a trigger declaring ``filter: {chat_id: …}``
+    plus ``raw_event:`` but no ``raw_filter`` matched **every** Feishu message
+    from everyone, so one 「你好」 ran two turns; 1056 injections had already
+    been baked into compaction summaries, where deleting the TRIGGER.md
+    cannot reach them.
+
+    Matching everything is still expressible, but only by saying so:
+    ``filter: {match: all}`` (:data:`MATCH_ALL`).
+    """
+    if is_match_all(filt):
+        return True
+    if not filt:
+        return False
     return all(payload.get(key) == expected for key, expected in filt.items())
+
+
+def is_match_all(filt: dict[str, Any]) -> bool:
+    """True when *filt* is the explicit opt-in wildcard :data:`MATCH_ALL`."""
+    if len(filt) != 1:
+        return False
+    value = filt.get(MATCH_ALL_KEY)
+    return isinstance(value, str) and value.strip().casefold() == MATCH_ALL_VALUE
