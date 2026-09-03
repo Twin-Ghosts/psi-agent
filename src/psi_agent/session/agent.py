@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import inspect
 import json
-from collections.abc import AsyncGenerator, Callable
-from contextlib import aclosing
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from contextlib import aclosing, asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
@@ -36,6 +36,7 @@ from psi_agent.session.channel_adapter import ChannelAdapter
 from psi_agent.session.conversation import Conversation
 from psi_agent.session.event_protocol import EventProtocolError, parse_event_envelope
 from psi_agent.session.history_display import (
+    COMPACTED_COVERS_KEY,
     KIND_COMPACTED,
     TURN_CONTEXT_KEY,
     message_kind,
@@ -283,6 +284,12 @@ class SessionAgent:
         self._workspace_path = workspace_path
         self._agent_path = agent_path
         self._tokens_at_last_compaction: int | None = None
+        # Compaction is deferred out of the lock: the turn records the signal
+        # here and ``drain_pending_compaction`` spends the LLM call after the
+        # lock is released.  ``_compaction_in_flight`` keeps two drains from
+        # summarizing the same conversation at once.
+        self._pending_compaction: tuple[int, int] | None = None
+        self._compaction_in_flight = False
         # One per session: it carries the calibrated chars/token ratio and the
         # set of rows already elided, both of which must persist across turns
         # for hysteresis to mean anything.
@@ -382,6 +389,40 @@ class SessionAgent:
         )
 
     # -- delegation -----------------------------------------------------------
+
+    @asynccontextmanager
+    async def turn_lock(self) -> AsyncIterator[None]:
+        """Hold the session lock for one turn, then compact **after** releasing it.
+
+        Every path that drives a turn takes this instead of ``self._lock``
+        directly, because the deferral only works if it is impossible to forget:
+        a call site that acquires the raw lock and never drains would leave the
+        session permanently un-compacted, and nothing would fail loudly —
+        elision keeps the requests legal, so the only symptom is quality
+        rotting over weeks.
+
+        Why it is worth deferring at all: compaction runs *after* the reply is
+        already streamed and committed (see ``_request_compaction``'s call site —
+        it is the last statement before ``_finish``). Its ~40s therefore buys the
+        finished turn nothing and is charged entirely to whoever asks next; the
+        measured queueing was p50 169s, and 774s on 2026-08-31. Tail work has no
+        business holding a lock.
+
+        Draining inside the ``finally`` keeps it on the cancellation path too: a
+        client disconnect mid-turn should not silently drop a compaction that
+        the conversation still needs.
+        """
+        try:
+            async with self._lock:
+                yield
+        finally:
+            # Reached only after the ``async with`` released the lock, so a
+            # waiting turn can start while the summary is still being generated.
+            # Under cancellation this ``await`` is itself cancelled and the drain
+            # is skipped — the request stays pending and the next turn performs
+            # it, which is why the pending flag is cleared by the drain rather
+            # than by the turn that recorded it.
+            await self.drain_pending_compaction()
 
     def start_all(self, task_group: object) -> None:
         """Start schedule runners — called by ``Session.run()``.
@@ -508,7 +549,7 @@ class SessionAgent:
             },
         )
 
-        async with self._lock:
+        async with self.turn_lock():
             try:
                 await response.prepare(request)
             except Exception:
@@ -545,7 +586,7 @@ class SessionAgent:
             logger.warning(f"POST /events rejected: {e}")
             return web.json_response({"error": str(e)}, status=400)
 
-        async with self._lock:
+        async with self.turn_lock():
             with runtime_scope(
                 session_id=self._conversation.session_id,
                 workspace=str(self._workspace_path) if self._workspace_path is not None else "",
@@ -951,7 +992,11 @@ class SessionAgent:
                         await self._system_prompt.run_after_turn(hook_message, assistant_msg)
                         await self._schedule_registry.refresh()
                         if _compaction_needed:
-                            await self._maybe_compact(_compaction_prompt_tokens, _compaction_threshold)
+                            # Recorded, not performed: the reply is already
+                            # streamed and committed, so the summary is tail work
+                            # and must not be charged to the next message's wait.
+                            # ``turn_lock`` runs it once the lock is released.
+                            self._request_compaction(_compaction_prompt_tokens, _compaction_threshold)
                         _finish(
                             AgentRunStatus.COMPLETED,
                             AgentStopCause.MODEL_COMPLETED,
@@ -1019,6 +1064,46 @@ class SessionAgent:
                         model_turns,
                     )
 
+    def _request_compaction(self, prompt_tokens: int = 0, threshold: int = 0) -> None:
+        """Record that this turn saw the compaction signal.  Costs nothing.
+
+        Deliberately synchronous: it runs while the session lock is held, and the
+        whole point is that nothing expensive happens there.  The LLM call is
+        ``drain_pending_compaction``'s, after the lock is released.
+
+        A second signal before the drain runs simply overwrites the numbers —
+        they are only inputs to the cooldown gate, and the newer pair is the more
+        accurate description of how big the context now is.
+        """
+        self._pending_compaction = (prompt_tokens, threshold)
+
+    async def drain_pending_compaction(self) -> None:
+        """Perform a recorded compaction.  MUST be called with the lock released.
+
+        Calling this while holding ``self._lock`` would deadlock on the write
+        phase below. ``turn_lock`` is the only intended caller and gets the
+        ordering right by construction.
+
+        Concurrency: ``_compaction_in_flight`` makes a second entrant return
+        immediately rather than start a competing summary. Without it, two
+        overlapping drains would each summarize and each append a ``compacted``
+        row; the projection takes the *last* one, so the earlier LLM call would
+        be paid for and then discarded — and if their coverage boundaries
+        differed, the surviving row's boundary could cut away rows the surviving
+        summary never described. Skipping is safe because the signal is
+        level-triggered: if the context is still over the threshold, the next
+        turn raises it again.
+        """
+        pending = self._pending_compaction
+        if pending is None or self._compaction_in_flight:
+            return
+        self._pending_compaction = None
+        self._compaction_in_flight = True
+        try:
+            await self._maybe_compact(*pending)
+        finally:
+            self._compaction_in_flight = False
+
     async def _maybe_compact(self, prompt_tokens: int = 0, threshold: int = 0) -> None:
         """Invoke compact_history from system.py, insert compaction message
         into conversation.  system prompt merge + old-message trimming is
@@ -1030,6 +1115,12 @@ class SessionAgent:
         the threshold, every subsequent turn re-raises the signal, so without this
         gate the session would re-summarize constantly — each pass paying an LLM
         call and eroding older context.
+
+        Runs with the session lock **released**, so ``self._conversation.messages``
+        can grow underneath it.  Two consequences are handled explicitly: the
+        summary is generated from a snapshot taken up front, and the row it
+        writes records that snapshot's length so the projection cuts there rather
+        than at the row's own index.
         """
         compaction_fn = self._system_prompt.compaction_fn
         if compaction_fn is None:
@@ -1050,15 +1141,22 @@ class SessionAgent:
                         raise AgentError(delta.content or "Compaction AI call failed")
             return "".join(parts)
 
+        # Snapshot before the LLM call: the lock is not held, so the live list
+        # can grow while the summary is generated.  Everything below reasons
+        # about this snapshot, and ``covers`` records its length so the
+        # projection deletes exactly what was summarized.
+        snapshot = list(self._conversation.messages)
+        covers = len(snapshot)
+
         try:
-            summary = await compaction_fn(self._conversation.messages, complete_fn)
+            summary = await compaction_fn(snapshot, complete_fn)
             if not summary:
                 logger.debug("Compaction returned empty summary, skipping")
                 return
-            source_chars = _conversation_chars(self._conversation.messages)
+            source_chars = _conversation_chars(snapshot)
             if _summary_looks_hijacked(summary, source_chars):
                 logger.warning(f"Compaction summary looks hijacked ({len(summary)} chars), retrying once")
-                summary = await compaction_fn(self._conversation.messages, complete_fn)
+                summary = await compaction_fn(snapshot, complete_fn)
                 if not summary or _summary_looks_hijacked(summary, source_chars):
                     # Writing it would replace the whole conversation with the
                     # model's answer to the transcript, permanently.  Skipping
@@ -1067,8 +1165,25 @@ class SessionAgent:
                     return
             logger.info(f"Compaction summary generated ({len(summary)} chars)")
 
-            self._conversation.add({"role": "compacted", "content": summary, "kind": KIND_COMPACTED})
-            await self._conversation.commit()
+            # Re-take the lock for the write only.  A turn may have started
+            # during the LLM call and be mid-``add``/``commit``; interleaving
+            # with it would put this row inside that turn's snapshot window,
+            # where a rollback would take the summary down with it.  Cheap to
+            # hold: an append plus one commit, with no network in between.
+            #
+            # This is a pure append at the tail, so ``Conversation.save()`` takes
+            # its append path — the summary costs its own bytes, not a rewrite of
+            # the whole history.
+            async with self._lock:
+                self._conversation.add(
+                    {
+                        "role": "compacted",
+                        "content": summary,
+                        "kind": KIND_COMPACTED,
+                        COMPACTED_COVERS_KEY: covers,
+                    }
+                )
+                await self._conversation.commit()
             # Watermark only on success: a failed compaction did not shrink
             # anything, so the next signal should still be allowed through.
             self._tokens_at_last_compaction = prompt_tokens or None
