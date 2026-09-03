@@ -122,9 +122,10 @@ def test_not_aligned_is_a_reminder_never_a_finding() -> None:
     assert "更不判失实" in body, "未对齐 must not be routed to truthfulness"
 
 
-def test_notes_the_pending_config() -> None:
+def test_judgment_criteria_live_in_config() -> None:
     body = _body()
-    assert "config/todo-sop.yaml" in body, "must note the judgment criteria are pending config externalization"
+    assert "config/todo-sop.yaml" in body, "must point the judgment criteria at config/todo-sop.yaml"
+    assert "alignment" in body, "must point at the config alignment section"
 
 
 def test_only_references_real_tools() -> None:

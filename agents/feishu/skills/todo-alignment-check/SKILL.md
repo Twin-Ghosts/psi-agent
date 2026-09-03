@@ -1,6 +1,6 @@
 ---
 name: todo-alignment-check
-description: "判「目标/价值写得对不对齐」的唯一口径（静态三层·对齐与价值）。LOAD FIRST whenever asked 目标对不对齐上级 / 个人和小组对齐吗 / 这条写清用户价值了吗 / 外部成果和友商对比在哪 / 验收过没有, or when reviewing 大目标/小目标 的对齐、价值与成果。判定 = 声明-价值对照：每条大目标/小目标的「上级对齐 + 小组对齐 + 用户价值 + 外部成果/友商对比 + 验收」声明逐项对照事实。档位只有四个：对齐 / 存疑／待跟进 / 未对齐（价值/成果缺失）/ 无法判定，禁止自造词；「未对齐」是提示级结论（提醒补写），不判违规、更不判失实。输入来自 todo-writing-standard（规不规范）与 todo-truthfulness-check（真不真）的结果，本文管的是对不对齐；与 company-todo-audit（台账闭环）互补——不合规 ≠ 未对齐、失实 ≠ 未对齐、闭环 ≠ 对齐。Not for 判真伪（todo-truthfulness-check）、判闭环（company-todo-audit）、判格式（todo-writing-standard）、判完成度（todo-completion-standard）。判定口径待并入 config/todo-sop.yaml（PR #796 合入后）。"
+description: "判「目标/价值写得对不对齐」的唯一口径（静态三层·对齐与价值）。LOAD FIRST whenever asked 目标对不对齐上级 / 个人和小组对齐吗 / 这条写清用户价值了吗 / 外部成果和友商对比在哪 / 验收过没有, or when reviewing 大目标/小目标 的对齐、价值与成果。判定 = 声明-价值对照：每条大目标/小目标的「上级对齐 + 小组对齐 + 用户价值 + 外部成果/友商对比 + 验收」声明逐项对照事实。档位只有四个：对齐 / 存疑／待跟进 / 未对齐（价值/成果缺失）/ 无法判定，禁止自造词；「未对齐」是提示级结论（提醒补写），不判违规、更不判失实。输入来自 todo-writing-standard（规不规范）与 todo-truthfulness-check（真不真）的结果，本文管的是对不对齐；与 company-todo-audit（台账闭环）互补——不合规 ≠ 未对齐、失实 ≠ 未对齐、闭环 ≠ 对齐。Not for 判真伪（todo-truthfulness-check）、判闭环（company-todo-audit）、判格式（todo-writing-standard）、判完成度（todo-completion-standard）。判定口径读 `config/todo-sop.yaml` 的 `alignment` 与 `schema` 段（用户可编辑，换公司只改该文件）。"
 category: knowledge-base
 ---
 
@@ -114,6 +114,6 @@ SOP 原文（引用依据时用）：大目标与组织上一级大目标对齐�
 - 对齐/价值是事实判定，不加评价性措辞，不向无关成员披露。
 - 判定只回答「对不对齐、有没有价值与成果」。要不要处理由用户拍板。
 
-## 口径待外置
+## 判定口径
 
-本文 A1-A6 的判定口径（对齐锚点、价值/成果必含项、验收状态机）**待并入 `config/todo-sop.yaml`（PR #796 合入后）**；当前先写进本 skill 正文，换公司时连同 config 一起替换。
+档位词、A1-A6 维度名、大目标必含的外部成果 / 友商对比，权威在 `config/todo-sop.yaml` 的 `alignment` 与 `schema` 段（用户可编辑，换公司只改该文件）；本文保留 A1-A6 的判定纪律与「从哪验证」，与其它判定 skill 同一模式。
