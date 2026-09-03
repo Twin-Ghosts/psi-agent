@@ -254,22 +254,48 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($tsaUrl)) {
             throw 'Set repository Variable GLOBALSIGN_TSA_URL.'
           }
+          # AzureSignTool 一次签多个文件时默认并行 (--max-degree-of-parallelism 4)。
+          # 多个文件同时开签时, Key Vault sign 与 RFC3161 时间戳请求会同一瞬间发出,
+          # 其中一个会撞上 HTTP 429 限流: AzureSignTool 报错 801901AD 即编码自 HTTP
+          # 429 Too Many Requests, 而它对这条路径不重试 (vcsjones/AzureSignTool#219
+          # 至今 open, vault 侧 reason 为 VaultRequestTypeLimitReached; 时间戳服务器
+          # 对共享出口 IP 同样限流)。实测 run 33629129092: psi-agent.exe 与 haitun.exe
+          # 同时开签, 前者 0.9s 内以 429 失败、后者成功; 同一代码的上一轮
+          # run 33623548053 两文件都过 —— 纯并发窗口问题。因此改为逐文件串行签名,
+          # 失败按固定间隔重试: 串行后任一时刻只有一个 vault/TSA 请求, 重试兜住
+          # 共享出口 IP 下的偶发限流。
           $files = @(
             (Resolve-Path 'agents\feishu\psi-agent.exe').Path,
             (Resolve-Path '.github\inno-setup\haitun.exe').Path
           )
-          & $env:AZURE_SIGN_TOOL sign `
-            --azure-key-vault-url $vaultUrl `
-            --azure-key-vault-managed-identity `
-            --azure-key-vault-certificate $certificateName `
-            --description 'HaiTun Agent' `
-            --timestamp-rfc3161 $tsaUrl `
-            --timestamp-digest sha256 `
-            --file-digest sha256 `
-            --verbose `
-            $files
-          if ($LASTEXITCODE -ne 0) {
-            throw "AzureSignTool failed for application executables (exit code $LASTEXITCODE)."
+          $signArgs = @(
+            'sign',
+            '--azure-key-vault-url', $vaultUrl,
+            '--azure-key-vault-managed-identity',
+            '--azure-key-vault-certificate', $certificateName,
+            '--description', 'HaiTun Agent',
+            '--timestamp-rfc3161', $tsaUrl,
+            '--timestamp-digest', 'sha256',
+            '--file-digest', 'sha256',
+            '--skip-signed',
+            '--verbose'
+          )
+          $maxAttempts = 4
+          $retryDelaySeconds = 10
+          foreach ($file in $files) {
+            $signed = $false
+            for ($attempt = 1; $attempt -le $maxAttempts -and -not $signed; $attempt++) {
+              & $env:AZURE_SIGN_TOOL @signArgs $file
+              if ($LASTEXITCODE -eq 0) {
+                $signed = $true
+              } elseif ($attempt -lt $maxAttempts) {
+                Write-Warning "AzureSignTool failed for $file (attempt $attempt/$maxAttempts, exit code $LASTEXITCODE); retrying in ${retryDelaySeconds}s."
+                Start-Sleep -Seconds $retryDelaySeconds
+              }
+            }
+            if (-not $signed) {
+              throw "AzureSignTool failed to sign $file after $maxAttempts attempts."
+            }
           }
       - name: Inject runtime .env
         shell: pwsh
@@ -333,18 +359,36 @@ jobs:
           if ($files.Count -ne 3) {
             throw "Expected three installer executables, found $($files.Count)."
           }
-          & $env:AZURE_SIGN_TOOL sign `
-            --azure-key-vault-url $vaultUrl `
-            --azure-key-vault-managed-identity `
-            --azure-key-vault-certificate $certificateName `
-            --description 'HaiTun Agent installer' `
-            --timestamp-rfc3161 $tsaUrl `
-            --timestamp-digest sha256 `
-            --file-digest sha256 `
-            --verbose `
-            $files
-          if ($LASTEXITCODE -ne 0) {
-            throw "AzureSignTool failed for installer executables (exit code $LASTEXITCODE)."
+          # 与 "Sign application executables" 同策略: 逐文件串行 + 失败重试 (原因见
+          # 上一步注释, 3 个安装器并行开签同样会撞 Key Vault 的 429 限流)。
+          $signArgs = @(
+            'sign',
+            '--azure-key-vault-url', $vaultUrl,
+            '--azure-key-vault-managed-identity',
+            '--azure-key-vault-certificate', $certificateName,
+            '--description', 'HaiTun Agent installer',
+            '--timestamp-rfc3161', $tsaUrl,
+            '--timestamp-digest', 'sha256',
+            '--file-digest', 'sha256',
+            '--skip-signed',
+            '--verbose'
+          )
+          $maxAttempts = 4
+          $retryDelaySeconds = 10
+          foreach ($file in $files) {
+            $signed = $false
+            for ($attempt = 1; $attempt -le $maxAttempts -and -not $signed; $attempt++) {
+              & $env:AZURE_SIGN_TOOL @signArgs $file
+              if ($LASTEXITCODE -eq 0) {
+                $signed = $true
+              } elseif ($attempt -lt $maxAttempts) {
+                Write-Warning "AzureSignTool failed for $file (attempt $attempt/$maxAttempts, exit code $LASTEXITCODE); retrying in ${retryDelaySeconds}s."
+                Start-Sleep -Seconds $retryDelaySeconds
+              }
+            }
+            if (-not $signed) {
+              throw "AzureSignTool failed to sign $file after $maxAttempts attempts."
+            }
           }
           $signtool = Get-ChildItem `
             -LiteralPath "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
