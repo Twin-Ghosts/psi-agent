@@ -3,10 +3,15 @@ from __future__ import annotations
 import glob
 import os
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import platformdirs
 from loguru import logger
+
+if TYPE_CHECKING:
+    # Stub-only in loguru: absent from the runtime module, so it must not be
+    # imported unconditionally.
+    from loguru import Record
 
 from psi_agent._session_context import log_session_field
 
@@ -71,7 +76,7 @@ _FORMAT = (
 )
 
 
-def _patch_session(record: dict[str, Any]) -> None:
+def _patch_session(record: Record) -> None:
     """Snapshot the current session id into ``record["extra"]``.
 
     Runs for every record via ``logger.configure(patcher=...)``, in the *calling*

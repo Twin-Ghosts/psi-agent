@@ -1861,14 +1861,16 @@ async def test_tool_elapsed_excludes_a_concurrent_tools_waiting(tmp_path: Path) 
         await server.cleanup()
         logger.remove(sink_id)
 
-    elapsed = {
-        name: int(value)
-        for name, value in (
-            (m.split("'")[1], re.search(r"elapsed_ms=(\d+)", m).group(1))  # type: ignore[union-attr]
-            for m in messages
-            if m.startswith("Tool result (")
-        )
-    }
+    # A missing ``elapsed_ms`` is a real regression in the log line, so it must
+    # fail as an assertion naming the offending message rather than as an
+    # ``AttributeError`` on ``None``.
+    elapsed: dict[str, int] = {}
+    for m in messages:
+        if not m.startswith("Tool result ("):
+            continue
+        match = re.search(r"elapsed_ms=(\d+)", m)
+        assert match is not None, f"no elapsed_ms in {m!r}"
+        elapsed[m.split("'")[1]] = int(match.group(1))
     assert set(elapsed) == {"slow", "quick"}, messages
     assert elapsed["slow"] >= 200, elapsed
     # The fast tool must not have inherited the slow one's 250ms wait.

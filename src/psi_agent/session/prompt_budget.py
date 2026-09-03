@@ -109,16 +109,21 @@ class PromptBudget:
         for text in texts:
             self._parts.append((label, text))
 
-    def add_if(self, condition: object, label: str, *texts: str) -> bool:
+    def add_if(self, condition: object, label: str, *texts: str | None) -> bool:
         """``add`` when ``condition`` is truthy. Returns whether it added.
 
         Conditionally-injected sections are the interesting ones for a
         trimming decision — this keeps the call site a single line so the
         condition stays readable next to the label.
+
+        ``texts`` admits ``None`` because the usual call site passes the very
+        value it just tested (``add_if(x := f(), label, "", x)``) and the
+        builders that feed it return ``str | None``. A ``None`` only ever
+        arrives on the falsy path, which returns before reaching ``add``.
         """
         if not condition:
             return False
-        self.add(label, *texts)
+        self.add(label, *(text for text in texts if text is not None))
         return True
 
     def render(self) -> str:

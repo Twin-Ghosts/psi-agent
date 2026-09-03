@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterator
 
 import pytest
 from loguru import logger
@@ -17,7 +18,7 @@ from psi_agent.session.prompt_budget import PromptBudget, log_tool_schema_size
 
 
 @pytest.fixture
-def sink() -> list[tuple[str, str]]:
+def sink() -> Iterator[list[tuple[str, str]]]:
     """Capture loguru records as ``(level, message)`` at INFO and above."""
     records: list[tuple[str, str]] = []
     handler_id = logger.add(

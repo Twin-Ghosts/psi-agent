@@ -32,6 +32,7 @@ import os
 import anyio
 import pytest
 from aiohttp import ClientSession, ClientTimeout
+from anyio.abc import TaskGroup
 
 from psi_agent.gateway.feishu import _routes
 from psi_agent.gateway.feishu._auth import FeishuAuth, Identity
@@ -76,7 +77,7 @@ class _Fixture:
 async def _setup(
     tmp_path: str,
     mock_ai_server: MockAIServer,
-    tg: anyio.abc.TaskGroup,
+    tg: TaskGroup,
 ) -> tuple[_Fixture, SessionManager, AIManager, object]:
     """建 app、起端口、给 A/B 各建一个会话。会话经 ``POST /feishu/sessions`` 建 —— workspace
     由后端按 cookie 里的 open_id 派生, 归属判定认的正是它。"""
