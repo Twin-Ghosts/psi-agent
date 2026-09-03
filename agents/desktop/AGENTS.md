@@ -65,7 +65,7 @@ ToB 没有安装器, 结构上不存在这个问题 —— 这一节只对 ToC �
 
 Desktop Fusion Memory is embedded in the existing Session process. Its durable scope is the normalized absolute workspace path, hashed as `workspace_id`: Sessions in that workspace share evidence, and other workspaces cannot read it. Files default to `<workspace>/.fusion-memory/evidence.jsonl` and `<workspace>/.fusion-memory/memory.sqlite3`.
 
-JSONL is the append-only authority for raw `evidence_span` and `scope_clear` records. SQLite contains only `evidence_spans`, `memory_items`, `summary_cards`, `ingest_checkpoints`, and the `fts_memory` virtual table, and can be rebuilt from JSONL. Ingestion keeps only complete ordinary chat user/assistant visible text and never modifies psi-agent history.
+JSONL is the append-only authority for raw `evidence_span` and `scope_clear` records. SQLite contains only `evidence_spans`, `memory_items`, `summary_cards`, `ingest_checkpoints`, and the `fts_memory` virtual table, and can be rebuilt from JSONL. Ingestion keeps only ordinary chat user/assistant visible text confirmed by the successful module-level `system_after_turn` hook and never modifies psi-agent history. It deliberately does not guess or backfill older history rows that lack finish provenance.
 
 Do not add an MCP service, sidecar, watcher, daemon, subprocess, or model server. Model and SQLite errors must not fail a completed chat. `memory_search` returns raw evidence, `memory_answer_context` returns bounded evidence-grounded context, and `memory_add` promotes existing source IDs only.
 

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from _fusion_memory.ingest import (
     HistorySource,
-    discover_histories,
+    discover_current_history,
     ingest_confirmed_turn,
     parse_completed_turns,
     workspace_scope,
@@ -171,7 +171,7 @@ def test_full_rescan_cannot_resurrect_tombstoned_history(tmp_path: Path) -> None
 
 
 @pytest.mark.anyio
-async def test_discover_histories_filters_gateway_sessions_by_workspace(tmp_path: Path) -> None:
+async def test_discover_current_history_ignores_other_gateway_sessions(tmp_path: Path) -> None:
     appdata = tmp_path / "appdata"
     (appdata / "histories").mkdir(parents=True)
     workspace_a = tmp_path / "workspace-a"
@@ -191,12 +191,12 @@ async def test_discover_histories_filters_gateway_sessions_by_workspace(tmp_path
         ),
         encoding="utf-8",
     )
-    found = await discover_histories(workspace_scope(workspace_a), "s1", appdata)
-    assert {item.session_id for item in found} == {"s1"}
+    found = await discover_current_history(workspace_scope(workspace_a), "s1", appdata)
+    assert found is not None and found.session_id == "s1"
 
 
 @pytest.mark.anyio
-async def test_discover_histories_rejects_unsafe_state_session_id(tmp_path: Path) -> None:
+async def test_discover_current_history_rejects_unsafe_session_id(tmp_path: Path) -> None:
     appdata = tmp_path / "appdata"
     (appdata / "histories").mkdir(parents=True)
     (appdata / "outside.jsonl").write_text("{}\n", encoding="utf-8")
@@ -208,13 +208,13 @@ async def test_discover_histories_rejects_unsafe_state_session_id(tmp_path: Path
         encoding="utf-8",
     )
 
-    found = await discover_histories(workspace_scope(workspace), "current", appdata)
+    found = await discover_current_history(workspace_scope(workspace), "../outside", appdata)
 
-    assert found == []
+    assert found is None
 
 
 @pytest.mark.anyio
-async def test_discover_histories_rejects_cross_workspace_symlink(tmp_path: Path) -> None:
+async def test_discover_current_history_rejects_cross_workspace_symlink(tmp_path: Path) -> None:
     appdata = tmp_path / "appdata"
     (appdata / "histories").mkdir(parents=True)
     workspace_a = tmp_path / "workspace-a"
@@ -223,10 +223,10 @@ async def test_discover_histories_rejects_cross_workspace_symlink(tmp_path: Path
     histories_b = workspace_b / "histories"
     histories_a.mkdir(parents=True)
     histories_b.mkdir(parents=True)
-    target = histories_b / "other.jsonl"
+    target = histories_b / "current.jsonl"
     target.write_text("{}\n", encoding="utf-8")
-    (histories_a / "other.jsonl").symlink_to(target)
+    (histories_a / "current.jsonl").symlink_to(target)
 
-    found = await discover_histories(workspace_scope(workspace_a), "current", appdata)
+    found = await discover_current_history(workspace_scope(workspace_a), "current", appdata)
 
-    assert found == []
+    assert found is None

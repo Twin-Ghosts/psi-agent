@@ -71,7 +71,7 @@ uv run psi-agent channel repl --session-socket /tmp/ch.sock
 
 Desktop Fusion Memory runs inside the existing Session process. Sessions using the same normalized workspace path share durable evidence; different workspaces remain isolated. The default files are `<workspace>/.fusion-memory/evidence.jsonl` and `<workspace>/.fusion-memory/memory.sqlite3`. JSONL is authoritative, while SQLite is a rebuildable FTS/dense index.
 
-Only completed ordinary user/assistant chat text is ingested. Trigger, schedule, heartbeat, system/tool rows, reasoning, transfer markers, compaction output, and incomplete turns stay out of the journal. The runtime adds no extra process. Model or SQLite failures degrade without failing the completed chat.
+Only ordinary user/assistant chat text confirmed by the successful after-turn hook is ingested. Trigger, schedule, heartbeat, system/tool rows, reasoning, transfer markers, compaction output, and incomplete turns stay out of the journal. Histories created before this hook was active are not guessed or backfilled because their rows have no finish provenance. The runtime adds no extra process. Model or SQLite failures degrade without failing the completed chat.
 
 Use `memory_search` for raw evidence and provenance, `memory_answer_context` for a bounded evidence pack, and `memory_add` only to promote existing source span IDs. Vector requests read `DASHSCOPE_API_KEY`; LLM configuration uses `FUSION_MEMORY_MODEL_*` or a complete `PSI_AI_*` fallback. Secrets are launcher-managed and never written to memory files.
 

@@ -13,11 +13,7 @@ from pathlib import Path
 import anyio
 from anyio import to_thread
 
-from psi_agent._appdata import (
-    appdata_state_latest_path,
-    legacy_state_latest_path,
-    resolve_history_read_path,
-)
+from psi_agent._appdata import resolve_history_read_path
 
 from .journal import EvidenceSpan
 from .store import IngestCheckpoint, MemoryStore
@@ -225,56 +221,6 @@ async def discover_current_history(
     )
     owned = await _owned_history_source(scope, current_session_id, current_path, appdata_root)
     return owned[1] if owned else None
-
-
-async def discover_histories(scope: WorkspaceScope, current_session_id: str, appdata_root: Path) -> list[HistorySource]:
-    discovered: dict[str, HistorySource] = {}
-
-    async def add(session_id: str, path: Path) -> None:
-        owned = await _owned_history_source(scope, session_id, path, appdata_root)
-        if owned:
-            discovered.setdefault(*owned)
-
-    current = await discover_current_history(scope, current_session_id, appdata_root)
-    if current:
-        await add(current.session_id, current.path)
-
-    state_paths = [Path(str(appdata_state_latest_path(str(appdata_root)))), Path(str(legacy_state_latest_path()))]
-    for state_path in state_paths:
-        if not state_path.is_file():
-            continue
-        try:
-            snapshot = json.loads(await _async_read_text(state_path))
-        except OSError, json.JSONDecodeError, UnicodeDecodeError:
-            continue
-        sessions = snapshot.get("sessions", []) if isinstance(snapshot, dict) else []
-        if not isinstance(sessions, list):
-            continue
-        for item in sessions:
-            if not isinstance(item, dict):
-                continue
-            session_id = item.get("id")
-            workspace = item.get("workspace")
-            if not isinstance(session_id, str) or not session_id or not isinstance(workspace, str):
-                continue
-            if normalize_workspace(workspace) != scope.normalized:
-                continue
-            path = Path(
-                str(
-                    await resolve_history_read_path(
-                        appdata_root=str(appdata_root), workspace=scope.normalized, session_id=session_id
-                    )
-                )
-            )
-            await add(session_id, path)
-
-    for path in (Path(scope.normalized) / "histories").glob("*.jsonl"):
-        await add(path.stem, path)
-    return list(discovered.values())
-
-
-async def _async_read_text(path: Path) -> str:
-    return await anyio.Path(path).read_text(encoding="utf-8")
 
 
 def _prefix_hash(path: Path, line_count: int) -> str:
