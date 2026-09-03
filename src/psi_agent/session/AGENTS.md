@@ -71,7 +71,7 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
    - reasoning（模型 thinking）→ `yield AgentChunk(reasoning=..., kind="thinking")`（上游 `delta.kind` 优先）
    - tool 执行起止 → 仍写入 **同一** `reasoning` 槽（刻意压缩，便于 Session↔AI OpenAI 形同构），`kind="tool_call"|"tool_result"`；正文可继续带 `[Tool Call:]`/`[Tool Result:]` 过渡标记
    - tool_calls → 累积（按 index 拼接 partial JSON）
-    - `finish_reason="tool_calls"` → 执行 tool → 结果追加到 history → 回到步骤 4
+    - `finish_reason="tool_calls"` → 逐个过 `ToolCallConvergence.refusal_for()`（见「回合收敛」，被拒的**不发出**，改把说明性字符串当结果）→ 执行余下 tool → 结果追加到 history → 回到步骤 4
     - finish_reason="stop" → 最终 content 追加到 history + `commit()` + 刷新 schedule registry + 若收到 compaction 信号则调用 `_maybe_compact()` → 释放锁
    - finish_reason="error" → 回滚到快照 → `raise AgentError(message)`
    - 任何未捕获异常 → 回滚到快照 → 向上传播
@@ -385,6 +385,36 @@ provider 只认 `reasoning_content`（any-llm 的 `REASONING_FIELD_NAMES` 首项
 **这道上限只管单行，管不了总量**：一万行各 2 万字符照样超预算，而「发出时就被拒、拿不到压缩信号、
 重试重建同样载荷、重启无效」这条死锁路径与本节完全相同。总量由装配点的预算兜住（见「请求装配点与
 预算」）：超预算的 body **装不出来**，所以发不出去。两处是同一个问题的单行版与总量版，都不能删。
+
+### 回合收敛（`tool_convergence.py`，刻意为之，勿"修掉"）
+
+`feishu_docs_search` 曾被**换着关键词连调 305 次**，直到上游返回 HTTP 402。循环里没有一处是坏的：
+每次调用都合法，每次结果都是诚实的「没搜到」，模型拿到这个只能换个说法再试。缺的不是调用次数上限，
+而是**「确实没有」与「这条路已经走到头」在模型眼里长得一模一样**。
+
+所以做法是**把话说出来，而不是悄悄停掉**。超阈值后该调用**不发出**，顶替它的字符串写明：哪个工具、
+第几次、这一次没有真正执行、以及该改做什么。**这里返回空结果比不加限制更糟** —— 模型会读成「还是
+没有」，于是再换一个词，正好是要收的那个环。这与 `truncate_tool_result` 的理由是同一条：不声明自己
+的截断，会被拿去当全量数据作答。
+
+两个计数器，对应事故的两种形状：
+
+- **连续无效，按工具名计数**（`UNPRODUCTIVE_LIMIT = 4`）。换词能绕开任何按参数计数的判据 —— 「换词
+  调 305 次」说的就是这件事，跨这些重试唯一稳定的键是工具名。**计的是连续**：一旦出结果就清零
+  （`record`），因为有结果证明这个工具与这个查询形状是通的；终身次数由 `max_tool_rounds` 兜。
+- **原样重复，按 (工具名, 参数) 计数**（`REPEAT_LIMIT = 3`）。参数键用 `sort_keys=True`：模型发同一个
+  查询时 key 顺序会变，不排序则重复计数器永远不触发。3 而非 1 是因为重复并不总是无意义 —— 这里的工具
+  会轮询外部状态（正在被编辑的文档、还在跑的后台进程）。
+
+- **无效判定同时覆盖「成功但空」与「调用失败」**：从调用方看这是同一件事——又一次没推进；驱动失控的是
+  重试，不是这两者中哪个发生了。空 JSON 信封（`{"items": []}`、`total: 0`）必须算空，它不是空字符串，
+  过不了任何长度判断。
+- **作用域是一个回合**：tracker 随 `run()` 生死，计数不会漏到下一个问题，用户说「再试一次」拿到的是
+  真的重试而不是上一轮继承来的拒绝。
+- **拒绝不进计数器**（`REFUSAL_PREFIX` + `is_refusal_notice`，与 `_TRUNCATION_MARKER` 同一手法）。
+  装配点已经跳过了拒绝，这道守卫把「跳过」从约定变成结构：两条提示语自身按措辞就会被判成无效结果
+  （其中一条含「没有查到」），一旦被回灌，计数器就靠本模块自己编造的证据往上爬，阈值变成整回合封杀。
+  **变异复核实测：不加这道守卫，「把拒绝也记进计数器」这个变异逃过了其余全部判据**。
 
 ## Schedule 机制完整流程
 
