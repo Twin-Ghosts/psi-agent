@@ -81,3 +81,19 @@ def test_replay_skips_complete_malformed_lines_and_copy_preserves_bytes(tmp_path
     destination = tmp_path / "copy.jsonl"
     journal.copy_to(destination)
     assert destination.read_bytes() == path.read_bytes()
+
+
+def test_replay_counts_incomplete_tail_separately_and_empty_copy_exists(tmp_path: Path) -> None:
+    path = tmp_path / "j.jsonl"
+    journal = JsonlJournal(path, fsync=False)
+    empty_copy = tmp_path / "backup" / "evidence.jsonl"
+    journal.copy_to(empty_copy)
+    assert empty_copy.read_bytes() == b""
+    journal.append_spans([span()])
+    with path.open("ab") as handle:
+        handle.write(b'{"record_type":"evidence_span"')
+    report = journal.replay(lambda _: True, lambda _: None)
+    assert report.records == 1
+    assert report.inserted == 1
+    assert report.skipped_records == 0
+    assert report.skipped_tail == 1

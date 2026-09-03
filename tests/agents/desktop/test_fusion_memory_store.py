@@ -63,7 +63,9 @@ def test_promote_card_embeddings_and_checkpoint_round_trip(tmp_path: Path) -> No
     _, store = opened(tmp_path)
     store.index_spans([make_span("u", content="用户偏好", line_no=1), make_span("a", content="助手记住", line_no=2)])
     item = store.promote("workspace-a", ["a", "u"], "preference", 0.7)
+    same_item = store.promote("workspace-a", ["u", "a"], "preference", 0.7)
     assert item.text == "用户偏好\n助手记住"
+    assert same_item.item_id == item.item_id
     assert store.upsert_turn_card("workspace-a", "turn-1", "用户偏好", "助手记住", ["u", "a"])
     assert {row[0] for row in store.connection.execute("select doc_type from fts_memory")} == {
         "evidence",

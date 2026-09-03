@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import anyio
+from anyio import to_thread
 
 from .embedding import ModelCallError, ModelConfig, embed_texts, rerank
 from .journal import EvidenceSpan
@@ -46,11 +46,11 @@ def _hit(span: EvidenceSpan, score: float) -> EvidenceHit:
 
 
 async def _fts(store: MemoryStore, query: str, workspace_id: str, limit: int) -> list[StoredCandidate]:
-    return await anyio.to_thread.run_sync(store.search_fts, query, workspace_id, limit)
+    return await to_thread.run_sync(store.search_fts, query, workspace_id, limit)
 
 
 async def _dense(store: MemoryStore, vector: list[float], workspace_id: str, limit: int) -> list[StoredCandidate]:
-    return await anyio.to_thread.run_sync(store.search_dense, vector, workspace_id, limit)
+    return await to_thread.run_sync(store.search_dense, vector, workspace_id, limit)
 
 
 async def search_evidence(
@@ -102,7 +102,7 @@ async def search_evidence(
     if not fused:
         return []
 
-    spans = await anyio.to_thread.run_sync(store.get_source_spans, workspace_id, list(fused))
+    spans = await to_thread.run_sync(store.get_source_spans, workspace_id, list(fused))
     by_id = {span.span_id: span for span in spans}
     evidence_ids = [span_id for span_id in fused if span_id in by_id]
     if not evidence_ids:

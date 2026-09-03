@@ -41,6 +41,17 @@ def test_llm_dedicated_key_can_reuse_agent_metadata_but_fallback_is_whole_group(
     )
     assert fallback.llm is not None and fallback.llm.api_key == "agent-secret"
     assert load_model_config({"PSI_AI_MODEL": "qwen-plus", "PSI_AI_API_KEY": "agent-secret"}).llm is None
+    no_mixing = load_model_config(
+        {
+            "FUSION_MEMORY_MODEL_PROVIDER": "deepseek",
+            "PSI_AI_PROVIDER": "openai",
+            "PSI_AI_MODEL": "agent-model",
+            "PSI_AI_API_KEY": "agent-secret",
+            "PSI_AI_BASE_URL": "https://agent.example/v1",
+        }
+    )
+    assert no_mixing.llm is not None
+    assert (no_mixing.llm.provider, no_mixing.llm.model) == ("openai", "agent-model")
 
 
 def test_cosine_similarity_is_safe_for_empty_or_mismatched_vectors() -> None:

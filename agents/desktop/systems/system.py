@@ -1548,11 +1548,13 @@ async def system_prompt_builder(
     profile_text = ""
     policy_text = ""
     recall_text = ""
-    try:
-        runtime = await get_runtime(str(user_workspace))
-        recall_text = await runtime.first_turn_recall(_runtime_session_id(), user_text)
-    except Exception as exc:
-        logger.warning("Fusion Memory prompt recall degraded after %s", type(exc).__name__)
+    kind = user_message.get("kind", "chat") if isinstance(user_message, dict) else "chat"
+    if kind == "chat":
+        try:
+            runtime = await get_runtime(str(user_workspace))
+            recall_text = await runtime.first_turn_recall(_runtime_session_id(), user_text)
+        except Exception as exc:
+            logger.warning("Fusion Memory prompt recall degraded after %s", type(exc).__name__)
     try:
         profile_module = importlib.import_module("_user_profile")
         identity = {

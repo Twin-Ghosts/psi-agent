@@ -19,7 +19,13 @@ def load_system():
     spec = importlib.util.spec_from_file_location("desktop_fusion_memory_system", systems / "system.py")
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    previous = sys.modules.pop("prompt_sections", None)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop("prompt_sections", None)
+        if previous is not None:
+            sys.modules["prompt_sections"] = previous
     return module
 
 
@@ -59,6 +65,40 @@ async def test_prompt_injects_recall_only_once(monkeypatch: pytest.MonkeyPatch, 
     assert "## Recalled workspace evidence" not in second
     assert fake.calls == [("session-2", "我们之前决定用什么数据库？"), ("session-2", "继续")]
     assert await module.system_prompt_rebuild_checker({"content": "继续"}, agent_raw=str(DESKTOP)) is True
+
+
+@pytest.mark.anyio
+async def test_schedule_prompt_does_not_consume_first_recall(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    module = load_system()
+
+    class FakeRuntime:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def first_turn_recall(self, _session_id: str, text: str) -> str:
+            self.calls.append(text)
+            return ""
+
+    fake = FakeRuntime()
+    monkeypatch.setattr(module, "get_runtime", lambda _workspace: _async_value(fake))
+    monkeypatch.setattr(module.System, "build_system_prompt", lambda _self: _async_value("base"))
+    profile = SimpleNamespace(get_topic=lambda _text: (None, None))
+    monkeypatch.setattr(
+        module.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(get_profile=lambda *_a, **_k: _async_value(profile)),
+    )
+    await module.system_prompt_builder(
+        {"role": "user", "content": "heartbeat", "kind": "schedule.silent"},
+        workspace_raw=str(tmp_path),
+        agent_raw=str(DESKTOP),
+    )
+    await module.system_prompt_builder(
+        {"role": "user", "content": "first chat", "kind": "chat"},
+        workspace_raw=str(tmp_path),
+        agent_raw=str(DESKTOP),
+    )
+    assert fake.calls == ["first chat"]
 
 
 async def _async_value(value):

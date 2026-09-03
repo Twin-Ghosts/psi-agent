@@ -55,7 +55,7 @@ def test_ingest_is_idempotent_and_updates_checkpoint(tmp_path: Path) -> None:
     source = HistorySource("s1", history)
     first = ingest_histories(store, scope, [source])
     second = ingest_histories(store, scope, [source])
-    assert first.completed_turns == second.completed_turns == 1
+    assert first.completed_turns == 1 and second.completed_turns == 0
     assert first.spans_appended == 2 and second.spans_appended == 0
     assert store.read_checkpoint(scope.workspace_id, str(history.resolve())) is not None
     history.write_text(json.dumps({"role": "user", "content": "changed", "kind": "chat"}) + "\n", encoding="utf-8")

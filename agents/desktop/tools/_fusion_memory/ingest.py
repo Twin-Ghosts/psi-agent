@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 import anyio
+from anyio import to_thread
 
 from psi_agent._appdata import (
     appdata_state_latest_path,
@@ -177,7 +178,7 @@ async def discover_histories(scope: WorkspaceScope, current_session_id: str, app
     async def add(session_id: str, path: Path) -> None:
         if not session_id or not await anyio.Path(path).is_file():
             return
-        key = await anyio.to_thread.run_sync(lambda: os.path.normcase(os.path.realpath(os.fspath(path))))
+        key = await to_thread.run_sync(lambda: os.path.normcase(os.path.realpath(os.fspath(path))))
         discovered.setdefault(key, HistorySource(session_id, path))
 
     current_path = Path(
@@ -241,18 +242,22 @@ def ingest_histories(store: MemoryStore, scope: WorkspaceScope, sources: list[Hi
         files_scanned += 1
         stat = path.stat()
         checkpoint = store.read_checkpoint(scope.workspace_id, str(path.resolve()))
-        if checkpoint and (
-            stat.st_size < checkpoint.file_size
-            or _prefix_hash(path, checkpoint.confirmed_line_count) != checkpoint.prefix_hash
-        ):
+        checkpoint_valid = bool(
+            checkpoint
+            and stat.st_size >= checkpoint.file_size
+            and _prefix_hash(path, checkpoint.confirmed_line_count) == checkpoint.prefix_hash
+        )
+        if checkpoint and not checkpoint_valid:
             rescanned += 1
-        spans = parse_completed_turns(scope, source)
+        start_line = checkpoint.confirmed_line_count + 1 if checkpoint_valid and checkpoint else 1
+        spans = parse_completed_turns(scope, source, start_line)
         turn_ids = {span.turn_id for span in spans}
         completed_turns += len(turn_ids)
         new = store.index_spans(spans)
         appended += len(new)
         indexed += len(spans)
-        confirmed_line = max((span.line_no for span in spans), default=0)
+        prior_confirmed = checkpoint.confirmed_line_count if checkpoint_valid and checkpoint else 0
+        confirmed_line = max((span.line_no for span in spans), default=prior_confirmed)
         checkpoint = IngestCheckpoint(
             workspace_id=scope.workspace_id,
             history_path=str(path.resolve()),
@@ -261,8 +266,8 @@ def ingest_histories(store: MemoryStore, scope: WorkspaceScope, sources: list[Hi
             prefix_hash=_prefix_hash(path, confirmed_line),
             file_size=stat.st_size,
             mtime_ns=stat.st_mtime_ns,
-            extraction_line=confirmed_line,
-            embedding_line=0,
+            extraction_line=checkpoint.extraction_line if checkpoint_valid and checkpoint else 0,
+            embedding_line=checkpoint.embedding_line if checkpoint_valid and checkpoint else 0,
             updated_at="",
         )
         store.write_checkpoint(checkpoint)

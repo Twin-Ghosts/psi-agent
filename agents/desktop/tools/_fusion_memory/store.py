@@ -480,8 +480,9 @@ class MemoryStore:
             raise ValueError("all source spans must belong to the current workspace")
         spans.sort(key=lambda item: (item.turn_id, item.line_no, item.span_id))
         text = "\n".join(item.content for item in spans)
-        item_id = hashlib.sha256(_json({"kind": kind, "source_span_ids": ids}).encode()).hexdigest()
-        item = MemoryItem(item_id, workspace_id, kind, text, 1.0, float(salience), ids, None)
+        canonical_ids = tuple(item.span_id for item in spans)
+        item_id = hashlib.sha256(_json({"kind": kind, "source_span_ids": canonical_ids}).encode()).hexdigest()
+        item = MemoryItem(item_id, workspace_id, kind, text, 1.0, float(salience), canonical_ids, None)
         self.upsert_memory_items(workspace_id, [item])
         return item
 
@@ -645,7 +646,7 @@ class MemoryStore:
             self.conn.backup(destination_conn)
         finally:
             destination_conn.close()
-        shutil.copyfile(self.journal.path, target_dir / self.journal.path.name)
+        self.journal.copy_to(target_dir / "evidence.jsonl")
         return target_db
 
     def close(self) -> None:

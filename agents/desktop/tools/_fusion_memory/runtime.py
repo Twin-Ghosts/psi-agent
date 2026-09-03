@@ -4,17 +4,18 @@ import hashlib
 import logging
 import os
 import threading
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import anyio
+from anyio import to_thread
 
 from psi_agent._appdata import resolve_appdata_root
 from psi_agent.session.runtime_context import get_agent, get_workspace
 
 from .embedding import ModelConfig, embed_texts, extract_memory_items, load_model_config
 from .ingest import discover_histories, ingest_histories, parse_completed_turns, workspace_scope
-from .journal import JsonlJournal
+from .journal import EvidenceSpan, JsonlJournal
 from .retrieval import AnswerContext, EvidenceHit, build_answer_context, render_first_recall, search_evidence
 from .store import MemoryItem, MemoryStore
 
@@ -84,15 +85,26 @@ class MemoryRuntime:
     async def ingest_current_session(self, session_id: str) -> dict[str, object]:
         if not self.enabled:
             return {"ok": False, "disabled": True}
+        store = self.store
+        assert store is not None
         async with self.lock:
             try:
                 appdata = Path(await resolve_appdata_root())
                 scope = workspace_scope(self.settings.workspace)
                 sources = await discover_histories(scope, session_id, appdata)
-                report = await anyio.to_thread.run_sync(ingest_histories, self.store, scope, sources)
-                spans_by_turn: dict[str, list[object]] = {}
+                report = await to_thread.run_sync(ingest_histories, store, scope, sources)
+                spans_by_turn: dict[str, list[EvidenceSpan]] = {}
+                extraction_checkpoints = []
                 for source in sources:
-                    for span in await anyio.to_thread.run_sync(parse_completed_turns, scope, source):
+                    checkpoint = await to_thread.run_sync(
+                        store.read_checkpoint, self.workspace_id, str(source.path.resolve())
+                    )
+                    if checkpoint is None:
+                        continue
+                    extraction_checkpoints.append(checkpoint)
+                    for span in await to_thread.run_sync(
+                        parse_completed_turns, scope, source, checkpoint.extraction_line + 1
+                    ):
                         spans_by_turn.setdefault(span.turn_id, []).append(span)
                 if self.models.llm is not None:
                     for spans in list(spans_by_turn.values())[-8:]:
@@ -114,7 +126,7 @@ class MemoryRuntime:
                                 for draft in drafts
                             ]
                             if items:
-                                await anyio.to_thread.run_sync(self.store.upsert_memory_items, self.workspace_id, items)
+                                await to_thread.run_sync(store.upsert_memory_items, self.workspace_id, items)
                         except Exception as exc:
                             self._warn("extraction", exc)
                 for turn_id, raw_spans in spans_by_turn.items():
@@ -123,8 +135,8 @@ class MemoryRuntime:
                     assistants = [span for span in spans if span.speaker == "assistant"]
                     if users and assistants:
                         try:
-                            await anyio.to_thread.run_sync(
-                                self.store.upsert_turn_card,
+                            await to_thread.run_sync(
+                                store.upsert_turn_card,
                                 self.workspace_id,
                                 turn_id,
                                 users[0].content,
@@ -135,19 +147,29 @@ class MemoryRuntime:
                             self._warn("card", exc)
                 if self.models.embedding.api_key:
                     try:
-                        pending = await anyio.to_thread.run_sync(self.store.pending_embeddings, self.workspace_id, 32)
+                        pending = await to_thread.run_sync(store.pending_embeddings, self.workspace_id, 32)
                         for offset in range(0, len(pending), self.models.embedding.batch_size):
                             batch = pending[offset : offset + self.models.embedding.batch_size]
                             vectors = await embed_texts(self.models, [item[2] for item in batch])
                             mapping = {(item[0], item[1]): vector for item, vector in zip(batch, vectors, strict=True)}
-                            await anyio.to_thread.run_sync(
-                                self.store.write_embeddings,
+                            await to_thread.run_sync(
+                                store.write_embeddings,
                                 self.workspace_id,
                                 self.models.embedding.model,
                                 mapping,
                             )
                     except Exception as exc:
                         self._warn("embedding", exc)
+                for checkpoint in extraction_checkpoints:
+                    if checkpoint.extraction_line < checkpoint.confirmed_line_count:
+                        await to_thread.run_sync(
+                            store.write_checkpoint,
+                            replace(
+                                checkpoint,
+                                extraction_line=checkpoint.confirmed_line_count,
+                                updated_at="",
+                            ),
+                        )
                 return {"ok": True, **asdict(report)}
             except Exception as exc:
                 self._warn("ingest", exc)
@@ -156,9 +178,11 @@ class MemoryRuntime:
     async def search(self, query: str, limit: int = 8) -> list[EvidenceHit]:
         if not self.enabled:
             return []
+        store = self.store
+        assert store is not None
         async with self.lock:
             try:
-                return await search_evidence(self.store, self.models, query, self.workspace_id, limit)
+                return await search_evidence(store, self.models, query, self.workspace_id, limit)
             except Exception as exc:
                 self._warn("search", exc)
                 return []
@@ -166,9 +190,11 @@ class MemoryRuntime:
     async def answer_context(self, query: str, limit: int = 12, max_chars: int = 6000) -> AnswerContext:
         if not self.enabled:
             return AnswerContext(query, (), "")
+        store = self.store
+        assert store is not None
         async with self.lock:
             try:
-                return await build_answer_context(self.store, self.models, query, self.workspace_id, limit, max_chars)
+                return await build_answer_context(store, self.models, query, self.workspace_id, limit, max_chars)
             except Exception as exc:
                 self._warn("answer_context", exc)
                 return AnswerContext(query, (), "")
@@ -176,11 +202,11 @@ class MemoryRuntime:
     async def promote(self, source_span_ids: list[str], kind: str, salience: float) -> MemoryItem | None:
         if not self.enabled:
             return None
+        store = self.store
+        assert store is not None
         async with self.lock:
             try:
-                return await anyio.to_thread.run_sync(
-                    self.store.promote, self.workspace_id, source_span_ids, kind, salience
-                )
+                return await to_thread.run_sync(store.promote, self.workspace_id, source_span_ids, kind, salience)
             except Exception as exc:
                 self._warn("promote", exc)
                 return None
@@ -198,7 +224,7 @@ class MemoryRuntime:
 
     async def close(self) -> None:
         if self.store is not None:
-            await anyio.to_thread.run_sync(self.store.close)
+            await to_thread.run_sync(self.store.close)
 
 
 _cache_lock = threading.RLock()
@@ -211,19 +237,30 @@ async def get_runtime(workspace_raw: str = "") -> MemoryRuntime:
         existing = _runtimes.get(settings.workspace)
         if existing is not None:
             return existing
-        if not settings.enabled:
-            runtime = MemoryRuntime(settings, None)
+    runtime = await to_thread.run_sync(_create_runtime, settings)
+    duplicate: MemoryRuntime | None = None
+    with _cache_lock:
+        existing = _runtimes.get(settings.workspace)
+        if existing is not None:
+            duplicate = runtime
+            runtime = existing
+        else:
             _runtimes[settings.workspace] = runtime
-            return runtime
-        settings.root.mkdir(parents=True, exist_ok=True)
-        gitignore = settings.root / ".gitignore"
-        if not gitignore.exists():
-            gitignore.write_text("*\n", encoding="utf-8")
-        journal = JsonlJournal(settings.journal_path, fsync=settings.journal_fsync)
-        store = MemoryStore(settings.database_path, journal, workspace_scope(settings.workspace).workspace_id).open()
-        runtime = MemoryRuntime(settings, store)
-        _runtimes[settings.workspace] = runtime
-        return runtime
+    if duplicate is not None:
+        await duplicate.close()
+    return runtime
+
+
+def _create_runtime(settings: RuntimeSettings) -> MemoryRuntime:
+    if not settings.enabled:
+        return MemoryRuntime(settings, None)
+    settings.root.mkdir(parents=True, exist_ok=True)
+    gitignore = settings.root / ".gitignore"
+    if not gitignore.exists():
+        gitignore.write_text("*\n", encoding="utf-8")
+    journal = JsonlJournal(settings.journal_path, fsync=settings.journal_fsync)
+    store = MemoryStore(settings.database_path, journal, workspace_scope(settings.workspace).workspace_id).open()
+    return MemoryRuntime(settings, store)
 
 
 async def reset_runtime_cache_for_tests() -> None:

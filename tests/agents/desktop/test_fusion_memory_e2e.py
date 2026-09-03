@@ -1,16 +1,16 @@
 from __future__ import annotations
 
+# ruff: noqa: RUF001
 import json
 from pathlib import Path
 
 import pytest
-
-from psi_agent.session.runtime_context import runtime_scope
-
 from _fusion_memory.runtime import get_runtime, reset_runtime_cache_for_tests
 from memory_add import memory_add
 from memory_answer_context import memory_answer_context
 from memory_search import memory_search
+
+from psi_agent.session.runtime_context import runtime_scope
 
 
 @pytest.fixture(autouse=True)

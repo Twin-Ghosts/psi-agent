@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import aiohttp
 
@@ -85,7 +86,7 @@ def _endpoint(base: str) -> str:
     return value if value.endswith("/chat/completions") else f"{value}/chat/completions"
 
 
-def load_model_config(env: dict[str, str] | None = None) -> ModelConfig:
+def load_model_config(env: Mapping[str, str] | None = None) -> ModelConfig:
     values = env if env is not None else __import__("os").environ
     embedding = EmbeddingConfig(
         api_key=values.get("DASHSCOPE_API_KEY", "").strip(),
@@ -112,9 +113,9 @@ def load_model_config(env: dict[str, str] | None = None) -> ModelConfig:
         base_url = base_url or values.get("PSI_AI_BASE_URL", "").strip()
         llm_key = dedicated_key
     else:
-        provider = provider or values.get("PSI_AI_PROVIDER", "").strip().lower()
-        model = model or values.get("PSI_AI_MODEL", "").strip()
-        base_url = base_url or values.get("PSI_AI_BASE_URL", "").strip()
+        provider = values.get("PSI_AI_PROVIDER", "").strip().lower()
+        model = values.get("PSI_AI_MODEL", "").strip()
+        base_url = values.get("PSI_AI_BASE_URL", "").strip()
         llm_key = values.get("PSI_AI_API_KEY", "").strip()
         if not all((provider, model, llm_key, base_url)):
             llm_key = ""
@@ -167,8 +168,11 @@ async def _request_json(
 def _vector(value: object) -> list[float] | None:
     if not isinstance(value, list) or not value:
         return None
+    if not all(isinstance(item, (int, float, str)) for item in value):
+        return None
     try:
-        result = [float(item) for item in value]
+        numeric = cast(list[int | float | str], value)
+        result = [float(item) for item in numeric]
     except TypeError, ValueError:
         return None
     return result if all(math.isfinite(item) for item in result) else None

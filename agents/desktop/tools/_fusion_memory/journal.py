@@ -6,7 +6,7 @@ import shutil
 import threading
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -94,11 +94,17 @@ class JsonlJournal:
             self._quarantine_tail(tail)
             with self.path.open("r+b") as fh:
                 fh.truncate(tail_start)
+                if self.fsync:
+                    fh.flush()
+                    os.fsync(fh.fileno())
             return
         if not self._recognized_record(record):
             self._quarantine_tail(tail)
             with self.path.open("r+b") as fh:
                 fh.truncate(tail_start)
+                if self.fsync:
+                    fh.flush()
+                    os.fsync(fh.fileno())
             return
         with self.path.open("ab") as fh:
             fh.write(b"\n")
@@ -149,8 +155,8 @@ class JsonlJournal:
             if self._recognized_record(record) and record.get("record_type") == "evidence_span":
                 self._span_records[str(record["span_id"])] = canonical_json(record)
 
-    def append_spans(self, spans: list[EvidenceSpan] | tuple[EvidenceSpan, ...] | object) -> list[EvidenceSpan]:
-        batch = list(spans)  # type: ignore[arg-type]
+    def append_spans(self, spans: Iterable[EvidenceSpan]) -> list[EvidenceSpan]:
+        batch = list(spans)
         with self._lock:
             self._recover_tail()
             self._refresh_index()
@@ -194,7 +200,10 @@ class JsonlJournal:
         if not self.path.exists():
             return ReplayReport()
         data = self.path.read_bytes()
-        tail = 0 if data.endswith(b"\n") or not data else 1
+        tail = 0
+        if data and not data.endswith(b"\n"):
+            tail = 1
+            data = data[: data.rfind(b"\n") + 1]
         for line in data.splitlines():
             counts[0] += 1
             try:
@@ -202,8 +211,8 @@ class JsonlJournal:
                 if not self._recognized_record(record):
                     raise ValueError
                 if record["record_type"] == "evidence_span":
-                    on_span(EvidenceSpan(**{k: record[k] for k in _SPAN_FIELDS}))
-                    counts[1] += 1
+                    inserted = on_span(EvidenceSpan(**{k: record[k] for k in _SPAN_FIELDS}))
+                    counts[2 if inserted is False else 1] += 1
                 else:
                     on_clear(ScopeClear(**{k: record[k] for k in _CLEAR_FIELDS}))
                     counts[3] += 1
@@ -212,7 +221,7 @@ class JsonlJournal:
         counts[5] = tail
         return ReplayReport(*counts)
 
-    def iter_active_spans(self):
+    def iter_active_spans(self) -> Iterator[EvidenceSpan]:
         active: OrderedDict[str, EvidenceSpan] = OrderedDict()
 
         def add(item: EvidenceSpan) -> None:
@@ -230,4 +239,9 @@ class JsonlJournal:
 
     def copy_to(self, destination: str | os.PathLike[str]) -> None:
         with self._lock:
-            shutil.copyfile(self.path, destination)
+            target = Path(destination)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if self.path.exists():
+                shutil.copyfile(self.path, target)
+            else:
+                target.touch(mode=0o600)
