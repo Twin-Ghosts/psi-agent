@@ -8,7 +8,7 @@ import pytest
 from _fusion_memory.ingest import (
     HistorySource,
     discover_histories,
-    ingest_histories,
+    ingest_confirmed_turn,
     parse_completed_turns,
     workspace_scope,
 )
@@ -37,7 +37,7 @@ def test_parse_filters_non_raw_rows_and_preserves_history(tmp_path: Path) -> Non
     scope = workspace_scope(tmp_path)
     spans = parse_completed_turns(scope, HistorySource("s1", history))
     assert [(span.speaker, span.content) for span in spans] == [
-        ("user", "记住我用 PostgreSQL"),
+        ("user", "记住我用 PostgreSQL\n"),
         ("assistant", "好的，已记录。"),
     ]
     assert all(span.timestamp is None for span in spans)
@@ -64,6 +64,30 @@ def test_turn_id_is_derived_from_each_completed_source_pair(tmp_path: Path) -> N
     assert [span.turn_id for span in parse_completed_turns(scope, source)] == [span.turn_id for span in spans]
 
 
+def test_parse_fails_closed_and_only_removes_transfer_markers(tmp_path: Path) -> None:
+    history = tmp_path / "s1.jsonl"
+    rows = [
+        {"role": "user", "content": "unknown input", "kind": "heartbeat"},
+        {"role": "assistant", "content": "unknown output", "kind": "heartbeat"},
+        {"role": "user_trigger", "content": "trigger input"},
+        {"role": "assistant_trigger", "content": "trigger output"},
+        {"role": "user", "content": "  raw\n\n\n[RECV:/tmp/in.txt]\n", "kind": "chat"},
+        {
+            "role": "assistant",
+            "content": "maximum context length and max rounds are configurable",
+            "kind": "chat",
+        },
+    ]
+    history.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    spans = parse_completed_turns(workspace_scope(tmp_path), HistorySource("s1", history))
+
+    assert [(span.speaker, span.content) for span in spans] == [
+        ("user", "  raw\n\n\n\n"),
+        ("assistant", "maximum context length and max rounds are configurable"),
+    ]
+
+
 def test_ingest_is_idempotent_and_updates_checkpoint(tmp_path: Path) -> None:
     history = tmp_path / "s1.jsonl"
     history.write_text(
@@ -77,14 +101,43 @@ def test_ingest_is_idempotent_and_updates_checkpoint(tmp_path: Path) -> None:
     journal = JsonlJournal(tmp_path / "evidence.jsonl", fsync=False)
     store = MemoryStore(tmp_path / "memory.sqlite3", journal, scope.workspace_id).open()
     source = HistorySource("s1", history)
-    first = ingest_histories(store, scope, [source])
-    second = ingest_histories(store, scope, [source])
+    user_message = {"role": "user", "content": "你好", "kind": "chat"}
+    assistant_message = {"role": "assistant", "content": "你好！", "kind": "chat"}
+    first, _ = ingest_confirmed_turn(store, scope, source, user_message, assistant_message)
+    second, _ = ingest_confirmed_turn(store, scope, source, user_message, assistant_message)
     assert first.completed_turns == 1 and second.completed_turns == 0
     assert first.spans_appended == 2 and second.spans_appended == 0
     assert store.read_checkpoint(scope.workspace_id, str(history.resolve())) is not None
     history.write_text(json.dumps({"role": "user", "content": "changed", "kind": "chat"}) + "\n", encoding="utf-8")
-    third = ingest_histories(store, scope, [source])
+    third, _ = ingest_confirmed_turn(store, scope, source, {"role": "user", "content": "changed"}, assistant_message)
     assert third.rescanned_files == 1
+    store.close()
+
+
+def test_confirmed_ingest_excludes_prior_turn_without_finish_provenance(tmp_path: Path) -> None:
+    history = tmp_path / "s1.jsonl"
+    rows = [
+        {"role": "user", "content": "truncated question", "kind": "chat"},
+        {"role": "assistant", "content": "plausible but truncated answer", "kind": "chat"},
+        {"role": "user", "content": "confirmed question", "kind": "chat"},
+        {"role": "assistant", "content": "confirmed answer", "kind": "chat"},
+    ]
+    history.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    scope = workspace_scope(tmp_path)
+    journal = JsonlJournal(tmp_path / "evidence.jsonl", fsync=False)
+    store = MemoryStore(tmp_path / "memory.sqlite3", journal, scope.workspace_id).open()
+
+    report, spans = ingest_confirmed_turn(
+        store,
+        scope,
+        HistorySource("s1", history),
+        rows[-2],
+        rows[-1],
+    )
+
+    assert report.completed_turns == 1
+    assert [item.content for item in spans] == ["confirmed question", "confirmed answer"]
+    assert [item.content for item in journal.iter_active_spans()] == ["confirmed question", "confirmed answer"]
     store.close()
 
 
@@ -101,12 +154,14 @@ def test_full_rescan_cannot_resurrect_tombstoned_history(tmp_path: Path) -> None
     journal = JsonlJournal(tmp_path / "evidence.jsonl", fsync=False)
     store = MemoryStore(tmp_path / "memory.sqlite3", journal, scope.workspace_id).open()
     source = HistorySource("s1", history)
-    ingest_histories(store, scope, [source])
+    user_message = {"role": "user", "content": "secret", "kind": "chat"}
+    assistant_message = {"role": "assistant", "content": "saved", "kind": "chat"}
+    ingest_confirmed_turn(store, scope, source, user_message, assistant_message)
     journal.append_scope_clear(scope.workspace_id)
     store.rebuild_index()
     store.connection.execute("delete from ingest_checkpoints")
     store.connection.commit()
-    ingest_histories(store, scope, [source])
+    ingest_confirmed_turn(store, scope, source, user_message, assistant_message)
     assert (
         store.get_source_spans(scope.workspace_id, [span.span_id for span in parse_completed_turns(scope, source)])
         == []
@@ -154,5 +209,24 @@ async def test_discover_histories_rejects_unsafe_state_session_id(tmp_path: Path
     )
 
     found = await discover_histories(workspace_scope(workspace), "current", appdata)
+
+    assert found == []
+
+
+@pytest.mark.anyio
+async def test_discover_histories_rejects_cross_workspace_symlink(tmp_path: Path) -> None:
+    appdata = tmp_path / "appdata"
+    (appdata / "histories").mkdir(parents=True)
+    workspace_a = tmp_path / "workspace-a"
+    workspace_b = tmp_path / "workspace-b"
+    histories_a = workspace_a / "histories"
+    histories_b = workspace_b / "histories"
+    histories_a.mkdir(parents=True)
+    histories_b.mkdir(parents=True)
+    target = histories_b / "other.jsonl"
+    target.write_text("{}\n", encoding="utf-8")
+    (histories_a / "other.jsonl").symlink_to(target)
+
+    found = await discover_histories(workspace_scope(workspace_a), "current", appdata)
 
     assert found == []

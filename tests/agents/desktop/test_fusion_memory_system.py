@@ -118,7 +118,7 @@ async def test_after_turn_memory_failure_does_not_block_profile(
     recorded: list[tuple[str, str]] = []
 
     class Runtime:
-        async def ingest_current_session(self, _session_id: str) -> None:
+        async def ingest_current_session(self, _session_id: str, _user: dict, _assistant: dict) -> None:
             raise RuntimeError("memory failed")
 
     class Profile:
@@ -139,6 +139,40 @@ async def test_after_turn_memory_failure_does_not_block_profile(
         {"content": "user"}, {"content": "assistant"}, workspace_raw=str(tmp_path), agent_raw=str(DESKTOP)
     )
     assert recorded == [("user", "assistant")]
+
+
+@pytest.mark.anyio
+async def test_after_turn_passes_successfully_completed_pair_to_memory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    module = load_system()
+    memory_calls: list[tuple[str, dict, dict]] = []
+
+    class Runtime:
+        async def ingest_current_session(self, session_id: str, user: dict, assistant: dict) -> None:
+            memory_calls.append((session_id, user, assistant))
+
+    class Profile:
+        async def record_turn(self, _user: str, _assistant: str) -> None:
+            return None
+
+    monkeypatch.setattr(module, "_runtime_session_id", lambda: "session-1")
+    monkeypatch.setattr(module, "get_runtime", lambda _workspace: _async_value(Runtime()))
+    monkeypatch.setattr(
+        module.importlib,
+        "import_module",
+        lambda name: (
+            SimpleNamespace(get_profile=lambda *_a, **_k: _async_value(Profile()))
+            if name == "_user_profile"
+            else SimpleNamespace(is_learning_question=lambda _text: False)
+        ),
+    )
+    user = {"role": "user", "content": "question"}
+    assistant = {"role": "assistant", "content": "answer"}
+
+    await module.system_after_turn(user, assistant, workspace_raw=str(tmp_path), agent_raw=str(DESKTOP))
+
+    assert memory_calls == [("session-1", user, assistant)]
 
 
 @pytest.mark.anyio

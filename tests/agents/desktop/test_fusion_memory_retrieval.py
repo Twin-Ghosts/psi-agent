@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from pathlib import Path
 
 from _fusion_memory.embedding import load_model_config
 from _fusion_memory.journal import EvidenceSpan, JsonlJournal
-from _fusion_memory.retrieval import build_answer_context, render_first_recall, search_evidence
+from _fusion_memory.retrieval import EvidenceHit, build_answer_context, render_first_recall, search_evidence
 from _fusion_memory.store import MemoryStore
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 
 
 def span(span_id: str, content: str, line_no: int) -> EvidenceSpan:
@@ -53,3 +56,63 @@ async def test_render_empty_and_max_chars_preserve_whole_entries(tmp_path: Path)
     pack = await build_answer_context(store, models, "database", "workspace-a", 8, 250)
     assert pack.rendered == render_first_recall(list(pack.evidence))
     store.close()
+
+
+def test_first_recall_has_default_budget_and_never_truncates_entries() -> None:
+    first = EvidenceHit(
+        "first", "workspace-a", "session-1", "turn-1", "assistant", "A" * 100, None, "history:///s1#L1", "evidence", 1.0
+    )
+    second = EvidenceHit(
+        "second",
+        "workspace-a",
+        "session-1",
+        "turn-2",
+        "assistant",
+        "B" * 100,
+        None,
+        "history:///s1#L2",
+        "evidence",
+        0.5,
+    )
+    first_only = render_first_recall([first], max_chars=10_000)
+
+    assert render_first_recall([first, second], max_chars=len(first_only)) == first_only
+    assert render_first_recall([first, second], max_chars=len(first_only) - 1) == ""
+
+    oversized = EvidenceHit(
+        "oversized",
+        "workspace-a",
+        "session-1",
+        "turn-3",
+        "assistant",
+        "X" * 6_000,
+        None,
+        "history:///s1#L3",
+        "evidence",
+        1.0,
+    )
+    assert render_first_recall([oversized]) == ""
+
+
+async def test_vector_http_failures_degrade_to_fts(tmp_path: Path) -> None:
+    async def reject(_request: web.Request) -> web.Response:
+        return web.json_response({"error": "unavailable"}, status=500)
+
+    server = TestServer(web.Application())
+    server.app.router.add_post("/{path:.*}", reject)
+    await server.start_server()
+    store = await seeded(tmp_path)
+    try:
+        config = load_model_config({"DASHSCOPE_API_KEY": "dash-secret"})
+        config = replace(
+            config,
+            embedding=replace(config.embedding, endpoint=str(server.make_url("/embedding"))),
+            rerank=replace(config.rerank, endpoint=str(server.make_url("/rerank"))),
+        )
+
+        hits = await search_evidence(store, config, "PostgreSQL", "workspace-a", 8)
+
+        assert [hit.content for hit in hits] == ["PostgreSQL database"]
+    finally:
+        store.close()
+        await server.close()

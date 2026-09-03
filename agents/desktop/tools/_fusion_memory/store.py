@@ -15,8 +15,20 @@ from pathlib import Path
 
 from .journal import EvidenceSpan, JsonlJournal, ReplayReport, ScopeClear, span_to_record
 
-SQLITE_SCHEMA_VERSION = 1
+SQLITE_SCHEMA_VERSION = 2
 BUSINESS_TABLES = frozenset({"evidence_spans", "memory_items", "summary_cards", "ingest_checkpoints"})
+FTS_TABLES = frozenset(
+    {
+        "fts_memory",
+        "fts_memory_config",
+        "fts_memory_content",
+        "fts_memory_data",
+        "fts_memory_docsize",
+        "fts_memory_idx",
+    }
+)
+SCHEMA_TABLES = BUSINESS_TABLES | FTS_TABLES
+ALLOWED_SCHEMA_TABLES = SCHEMA_TABLES | {"sqlite_sequence"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +66,7 @@ class IngestCheckpoint:
     mtime_ns: int
     extraction_line: int = 0
     embedding_line: int = 0
+    card_line: int = 0
     updated_at: str = ""
 
 
@@ -159,9 +172,8 @@ class MemoryStore:
             for row in self.conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table','virtual table')")
             if row[0] is not None
         }
-        required = BUSINESS_TABLES | {"fts_memory"}
         incompatible = version not in (0, SQLITE_SCHEMA_VERSION) or (
-            version == SQLITE_SCHEMA_VERSION and not required <= names
+            version == SQLITE_SCHEMA_VERSION and (not names >= SCHEMA_TABLES or bool(names - ALLOWED_SCHEMA_TABLES))
         )
         if version == 0 and names and names - {"sqlite_sequence"}:
             incompatible = True
@@ -248,6 +260,7 @@ class MemoryStore:
               mtime_ns integer not null,
               extraction_line integer not null default 0,
               embedding_line integer not null default 0,
+              card_line integer not null default 0,
               updated_at text not null,
               primary key (workspace_id, history_path)
             );
@@ -290,12 +303,16 @@ class MemoryStore:
             source_uri=row["source_uri"],
         )
 
-    def _insert_span(self, span: EvidenceSpan) -> bool:
+    def _insert_span(self, span: EvidenceSpan, *, replace_conflict: bool = False) -> bool:
         existing = self.conn.execute("select * from evidence_spans where span_id = ?", (span.span_id,)).fetchone()
         if existing is not None:
             if span_to_record(self._row_span(existing)) != span_to_record(span):
-                raise ValueError(f"conflicting index row for span_id={span.span_id}")
-            return False
+                if not replace_conflict:
+                    raise ValueError(f"conflicting index row for span_id={span.span_id}")
+                self.conn.execute("delete from evidence_spans where span_id = ?", (span.span_id,))
+                self.conn.execute("delete from fts_memory where doc_type = 'evidence' and doc_id = ?", (span.span_id,))
+            else:
+                return False
         self.conn.execute(
             """insert into evidence_spans
             (span_id,workspace_id,session_id,turn_id,line_no,speaker,content,content_hash,timestamp,source_uri)
@@ -316,9 +333,10 @@ class MemoryStore:
             if span.workspace_id != self.workspace_id:
                 raise ValueError("span workspace does not match store scope")
         new = self.journal.append_spans(batch)
+        active = self.journal.active_spans(batch)
         self.conn.execute("begin")
         try:
-            for span in new:
+            for span in active:
                 self._insert_span(span)
             self.conn.commit()
         except Exception:
@@ -326,50 +344,69 @@ class MemoryStore:
             raise
         return new
 
-    def replay_journal(self) -> ReplayReport:
+    def _delete_derived_referencing(self, span_ids: Iterable[str]) -> None:
+        targets = set(span_ids)
+        if not targets:
+            return
+        for table, id_column, doc_type in (
+            ("memory_items", "item_id", "memory_item"),
+            ("summary_cards", "card_id", "summary_card"),
+        ):
+            derived_ids = [
+                str(row[0])
+                for row in self.conn.execute(
+                    f"select {id_column}, source_span_ids from {table} where workspace_id = ?",
+                    (self.workspace_id,),
+                )
+                if targets.intersection(_parse_ids(row[1]))
+            ]
+            self.conn.executemany(f"delete from {table} where {id_column} = ?", ((item,) for item in derived_ids))
+            self.conn.executemany(
+                "delete from fts_memory where doc_type = ? and doc_id = ?",
+                ((doc_type, item) for item in derived_ids),
+            )
+
+    def _delete_spans(self, span_ids: Iterable[str]) -> None:
+        ids = tuple(dict.fromkeys(span_ids))
+        if not ids:
+            return
+        self._delete_derived_referencing(ids)
+        self.conn.executemany("delete from evidence_spans where span_id = ?", ((item,) for item in ids))
+        self.conn.executemany(
+            "delete from fts_memory where doc_type = 'evidence' and doc_id = ?", ((item,) for item in ids)
+        )
+
+    def _replay_journal_in_transaction(self) -> ReplayReport:
         inserted = 0
         duplicates = 0
         clears = 0
-        self.conn.execute("begin")
-        try:
+        replay_active: dict[str, EvidenceSpan] = {}
 
-            def on_span(span: EvidenceSpan) -> None:
-                nonlocal inserted, duplicates
-                if span.workspace_id != self.workspace_id:
-                    return
-                if self._insert_span(span):
-                    inserted += 1
-                else:
-                    duplicates += 1
+        def on_span(span: EvidenceSpan) -> None:
+            nonlocal inserted, duplicates
+            if span.workspace_id != self.workspace_id:
+                return
+            replay_active[span.span_id] = span
+            if self._insert_span(span, replace_conflict=True):
+                inserted += 1
+            else:
+                duplicates += 1
 
-            def on_clear(clear: ScopeClear) -> None:
-                nonlocal clears
-                if clear.workspace_id != self.workspace_id:
-                    return
-                if clear.session_id is None:
-                    self.conn.execute("delete from evidence_spans where workspace_id = ?", (self.workspace_id,))
-                    self.conn.execute(
-                        "delete from fts_memory where doc_type = 'evidence' and workspace_id = ?", (self.workspace_id,)
-                    )
-                else:
-                    ids = [
-                        row[0]
-                        for row in self.conn.execute(
-                            "select span_id from evidence_spans where workspace_id = ? and session_id = ?",
-                            (self.workspace_id, clear.session_id),
-                        )
-                    ]
-                    self.conn.executemany("delete from evidence_spans where span_id = ?", ((item,) for item in ids))
-                    self.conn.executemany(
-                        "delete from fts_memory where doc_type = 'evidence' and doc_id = ?", ((item,) for item in ids)
-                    )
-                clears += 1
+        def on_clear(clear: ScopeClear) -> None:
+            nonlocal clears
+            if clear.workspace_id != self.workspace_id:
+                return
+            ids = [
+                span_id
+                for span_id, span in replay_active.items()
+                if clear.session_id is None or span.session_id == clear.session_id
+            ]
+            self._delete_spans(ids)
+            for span_id in ids:
+                del replay_active[span_id]
+            clears += 1
 
-            report = self.journal.replay(on_span, on_clear)
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        report = self.journal.replay(on_span, on_clear)
         return ReplayReport(
             records=report.records,
             inserted=inserted,
@@ -379,18 +416,34 @@ class MemoryStore:
             skipped_tail=report.skipped_tail,
         )
 
-    def rebuild_index(self) -> ReplayReport:
+    def replay_journal(self) -> ReplayReport:
         self.conn.execute("begin")
         try:
-            self.conn.execute("delete from evidence_spans where workspace_id = ?", (self.workspace_id,))
-            self.conn.execute(
-                "delete from fts_memory where doc_type = 'evidence' and workspace_id = ?", (self.workspace_id,)
-            )
+            report = self._replay_journal_in_transaction()
             self.conn.commit()
         except Exception:
             self.conn.rollback()
             raise
-        return self.replay_journal()
+        return report
+
+    def rebuild_index(self) -> ReplayReport:
+        self.conn.execute("begin")
+        try:
+            self.conn.execute("delete from evidence_spans where workspace_id = ?", (self.workspace_id,))
+            self.conn.execute("delete from memory_items where workspace_id = ?", (self.workspace_id,))
+            self.conn.execute("delete from summary_cards where workspace_id = ?", (self.workspace_id,))
+            self.conn.execute("delete from fts_memory where workspace_id = ?", (self.workspace_id,))
+            self.conn.execute(
+                "update ingest_checkpoints set extraction_line = 0, embedding_line = 0, card_line = 0, updated_at = ? "
+                "where workspace_id = ?",
+                (_now(), self.workspace_id),
+            )
+            report = self._replay_journal_in_transaction()
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return report
 
     def _candidate(self, row: sqlite3.Row, score: float) -> StoredCandidate:
         return StoredCandidate(
@@ -552,16 +605,21 @@ class MemoryStore:
         card_id = _turn_card_id(turn_id)
         retrieval_key = user_text[:240]
         snippet = assistant_text[:500]
-        self.conn.execute(
-            "insert into summary_cards(card_id,workspace_id,retrieval_key,snippet,source_span_ids,updated_at) values (?,?,?,?,?,?) on conflict(card_id) do update set workspace_id=excluded.workspace_id,retrieval_key=excluded.retrieval_key,snippet=excluded.snippet,source_span_ids=excluded.source_span_ids,updated_at=excluded.updated_at",
-            (card_id, workspace_id, retrieval_key, snippet, _json(ids), _now()),
-        )
-        self.conn.execute("delete from fts_memory where doc_type='summary_card' and doc_id=?", (card_id,))
-        self.conn.execute(
-            "insert into fts_memory(doc_type,doc_id,workspace_id,text) values ('summary_card',?,?,?)",
-            (card_id, workspace_id, f"{retrieval_key}\n{snippet}"),
-        )
-        self.conn.commit()
+        self.conn.execute("begin")
+        try:
+            self.conn.execute(
+                "insert into summary_cards(card_id,workspace_id,retrieval_key,snippet,source_span_ids,updated_at) values (?,?,?,?,?,?) on conflict(card_id) do update set workspace_id=excluded.workspace_id,retrieval_key=excluded.retrieval_key,snippet=excluded.snippet,source_span_ids=excluded.source_span_ids,updated_at=excluded.updated_at",
+                (card_id, workspace_id, retrieval_key, snippet, _json(ids), _now()),
+            )
+            self.conn.execute("delete from fts_memory where doc_type='summary_card' and doc_id=?", (card_id,))
+            self.conn.execute(
+                "insert into fts_memory(doc_type,doc_id,workspace_id,text) values ('summary_card',?,?,?)",
+                (card_id, workspace_id, f"{retrieval_key}\n{snippet}"),
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
         return card_id
 
     def missing_turn_cards(self, workspace_id: str, turn_ids: Iterable[str]) -> list[str]:
@@ -576,6 +634,26 @@ class MemoryStore:
             if row is None:
                 missing.append(turn_id)
         return missing
+
+    def pending_session_turns(
+        self,
+        workspace_id: str,
+        session_id: str,
+        after_line: int,
+        limit: int,
+    ) -> list[list[EvidenceSpan]]:
+        if workspace_id != self.workspace_id or limit <= 0:
+            return []
+        rows = self.conn.execute(
+            "select * from evidence_spans where workspace_id = ? and session_id = ? and line_no > ? "
+            "order by line_no, span_id limit ?",
+            (workspace_id, session_id, after_line, limit * 2),
+        ).fetchall()
+        turns: dict[str, list[EvidenceSpan]] = {}
+        for row in rows:
+            span = self._row_span(row)
+            turns.setdefault(span.turn_id, []).append(span)
+        return [spans for spans in turns.values() if {span.speaker for span in spans} == {"user", "assistant"}][:limit]
 
     def pending_embeddings(self, workspace_id: str, limit: int = 100) -> list[tuple[str, str, str]]:
         if workspace_id != self.workspace_id:
@@ -632,22 +710,28 @@ class MemoryStore:
     def write_checkpoint(self, checkpoint: IngestCheckpoint) -> None:
         if checkpoint.workspace_id != self.workspace_id:
             raise ValueError("checkpoint workspace does not match store scope")
-        self.conn.execute(
-            "insert into ingest_checkpoints(workspace_id,history_path,session_id,confirmed_line_count,prefix_hash,file_size,mtime_ns,extraction_line,embedding_line,updated_at) values (?,?,?,?,?,?,?,?,?,?) on conflict(workspace_id,history_path) do update set session_id=excluded.session_id,confirmed_line_count=excluded.confirmed_line_count,prefix_hash=excluded.prefix_hash,file_size=excluded.file_size,mtime_ns=excluded.mtime_ns,extraction_line=excluded.extraction_line,embedding_line=excluded.embedding_line,updated_at=excluded.updated_at",
-            (
-                checkpoint.workspace_id,
-                checkpoint.history_path,
-                checkpoint.session_id,
-                checkpoint.confirmed_line_count,
-                checkpoint.prefix_hash,
-                checkpoint.file_size,
-                checkpoint.mtime_ns,
-                checkpoint.extraction_line,
-                checkpoint.embedding_line,
-                checkpoint.updated_at or _now(),
-            ),
-        )
-        self.conn.commit()
+        self.conn.execute("begin")
+        try:
+            self.conn.execute(
+                "insert into ingest_checkpoints(workspace_id,history_path,session_id,confirmed_line_count,prefix_hash,file_size,mtime_ns,extraction_line,embedding_line,card_line,updated_at) values (?,?,?,?,?,?,?,?,?,?,?) on conflict(workspace_id,history_path) do update set session_id=excluded.session_id,confirmed_line_count=excluded.confirmed_line_count,prefix_hash=excluded.prefix_hash,file_size=excluded.file_size,mtime_ns=excluded.mtime_ns,extraction_line=excluded.extraction_line,embedding_line=excluded.embedding_line,card_line=excluded.card_line,updated_at=excluded.updated_at",
+                (
+                    checkpoint.workspace_id,
+                    checkpoint.history_path,
+                    checkpoint.session_id,
+                    checkpoint.confirmed_line_count,
+                    checkpoint.prefix_hash,
+                    checkpoint.file_size,
+                    checkpoint.mtime_ns,
+                    checkpoint.extraction_line,
+                    checkpoint.embedding_line,
+                    checkpoint.card_line,
+                    checkpoint.updated_at or _now(),
+                ),
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def backup_to(self, destination: str | os.PathLike[str]) -> Path:
         target_dir = Path(destination)

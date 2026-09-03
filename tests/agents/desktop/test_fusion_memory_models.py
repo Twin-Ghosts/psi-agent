@@ -1,6 +1,20 @@
 from __future__ import annotations
 
-from _fusion_memory.embedding import cosine_similarity, load_model_config
+from dataclasses import replace
+
+import anyio
+import pytest
+from _fusion_memory.embedding import (
+    ModelCallError,
+    cosine_similarity,
+    embed_texts,
+    extract_memory_items,
+    load_model_config,
+    rerank,
+)
+from _fusion_memory.journal import EvidenceSpan
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 
 
 def test_vector_clients_only_use_dashscope_key() -> None:
@@ -58,3 +72,95 @@ def test_cosine_similarity_is_safe_for_empty_or_mismatched_vectors() -> None:
     assert cosine_similarity([1.0, 0.0], [1.0, 0.0]) == 1.0
     assert cosine_similarity([], []) == 0.0
     assert cosine_similarity([1.0], [1.0, 2.0]) == 0.0
+
+
+@pytest.mark.parametrize("status", [429, 500])
+async def test_embedding_http_errors_are_sanitized(status: int) -> None:
+    async def reject(_request: web.Request) -> web.Response:
+        return web.json_response({"request": "secret input"}, status=status)
+
+    server = TestServer(web.Application())
+    server.app.router.add_post("/embedding", reject)
+    await server.start_server()
+    try:
+        config = load_model_config({"DASHSCOPE_API_KEY": "dash-secret"})
+        embedding = replace(config.embedding, endpoint=str(server.make_url("/embedding")))
+        with pytest.raises(ModelCallError) as raised:
+            await embed_texts(embedding, ["private request body"])
+        assert raised.value.status == status
+        assert "dash-secret" not in str(raised.value)
+        assert "private request body" not in str(raised.value)
+    finally:
+        await server.close()
+
+
+async def test_embedding_timeout_is_sanitized() -> None:
+    async def slow(_request: web.Request) -> web.Response:
+        await anyio.sleep(0.1)
+        return web.json_response({"data": [{"embedding": [1.0]}]})
+
+    server = TestServer(web.Application())
+    server.app.router.add_post("/embedding", slow)
+    await server.start_server()
+    try:
+        config = load_model_config({"DASHSCOPE_API_KEY": "dash-secret"})
+        embedding = replace(
+            config.embedding,
+            endpoint=str(server.make_url("/embedding")),
+            timeout_seconds=0.01,
+        )
+        with pytest.raises(ModelCallError) as raised:
+            await embed_texts(embedding, ["private request body"])
+        assert raised.value.status is None
+        assert "dash-secret" not in str(raised.value)
+        assert "private request body" not in str(raised.value)
+    finally:
+        await server.close()
+
+
+async def test_malformed_embedding_rerank_and_llm_responses_fail_closed() -> None:
+    async def malformed(request: web.Request) -> web.Response:
+        if request.path == "/embedding":
+            return web.json_response({"data": [{"embedding": ["not-a-number"]}]})
+        if request.path == "/rerank":
+            return web.json_response({"output": {"results": [{"index": 99, "relevance_score": 1.0}]}})
+        return web.json_response({"choices": [{"message": {"content": "not-json"}}]})
+
+    app = web.Application()
+    app.router.add_post("/{path:.*}", malformed)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        base = str(server.make_url("/")).rstrip("/")
+        config = load_model_config(
+            {
+                "DASHSCOPE_API_KEY": "dash-secret",
+                "FUSION_MEMORY_EMBEDDING_ENDPOINT": f"{base}/embedding",
+                "FUSION_MEMORY_RERANKER_ENDPOINT": f"{base}/rerank",
+                "FUSION_MEMORY_MODEL_API_KEY": "llm-secret",
+                "FUSION_MEMORY_MODEL_PROVIDER": "openai",
+                "FUSION_MEMORY_MODEL_NAME": "model",
+                "FUSION_MEMORY_MODEL_BASE_URL": f"{base}/llm",
+            }
+        )
+        evidence = EvidenceSpan(
+            "span-1",
+            "workspace-a",
+            "session-1",
+            "turn-1",
+            1,
+            "assistant",
+            "answer",
+            "hash",
+            None,
+            "history:///s1#L1",
+        )
+
+        with pytest.raises(ModelCallError):
+            await embed_texts(config, ["text"])
+        with pytest.raises(ModelCallError):
+            await rerank(config, "query", ["document"])
+        with pytest.raises(ModelCallError):
+            await extract_memory_items(config, [evidence])
+    finally:
+        await server.close()

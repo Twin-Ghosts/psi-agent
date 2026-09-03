@@ -75,6 +75,7 @@ class JsonlJournal:
         self.fsync = fsync
         self._lock = self._process_lock
         self._span_records: dict[str, bytes] = {}
+        self._active_spans: OrderedDict[str, EvidenceSpan] = OrderedDict()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
             self._recover_tail()
@@ -83,11 +84,28 @@ class JsonlJournal:
     def _recover_tail(self) -> None:
         if not self.path.exists():
             return
-        data = self.path.read_bytes()
-        if not data or data.endswith(b"\n"):
-            return
-        tail_start = data.rfind(b"\n") + 1
-        tail = data[tail_start:]
+        with self.path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            end = fh.tell()
+            if end == 0:
+                return
+            fh.seek(-1, os.SEEK_END)
+            if fh.read(1) == b"\n":
+                return
+            split_at = -1
+            cursor = end
+            while cursor > 0:
+                size = min(64 * 1024, cursor)
+                cursor -= size
+                fh.seek(cursor)
+                chunk = fh.read(size)
+                relative = chunk.rfind(b"\n")
+                if relative >= 0:
+                    split_at = cursor + relative
+                    break
+            tail_start = split_at + 1
+            fh.seek(tail_start)
+            tail = fh.read()
         try:
             record = json.loads(tail.decode("utf-8"))
         except UnicodeDecodeError, json.JSONDecodeError:
@@ -145,21 +163,41 @@ class JsonlJournal:
 
     def _refresh_index(self) -> None:
         self._span_records.clear()
+        self._active_spans.clear()
         if not self.path.exists():
             return
         for line in self.path.read_bytes().splitlines():
             try:
                 record = json.loads(line.decode("utf-8"))
-            except UnicodeDecodeError, json.JSONDecodeError:
+                if not self._recognized_record(record):
+                    continue
+                if record.get("record_type") == "evidence_span":
+                    span = EvidenceSpan(**{key: record[key] for key in _SPAN_FIELDS})
+                    canonical = canonical_json(record)
+                else:
+                    clear = ScopeClear(**{key: record[key] for key in _CLEAR_FIELDS})
+            except UnicodeDecodeError, json.JSONDecodeError, TypeError, KeyError, ValueError:
                 continue
-            if self._recognized_record(record) and record.get("record_type") == "evidence_span":
-                self._span_records[str(record["span_id"])] = canonical_json(record)
+            if record.get("record_type") == "evidence_span":
+                existing = self._span_records.get(span.span_id)
+                if existing is not None and existing != canonical:
+                    raise JournalConflictError(f"span_id conflict: {span.span_id}")
+                self._span_records[span.span_id] = canonical
+                self._active_spans[span.span_id] = span
+            else:
+                self._apply_clear(clear)
+
+    def _apply_clear(self, clear: ScopeClear) -> None:
+        for span_id, span in list(self._active_spans.items()):
+            if span.workspace_id == clear.workspace_id and (
+                clear.session_id is None or span.session_id == clear.session_id
+            ):
+                del self._active_spans[span_id]
 
     def append_spans(self, spans: Iterable[EvidenceSpan]) -> list[EvidenceSpan]:
         batch = list(spans)
         with self._lock:
             self._recover_tail()
-            self._refresh_index()
             pending: dict[str, tuple[EvidenceSpan, bytes]] = {}
             for span in batch:
                 record_bytes = canonical_json(span_to_record(span))
@@ -179,7 +217,12 @@ class JsonlJournal:
                         fh.flush()
                         os.fsync(fh.fileno())
                 self._span_records.update((item.span_id, data) for item, data in new)
+                self._active_spans.update((item.span_id, item) for item, _ in new)
             return [item for item, _ in new]
+
+    def active_spans(self, spans: Iterable[EvidenceSpan]) -> list[EvidenceSpan]:
+        with self._lock:
+            return [span for span in spans if span.span_id in self._active_spans]
 
     def append_scope_clear(self, workspace_id: str, session_id: str | None = None) -> ScopeClear:
         clear = ScopeClear(uuid.uuid4().hex, workspace_id, session_id, datetime.now(UTC).isoformat())
@@ -191,6 +234,7 @@ class JsonlJournal:
                 if self.fsync:
                     fh.flush()
                     os.fsync(fh.fileno())
+            self._apply_clear(clear)
         return clear
 
     def replay(
@@ -211,13 +255,18 @@ class JsonlJournal:
                 if not self._recognized_record(record):
                     raise ValueError
                 if record["record_type"] == "evidence_span":
-                    inserted = on_span(EvidenceSpan(**{k: record[k] for k in _SPAN_FIELDS}))
-                    counts[2 if inserted is False else 1] += 1
+                    span = EvidenceSpan(**{k: record[k] for k in _SPAN_FIELDS})
                 else:
-                    on_clear(ScopeClear(**{k: record[k] for k in _CLEAR_FIELDS}))
-                    counts[3] += 1
+                    clear = ScopeClear(**{k: record[k] for k in _CLEAR_FIELDS})
             except UnicodeDecodeError, json.JSONDecodeError, TypeError, KeyError, ValueError:
                 counts[4] += 1
+                continue
+            if record["record_type"] == "evidence_span":
+                inserted = on_span(span)
+                counts[2 if inserted is False else 1] += 1
+            else:
+                on_clear(clear)
+                counts[3] += 1
         counts[5] = tail
         return ReplayReport(*counts)
 

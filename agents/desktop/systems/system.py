@@ -1646,7 +1646,7 @@ async def system_after_turn(
     workspace = _resolve_workspace(workspace_raw, agent_raw)
     try:
         runtime = await get_runtime(str(workspace))
-        await runtime.ingest_current_session(_runtime_session_id())
+        await runtime.ingest_current_session(_runtime_session_id(), user_message, assistant_message)
     except Exception as exc:
         logger.warning("Fusion Memory after-turn ingestion degraded after %s", type(exc).__name__)
 

@@ -73,6 +73,45 @@ def test_incremental_index_does_not_replay_the_full_journal(tmp_path: Path, monk
     store.close()
 
 
+def test_retry_projects_active_span_after_sqlite_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    journal, store = opened(tmp_path)
+    span = make_span("span-1")
+    original = store._insert_span
+
+    def fail_once(_span, *, replace_conflict=False):
+        raise sqlite3.OperationalError("forced write failure")
+
+    monkeypatch.setattr(store, "_insert_span", fail_once)
+    with pytest.raises(sqlite3.OperationalError):
+        store.index_spans([span])
+    assert len(list(journal.iter_active_spans())) == 1
+
+    monkeypatch.setattr(store, "_insert_span", original)
+    assert store.index_spans([span]) == []
+    assert store.get_source_spans("workspace-a", [span.span_id]) == [span]
+    store.close()
+
+
+def test_replay_repairs_conflicting_projection_from_jsonl_authority(tmp_path: Path) -> None:
+    journal, store = opened(tmp_path)
+    span = make_span("span-1", content="authority")
+    store.index_spans([span])
+    store.conn.execute(
+        "update evidence_spans set content='tampered', content_hash='tampered' where span_id=?",
+        (span.span_id,),
+    )
+    store.conn.execute("update fts_memory set text='tampered' where doc_id=?", (span.span_id,))
+    store.conn.commit()
+
+    store.replay_journal()
+
+    assert store.get_source_spans("workspace-a", [span.span_id]) == [span]
+    assert [item.doc_id for item in store.search_fts("authority", "workspace-a")] == [span.span_id]
+    assert store.search_fts("tampered", "workspace-a") == []
+    journal.copy_to(tmp_path / "authority-copy.jsonl")
+    store.close()
+
+
 def test_promote_card_embeddings_and_checkpoint_round_trip(tmp_path: Path) -> None:
     _, store = opened(tmp_path)
     store.index_spans([make_span("u", content="用户偏好", line_no=1), make_span("a", content="助手记住", line_no=2)])
@@ -90,22 +129,104 @@ def test_promote_card_embeddings_and_checkpoint_round_trip(tmp_path: Path) -> No
     assert {row[0] for row in pending} == {"evidence", "memory_item"}
     assert store.write_embeddings("workspace-a", "text-embedding-v4", {("evidence", "u"): [1.0, 0.0]}) == 1
     checkpoint = IngestCheckpoint(
-        "workspace-a", "/history.jsonl", "session-1", 2, "abc", 42, 9, 2, 0, "2026-09-03T12:00:00+00:00"
+        workspace_id="workspace-a",
+        history_path="/history.jsonl",
+        session_id="session-1",
+        confirmed_line_count=2,
+        prefix_hash="abc",
+        file_size=42,
+        mtime_ns=9,
+        extraction_line=2,
+        embedding_line=0,
+        card_line=2,
+        updated_at="2026-09-03T12:00:00+00:00",
     )
     store.write_checkpoint(checkpoint)
     assert store.read_checkpoint("workspace-a", "/history.jsonl") == checkpoint
     store.close()
 
 
+def test_turn_card_failure_rolls_back_shared_connection(tmp_path: Path) -> None:
+    _, store = opened(tmp_path)
+    store.index_spans([make_span("u", line_no=1), make_span("a", line_no=2)])
+    store.conn.execute(
+        "create trigger reject_card before insert on summary_cards "
+        "begin select raise(abort, 'forced card failure'); end"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        store.upsert_turn_card("workspace-a", "turn-1", "user", "assistant", ["u", "a"])
+    assert not store.conn.in_transaction
+    store.conn.execute("drop trigger reject_card")
+    store.index_spans([make_span("after-card")])
+    store.close()
+
+
+def test_checkpoint_failure_rolls_back_shared_connection(tmp_path: Path) -> None:
+    _, store = opened(tmp_path)
+    checkpoint = IngestCheckpoint("workspace-a", "/history.jsonl", "session-1", 2, "abc", 42, 9)
+    store.conn.execute(
+        "create trigger reject_checkpoint before insert on ingest_checkpoints "
+        "begin select raise(abort, 'forced checkpoint failure'); end"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        store.write_checkpoint(checkpoint)
+    assert not store.conn.in_transaction
+    store.conn.execute("drop trigger reject_checkpoint")
+    store.index_spans([make_span("after-checkpoint")])
+    store.close()
+
+
 def test_scope_clear_replay_and_source_boundary(tmp_path: Path) -> None:
     journal, store = opened(tmp_path)
     store.index_spans([make_span("local")])
+    store.promote("workspace-a", ["local"], "fact", 1.0)
+    store.upsert_turn_card("workspace-a", "turn-1", "user", "assistant", ["local"])
     journal.append_spans([make_span("foreign", "workspace-b")])
     journal.append_scope_clear("workspace-a")
-    store.rebuild_index()
+    store.replay_journal()
     assert list(store.get_source_spans("workspace-a", ["local"])) == []
+    assert store.conn.execute("select count(*) from memory_items").fetchone()[0] == 0
+    assert store.conn.execute("select count(*) from summary_cards").fetchone()[0] == 0
+    assert store.conn.execute("select count(*) from fts_memory").fetchone()[0] == 0
     with pytest.raises(ValueError):
         store.promote("workspace-a", ["foreign"], "fact", 1.0)
+    store.close()
+
+
+def test_failed_rebuild_preserves_active_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    journal, store = opened(tmp_path)
+    span = make_span("local")
+    store.index_spans([span])
+
+    def fail_replay(*_args, **_kwargs):
+        raise sqlite3.OperationalError("forced replay failure")
+
+    monkeypatch.setattr(journal, "replay", fail_replay)
+    with pytest.raises(sqlite3.OperationalError):
+        store.rebuild_index()
+
+    assert store.get_source_spans("workspace-a", [span.span_id]) == [span]
+    store.close()
+
+
+def test_rebuild_clears_derived_rows_and_resets_derivation_progress(tmp_path: Path) -> None:
+    _, store = opened(tmp_path)
+    span = make_span("local")
+    store.index_spans([span])
+    store.promote("workspace-a", [span.span_id], "fact", 1.0)
+    store.upsert_turn_card("workspace-a", "turn-1", "user", "assistant", [span.span_id])
+    checkpoint = IngestCheckpoint("workspace-a", "/history.jsonl", "session-1", 2, "abc", 42, 9, 2, 2, 2)
+    store.write_checkpoint(checkpoint)
+
+    store.rebuild_index()
+
+    assert store.conn.execute("select count(*) from memory_items").fetchone()[0] == 0
+    assert store.conn.execute("select count(*) from summary_cards").fetchone()[0] == 0
+    restored = store.read_checkpoint("workspace-a", "/history.jsonl")
+    assert restored is not None
+    assert restored.extraction_line == 0
+    assert restored.embedding_line == 0
+    assert restored.card_line == 0
     store.close()
 
 
@@ -138,3 +259,19 @@ def test_legacy_database_and_journal_are_backed_up_without_row_conversion(tmp_pa
     assert list(tmp_path.glob("memory.sqlite3.legacy-*"))
     assert list(tmp_path.glob("evidence.jsonl.legacy-*"))
     store.close()
+
+
+def test_version_one_database_with_unknown_table_is_migrated(tmp_path: Path) -> None:
+    journal, store = opened(tmp_path)
+    store.close()
+    with sqlite3.connect(tmp_path / "memory.sqlite3") as connection:
+        connection.execute("create table rogue_business_data (value text)")
+        connection.execute("insert into rogue_business_data values ('do-not-keep-active')")
+        connection.execute("pragma user_version = 1")
+
+    migrated = MemoryStore(tmp_path / "memory.sqlite3", journal, "workspace-a").open()
+
+    names = {row[0] for row in migrated.conn.execute("select name from sqlite_master where type='table'")}
+    assert "rogue_business_data" not in names
+    assert list(tmp_path.glob("memory.sqlite3.legacy-*"))
+    migrated.close()

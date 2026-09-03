@@ -67,6 +67,30 @@ def test_batch_preflight_does_not_append_on_conflict(tmp_path: Path) -> None:
     assert [s.span_id for s in journal.iter_active_spans()] == ["span-1"]
 
 
+def test_initialization_rejects_conflicting_authority_records(tmp_path: Path) -> None:
+    path = tmp_path / "j.jsonl"
+    path.write_bytes(
+        canonical_json(span_to_record(span()))
+        + b"\n"
+        + canonical_json(span_to_record(span(content="different")))
+        + b"\n"
+    )
+
+    with pytest.raises(JournalConflictError):
+        JsonlJournal(path, fsync=False)
+
+
+def test_incremental_append_does_not_read_the_whole_journal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    journal = JsonlJournal(tmp_path / "j.jsonl", fsync=False)
+    journal.append_spans([span()])
+
+    def reject_full_read(_path: Path) -> bytes:
+        raise AssertionError("incremental append must inspect only the journal tail")
+
+    monkeypatch.setattr(Path, "read_bytes", reject_full_read)
+    assert journal.append_spans([span("span-2")]) == [span("span-2")]
+
+
 def test_replay_skips_complete_malformed_lines_and_copy_preserves_bytes(tmp_path: Path) -> None:
     path = tmp_path / "j.jsonl"
     journal = JsonlJournal(path, fsync=False)

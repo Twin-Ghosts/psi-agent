@@ -57,7 +57,7 @@ async def test_cross_session_workspace_isolation_and_jsonl_recovery(
     monkeypatch.delenv("PSI_AI_API_KEY", raising=False)
 
     runtime_a = await get_runtime(str(workspace_a))
-    assert (await runtime_a.ingest_current_session("session-1"))["ok"] is True
+    assert (await runtime_a.ingest_current_session("session-1", mixed[1], mixed[4]))["ok"] is True
     with runtime_scope(session_id="session-2", workspace=str(workspace_a), agent=str(workspace_a)):
         first = await runtime_a.first_turn_recall("session-2", "Quartz-927")
         assert "Quartz-927" in first and "session_id=session-1" in first
@@ -75,7 +75,7 @@ async def test_cross_session_workspace_isolation_and_jsonl_recovery(
     journal_path = workspace_a / ".fusion-memory" / "evidence.jsonl"
     records = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
     assert {record["record_type"] for record in records} == {"evidence_span"}
-    assert {record["content"] for record in records} == {valid_user, valid_assistant}
+    assert {record["content"] for record in records} == {valid_user + "\n", valid_assistant}
     authority = journal_path.read_text(encoding="utf-8")
     assert not any(term in authority for term in ["tool output", "thinking", "HEARTBEAT_OK", "summary"])
 

@@ -29,14 +29,10 @@ async def test_cache_is_workspace_scoped_and_survives_session_restart(
     (appdata / "histories").mkdir(parents=True)
     (appdata / "state").mkdir()
     history = appdata / "histories" / "s1.jsonl"
+    user_message = {"role": "user", "content": "我使用 PostgreSQL", "kind": "chat"}
+    assistant_message = {"role": "assistant", "content": "已记录数据库偏好", "kind": "chat"}
     history.write_text(
-        "\n".join(
-            [
-                json.dumps({"role": "user", "content": "我使用 PostgreSQL", "kind": "chat"}, ensure_ascii=False),
-                json.dumps({"role": "assistant", "content": "已记录数据库偏好", "kind": "chat"}, ensure_ascii=False),
-            ]
-        )
-        + "\n",
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in (user_message, assistant_message)) + "\n",
         encoding="utf-8",
     )
     (appdata / "state" / "latest.json").write_text(
@@ -50,7 +46,7 @@ async def test_cache_is_workspace_scoped_and_survives_session_restart(
     assert runtime_a1 is runtime_a2
     assert runtime_a1 is not runtime_b
     assert runtime_a1.workspace_id != runtime_b.workspace_id
-    assert (await runtime_a1.ingest_current_session("s1"))["ok"] is True
+    assert (await runtime_a1.ingest_current_session("s1", user_message, assistant_message))["ok"] is True
     hits = await runtime_a1.search("PostgreSQL")
     assert hits and hits[0].session_id == "s1"
     assert await runtime_b.search("PostgreSQL") == []
@@ -99,7 +95,7 @@ async def test_concurrent_first_use_creates_one_runtime(tmp_path: Path, monkeypa
 
 
 @pytest.mark.anyio
-async def test_extraction_checkpoint_advances_one_bounded_turn_batch(
+async def test_only_hook_confirmed_turn_is_derived_and_recovery_is_bounded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -124,16 +120,17 @@ async def test_extraction_checkpoint_advances_one_bounded_turn_batch(
     monkeypatch.delenv("PSI_AI_API_KEY", raising=False)
     runtime = await get_runtime(str(workspace))
 
-    assert (await runtime.ingest_current_session("s1"))["ok"] is True
+    assert (await runtime.ingest_current_session("s1", rows[-2], rows[-1]))["ok"] is True
     assert runtime.store is not None
     checkpoint = runtime.store.read_checkpoint(runtime.workspace_id, str(history.resolve()))
     assert checkpoint is not None and checkpoint.extraction_line == 0
-    assert runtime.store.conn.execute("select count(*) from summary_cards").fetchone()[0] == 8
+    assert checkpoint.confirmed_line_count == 20
+    assert runtime.store.conn.execute("select count(*) from summary_cards").fetchone()[0] == 1
 
-    assert (await runtime.ingest_current_session("s1"))["ok"] is True
+    assert (await runtime.ingest_current_session("s1", rows[-2], rows[-1]))["ok"] is True
     checkpoint = runtime.store.read_checkpoint(runtime.workspace_id, str(history.resolve()))
     assert checkpoint is not None and checkpoint.extraction_line == 0
-    assert runtime.store.conn.execute("select count(*) from summary_cards").fetchone()[0] == 10
+    assert runtime.store.conn.execute("select count(*) from summary_cards").fetchone()[0] == 1
 
     await reset_runtime_cache_for_tests()
     monkeypatch.setenv("PSI_AI_PROVIDER", "openai")
@@ -148,16 +145,84 @@ async def test_extraction_checkpoint_advances_one_bounded_turn_batch(
 
     monkeypatch.setattr(runtime_module, "extract_memory_items", extract)
     runtime = await get_runtime(str(workspace))
-    assert (await runtime.ingest_current_session("s1"))["ok"] is True
+    assert (await runtime.ingest_current_session("s1", rows[-2], rows[-1]))["ok"] is True
     assert runtime.store is not None
     checkpoint = runtime.store.read_checkpoint(runtime.workspace_id, str(history.resolve()))
-    assert checkpoint is not None and checkpoint.extraction_line == 16
-    assert len(extracted_lines) == 8
+    assert checkpoint is not None and checkpoint.extraction_line == 20
+    assert len(extracted_lines) == 1
 
-    assert (await runtime.ingest_current_session("s1"))["ok"] is True
+    assert (await runtime.ingest_current_session("s1", rows[-2], rows[-1]))["ok"] is True
     checkpoint = runtime.store.read_checkpoint(runtime.workspace_id, str(history.resolve()))
     assert checkpoint is not None and checkpoint.extraction_line == 20
-    assert len(extracted_lines) == 10
+    assert len(extracted_lines) == 1
+
+
+@pytest.mark.anyio
+async def test_ingest_without_successful_hook_provenance_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    appdata = tmp_path / "appdata"
+    histories = appdata / "histories"
+    histories.mkdir(parents=True)
+    (histories / "s1.jsonl").write_text(
+        json.dumps({"role": "assistant", "content": "unproven history text", "kind": "chat"}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PSI_APPDATA", str(appdata))
+    monkeypatch.setenv("FUSION_MEMORY_JOURNAL_FSYNC", "0")
+    runtime = await get_runtime(str(workspace))
+
+    assert await runtime.ingest_current_session("s1") == {"ok": False, "unconfirmed": True}
+    assert runtime.store is not None
+    assert runtime.store.conn.execute("select count(*) from evidence_spans").fetchone()[0] == 0
+
+
+@pytest.mark.anyio
+async def test_turn_card_failure_retries_from_confirmed_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    appdata = tmp_path / "appdata"
+    histories = appdata / "histories"
+    histories.mkdir(parents=True)
+    history = histories / "s1.jsonl"
+    rows = []
+    for turn in range(10):
+        rows.extend(
+            (
+                {"role": "user", "content": f"question {turn}", "kind": "chat"},
+                {"role": "assistant", "content": f"answer {turn}", "kind": "chat"},
+            )
+        )
+    history.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    monkeypatch.setenv("PSI_APPDATA", str(appdata))
+    monkeypatch.setenv("FUSION_MEMORY_JOURNAL_FSYNC", "0")
+    monkeypatch.delenv("FUSION_MEMORY_MODEL_API_KEY", raising=False)
+    monkeypatch.delenv("PSI_AI_API_KEY", raising=False)
+    runtime = await get_runtime(str(workspace))
+    assert runtime.store is not None
+    original = runtime.store.upsert_turn_card
+    calls = 0
+
+    def fail_once(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("temporary card failure")
+        return original(*args)
+
+    monkeypatch.setattr(runtime.store, "upsert_turn_card", fail_once)
+    assert (await runtime.ingest_current_session("s1", rows[-2], rows[-1]))["ok"] is True
+    checkpoint = runtime.store.read_checkpoint(runtime.workspace_id, str(history.resolve()))
+    assert checkpoint is not None and checkpoint.card_line == 0
+
+    assert (await runtime.ingest_current_session("s1", rows[-2], rows[-1]))["ok"] is True
+    checkpoint = runtime.store.read_checkpoint(runtime.workspace_id, str(history.resolve()))
+    assert checkpoint is not None and checkpoint.card_line == 20
+    assert calls == 2
 
 
 @pytest.mark.anyio
@@ -198,13 +263,17 @@ async def test_failed_extraction_is_retried_without_blocking_turn_card(
     monkeypatch.setattr(runtime_module, "extract_memory_items", extract)
     runtime = await get_runtime(str(workspace))
 
-    assert (await runtime.ingest_current_session("s1"))["ok"] is True
+    user_message = {"role": "user", "content": "question", "kind": "chat"}
+    assistant_message = {"role": "assistant", "content": "answer", "kind": "chat"}
+    assert (await runtime.ingest_current_session("s1", user_message, assistant_message))["ok"] is True
     assert runtime.store is not None
     checkpoint = runtime.store.read_checkpoint(runtime.workspace_id, str(history.resolve()))
     assert checkpoint is not None and checkpoint.extraction_line == 0
+    assert checkpoint.card_line == 2
     assert runtime.store.conn.execute("select count(*) from summary_cards").fetchone()[0] == 1
 
-    assert (await runtime.ingest_current_session("s1"))["ok"] is True
+    assert (await runtime.ingest_current_session("s1", user_message, assistant_message))["ok"] is True
     checkpoint = runtime.store.read_checkpoint(runtime.workspace_id, str(history.resolve()))
     assert checkpoint is not None and checkpoint.extraction_line == 2
+    assert checkpoint.card_line == 2
     assert calls == 2
