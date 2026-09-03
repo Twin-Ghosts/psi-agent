@@ -87,6 +87,15 @@ def read_lines(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def tmp_files(directory: Path) -> list[Path]:
+    """Leftover ``.jsonl.tmp`` files, listed from a sync helper.
+
+    A blocking ``pathlib`` call in an async body is ASYNC240, and the repo
+    keeps those out of coroutines rather than silencing the rule.
+    """
+    return list(directory.glob("*.tmp"))
+
+
 @pytest.fixture
 def counter(monkeypatch: pytest.MonkeyPatch) -> WriteCounter:
     c = WriteCounter()
@@ -98,9 +107,7 @@ def counter(monkeypatch: pytest.MonkeyPatch) -> WriteCounter:
 
 
 @pytest.mark.anyio
-async def test_append_writes_only_the_new_line_not_the_whole_history(
-    tmp_path: Path, counter: WriteCounter
-) -> None:
+async def test_append_writes_only_the_new_line_not_the_whole_history(tmp_path: Path, counter: WriteCounter) -> None:
     """A second commit must not re-write the first (large) message.
 
     This is the assertion that goes red if ``save()`` reverts to a full
@@ -135,7 +142,7 @@ async def test_append_does_not_go_through_a_tmp_file(tmp_path: Path, counter: Wr
     await conv.commit()
 
     assert not [p for p, _ in counter.opened if p.endswith(".tmp")]
-    assert list(tmp_path.glob("*.tmp")) == []
+    assert tmp_files(tmp_path) == []
 
 
 @pytest.mark.anyio
@@ -399,7 +406,7 @@ async def test_save_then_load_round_trip(tmp_path: Path) -> None:
     conv = Conversation(path=path)
     conv.add({"role": "system", "content": "sys"})
     await conv.commit()
-    conv.add({"role": "user", "content": "中文 with \"quotes\" and \\ backslash"})
+    conv.add({"role": "user", "content": '中文 with "quotes" and \\ backslash'})
     await conv.commit()
     conv.add({"role": "assistant", "content": "multi\nline\tvalue", "tool_calls": [{"id": "1"}]})
     await conv.commit()
@@ -511,9 +518,7 @@ async def test_second_writer_on_the_same_file_is_detected(tmp_path: Path) -> Non
 
 
 @pytest.mark.anyio
-async def test_failed_append_recovers_on_the_next_commit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_failed_append_recovers_on_the_next_commit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A partial append (disk full, I/O error) leaves the file in a state the
     recorded size no longer describes.  ``save`` swallows the error, so the
     *next* commit must rewrite rather than append onto that unknown tail."""
