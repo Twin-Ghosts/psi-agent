@@ -30,6 +30,7 @@ SOP_SKILLS = (
     "todo-completion-standard",
     "company-todo-review",
     "todo-alignment-check",
+    "todo-growth-profile",
 )
 
 
@@ -85,6 +86,12 @@ def test_alignment_section_is_present() -> None:
     cfg = _config()["alignment"]
     assert len(cfg["verdicts"]) == 4
     assert list(cfg["dimensions"]) == ["A1", "A2", "A3", "A4", "A5", "A6"]
+
+
+def test_growth_section_is_present() -> None:
+    growth = _config()["growth"]
+    assert isinstance(growth["indicators"], list) and growth["indicators"], "growth.indicators must be a non-empty list"
+    assert growth["min_cycles"] >= 1, "growth.min_cycles must be at least 1"
 
 
 def test_judgment_skills_point_at_the_config() -> None:

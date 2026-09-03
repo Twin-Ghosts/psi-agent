@@ -96,3 +96,14 @@ alignment:
     A4: 用户价值
     A5: 外部成果/友商对比
     A6: 验收
+
+growth:
+  min_cycles: 3
+  indicators:
+    - 闭环率
+    - 按时率
+    - 回流次数
+    - 持续逾期段
+    - mentor打分趋势
+    - 承担层级迁移
+    - 外部成果累计
