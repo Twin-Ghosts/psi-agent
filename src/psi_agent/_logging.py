@@ -3,7 +3,7 @@ from __future__ import annotations
 import glob
 import os
 import sys
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import platformdirs
 from loguru import logger
