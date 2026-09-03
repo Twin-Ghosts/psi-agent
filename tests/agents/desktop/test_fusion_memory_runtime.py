@@ -96,3 +96,41 @@ async def test_concurrent_first_use_creates_one_runtime(tmp_path: Path, monkeypa
         group.start_soon(load)
     assert len(results) == 2 and results[0] is results[1]
     assert count == 1
+
+
+@pytest.mark.anyio
+async def test_extraction_checkpoint_advances_one_bounded_turn_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    appdata = tmp_path / "appdata"
+    histories = appdata / "histories"
+    histories.mkdir(parents=True)
+    history = histories / "s1.jsonl"
+    rows = []
+    for turn in range(1, 11):
+        rows.extend(
+            (
+                {"role": "user", "content": f"question {turn}", "kind": "chat"},
+                {"role": "assistant", "content": f"answer {turn}", "kind": "chat"},
+            )
+        )
+    history.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    monkeypatch.setenv("PSI_APPDATA", str(appdata))
+    monkeypatch.setenv("FUSION_MEMORY_JOURNAL_FSYNC", "0")
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.delenv("FUSION_MEMORY_MODEL_API_KEY", raising=False)
+    monkeypatch.delenv("PSI_AI_API_KEY", raising=False)
+    runtime = await get_runtime(str(workspace))
+
+    assert (await runtime.ingest_current_session("s1"))["ok"] is True
+    assert runtime.store is not None
+    checkpoint = runtime.store.read_checkpoint(runtime.workspace_id, str(history.resolve()))
+    assert checkpoint is not None and checkpoint.extraction_line == 16
+    assert runtime.store.conn.execute("select count(*) from summary_cards").fetchone()[0] == 8
+
+    assert (await runtime.ingest_current_session("s1"))["ok"] is True
+    checkpoint = runtime.store.read_checkpoint(runtime.workspace_id, str(history.resolve()))
+    assert checkpoint is not None and checkpoint.extraction_line == 20
+    assert runtime.store.conn.execute("select count(*) from summary_cards").fetchone()[0] == 10

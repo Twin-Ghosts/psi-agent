@@ -17,9 +17,11 @@ from .embedding import ModelConfig, embed_texts, extract_memory_items, load_mode
 from .ingest import discover_histories, ingest_histories, parse_completed_turns, workspace_scope
 from .journal import EvidenceSpan, JsonlJournal
 from .retrieval import AnswerContext, EvidenceHit, build_answer_context, render_first_recall, search_evidence
-from .store import MemoryItem, MemoryStore
+from .store import IngestCheckpoint, MemoryItem, MemoryStore
 
 logger = logging.getLogger(__name__)
+
+_EXTRACTION_TURN_LIMIT = 8
 
 
 def _parse_bool(value: str | None, *, default: bool) -> bool:
@@ -93,58 +95,70 @@ class MemoryRuntime:
                 scope = workspace_scope(self.settings.workspace)
                 sources = await discover_histories(scope, session_id, appdata)
                 report = await to_thread.run_sync(ingest_histories, store, scope, sources)
-                spans_by_turn: dict[str, list[EvidenceSpan]] = {}
-                extraction_checkpoints = []
+                source_batches: list[tuple[IngestCheckpoint, list[list[EvidenceSpan]]]] = []
                 for source in sources:
                     checkpoint = await to_thread.run_sync(
                         store.read_checkpoint, self.workspace_id, str(source.path.resolve())
                     )
                     if checkpoint is None:
                         continue
-                    extraction_checkpoints.append(checkpoint)
+                    spans_by_turn: dict[str, list[EvidenceSpan]] = {}
                     for span in await to_thread.run_sync(
                         parse_completed_turns, scope, source, checkpoint.extraction_line + 1
                     ):
                         spans_by_turn.setdefault(span.turn_id, []).append(span)
-                if self.models.llm is not None:
-                    for spans in list(spans_by_turn.values())[-8:]:
-                        try:
-                            drafts = await extract_memory_items(self.models, spans)
-                            items = [
-                                MemoryItem(
-                                    item_id=hashlib.sha256(
-                                        f"{draft.kind}|{'|'.join(draft.source_span_ids)}|{draft.text}".encode()
-                                    ).hexdigest(),
-                                    workspace_id=self.workspace_id,
-                                    kind=draft.kind,
-                                    text=draft.text,
-                                    confidence=draft.confidence,
-                                    salience=draft.salience,
-                                    source_span_ids=draft.source_span_ids,
-                                    model=self.models.llm.model,
-                                )
-                                for draft in drafts
-                            ]
-                            if items:
-                                await to_thread.run_sync(store.upsert_memory_items, self.workspace_id, items)
-                        except Exception as exc:
-                            self._warn("extraction", exc)
-                for turn_id, raw_spans in spans_by_turn.items():
-                    spans = sorted(raw_spans, key=lambda span: span.line_no)
-                    users = [span for span in spans if span.speaker == "user"]
-                    assistants = [span for span in spans if span.speaker == "assistant"]
-                    if users and assistants:
+                    batch = list(spans_by_turn.values())[:_EXTRACTION_TURN_LIMIT]
+                    if batch:
+                        source_batches.append((checkpoint, batch))
+                for checkpoint, batch in source_batches:
+                    if self.models.llm is not None:
+                        for spans in batch:
+                            try:
+                                drafts = await extract_memory_items(self.models, spans)
+                                items = [
+                                    MemoryItem(
+                                        item_id=hashlib.sha256(
+                                            f"{draft.kind}|{'|'.join(draft.source_span_ids)}|{draft.text}".encode()
+                                        ).hexdigest(),
+                                        workspace_id=self.workspace_id,
+                                        kind=draft.kind,
+                                        text=draft.text,
+                                        confidence=draft.confidence,
+                                        salience=draft.salience,
+                                        source_span_ids=draft.source_span_ids,
+                                        model=self.models.llm.model,
+                                    )
+                                    for draft in drafts
+                                ]
+                                if items:
+                                    await to_thread.run_sync(store.upsert_memory_items, self.workspace_id, items)
+                            except Exception as exc:
+                                self._warn("extraction", exc)
+                    extraction_line = checkpoint.extraction_line
+                    for raw_spans in batch:
+                        spans = sorted(raw_spans, key=lambda span: span.line_no)
+                        users = [span for span in spans if span.speaker == "user"]
+                        assistants = [span for span in spans if span.speaker == "assistant"]
+                        if not users or not assistants:
+                            break
                         try:
                             await to_thread.run_sync(
                                 store.upsert_turn_card,
                                 self.workspace_id,
-                                turn_id,
+                                spans[0].turn_id,
                                 users[0].content,
                                 assistants[-1].content,
                                 [span.span_id for span in spans],
                             )
                         except Exception as exc:
                             self._warn("card", exc)
+                            break
+                        extraction_line = assistants[-1].line_no
+                    if extraction_line > checkpoint.extraction_line:
+                        await to_thread.run_sync(
+                            store.write_checkpoint,
+                            replace(checkpoint, extraction_line=extraction_line, updated_at=""),
+                        )
                 if self.models.embedding.api_key:
                     try:
                         pending = await to_thread.run_sync(store.pending_embeddings, self.workspace_id, 32)
@@ -160,16 +174,6 @@ class MemoryRuntime:
                             )
                     except Exception as exc:
                         self._warn("embedding", exc)
-                for checkpoint in extraction_checkpoints:
-                    if checkpoint.extraction_line < checkpoint.confirmed_line_count:
-                        await to_thread.run_sync(
-                            store.write_checkpoint,
-                            replace(
-                                checkpoint,
-                                extraction_line=checkpoint.confirmed_line_count,
-                                updated_at="",
-                            ),
-                        )
                 return {"ok": True, **asdict(report)}
             except Exception as exc:
                 self._warn("ingest", exc)

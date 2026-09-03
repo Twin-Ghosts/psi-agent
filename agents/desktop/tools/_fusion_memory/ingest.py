@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -175,7 +176,7 @@ async def discover_histories(scope: WorkspaceScope, current_session_id: str, app
     discovered: dict[str, HistorySource] = {}
 
     async def add(session_id: str, path: Path) -> None:
-        if not session_id or not await anyio.Path(path).is_file():
+        if re.fullmatch(r"[a-zA-Z0-9_-]+", session_id) is None or not await anyio.Path(path).is_file():
             return
         key = await to_thread.run_sync(lambda: os.path.normcase(os.path.realpath(os.fspath(path))))
         discovered.setdefault(key, HistorySource(session_id, path))

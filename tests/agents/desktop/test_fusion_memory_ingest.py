@@ -118,3 +118,21 @@ async def test_discover_histories_filters_gateway_sessions_by_workspace(tmp_path
     )
     found = await discover_histories(workspace_scope(workspace_a), "s1", appdata)
     assert {item.session_id for item in found} == {"s1"}
+
+
+@pytest.mark.anyio
+async def test_discover_histories_rejects_unsafe_state_session_id(tmp_path: Path) -> None:
+    appdata = tmp_path / "appdata"
+    (appdata / "histories").mkdir(parents=True)
+    (appdata / "outside.jsonl").write_text("{}\n", encoding="utf-8")
+    (appdata / "state").mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (appdata / "state" / "latest.json").write_text(
+        json.dumps({"sessions": [{"id": "../outside", "workspace": str(workspace)}]}),
+        encoding="utf-8",
+    )
+
+    found = await discover_histories(workspace_scope(workspace), "current", appdata)
+
+    assert found == []
