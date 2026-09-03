@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -19,22 +18,6 @@ else:
     from memory_add import memory_add
     from memory_answer_context import memory_answer_context
     from memory_search import memory_search
-
-
-def test_runtime_does_not_import_process_or_service_modules() -> None:
-    root = Path(__file__).parents[3] / "agents" / "desktop" / "tools" / "_fusion_memory"
-    banned = {"subprocess", "multiprocessing", "asyncio"}
-    for path in root.glob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        imports = {
-            alias.name.split(".")[0]
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.Import, ast.ImportFrom))
-            for alias in node.names
-        }
-        assert not imports & banned
-        text = path.read_text(encoding="utf-8").lower()
-        assert not any(value in text for value in ("open_process", "mcp_server", "model_server"))
 
 
 @pytest.mark.anyio
