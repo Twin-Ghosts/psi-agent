@@ -144,7 +144,11 @@ def _extract_code(code_or_url: str) -> str:
     return s
 
 
-async def auth_start_impl(capabilities: str = "", user_key: str = "") -> dict[str, Any]:
+async def auth_start_impl(
+    capabilities: str = "",
+    user_key: str = "",
+    chat_id: str = "",
+) -> dict[str, Any]:
     """Build the browser authorize URL, asking only for the capabilities needed, and
     pick an automatic code-receiving channel.
 
@@ -152,6 +156,10 @@ async def auth_start_impl(capabilities: str = "", user_key: str = "") -> dict[st
     自动接收通道 (Gateway 回调 → 本机回环 → 都不行才手工), 把 ``state`` / PKCE
     verifier / 通道信息一并写进 pending 文件, 供后台 watcher (``auth_collect_impl``)、
     ``auth_check_impl`` 与 ``auth_complete_impl`` 取用。
+
+    可选的 ``chat_id`` (当前会话的 ``oc_`` 聊天 id) 会拼进 ``state`` 尾巴: 授权落地页
+    由此知道用户该回到哪个对话, 渲染「回到飞书对话」深链按钮 (applink) —— 否则用户
+    授权完只能手动关页回飞书。
 
     The requested scope is the UNION of what this user already granted and what
     ``capabilities`` asks for: Feishu issues a token carrying exactly the scopes of
@@ -170,6 +178,9 @@ async def auth_start_impl(capabilities: str = "", user_key: str = "") -> dict[st
     already = _core.granted_capabilities(user_key)
     union = [c for c in _core.scope_catalog_keys() if c in {*already, *requested}]
     state = os.urandom(24).hex()
+    chat = (chat_id or "").strip()
+    if chat:
+        state = f"{state}.{chat}"
     verifier, challenge = _new_pkce_pair()
     # 先撤掉上一轮的 watcher 并等它收尾, **再**选通道: 新一轮授权作废旧 state, 旧 watcher
     # 再守也只会等到一个过期的码, 而它守着的结果还会被 auth_collect 当成本次的状态报出去。
@@ -185,6 +196,7 @@ async def auth_start_impl(capabilities: str = "", user_key: str = "") -> dict[st
                 "code_verifier": verifier,
                 "redirect_uri": plan.redirect_uri,
                 "mode": plan.mode,
+                "chat_id": chat,
                 "capabilities": union,
             }
         ),
@@ -333,6 +345,7 @@ async def auth_card_impl(
     capabilities: str = "",
     reason: str = "",
     receive_id: str = "",
+    chat_id: str = "",
 ) -> dict[str, Any]:
     """Send ``user_key`` an authorization card instead of a bare authorize URL.
 
@@ -361,7 +374,7 @@ async def auth_card_impl(
             "群场景请先私聊该用户.",
             receive_id=target,
         )
-    started = await auth_start_impl(capabilities, key)
+    started = await auth_start_impl(capabilities, key, chat_id)
     if not started.get("ok"):
         return started
     if not started.get("auto_receive"):
@@ -470,6 +483,7 @@ async def auth_request_impl(
     capabilities: str = "",
     reason: str = "",
     receive_id: str = "",
+    chat_id: str = "",
 ) -> dict[str, Any]:
     """Ask this user to authorize, using the best method the environment allows.
 
@@ -500,7 +514,7 @@ async def auth_request_impl(
         "" if target.startswith("ou_") else f"没有可私聊的 open_id (receive_id={target!r} 不是 ou_ 开头), 卡片无处可发"
     )
     if not card_skip:
-        card = await auth_card_impl(key, capabilities, reason, target)
+        card = await auth_card_impl(key, capabilities, reason, target, chat_id)
         if card.get("ok"):
             tiered = {**card, "tier": TIER_CARD, "tier_label": _TIER_LABEL[TIER_CARD]}
             if card.get("callback_is_private"):
@@ -513,7 +527,7 @@ async def auth_request_impl(
         # tier 2 cannot work either — go straight to tier 3 and say so.
         card_skip = str(card.get("message") or "卡片发送失败")
         if card.get("manual_required"):
-            started = await auth_start_impl(capabilities, key)
+            started = await auth_start_impl(capabilities, key, chat_id)
             if not started.get("ok"):
                 return started
             return {
@@ -526,7 +540,7 @@ async def auth_request_impl(
             }
 
     # Tier 2/3: the plain link. auto_receive decides which of the two we actually got.
-    started = await auth_start_impl(capabilities, key)
+    started = await auth_start_impl(capabilities, key, chat_id)
     if not started.get("ok"):
         return started
     tier = TIER_LINK if started.get("auto_receive") else TIER_MANUAL

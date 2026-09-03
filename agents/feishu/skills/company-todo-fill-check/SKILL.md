@@ -6,6 +6,8 @@ category: productivity
 
 # TODO 填报情况判定(空白 ≠ 没填)
 
+> 判定口径读 `config/todo-sop.yaml`，用户可编辑，换公司只改此文件；本文保留引擎与通用纪律，参数值以该文件为准。
+
 回答「谁没填 todo」「我的填报是否合规」这类问题时,**表格里的空白格子不是结论,是一个待查的问号**。
 同一个空白有三种完全不同的成因,处置也不同:
 
@@ -37,8 +39,8 @@ feishu_leave_query(approval_code=<请假模板 code>, date_from=<最早空白日
 
 | 用途 | approval_code |
 |---|---|
-| 请假 Leave | `99EEC396-536A-4C7A-8B2D-412584E35CE3` |
-| 补卡 | `09D3F0F3-2A0B-4E05-B40D-9D5565D2A27B` |
+| 请假 Leave | `config/todo-sop.yaml` 的 `leave.leave_approval_code`(当前 `99EEC396-536A-4C7A-8B2D-412584E35CE3`) |
+| 补卡 | `config/todo-sop.yaml` 的 `leave.makeup_approval_code`(当前 `09D3F0F3-2A0B-4E05-B40D-9D5565D2A27B`) |
 
 拿不到或换了租户:`feishu_api` 打 `GET /open-apis/approval/v4/tasks/query`(带 `topic=3`),
 看返回里的 `definition_code` / `process_code`。
@@ -127,6 +129,21 @@ feishu_leave_query(approval_code=<请假模板 code>, date_from=<最早空白日
 查假硬顺序,三类产出直接对应过去(**缺写 = 违规,请假免填 = 不违规,待人工确认 = 不判违规**)。
 所以顺序是**先本技能、再那边的其余规则**。
 
+## 填了之后问「是不是真的」:再换口径
+
+本技能只判**填没填**。用户接着问「他这条写得是不是真的」「实事求是吗」「有没有弄虚作假」时,
+**再换 [`todo-truthfulness-check`]**(静态二层:声明-事实对照,四档
+`属实` / `存疑／待跟进` / `失实(涉嫌弄虚作假)` / `无法跟进`)。
+
+分界一句话:**缺写 ≠ 失实** —— 本技能产出的「缺写」只证明"那一期没填",不是「写了假的」的
+证据;写了的东西真不真,要靠任务进度 / 交付物 / 验收事实去对(见 `todo-truthfulness-check`
+的 D1 可跟进性与 D3 进度真实性)。**禁止**拿本技能的「缺写」给任何人落「失实」。
+
+流水线顺序:本技能(①填没填,含请假豁免)→ [`todo-completion-standard`](②做完没)→
+[`todo-truthfulness-check`](③真不真)。颠倒会把「休假没填」读成「失实」——方向是加重考核,
+且不会立刻暴露。写完没写对与否另见 [`todo-writing-standard`](填得规不规范),与 ③ 是两回事:
+填得规范 ≠ 写得是真的,反之亦然。
+
 ## 权限
 
 看板表要么该 app 是协作者,要么走 `feishu_auth_start()` 让本人授权后带 `user_key=<sender_open_id>`。
@@ -139,4 +156,5 @@ feishu_leave_query(approval_code=<请假模板 code>, date_from=<最早空白日
 - 别把表头日期和请假日期不做归一就直接字符串比。
 - 别用打卡反推请假。
 - 别把 `skipped_not_approved` / `needs_fix` / `unmatched_filter` 咽掉不报。
+- 别拿「缺写」判「失实」——缺写只证明没填,真实性问题换 [`todo-truthfulness-check`]。
 - 别在读表失败时给出填报结论。

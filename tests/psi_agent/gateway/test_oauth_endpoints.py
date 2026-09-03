@@ -29,10 +29,31 @@ async def test_callback_stores_code_and_shows_success_page() -> None:
     resp = await _oauth_callback(_request("/oauth/callback?code=c0de&state=st", relay))
     assert resp.status == 200
     assert "text/html" in resp.content_type
-    # 页面必须明说不用复制任何东西 —— 这正是本改动要消除的动作。
-    assert "不用复制" in _body(resp)
+    # 成功页承诺"授权已完成"并给出可操作的关闭按钮 (不再有"不用复制"字样 —
+    # 文案按验收意见去掉, 自动回流本身已免复制)。
+    body = _body(resp)
+    assert "授权已完成" in body
+    assert "关闭页面" in body
+    assert "回到飞书对话" not in body, "state 不带 chat_id 时不应渲染对话深链按钮"
 
     got = await relay.take("st")
+    assert got is not None
+    assert got.code == "c0de"
+
+
+@pytest.mark.anyio
+async def test_success_page_links_back_to_chat_when_state_carries_chat_id() -> None:
+    """state 尾巴带 ``.oc_xxx`` 时, 成功页须渲染「回到飞书对话」applink 按钮。"""
+    relay = OAuthRelay()
+    state = "deadbeef.oc_8846bd8c12a3d9fc8d06b45a9301cc1a"
+    resp = await _oauth_callback(_request(f"/oauth/callback?code=c0de&state={state}", relay))
+    assert resp.status == 200
+    body = _body(resp)
+    assert "回到飞书对话" in body
+    assert "applink.feishu.cn/client/chat/open?chatId=oc_8846bd8c12a3d9fc8d06b45a9301cc1a" in body
+    assert "关闭页面" in body, "关闭按钮仍在, 对话按钮在其下方"
+
+    got = await relay.take(state)
     assert got is not None
     assert got.code == "c0de"
 

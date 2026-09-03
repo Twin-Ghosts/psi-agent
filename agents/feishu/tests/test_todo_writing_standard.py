@@ -12,7 +12,7 @@ hardcoded one-off:
 - the five sections all exist;
 - the engine section contains no concrete level names, numbers, column names or tokens
   (the single assertion that keeps "replace the params, behaviour changes" true);
-- the four discipline rules each carry all five required fields;
+- the five discipline rules each carry all five required fields;
 - 按时 defers to company-todo-fill-check instead of re-deriving the leave-check order;
 - mentor check is only ever reminded, never stamped on the member's behalf;
 - 生成 → 成员确认 → 写表 survives, and 澄清 forbids inventing missing acceptance data;
@@ -35,8 +35,8 @@ SKILL = "todo-writing-standard"
 # in the document, so their headings are part of the contract.
 SECTIONS = ("内容 schema 段", "规则集段", "载体段", "参数段", "引擎段")
 
-# The four discipline rules, and the five fields each rule row must carry.
-RULES = ("按时", "按质", "按量", "mentor check")
+# The five discipline rules, and the five fields each rule row must carry.
+RULES = ("按时", "按质", "按量", "按优先级", "mentor check")
 RULE_FIELDS = ("触发条件", "判定对象", "判定逻辑", "违规文案", "报告去向")
 
 # Params that must live in the params section (and nowhere else, see the engine test).
@@ -223,6 +223,16 @@ def test_on_demand_sinking_is_per_rule_and_not_prebuilt() -> None:
     assert "参数段" in block or "规则集段" in block, (
         "a sunk rule must still read its params from the definition sections"
     )
+
+
+def test_priority_rule_pins_the_four_quadrant_order() -> None:
+    """SOP 总则: TODO list 按优先级排序(重要且紧急 > 重要不紧急 > 紧急不重要 > 不重要不紧急)。"""
+    params = _section("参数段")
+    for quadrant in ("重要且紧急", "重要不紧急", "紧急不重要", "不重要不紧急"):
+        assert quadrant in params, f"params must pin the quadrant {quadrant}"
+    block = _subsection("按优先级", within=_section("规则集段"))
+    assert "待人工确认" in block, "an uncertain ordering must be reported, not guessed"
+    assert "金字塔" in block, "must note the 70/25/5 pyramid is not yet in scope"
 
 
 def test_params_section_pins_the_confirmed_values() -> None:
