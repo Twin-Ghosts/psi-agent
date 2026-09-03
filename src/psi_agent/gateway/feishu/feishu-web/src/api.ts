@@ -120,6 +120,21 @@ export async function getFeishuAppId(): Promise<string> {
   return data.app_id || "";
 }
 
+export interface FeishuJsapiConfig {
+  appId: string;
+  timestamp: string;
+  nonceStr: string;
+  signature: string;
+  url: string;
+}
+
+/** 调 ``window.tt.config`` 前向后端取签名参数。URL 必须去掉 ``#`` 之后的 fragment。 */
+export async function getFeishuJsapiConfig(): Promise<FeishuJsapiConfig> {
+  const pageUrl = window.location.href.split("#")[0];
+  const query = new URLSearchParams({ url: pageUrl }).toString();
+  return requestJson<FeishuJsapiConfig>(`/feishu/jsapi/config?${query}`);
+}
+
 export async function login(code: string): Promise<Me> {
   return requestJson<Me>("/feishu/auth/login", jsonPost({ code }));
 }

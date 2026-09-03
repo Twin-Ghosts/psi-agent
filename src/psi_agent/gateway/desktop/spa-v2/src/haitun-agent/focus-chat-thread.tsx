@@ -260,28 +260,49 @@ export function FocusChatThread({
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   /** Align with spa v1 / Cursor: only pin to bottom while the user is near the end. */
   const stickToBottomRef = useRef(true);
+  /**
+   * Same stick rule for the in-bubble live thinking scroller (`.focus-chat-live-thinking`).
+   * 刻意为之: never force scrollTop on every token — that glued the box even after the user
+   * scrolled up to read earlier thinking.
+   */
+  const stickLiveThinkingRef = useRef(true);
+  const prevLiveThinkingEmptyRef = useRef(true);
   const prevMessageCountRef = useRef(0);
   const liveThinkingRef = useRef<HTMLDivElement | null>(null);
   const [preview, setPreview] = useState<ChatFile | null>(null);
   const [previewBusy, setPreviewBusy] = useState<string | null>(null);
   const [revealBusy, setRevealBusy] = useState<string | null>(null);
 
+  const distanceFromBottom = (el: HTMLElement) =>
+    el.scrollHeight - el.clientHeight - el.scrollTop;
+
   const onThreadScroll = () => {
     const el = scrollerRef.current;
     if (!el) return;
-    const fromBottom = el.scrollHeight - el.clientHeight - el.scrollTop;
-    stickToBottomRef.current = fromBottom <= STICK_BOTTOM_PX;
+    stickToBottomRef.current = distanceFromBottom(el) <= STICK_BOTTOM_PX;
+  };
+
+  const onLiveThinkingScroll = () => {
+    const el = liveThinkingRef.current;
+    if (!el) return;
+    stickLiveThinkingRef.current = distanceFromBottom(el) <= STICK_BOTTOM_PX;
   };
 
   useEffect(() => {
     const el = scrollerRef.current;
     if (!el) return;
 
-    // New user turn → re-stick so the send is visible (same as spa v1 clearing userHasScrolledUp).
+    // New user turn → jump to bottom + re-stick (same as spa v1 clearing userHasScrolledUp).
+    // 刻意为之: send appends user + empty agent in one setState, so last.role is "agent" —
+    // must scan the newly added slice for role=user, not only messages.at(-1).
     const count = messages.length;
-    if (count > prevMessageCountRef.current) {
-      const last = messages[count - 1];
-      if (last?.role === "user") stickToBottomRef.current = true;
+    const prevCount = prevMessageCountRef.current;
+    if (count > prevCount) {
+      const added = messages.slice(prevCount);
+      if (added.some((m) => m.role === "user")) {
+        stickToBottomRef.current = true;
+        stickLiveThinkingRef.current = true;
+      }
     }
     prevMessageCountRef.current = count;
 
@@ -292,12 +313,25 @@ export function FocusChatThread({
       node.scrollTop = node.scrollHeight;
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [messages, typing, progressLog]);
+  }, [messages, typing, progressLog, liveThinking]);
 
   useEffect(() => {
-    const el = liveThinkingRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [liveThinking, messages]);
+    const lastInterim = messages[messages.length - 1]?.interimText?.trim() ?? "";
+    const hasLive = !!(liveThinking.trim() || lastInterim);
+    // Fresh thinking/step content after an empty gap → stick again for the new run.
+    if (hasLive && prevLiveThinkingEmptyRef.current) {
+      stickLiveThinkingRef.current = true;
+    }
+    prevLiveThinkingEmptyRef.current = !hasLive;
+
+    if (!stickLiveThinkingRef.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      const node = liveThinkingRef.current;
+      if (!node || !stickLiveThinkingRef.current) return;
+      node.scrollTop = node.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [liveThinking, messages, typing]);
 
   const openPreview = async (file: ChatFile) => {
     if (!isPreviewable(file.name)) return;
@@ -356,7 +390,12 @@ export function FocusChatThread({
 
   const thinkingBubble = (
     <div className="focus-chat-bubble thinking focus-chat-progress-wrap">
-      <div ref={liveThinkingRef} className="focus-chat-live-thinking" aria-live="polite">
+      <div
+        ref={liveThinkingRef}
+        className="focus-chat-live-thinking"
+        aria-live="polite"
+        onScroll={onLiveThinkingScroll}
+      >
         {liveThinking.trim() ? (
           <div className="focus-chat-live-thinking-prose">{liveThinking}</div>
         ) : null}

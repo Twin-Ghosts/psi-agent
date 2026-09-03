@@ -20,12 +20,23 @@ interface FeishuRequestAuthCodeArgs {
   fail: (err: { errno?: number; errString?: string }) => void;
 }
 
+interface FeishuConfigArgs {
+  appId: string;
+  timestamp: string;
+  nonceStr: string;
+  signature: string;
+  jsApiList: string[];
+  success: () => void;
+  fail: (err: { errno?: number; errString?: string }) => void;
+}
+
 interface Window {
   h5sdk?: {
     ready: (cb: () => void) => void;
     error?: (cb: (err: unknown) => void) => void;
   };
   tt?: {
+    config?: (args: FeishuConfigArgs) => void;
     requestAccess?: (args: FeishuRequestAccessArgs) => void;
     requestAuthCode?: (args: FeishuRequestAuthCodeArgs) => void;
   };

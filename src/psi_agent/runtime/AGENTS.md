@@ -45,6 +45,27 @@ git grep -n "from psi_agent.gateway" -- src/psi_agent/runtime/   # 必须无输�
 
 各 manager 的行为细节、Socket 路径约定、`_wait_socket` 120s 超时的由来、SchedulerManager 的「定时任务归 workspace，触发权归 session × schedule」不变量、免费模型的 key 替换钩子，仍记在 `gateway/AGENTS.md` 对应小节——那里同时讲了 REST 侧的接线，拆开会让两边都读不完整。
 
+## `SessionManager.create` 的 workspace 判据（拒绝，而非兜底）
+
+`create()` 末尾有一行兜底：`workspace = workspace.strip() or self._default_workspace or os.getcwd()`。对 ToC / 桌面端这是对的（一台机器一个人一个工作区）；对多人共用一个 Gateway 的接入形态，它会让**忘记传 workspace 的调用方**静默把所有人的产出写进同一个公共目录。
+
+〔生产实测〕63 个飞书会话里 14 个 `feishu-ou_*` 形状的会话 workspace 指向 `/workspace` 根目录而非各自子目录，根目录已散着约 290 个混放文件。而**初始成因至今未定**：`FeishuManager.route()` 那条路吃不到这个兜底（它传的 workspace 永远非空），所以另有一条建 `feishu-ou_*` 形状 id 却不给 workspace 的路径。
+
+所以判据放在 `create()` 里，而不是去堵某条已知路径：这是**每条建 session 的路径都必经的唯一收口**，不知道是谁写的那条路也照样过不去。
+
+```python
+_guarded_id_prefix: str = ""       # 空 = 判据不启用
+_guarded_workspace_root: str = ""
+```
+
+- **两个字段由调用方注入**，本包不认识 `"feishu-"` 这个产品词。`Gateway.run` 传 `_guarded_id_prefix=FEISHU_SESSION_PREFIX, _guarded_workspace_root=self.feishu_workspace_root`（`gateway/__init__.py`）。默认空 → 判据整段不启用，ToC / 桌面端的兜底行为逐字节不变。
+- **判据必须在那行 `or` 兜底之前。** 兜底一旦生效，「调用方到底给没给 workspace」这个信息就永久丢了——那正是那 14 个会话落进公共区时发生的事。
+- 命中前缀且 **没给 workspace → 抛 `ValueError`**，不去派生一个默认值。内核不知道那三种目录形状的派生规则（`<root>/<open_id>` / `chat-<chat_id>` / `.private/<open_id>`），硬猜只会造出第 4 种形状。派生是 `FeishuManager.workspace_for` 的职责。
+- 命中前缀且 workspace **不严格位于 root 之下 → 抛 `ValueError`**。判定走 `_workspace_paths.is_strictly_under`（基于 `os.path.relpath`），不是裸 `startswith`：后者放过 `<root>/../evil`、`<root>-evil` 兄弟目录，Windows 上跨盘符还会抛 `ValueError`。**root 自身不算「在 root 之下」**——那恰恰是生产上那个坏形状。纯路径运算、不 resolve 符号链接（要能判还不存在的路径）。
+- **`skip_workspace_guard=True` 只给 state 恢复用**（`gateway/__init__.py` 里那处 `sm.create`）。给恢复也上判据的话，那 14 个人重启后会被**静默迁走**：历史按 session_id 存在 appdata 里不会丢，但他们过去的产出仍在根目录那 290 个文件里，agent 从此看不见自己写过的东西。让问题可见是这一步的目标，改数据是另一个独立决定。
+
+用例见 `tests/psi_agent/gateway/test_session_workspace_guard.py`（9 条：root 下合法通过、缺 workspace 拒、workspace 等于 root 拒、root 外与 `..` 穿越拒、`<root>-evil` 兄弟目录拒、群聊与私密区两种合法形状通过、非命中前缀的 id 仍走兜底、未配置时判据不启用、恢复豁免且 workspace 不被改写）。
+
 ## 测试
 
 测试仍在 `tests/psi_agent/gateway/`（`test_manager.py` / `test_session_manager.py` / `test_router_manager.py` / `test_scheduler_manager.py` / `test_history_manager.py` / `test_todo_manager.py` / `test_summary_manager.py` / `test_chat_manager.py`）与 `tests/integration/test_gateway.py`。**没有随代码搬家**：它们大量经 `create_core_app()` 走 REST 断言，本质是 gateway 装配后的行为，搬过来反而要把 aiohttp 装配也搬过来。跑子树注意 `-o testpaths=` 必须写在路径**之前**：

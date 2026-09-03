@@ -32,6 +32,9 @@ from psi_agent.gateway.desktop._spa_shell import DEFAULT_APP_NAME
 from psi_agent.gateway.desktop._tray import GatewayTray
 from psi_agent.gateway.desktop._ui_prefs import UIPrefs
 from psi_agent.gateway.desktop._webview import GatewayWebView
+from psi_agent.gateway.feishu._feishu_manager import (
+    FEISHU_SESSION_PREFIX as _FEISHU_SESSION_PREFIX,
+)
 from psi_agent.gateway.feishu._routes import register_feishu_routes, register_oauth_routes
 from psi_agent.gateway.server import create_core_app
 from psi_agent.runtime._ai_manager import AIManager
@@ -310,6 +313,12 @@ class Gateway:
                 _default_agent=agent_default,
                 _default_workspace=workspace_default,
                 _appdata=appdata_root,
+                # 「``feishu-*`` 的 Session 必须显式带一个 ``--feishu-workspace-root`` 之下的
+                # workspace」这条判据的两个参数。产品名住在**这里** —— ``SessionManager`` 只
+                # 认「某前缀 + 某 root」这个机制, 不认识飞书。没配 root 时判据自动不存在
+                # (开发时单挂 ToC 的进程正是这样), 见 ``_check_workspace_guard``。
+                _guarded_id_prefix=_FEISHU_SESSION_PREFIX,
+                _guarded_workspace_root=self.feishu_workspace_root,
             )
             tm = TitleManager()
             sum_m = SummaryManager()
@@ -376,6 +385,12 @@ class Gateway:
                         workspace=cfg.get("workspace", ""),
                         agent=cfg.get("agent", "") or agent_default,
                         id=cfg.get("id", ""),
+                        # 恢复是「把已经存在的东西重新拉起来」, 不是创建 —— 判据一律放行。
+                        # 生产上有 14 个飞书会话的 workspace 就是根目录, 挡住它们等于让这些人
+                        # 起不来, 下一条消息按正确规则派生到新目录, 也就是**悄悄迁移**了他们:
+                        # 历史按 session_id 存在 appdata 里不会丢, 但过去的产出都留在根目录那
+                        # 约 290 个混放文件里, agent 从此看不见自己的旧文件。是否迁移是独立决定。
+                        skip_workspace_guard=True,
                     )
                     logger.info(f"Restored Session {cfg.get('id', '?')!r}")
                 except Exception as e:

@@ -49,9 +49,10 @@ export default defineConfig(({ mode }) => {
         // ``/auth/me`` ``/auth/logout`` 被 desktop 那条产品线占着, 同进程装配下先注册者
         // 胜出), 所以下面那条 ``/feishu`` 已经把免登一起代理了。
         // ``/feishu/*``(``_routes.py`` 里的 ``register_feishu_routes``): 免登三条、app-id、
-        // 按身份过滤的 sessions/titles/summaries、``/feishu/route`` ``/feishu/routes`` 都是普通 JSON。
-        // 聊天流式仍然打骨架的 ``/sessions/{id}/chat``(上面那条), ``/feishu`` 下**没有**注册
-        // 任何 SSE 端点, 所以不需要 ``{ target, changeOrigin, ws: false }`` 的特殊处理。
+        // 按身份过滤的 sessions/titles/summaries、``/feishu/route`` ``/feishu/routes`` 都是普通 JSON,
+        // 而 ``POST /feishu/sessions/{id}/chat`` 是 **SSE** —— 聊天流已从裸 ``/sessions/{id}/chat``
+        // 挪到这条带鉴权的对等物上(裸的那条一行身份校验都没有却能驱动 agent 执行工具)。所以这条
+        // key 也要 ``{ target, changeOrigin, ws: false }`` 的写法, 与上面 ``/sessions`` 那条同款。
         //
         // **必须是这条正则, 不能写成 ``'/feishu'``**: 字符串 key 在 vite 里是**前缀**匹配,
         // 而本应用的 ``base`` 恰好是 ``/feishu-web/`` —— 也以 ``/feishu`` 开头。写成字符串
@@ -60,7 +61,7 @@ export default defineConfig(({ mode }) => {
         // 不生效, 而且 ``/feishu-web/`` 带斜杠时 aiohttp 的 ``show_index=False`` 直接回 403。
         // 两个表现都不像「代理配错了」, 所以这个坑很能藏 —— 实测踩过。
         // ``^`` 开头的 key 被 vite 当正则, 负向前查把 ``-web`` 摘出去。
-        '^/feishu(?!-web)': gateway,
+        '^/feishu(?!-web)': { target: gateway, changeOrigin: true, ws: false },
       },
     },
   }

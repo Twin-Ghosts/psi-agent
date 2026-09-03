@@ -47,6 +47,20 @@ class AiClient:
                 return 0
         return 0
 
+    @classmethod
+    def _usage_prompt_tokens(cls, data: dict) -> int:
+        """Prompt tokens from a chunk's ``usage``, or 0 when absent.
+
+        The AI layer forces ``stream_options.include_usage`` and forwards every
+        upstream chunk verbatim, so this number is already on the wire — it was
+        simply never parsed.  Reading it here rather than adding a second signal
+        keeps one fact on one path.
+        """
+        usage = data.get("usage")
+        if not isinstance(usage, dict):
+            return 0
+        return cls._as_int(usage.get("prompt_tokens"))
+
     async def stream(self, request_body: dict) -> AsyncGenerator[AiDelta]:
         connector, endpoint = self._build_connector_and_endpoint()
         async with (
@@ -76,9 +90,18 @@ class AiClient:
                     logger.warning(f"Failed to parse SSE data: {data_str[:1000]!r}")
                     continue
 
+                usage_prompt_tokens = self._usage_prompt_tokens(data)
+
                 choices_data = data.get("choices", [])
                 if not isinstance(choices_data, list):
                     logger.warning(f"Expected choices as list, got {type(choices_data).__name__}")
+                    continue
+                if not choices_data and usage_prompt_tokens:
+                    # OpenAI sends the final usage chunk with an *empty* choices
+                    # array, so the `continue` below would drop the one number
+                    # the budget calibrates against.  Surface it as a delta that
+                    # carries nothing else.
+                    yield AiDelta(usage_prompt_tokens=usage_prompt_tokens)
                     continue
                 if len(choices_data) > 1:
                     logger.warning(f"Expected 1 choice, got {len(choices_data)}, yielding error")
@@ -112,5 +135,6 @@ class AiClient:
                     compaction_threshold=self._as_int(compaction_signal.get("threshold"))
                     if isinstance(compaction_signal, dict)
                     else 0,
+                    usage_prompt_tokens=usage_prompt_tokens,
                 )
             logger.debug("SSE stream consumed successfully")

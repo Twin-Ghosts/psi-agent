@@ -9,11 +9,36 @@ from aiohttp import web
 from any_llm.api import ChatCompletionChunk, acompletion
 from loguru import logger
 
+from psi_agent._session_context import session_id_scope
 from psi_agent.protocol import make_compaction_signal, make_error_chunk
 
 # Raised from 1000 so a long ``content`` no longer pushes sibling keys out of
 # the line. ``_describe_delta`` is the actual safeguard — see below.
 _CHUNK_LOG_LIMIT = 8000
+
+# ── 回合标记: 模型墙上时间的**权威**判据 ──────────────────────────────────────
+#
+# 这两端 (open / close) 的计数必须相等, 用例钉住了包括 ``response.prepare`` 失败在内
+# 的每条 return 路径。
+#
+# **不要去改用 agent.py 那侧的标记, 也不要去补它。** 实测 2,331 个回合里有 241 个
+# (10%) 只有 AI 侧标记而没有 agent 侧, 据此算出的模型耗时占比是 39.2%, 而正确值是
+# 63.4% —— 差 24 个百分点, 且系统性偏低: 掉的那批恰好是走特殊分支的慢回合。
+#
+# 选这一侧作权威, 三个理由:
+#   1. **配平在这里是结构性保证。** 所有上游调用都必经这个 handler, 于是 open 一次、
+#      close 一次可以由一个函数的控制流锁死, 并被用例断言。放在 agent.py 则要靠人自
+#      觉, 下次新加一个分支又会静默失衡。
+#   2. **这两端量的正好是想要的东西** —— 上游墙上时间。agent.py 那一对还会把 Session
+#      自己的历史读写与落盘算进去。
+#   3. ``"Sending request to AI via AiClient"`` 保留用于观测**发起**, 但不得用来配对
+#      算耗时。
+#
+# 改这几个字符串, 要同步 ``scripts/latency-probe/parse.py``。
+_TURN_MARKER_OPEN = "ai-turn open"
+_TURN_MARKER_CLOSE = "ai-turn close"
+# 请求体都没解析出来的那类, 刻意用第三个词: 它没有配对的 open, 不该混进配平计数。
+_TURN_MARKER_REJECTED = "ai-turn rejected"
 
 # Every field a provider might carry reasoning in, plus the ones we consume.
 # ``session/ai_client.py`` reads ``reasoning`` only, so a provider emitting
@@ -39,11 +64,24 @@ _MESSAGE_REASONING_FIELDS = ("reasoning_content", "reasoning", "thinking")
 # 自我对话直接写进 ``content`` —— 这就是线上看到的泄漏 (复述提问 + 自问自答)。
 # 实测同一 prompt: 不传 = 0/9 个 chunk 带思维链, 传 "medium" = 20/23。
 #
+# **兜底必须只作用于会误关思维的 provider, 不能无条件对全部 provider 生效**
+# (2026-09 修正): 最初这段默认对**所有** provider 全局生效, 而 ``openai`` provider
+# 直连 DeepSeek 兼容端点 (ToB 部署形态: provider=openai + api_base=api.deepseek.com)
+# 并没有 auto→disabled 逻辑 —— 不传 ``reasoning_effort`` 时 thinking 本来就开着,
+# 思考照常进 ``reasoning_content``。强制传 ``"medium"`` 反而把思考档位压到中档,
+# 模型于是把**过程叙述**写进 ``content`` (每轮 tool call 前一段自述), 用户在飞书
+# 里看到整段自我对话 —— 与本注释描述的泄漏形态一致。实测同一 tool-call prompt:
+# 不传 reasoning_effort → content=0 / reasoning=306; 传 "medium" → content=34 /
+# reasoning=345。
+#
 # 该默认值是 1.21.0 之后引入的 (1.21.0 的同一文件里没有 thinking 分支), 而依赖写的
 # 是 ``any-llm-sdk>=1.21.0``, 所以是一次静默的上游行为变更改掉了我们的线上语义。
 #
 # 只在调用方**没给**时兜底, 给了就用它的 —— 这里是转发层, 不该覆盖上游意图。
 _DEFAULT_REASONING_EFFORT = "medium"
+# 只对会因缺省 auto 而关掉 thinking 的 provider 兜底 (见上); 其余 provider 保持
+# 不传, 交给上游默认行为。
+_REASONING_EFFORT_DEFAULT_PROVIDERS = frozenset({"deepseek"})
 
 
 def _describe_delta(data: str) -> str:
@@ -139,17 +177,38 @@ def _describe_messages(messages: Any) -> str:
 
 
 async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
-    logger.info("Received chat completion request")
+    """一次上游调用的入口 —— 顺带把这一回合的会话 id 绑上, 供日志归属。
+
+    会话 id 只能从请求体 ``routing.session_id`` 取: AI 是 socket 后面另一个 aiohttp
+    进程, Session 那边的 ContextVar 过不来。
+    """
     try:
         body: dict[str, Any] = await request.json()
-        logger.debug(f"Request body: {json.dumps(body, ensure_ascii=False)[:_CHUNK_LOG_LIMIT]}")
     except Exception as e:
-        logger.error(f"Failed to parse request body: {e!r}")
+        # 刻意用第三个标记词: 它没有配对的 open, 不该混进配平计数 —— 但也不能不记,
+        # 否则「上游一直没被调用」与「请求根本没进来」在日志里长得一样。
+        logger.error(f"{_TURN_MARKER_REJECTED} unparseable body: {e!r}")
         # OpenAI-compatible error response.
         return web.json_response(
             {"error": {"message": str(e), "type": "invalid_request_error", "param": None, "code": 400}},
             status=400,
         )
+
+    routing = body.get("routing")
+    turn_session_id = ""
+    if isinstance(routing, dict):
+        raw_sid = routing.get("session_id")
+        if isinstance(raw_sid, str):
+            turn_session_id = raw_sid.strip()
+
+    with session_id_scope(turn_session_id):
+        return await _forward_chat_completion(request, body)
+
+
+async def _forward_chat_completion(request: web.Request, body: dict[str, Any]) -> web.StreamResponse:
+    logger.info(_TURN_MARKER_OPEN)
+    logger.debug(f"Request body: {json.dumps(body, ensure_ascii=False)[:_CHUNK_LOG_LIMIT]}")
+    turn_started = anyio.current_time()
 
     provider = request.app["provider"]
     model = request.app["model"]
@@ -176,7 +235,10 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
     body.pop("routing", None)
     # 见 ``_DEFAULT_REASONING_EFFORT``: 不传等于让 DeepSeek provider 关掉思维模式。
     # ``setdefault`` 而非赋值 —— 调用方显式给的值 (含 ``"none"``) 优先。
-    body.setdefault("reasoning_effort", _DEFAULT_REASONING_EFFORT)
+    # 只对会误关思维的 provider (deepseek) 兜底; openai 打 DeepSeek 兼容端点时强制
+    # medium 反而让模型把过程叙述写进 content (线上泄漏), 见常量注释。
+    if provider in _REASONING_EFFORT_DEFAULT_PROVIDERS:
+        body.setdefault("reasoning_effort", _DEFAULT_REASONING_EFFORT)
     stream_opts = body.get("stream_options", {})
     if isinstance(stream_opts, dict):
         stream_opts["include_usage"] = True
@@ -200,6 +262,9 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
         await response.prepare(request)
     except Exception:
         logger.warning("Client disconnected before SSE response prepared")
+        # 这条早退分支原先只有上面那句 warning、没有任何 close —— 它是 open/close 计数
+        # 不配平的第二个来源 (另一个是 agent.py 侧的标记本就不全)。
+        logger.info(f"{_TURN_MARKER_CLOSE} elapsed_ms=0 outcome=prepare_failed")
         return response
 
     logger.debug(f"Forwarding to upstream: provider={provider!r}, model={model!r}, base_url={base_url!r}")
@@ -284,10 +349,14 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
                     except Exception as close_err:
                         logger.warning(f"Failed to close upstream stream: {close_err}")
 
+    # 三条终态日志收成一条出口: 结局进 ``outcome=`` 字段, 于是「配平」只需数两个词,
+    # 不必知道有几种收尾方式 —— 将来多一种结局也不会让脚本漏计一个 close。
     if client_gone:
-        logger.info("Request cancelled by client disconnect")
+        outcome = "client_disconnect"
     elif upstream_error:
-        logger.info("Request completed with upstream error")
+        outcome = "upstream_error"
     else:
-        logger.info("Request completed successfully")
+        outcome = "ok"
+    elapsed_ms = int((anyio.current_time() - turn_started) * 1000)
+    logger.info(f"{_TURN_MARKER_CLOSE} elapsed_ms={elapsed_ms} outcome={outcome}")
     return response

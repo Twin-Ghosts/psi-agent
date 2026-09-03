@@ -16,6 +16,42 @@ from __future__ import annotations
 from typing import Any
 
 FEISHU_PATHS: dict[str, Any] = {
+    "/feishu/jsapi/config": {
+        "get": {
+            "summary": "Return signed parameters for window.tt.config",
+            "operationId": "feishuJsapiConfig",
+            "parameters": [
+                {
+                    "name": "url",
+                    "in": "query",
+                    "required": True,
+                    "schema": {"type": "string"},
+                    "description": "Current page URL without the # fragment, used in the SHA1 signature",
+                },
+            ],
+            "responses": {
+                "200": {
+                    "description": "Signed config",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "appId": {"type": "string"},
+                                    "timestamp": {"type": "string"},
+                                    "nonceStr": {"type": "string"},
+                                    "signature": {"type": "string"},
+                                    "url": {"type": "string"},
+                                },
+                            }
+                        }
+                    },
+                },
+                "400": {"$ref": "#/components/responses/Error"},
+                "500": {"$ref": "#/components/responses/Error"},
+            },
+        },
+    },
     "/feishu/route": {
         "post": {
             "summary": "Route a Feishu chat to its Session (per-chat for groups, per-user for DMs)",

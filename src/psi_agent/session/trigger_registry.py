@@ -21,6 +21,7 @@ from loguru import logger
 
 from psi_agent._yaml import parse_yaml_header
 from psi_agent.session.event_protocol import (
+    MATCH_ALL,
     EventEnvelope,
     filter_matches,
 )
@@ -36,6 +37,62 @@ if TYPE_CHECKING:
     from psi_agent.session.agent import SessionAgent
 
 _IDEMPOTENCY_MAX = 2048
+
+__all__ = [
+    "MATCH_ALL",
+    "Trigger",
+    "TriggerEntry",
+    "TriggerRegistry",
+    "merge_event_tool_args",
+    "tool_result_is_noop",
+]
+
+# Result keys that count as "something actually changed" when non-zero.
+# Only ``fire=tool`` results are inspected, and only when the tool reports in
+# this shape; anything unrecognised is treated as a change (write it).
+_CHANGE_COUNT_KEYS = frozenset(
+    {
+        "read_advanced",
+        "card_updates",
+        "updated",
+        "created",
+        "deleted",
+        "sent",
+        "advanced",
+        "changed",
+    }
+)
+
+
+def tool_result_is_noop(result: str) -> bool:
+    """True when a ``fire=tool`` result says **nothing changed**.
+
+    件二A 写入准入: a periodic trigger writes 2 history rows per fire whether or
+    not it did anything. Those rows carry no information, yet every later turn
+    pays to assemble them. So a fire that changed nothing writes nothing.
+
+    Deliberately conservative — it returns ``True`` only for a JSON object that
+    (a) reports ``ok: true``, (b) carries at least one recognised change
+    counter, (c) has every recognised counter at zero/false, and (d) reports no
+    ``errors``. A non-JSON result, an unrecognised shape, a failure, or any
+    error entry all mean "write it": swallowing a *failure* would trade a cheap
+    history row for an invisible outage.
+    """
+    try:
+        parsed = json.loads(result)
+    except json.JSONDecodeError, TypeError:
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    if parsed.get("ok") is not True:
+        return False
+    errors = parsed.get("errors")
+    if errors:
+        return False
+    counters = [key for key in parsed if key in _CHANGE_COUNT_KEYS]
+    if not counters:
+        return False
+    return all(not parsed[key] for key in counters)
 
 
 def merge_event_tool_args(
@@ -165,6 +222,12 @@ class TriggerRegistry:
         1. Normalized: ``trigger.event`` == ``envelope.event`` + ``filter`` vs ``payload``
         2. Else raw: ``trigger.raw_event`` == ``envelope.raw_event`` + ``raw_filter``
            vs ``raw_payload`` (falls back to ``payload`` when raw_payload empty)
+
+        **The raw path cannot be wider than the normalized one** (刻意为之).
+        An empty filter no longer matches everything (see
+        ``event_protocol.filter_matches``), so a trigger that narrows ``filter``
+        but leaves ``raw_filter`` empty can no longer fall through the raw path
+        and match every event — the exact 2026-09-02 production failure.
         """
         hits: list[Trigger] = []
         for trigger in self.triggers:
@@ -255,56 +318,66 @@ class TriggerRegistry:
         logger.info(f"Trigger tool fire: {trigger.name!r} → {tool_name!r}({args!r}) event={envelope.event!r}")
 
         chunks: list[AgentChunk] = []
-        async with agent._conversation:
-            agent._conversation.add(
-                with_kind(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"[trigger tool] {trigger.name}: call {tool_name}\n"
-                            f"event={envelope.event} "
-                            f"payload={json.dumps(envelope.payload, ensure_ascii=False)}"
-                            + (f"\n{trigger.task_content}" if trigger.task_content else "")
-                        ),
-                    },
-                    KIND_TRIGGER_SILENT,
+        # 刻意为之: the tool runs **before** anything is written. The old order
+        # committed the user row first (a crash-recovery baseline, as in
+        # ``agent.run``), but a ``fire=tool`` trigger has no LLM turn to resume
+        # and its rows are pure record-keeping — and the baseline forced a write
+        # even when the tool turned out to change nothing. Trade-off: a crash
+        # mid-tool now leaves no trace in history (the fire is still logged).
+        func = agent._tool_registry.get(tool_name) if tool_name else None
+        if func is None:
+            result = f"Error: Tool {tool_name!r} not found"
+            logger.error(f"Trigger {trigger.name!r}: {result}")
+        else:
+            args = merge_event_tool_args(func, args, envelope)
+            try:
+                raw = await func(**args)
+                result = str(raw)
+                logger.info(f"Trigger tool result ({tool_name!r}): {result[:1000]!r}")
+            except Exception as e:
+                result = f"Error executing tool {tool_name!r}: {e}"
+                logger.error(f"Trigger {trigger.name!r} tool error: {e!r}")
+
+        chunks.append(AgentChunk(reasoning=f"[Tool Call: {tool_name}({json.dumps(args, ensure_ascii=False)})]"))
+        chunks.append(AgentChunk(reasoning=f"[Tool Result: {result[:1000]}]"))
+        if trigger.visibility == "display":
+            chunks.append(AgentChunk(content=result[:2000]))
+
+        if tool_result_is_noop(result):
+            # 件二A 写入准入: nothing changed → nothing written. Skipping both
+            # rows keeps the history prefix byte-identical, so the next turn
+            # still hits the upstream prefix cache.
+            logger.info(f"Trigger {trigger.name!r} tool {tool_name!r} reported no changes; skipping history write")
+        else:
+            async with agent._conversation:
+                agent._conversation.add(
+                    with_kind(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"[trigger tool] {trigger.name}: call {tool_name}\n"
+                                f"event={envelope.event} "
+                                f"payload={json.dumps(envelope.payload, ensure_ascii=False)}"
+                                + (f"\n{trigger.task_content}" if trigger.task_content else "")
+                            ),
+                        },
+                        KIND_TRIGGER_SILENT,
+                    )
                 )
-            )
-            await agent._conversation.commit()
-
-            func = agent._tool_registry.get(tool_name) if tool_name else None
-            if func is None:
-                result = f"Error: Tool {tool_name!r} not found"
-                logger.error(f"Trigger {trigger.name!r}: {result}")
-            else:
-                args = merge_event_tool_args(func, args, envelope)
-                try:
-                    raw = await func(**args)
-                    result = str(raw)
-                    logger.info(f"Trigger tool result ({tool_name!r}): {result[:1000]!r}")
-                except Exception as e:
-                    result = f"Error executing tool {tool_name!r}: {e}"
-                    logger.error(f"Trigger {trigger.name!r} tool error: {e!r}")
-
-            chunks.append(AgentChunk(reasoning=f"[Tool Call: {tool_name}({json.dumps(args, ensure_ascii=False)})]"))
-            chunks.append(AgentChunk(reasoning=f"[Tool Result: {result[:1000]}]"))
-            if trigger.visibility == "display":
-                chunks.append(AgentChunk(content=result[:2000]))
-
-            agent._conversation.add(
-                with_kind(
-                    {
-                        "role": "assistant",
-                        "content": (
-                            f"[trigger tool {tool_name}] {result[:3500]}"
-                            if trigger.visibility == "display"
-                            else f"[trigger tool {tool_name}] ok"
-                        ),
-                    },
-                    response_kind,
+                agent._conversation.add(
+                    with_kind(
+                        {
+                            "role": "assistant",
+                            "content": (
+                                f"[trigger tool {tool_name}] {result[:3500]}"
+                                if trigger.visibility == "display"
+                                else f"[trigger tool {tool_name}] ok"
+                            ),
+                        },
+                        response_kind,
+                    )
                 )
-            )
-            await agent._conversation.commit()
+                await agent._conversation.commit()
 
         if trigger.visibility == "display" and chunks:
             agent.set_pending_schedule_chunks(chunks)

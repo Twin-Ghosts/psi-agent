@@ -20,7 +20,7 @@ import anyio
 import pytest
 
 from psi_agent.session.conversation import Conversation
-from psi_agent.session.history_display import TURN_CONTEXT_KEY, messages_for_ai
+from psi_agent.session.history_display import TURN_CONTEXT_KEY, project_history_for_wire
 from psi_agent.session.system_prompt import SystemPrompt
 
 
@@ -37,6 +37,41 @@ async def test_turn_context_rendered_from_builder() -> None:
 @pytest.mark.anyio
 async def test_no_builder_yields_no_block() -> None:
     assert await SystemPrompt().turn_context() == ""
+
+
+@pytest.mark.anyio
+async def test_turn_message_reaches_a_builder_that_asks_for_it() -> None:
+    """Volatile text derived from the turn has to arrive here, not in the prompt.
+
+    A learning profile keyed on this message, and advice attached to it, are
+    per-turn by nature. Without the message on this path the only place they
+    could be assembled is the prompt — the placement this whole mechanism
+    exists to avoid.
+    """
+    seen: list[dict[str, Any] | None] = []
+
+    async def turn_context_builder(user_message: dict[str, Any] | None = None) -> str:
+        seen.append(user_message)
+        return f"advice={(user_message or {}).get('supervisor_advice')}"
+
+    sp = SystemPrompt(turn_context_fn=turn_context_builder)
+
+    block = await sp.turn_context({"role": "user", "content": "hi", "supervisor_advice": {"focus": "depth"}})
+
+    assert seen == [{"role": "user", "content": "hi", "supervisor_advice": {"focus": "depth"}}]
+    assert block == "advice={'focus': 'depth'}"
+
+
+@pytest.mark.anyio
+async def test_builder_that_takes_no_message_is_called_unchanged() -> None:
+    """Opt-in by signature: a pack that never asked for a message must not break."""
+
+    async def turn_context_builder(*, agent_raw: str = "") -> str:
+        return "Date: 2026-07-29"
+
+    sp = SystemPrompt(turn_context_fn=turn_context_builder)
+
+    assert await sp.turn_context({"role": "user", "content": "hi"}) == "Date: 2026-07-29"
 
 
 @pytest.mark.anyio
@@ -141,7 +176,7 @@ async def test_workspace_without_builder_yields_no_block(tmp_path: Path) -> None
 
 def test_block_folds_in_after_the_message_body() -> None:
     """After, not before: a prefix would shift every byte of the turn."""
-    projected = messages_for_ai(
+    projected = project_history_for_wire(
         [
             {"role": "system", "content": "PROMPT"},
             {"role": "user", "content": "what time is it", TURN_CONTEXT_KEY: "Date: 2026-07-29"},
@@ -158,20 +193,20 @@ def test_block_never_reaches_the_stored_row() -> None:
         {"role": "user", "content": "hi", TURN_CONTEXT_KEY: "Date: 2026-07-29"},
     ]
 
-    messages_for_ai(stored)
+    project_history_for_wire(stored)
 
     assert stored[1] == {"role": "user", "content": "hi", TURN_CONTEXT_KEY: "Date: 2026-07-29"}
 
 
 def test_earlier_turns_project_byte_identically() -> None:
     """Only the newest turn carries a block, so the request prefix is stable."""
-    first = messages_for_ai(
+    first = project_history_for_wire(
         [
             {"role": "system", "content": "PROMPT"},
             {"role": "user", "content": "turn one", TURN_CONTEXT_KEY: "Date: 2026-07-28"},
         ]
     )
-    second = messages_for_ai(
+    second = project_history_for_wire(
         [
             {"role": "system", "content": "PROMPT"},
             {"role": "user", "content": "turn one", TURN_CONTEXT_KEY: "Date: 2026-07-28"},
@@ -184,7 +219,7 @@ def test_earlier_turns_project_byte_identically() -> None:
 
 
 def test_empty_body_projects_to_the_block_alone() -> None:
-    projected = messages_for_ai([{"role": "user", "content": "", TURN_CONTEXT_KEY: "Date: 2026-07-29"}])
+    projected = project_history_for_wire([{"role": "user", "content": "", TURN_CONTEXT_KEY: "Date: 2026-07-29"}])
 
     assert projected[0]["content"] == "Date: 2026-07-29"
 
@@ -192,21 +227,21 @@ def test_empty_body_projects_to_the_block_alone() -> None:
 def test_multimodal_content_is_left_intact() -> None:
     """No single place to append to; dropping the block beats corrupting blocks."""
     blocks = [{"type": "text", "text": "look"}, {"type": "image_url", "image_url": {"url": "u"}}]
-    projected = messages_for_ai([{"role": "user", "content": blocks, TURN_CONTEXT_KEY: "Date: 2026-07-29"}])
+    projected = project_history_for_wire([{"role": "user", "content": blocks, TURN_CONTEXT_KEY: "Date: 2026-07-29"}])
 
     assert projected[0]["content"] == blocks
     assert TURN_CONTEXT_KEY not in projected[0]
 
 
 def test_blank_block_is_not_folded_in() -> None:
-    projected = messages_for_ai([{"role": "user", "content": "hi", TURN_CONTEXT_KEY: "   "}])
+    projected = project_history_for_wire([{"role": "user", "content": "hi", TURN_CONTEXT_KEY: "   "}])
 
     assert projected[0] == {"role": "user", "content": "hi"}
 
 
 def test_block_folds_in_after_compaction_too() -> None:
     """Compaction rebuilds the list from a different branch of the projection."""
-    projected = messages_for_ai(
+    projected = project_history_for_wire(
         [
             {"role": "system", "content": "PROMPT"},
             {"role": "user", "content": "old"},

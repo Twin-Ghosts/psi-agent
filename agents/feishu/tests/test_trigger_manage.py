@@ -33,6 +33,9 @@ async def test_create_member_added_trigger(workspace: Path) -> None:
         trigger_name="welcome-group",
         event="feishu.chat.member_added",
         filter='{"chat_id":"oc_1"}',
+        # raw_event 由 event 自动补齐, 所以 raw 路存在, raw_filter 必须同步收窄:
+        # 留空会让 raw 路比 normalized 路更宽(2026-09-02 生产那条绕行路径)。
+        raw_filter='{"chat_id":"oc_1"}',
         fire="tool",
         tool="feishu_message_send",
         tool_args='{"receive_id":"oc_1","text":"新人进群","receive_id_type":"chat_id"}',
@@ -57,6 +60,7 @@ async def test_create_allows_unknown_event_name(workspace: Path) -> None:
         action="create",
         trigger_name="custom-ev",
         event="feishu.custom.from_channel_events",
+        filter='{"match":"all"}',
         fire="prompt",
     )
     assert out.startswith("Created trigger")
@@ -68,6 +72,8 @@ async def test_list_and_delete(workspace: Path) -> None:
         action="create",
         trigger_name="t1",
         event="feishu.chat.member_added",
+        filter='{"match":"all"}',
+        raw_filter='{"match":"all"}',
         fire="prompt",
     )
     listed = await tm.trigger_manage(action="list")
@@ -107,6 +113,70 @@ def test_assignment_delivery_trigger_uses_silent_tool_fire() -> None:
     assert header["fire"] == "tool"
     assert header["tool"] == "assignment_delivery_refresh"
     assert header["visibility"] == "silent"
+
+
+@pytest.mark.parametrize(
+    "trigger_name",
+    ["assignment-delivery-refresh", "handbook-onboarding-welcome"],
+)
+def test_shipped_triggers_declare_wildcard_explicitly(trigger_name: str) -> None:
+    """空 filter 不再放行一切——随包发的 trigger 必须显式声明, 否则静默失效。
+
+    这两份原本都是 ``filter: {}``, 靠旧语义的 ``all([])`` 才在生产跑着。
+    """
+    raw = (WORKSPACE_ROOT / "triggers" / trigger_name / "TRIGGER.md").read_text(encoding="utf-8")
+    header, _body = tm._parse_header(raw)
+    assert header["filter"] == {"match": "all"}, f"{trigger_name} 的 filter 在新语义下不匹配任何事件"
+    if header.get("raw_event"):
+        assert header.get("raw_filter") == {"match": "all"}, (
+            f"{trigger_name} 声明了 raw_event 但 raw_filter 会拦掉 raw 路"
+        )
+
+
+@pytest.mark.anyio
+async def test_create_rejects_empty_filter(workspace: Path) -> None:
+    """留空 filter 会造出一个永不触发的 trigger, 创建时就要拦住。"""
+    out = await tm.trigger_manage(
+        action="create",
+        trigger_name="no-filter",
+        event="feishu.chat.member_added",
+        fire="prompt",
+    )
+    assert out.startswith("[Error]")
+    assert "matches nothing" in out
+    assert not (workspace / "triggers" / "no-filter").exists()
+
+
+@pytest.mark.anyio
+async def test_create_rejects_empty_raw_filter_when_raw_path_exists(workspace: Path) -> None:
+    """收窄了 filter 却留空 raw_filter, 就是 2026-09-02 生产那条绕行路径。"""
+    out = await tm.trigger_manage(
+        action="create",
+        trigger_name="narrow-norm-wide-raw",
+        event="feishu.chat.member_added",  # 该 event 自带 raw_event 映射
+        filter='{"chat_id":"oc_1"}',
+        fire="prompt",
+    )
+    assert out.startswith("[Error]")
+    assert "raw_filter" in out
+    assert not (workspace / "triggers" / "narrow-norm-wide-raw").exists()
+
+
+@pytest.mark.anyio
+async def test_create_accepts_explicit_match_all(workspace: Path) -> None:
+    """显式 wildcard 仍然放行(不能把功能拦没)。"""
+    out = await tm.trigger_manage(
+        action="create",
+        trigger_name="all-ok",
+        event="feishu.chat.member_added",
+        filter='{"match":"all"}',
+        raw_filter='{"match":"all"}',
+        fire="prompt",
+    )
+    assert out.startswith("Created trigger")
+    header, _ = tm._parse_header((workspace / "triggers" / "all-ok" / "TRIGGER.md").read_text(encoding="utf-8"))
+    assert header["filter"] == {"match": "all"}
+    assert header["raw_filter"] == {"match": "all"}
 
 
 @pytest.mark.anyio

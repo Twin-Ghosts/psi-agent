@@ -7,18 +7,18 @@ from psi_agent.session.history_display import (
     extract_send_paths,
     is_displayable_chat_message,
     message_kind,
-    messages_for_ai,
+    project_history_for_wire,
     strip_transfer_markers,
     with_chat_type,
     with_kind,
 )
 
 
-def test_with_kind_and_messages_for_ai() -> None:
+def test_with_kind_and_project_history_for_wire() -> None:
     msg = with_kind({"role": "user", "content": "hi"}, KIND_SCHEDULE_SILENT)
     assert msg["kind"] == KIND_SCHEDULE_SILENT
     assert "chat_type" not in msg
-    projected = messages_for_ai([msg, {"role": "assistant", "content": "ok", "kind": KIND_CHAT}])
+    projected = project_history_for_wire([msg, {"role": "assistant", "content": "ok", "kind": KIND_CHAT}])
     assert projected == [
         {"role": "user", "content": "hi"},
         {"role": "assistant", "content": "ok"},
@@ -32,8 +32,8 @@ def test_legacy_chat_type_maps_to_kind() -> None:
     assert legacy["kind"] == KIND_SCHEDULE_SILENT
 
 
-def test_messages_for_ai_rewrites_legacy_schedule_roles() -> None:
-    projected = messages_for_ai(
+def test_project_history_for_wire_rewrites_legacy_schedule_roles() -> None:
+    projected = project_history_for_wire(
         [
             {"role": "user_schedule", "content": "heartbeat"},
             {"role": "assistant_schedule", "content": "HEARTBEAT_OK"},
@@ -48,8 +48,8 @@ def test_messages_for_ai_rewrites_legacy_schedule_roles() -> None:
     assert not is_displayable_chat_message({"role": "user_schedule", "content": "heartbeat"})
 
 
-def test_messages_for_ai_skips_reasoning_only_assistant_rows() -> None:
-    projected = messages_for_ai(
+def test_project_history_for_wire_skips_reasoning_only_assistant_rows() -> None:
+    projected = project_history_for_wire(
         [
             {"role": "user", "content": "confirm"},
             {"role": "assistant", "reasoning": "internal only", "kind": KIND_CHAT},
@@ -70,7 +70,7 @@ def test_messages_for_ai_skips_reasoning_only_assistant_rows() -> None:
     ]
 
 
-def test_messages_for_ai_keeps_assistant_rows_with_content_or_tool_calls() -> None:
+def test_project_history_for_wire_keeps_assistant_rows_with_content_or_tool_calls() -> None:
     tool_calls = [
         {
             "id": "call-1",
@@ -81,7 +81,7 @@ def test_messages_for_ai_keeps_assistant_rows_with_content_or_tool_calls() -> No
 
     # ``reasoning`` goes out as ``reasoning_content`` — the only name providers
     # read.  See ``test_assistant_reasoning_goes_out_as_reasoning_content``.
-    assert messages_for_ai(
+    assert project_history_for_wire(
         [
             {"role": "assistant", "content": "answer", "reasoning": "internal"},
             {"role": "assistant", "reasoning": "internal", "tool_calls": tool_calls},
@@ -128,7 +128,7 @@ def test_assistant_reasoning_goes_out_as_reasoning_content() -> None:
     Measured against the live endpoint, the key name is the only thing that
     decides acceptance: ``reasoning`` → HTTP 400, ``reasoning_content`` → OK.
     """
-    projected = messages_for_ai(
+    projected = project_history_for_wire(
         [
             {"role": "user", "content": "hi"},
             {"role": "assistant", "content": "答案", "reasoning": "先想清楚再答。", "kind": KIND_CHAT},
@@ -143,7 +143,7 @@ def test_assistant_reasoning_goes_out_as_reasoning_content() -> None:
 def test_reasoning_rename_preserves_tool_call_only_turns() -> None:
     """A tool-call turn carries no ``content``; renaming must not drop it."""
     calls = [{"id": "call_1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]
-    projected = messages_for_ai(
+    projected = project_history_for_wire(
         [
             {"role": "user", "content": "hi"},
             {"role": "assistant", "tool_calls": calls, "reasoning": "该调工具了。"},
@@ -156,20 +156,22 @@ def test_reasoning_rename_preserves_tool_call_only_turns() -> None:
 
 def test_reasoning_rename_edge_cases() -> None:
     # An explicit provider-shaped value wins over our own key.
-    both = messages_for_ai([{"role": "assistant", "content": "a", "reasoning": "ours", "reasoning_content": "theirs"}])
+    both = project_history_for_wire(
+        [{"role": "assistant", "content": "a", "reasoning": "ours", "reasoning_content": "theirs"}]
+    )
     assert both == [{"role": "assistant", "content": "a", "reasoning_content": "theirs"}]
 
     # any-llm's ``Reasoning`` shape, should it ever reach storage.
-    nested = messages_for_ai([{"role": "assistant", "content": "a", "reasoning": {"content": "深思"}}])
+    nested = project_history_for_wire([{"role": "assistant", "content": "a", "reasoning": {"content": "深思"}}])
     assert nested == [{"role": "assistant", "content": "a", "reasoning_content": "深思"}]
 
     # Empty / blank thinking is not worth a wire field.
     for blank in ("", "   ", None):
-        assert messages_for_ai([{"role": "assistant", "content": "a", "reasoning": blank}]) == [
+        assert project_history_for_wire([{"role": "assistant", "content": "a", "reasoning": blank}]) == [
             {"role": "assistant", "content": "a"}
         ]
 
     # Non-assistant roles keep their keys untouched.
-    assert messages_for_ai([{"role": "user", "content": "a", "reasoning": "x"}]) == [
+    assert project_history_for_wire([{"role": "user", "content": "a", "reasoning": "x"}]) == [
         {"role": "user", "content": "a", "reasoning": "x"}
     ]

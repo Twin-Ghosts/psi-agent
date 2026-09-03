@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import threading
@@ -36,6 +37,16 @@ class ScopeClear:
 
 
 @dataclass(frozen=True, slots=True)
+class MemoryPromotion:
+    promotion_id: str
+    workspace_id: str
+    source_span_ids: tuple[str, ...]
+    kind: str
+    salience: float
+    timestamp: str
+
+
+@dataclass(frozen=True, slots=True)
 class ReplayReport:
     records: int = 0
     inserted: int = 0
@@ -63,8 +74,40 @@ def _clear_to_record(clear: ScopeClear) -> dict[str, object]:
     return {"record_type": "scope_clear", "schema_version": 1, **asdict(clear)}
 
 
+def _promotion_to_record(promotion: MemoryPromotion) -> dict[str, object]:
+    return {"record_type": "memory_promotion", "schema_version": 1, **asdict(promotion)}
+
+
 _SPAN_FIELDS = {f.name for f in EvidenceSpan.__dataclass_fields__.values()}
 _CLEAR_FIELDS = {f.name for f in ScopeClear.__dataclass_fields__.values()}
+_PROMOTION_FIELDS = {f.name for f in MemoryPromotion.__dataclass_fields__.values()}
+
+
+def _promotion_from_record(record: dict[str, object]) -> MemoryPromotion:
+    promotion_id = record["promotion_id"]
+    workspace_id = record["workspace_id"]
+    source_span_ids = record["source_span_ids"]
+    kind = record["kind"]
+    salience = record["salience"]
+    timestamp = record["timestamp"]
+    if not isinstance(promotion_id, str) or not promotion_id:
+        raise TypeError("promotion_id must be a non-empty string")
+    if not isinstance(workspace_id, str) or not workspace_id:
+        raise TypeError("workspace_id must be a non-empty string")
+    if not isinstance(kind, str) or not kind:
+        raise TypeError("kind must be a non-empty string")
+    if not isinstance(timestamp, str) or not timestamp:
+        raise TypeError("promotion string fields must be non-empty")
+    if (
+        not isinstance(source_span_ids, list)
+        or not source_span_ids
+        or not all(isinstance(item, str) and item for item in source_span_ids)
+    ):
+        raise TypeError("source_span_ids must be a non-empty string list")
+    if not isinstance(salience, (int, float)) or not math.isfinite(salience):
+        raise TypeError("salience must be finite")
+    span_ids = tuple(item for item in source_span_ids if isinstance(item, str))
+    return MemoryPromotion(promotion_id, workspace_id, span_ids, kind, float(salience), timestamp)
 
 
 class JsonlJournal:
@@ -159,6 +202,8 @@ class JsonlJournal:
             return record.keys() >= _SPAN_FIELDS and record.get("speaker") in {"user", "assistant"}
         if kind == "scope_clear":
             return record.keys() >= _CLEAR_FIELDS
+        if kind == "memory_promotion":
+            return record.keys() >= _PROMOTION_FIELDS
         return False
 
     def _refresh_index(self) -> None:
@@ -174,8 +219,10 @@ class JsonlJournal:
                 if record.get("record_type") == "evidence_span":
                     span = EvidenceSpan(**{key: record[key] for key in _SPAN_FIELDS})
                     canonical = canonical_json(record)
-                else:
+                elif record.get("record_type") == "scope_clear":
                     clear = ScopeClear(**{key: record[key] for key in _CLEAR_FIELDS})
+                else:
+                    _promotion_from_record(record)
             except UnicodeDecodeError, json.JSONDecodeError, TypeError, KeyError, ValueError:
                 continue
             if record.get("record_type") == "evidence_span":
@@ -184,7 +231,7 @@ class JsonlJournal:
                     raise JournalConflictError(f"span_id conflict: {span.span_id}")
                 self._span_records[span.span_id] = canonical
                 self._active_spans[span.span_id] = span
-            else:
+            elif record.get("record_type") == "scope_clear":
                 self._apply_clear(clear)
 
     def _apply_clear(self, clear: ScopeClear) -> None:
@@ -237,8 +284,32 @@ class JsonlJournal:
             self._apply_clear(clear)
         return clear
 
+    def append_promotion(
+        self, workspace_id: str, source_span_ids: Iterable[str], kind: str, salience: float
+    ) -> MemoryPromotion:
+        promotion = MemoryPromotion(
+            uuid.uuid4().hex,
+            workspace_id,
+            tuple(source_span_ids),
+            kind,
+            float(salience),
+            datetime.now(UTC).isoformat(),
+        )
+        data = canonical_json(_promotion_to_record(promotion)) + b"\n"
+        with self._lock:
+            self._recover_tail()
+            with self.path.open("ab") as fh:
+                fh.write(data)
+                if self.fsync:
+                    fh.flush()
+                    os.fsync(fh.fileno())
+        return promotion
+
     def replay(
-        self, on_span: Callable[[EvidenceSpan], object], on_clear: Callable[[ScopeClear], object]
+        self,
+        on_span: Callable[[EvidenceSpan], object],
+        on_clear: Callable[[ScopeClear], object],
+        on_promotion: Callable[[MemoryPromotion], object] | None = None,
     ) -> ReplayReport:
         counts = [0, 0, 0, 0, 0, 0]
         if not self.path.exists():
@@ -256,17 +327,21 @@ class JsonlJournal:
                     raise ValueError
                 if record["record_type"] == "evidence_span":
                     span = EvidenceSpan(**{k: record[k] for k in _SPAN_FIELDS})
-                else:
+                elif record["record_type"] == "scope_clear":
                     clear = ScopeClear(**{k: record[k] for k in _CLEAR_FIELDS})
+                else:
+                    promotion = _promotion_from_record(record)
             except UnicodeDecodeError, json.JSONDecodeError, TypeError, KeyError, ValueError:
                 counts[4] += 1
                 continue
             if record["record_type"] == "evidence_span":
                 inserted = on_span(span)
                 counts[2 if inserted is False else 1] += 1
-            else:
+            elif record["record_type"] == "scope_clear":
                 on_clear(clear)
                 counts[3] += 1
+            elif on_promotion is not None:
+                on_promotion(promotion)
         counts[5] = tail
         return ReplayReport(*counts)
 

@@ -254,23 +254,39 @@ def test_policy_uses_current_turn_and_single_injection(monkeypatch: pytest.Monke
 
 
 @pytest.mark.anyio
-async def test_generated_prompt_has_one_profile_and_policy_section(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_turn_context_has_one_profile_and_policy_section(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Injected once, and into the turn context rather than the prompt.
+
+    This used to assert the same single-injection property against
+    ``system_prompt_builder``, splicing at a boundary marker in a stubbed base
+    prompt. Both blocks now ride the request tail, so the prompt is the wrong
+    place to look — but "exactly one of each" is still the property that
+    matters, since a second copy is what a re-entrant builder would produce.
+    """
     module = _load_system_module(monkeypatch)
 
-    async def base_prompt(_self) -> str:
-        return "stable<!-- HAITUN_CACHE_BOUNDARY -->dynamic"
+    block = await module.turn_context_builder(
+        {"role": "user", "content": "深入讲 Python 原理", "user_id": "runtime"},
+        workspace_raw=str(tmp_path),
+    )
 
-    monkeypatch.setattr(module.System, "build_system_prompt", base_prompt)
+    assert block.count("## 当前知识点学习画像") == 1
+    assert block.count("## 强制监督规则") == 1
+    assert not await anyio.Path(tmp_path / "wiki" / "profiles" / "user-runtime.md").exists()
+
+
+@pytest.mark.anyio
+async def test_generated_prompt_carries_neither_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The prompt is ``messages[0]``: anything per-turn in it invalidates everything."""
+    module = _load_system_module(monkeypatch)
+
     prompt = await module.system_prompt_builder(
         {"role": "user", "content": "深入讲 Python 原理", "user_id": "runtime"},
         workspace_raw=str(tmp_path),
     )
 
-    assert prompt.count("## 当前知识点学习画像") == 1
-    assert prompt.count("## 强制监督规则") == 1
-    assert not await anyio.Path(tmp_path / "wiki" / "profiles" / "user-runtime.md").exists()
+    assert "## 当前知识点学习画像" not in prompt
+    assert "## 强制监督规则" not in prompt
 
 
 def test_standalone_demo_is_runnable_without_real_wiki(tmp_path: Path) -> None:

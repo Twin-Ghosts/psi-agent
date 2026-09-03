@@ -3,14 +3,22 @@ from __future__ import annotations
 import ast
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-from _fusion_memory.runtime import reset_runtime_cache_for_tests
-from memory_add import memory_add
-from memory_answer_context import memory_answer_context
-from memory_search import memory_search
 
 from psi_agent.session.runtime_context import runtime_scope
+
+if TYPE_CHECKING:
+    from agents.desktop.tools._fusion_memory.runtime import reset_runtime_cache_for_tests
+    from agents.desktop.tools.memory_add import memory_add
+    from agents.desktop.tools.memory_answer_context import memory_answer_context
+    from agents.desktop.tools.memory_search import memory_search
+else:
+    from _fusion_memory.runtime import reset_runtime_cache_for_tests
+    from memory_add import memory_add
+    from memory_answer_context import memory_answer_context
+    from memory_search import memory_search
 
 
 def test_runtime_does_not_import_process_or_service_modules() -> None:

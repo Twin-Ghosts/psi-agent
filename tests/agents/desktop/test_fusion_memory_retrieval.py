@@ -3,13 +3,26 @@ from __future__ import annotations
 import hashlib
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from _fusion_memory.embedding import load_model_config
-from _fusion_memory.journal import EvidenceSpan, JsonlJournal
-from _fusion_memory.retrieval import EvidenceHit, build_answer_context, render_first_recall, search_evidence
-from _fusion_memory.store import MemoryStore
 from aiohttp import web
 from aiohttp.test_utils import TestServer
+
+if TYPE_CHECKING:
+    from agents.desktop.tools._fusion_memory.embedding import load_model_config
+    from agents.desktop.tools._fusion_memory.journal import EvidenceSpan, JsonlJournal
+    from agents.desktop.tools._fusion_memory.retrieval import (
+        EvidenceHit,
+        build_answer_context,
+        render_first_recall,
+        search_evidence,
+    )
+    from agents.desktop.tools._fusion_memory.store import MemoryStore
+else:
+    from _fusion_memory.embedding import load_model_config
+    from _fusion_memory.journal import EvidenceSpan, JsonlJournal
+    from _fusion_memory.retrieval import EvidenceHit, build_answer_context, render_first_recall, search_evidence
+    from _fusion_memory.store import MemoryStore
 
 
 def span(span_id: str, content: str, line_no: int) -> EvidenceSpan:

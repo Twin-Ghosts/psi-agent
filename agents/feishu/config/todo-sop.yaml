@@ -8,7 +8,7 @@ schema:
     - name: 大目标
       time_granularity: 3-6 个月
       count: 1 或多个
-      required: [事情描述, 时间, 标准]
+      required: [事情描述, 时间, 标准, 外部成果, 友商对比]
       relation: 与组织上一级大目标对齐;成果来自外部
     - name: 小目标
       time_granularity: 1 周-1 个月
@@ -82,3 +82,17 @@ truthfulness:
     D4: 前后一致性
     D5: 闭环要素
     D6: 对齐与粒度
+
+alignment:
+  verdicts:
+    - 对齐
+    - 存疑／待跟进
+    - 未对齐（价值/成果缺失）
+    - 无法判定
+  dimensions:
+    A1: 可对齐性
+    A2: 上级对齐
+    A3: 小组对齐
+    A4: 用户价值
+    A5: 外部成果/友商对比
+    A6: 验收

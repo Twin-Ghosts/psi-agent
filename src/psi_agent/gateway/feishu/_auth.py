@@ -43,10 +43,11 @@ from typing import Any, cast
 from aiohttp import ClientError, ClientSession, ClientTimeout
 from loguru import logger
 
-TOKEN_URL = "https://open.feishu.cn/open-apis/authen/v2/oauth/token"
-"""换 ``user_access_token``。官方已把 v2 标为历史版本, 推荐 v3
-``https://accounts.feishu.cn/oauth/v3/token`` (请求/响应结构与 v2 一致, 差别在 PKCE 校验
-更严)。这里用 v2 是因为本流程不启用 PKCE, 两者行为等价; 迁 v3 时只改这一个常量。
+TOKEN_URL = "https://accounts.feishu.cn/oauth/v3/token"
+"""换 ``user_access_token`` (官方 OAuth 令牌接口, 2026-08 更新)。
+
+自建应用属于 Confidential Client, 请求体带 ``client_id`` / ``client_secret`` /
+``code`` 即可; 本流程不启用 PKCE, 因此不需要 ``code_verifier``。
 """
 
 USER_INFO_URL = "https://open.feishu.cn/open-apis/authen/v1/user_info"

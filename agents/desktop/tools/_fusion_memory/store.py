@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .journal import EvidenceSpan, JsonlJournal, ReplayReport, ScopeClear, span_to_record
+from .journal import EvidenceSpan, JsonlJournal, MemoryPromotion, ReplayReport, ScopeClear, span_to_record
 
 SQLITE_SCHEMA_VERSION = 2
 BUSINESS_TABLES = frozenset({"evidence_spans", "memory_items", "summary_cards", "ingest_checkpoints"})
@@ -406,7 +406,21 @@ class MemoryStore:
                 del replay_active[span_id]
             clears += 1
 
-        report = self.journal.replay(on_span, on_clear)
+        def on_promotion(promotion: MemoryPromotion) -> None:
+            if promotion.workspace_id != self.workspace_id:
+                return
+            try:
+                item = self._manual_item(
+                    promotion.workspace_id,
+                    promotion.source_span_ids,
+                    promotion.kind,
+                    promotion.salience,
+                )
+            except ValueError:
+                return
+            self._upsert_memory_items_in_transaction(self.workspace_id, [item])
+
+        report = self.journal.replay(on_span, on_clear, on_promotion)
         stale_ids = [
             str(row[0])
             for row in self.conn.execute(
@@ -553,7 +567,7 @@ class MemoryStore:
         by_id = {row["span_id"]: self._row_span(row) for row in rows}
         return [by_id[item] for item in ids if item in by_id]
 
-    def promote(self, workspace_id: str, source_span_ids: Iterable[str], kind: str, salience: float) -> MemoryItem:
+    def _manual_item(self, workspace_id: str, source_span_ids: Iterable[str], kind: str, salience: float) -> MemoryItem:
         if workspace_id != self.workspace_id:
             raise ValueError("workspace does not match store scope")
         ids = tuple(dict.fromkeys(str(item) for item in source_span_ids))
@@ -566,49 +580,56 @@ class MemoryStore:
         text = "\n".join(item.content for item in spans)
         canonical_ids = tuple(item.span_id for item in spans)
         item_id = hashlib.sha256(_json({"kind": kind, "source_span_ids": canonical_ids}).encode()).hexdigest()
-        item = MemoryItem(item_id, workspace_id, kind, text, 1.0, float(salience), canonical_ids, None)
+        return MemoryItem(item_id, workspace_id, kind, text, 1.0, float(salience), canonical_ids, None)
+
+    def promote(self, workspace_id: str, source_span_ids: Iterable[str], kind: str, salience: float) -> MemoryItem:
+        item = self._manual_item(workspace_id, source_span_ids, kind, salience)
+        self.journal.append_promotion(workspace_id, item.source_span_ids, kind, salience)
         self.upsert_memory_items(workspace_id, [item])
         return item
 
-    def upsert_memory_items(self, workspace_id: str, items: Iterable[MemoryItem]) -> None:
+    def _upsert_memory_items_in_transaction(self, workspace_id: str, items: Iterable[MemoryItem]) -> None:
         if workspace_id != self.workspace_id:
             raise ValueError("workspace does not match store scope")
+        for item in items:
+            if item.workspace_id != workspace_id:
+                raise ValueError("memory item workspace does not match store scope")
+            ids = tuple(dict.fromkeys(item.source_span_ids))
+            if not ids or len(self.get_source_spans(workspace_id, ids)) != len(ids):
+                raise ValueError("memory item source spans are missing or cross-workspace")
+            now = _now()
+            existing = self.conn.execute(
+                "select created_at from memory_items where item_id = ?", (item.item_id,)
+            ).fetchone()
+            created = existing[0] if existing else now
+            self.conn.execute(
+                """insert into memory_items(item_id,workspace_id,kind,text,confidence,salience,source_span_ids,model,schema_version,created_at,updated_at)
+                values (?,?,?,?,?,?,?,?,?,?,?) on conflict(item_id) do update set workspace_id=excluded.workspace_id,kind=excluded.kind,text=excluded.text,confidence=excluded.confidence,salience=excluded.salience,source_span_ids=excluded.source_span_ids,model=excluded.model,schema_version=excluded.schema_version,updated_at=excluded.updated_at""",
+                (
+                    item.item_id,
+                    workspace_id,
+                    item.kind,
+                    item.text,
+                    item.confidence,
+                    item.salience,
+                    _json(ids),
+                    item.model,
+                    item.schema_version,
+                    created,
+                    now,
+                ),
+            )
+            self.conn.execute("delete from fts_memory where doc_type='memory_item' and doc_id=?", (item.item_id,))
+            self.conn.execute(
+                "insert into fts_memory(doc_type,doc_id,workspace_id,text) values ('memory_item',?,?,?)",
+                (item.item_id, workspace_id, item.text),
+            )
+
+    def upsert_memory_items(self, workspace_id: str, items: Iterable[MemoryItem]) -> None:
         batch = list(items)
         self.conn.execute("begin")
         try:
-            for item in batch:
-                if item.workspace_id != workspace_id:
-                    raise ValueError("memory item workspace does not match store scope")
-                ids = tuple(dict.fromkeys(item.source_span_ids))
-                if not ids or len(self.get_source_spans(workspace_id, ids)) != len(ids):
-                    raise ValueError("memory item source spans are missing or cross-workspace")
-                now = _now()
-                existing = self.conn.execute(
-                    "select created_at from memory_items where item_id = ?", (item.item_id,)
-                ).fetchone()
-                created = existing[0] if existing else now
-                self.conn.execute(
-                    """insert into memory_items(item_id,workspace_id,kind,text,confidence,salience,source_span_ids,model,schema_version,created_at,updated_at)
-                    values (?,?,?,?,?,?,?,?,?,?,?) on conflict(item_id) do update set workspace_id=excluded.workspace_id,kind=excluded.kind,text=excluded.text,confidence=excluded.confidence,salience=excluded.salience,source_span_ids=excluded.source_span_ids,model=excluded.model,schema_version=excluded.schema_version,updated_at=excluded.updated_at""",
-                    (
-                        item.item_id,
-                        workspace_id,
-                        item.kind,
-                        item.text,
-                        item.confidence,
-                        item.salience,
-                        _json(ids),
-                        item.model,
-                        item.schema_version,
-                        created,
-                        now,
-                    ),
-                )
-                self.conn.execute("delete from fts_memory where doc_type='memory_item' and doc_id=?", (item.item_id,))
-                self.conn.execute(
-                    "insert into fts_memory(doc_type,doc_id,workspace_id,text) values ('memory_item',?,?,?)",
-                    (item.item_id, workspace_id, item.text),
-                )
+            self._upsert_memory_items_in_transaction(workspace_id, batch)
             self.conn.commit()
         except Exception:
             self.conn.rollback()

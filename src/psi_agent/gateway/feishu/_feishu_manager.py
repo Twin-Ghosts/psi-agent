@@ -36,6 +36,12 @@ _SOCKET_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 
 _EXTERNAL_ENV_KEY = "PSI_FEISHU_EXTERNAL_SESSIONS"
 
+# 飞书派生 session_id 的命名空间前缀, 与 SPA 手建的 uuid 隔离。``session_id_for`` 拼的就是
+# 它。**公开**是因为 ``Gateway.run`` 要拿它去配 ``SessionManager`` 的 workspace 判据 —— 那边
+# 只认「某前缀 + 某 root」这个机制, 产品名必须由本模块提供, 否则内核里就多一处 "feishu-"
+# 硬编码。``_identity.GROUP_SESSION_PREFIX`` 是它加上群聊那段。
+FEISHU_SESSION_PREFIX = "feishu-"
+
 
 def external_sessions() -> dict[str, str]:
     """读 ``PSI_FEISHU_EXTERNAL_SESSIONS``: ``<路由键>=<地址>`` 逗号/分号分隔。
@@ -59,6 +65,24 @@ def external_sessions() -> dict[str, str]:
             continue
         out[key] = addr
     return out
+
+
+def _same_workspace(a: str, b: str) -> bool:
+    """两个 workspace 字符串是否指同一个目录 (纯路径运算, 不碰磁盘)。
+
+    尾斜杠 / ``.`` 段 / Windows 大小写差异都指同一处, 按裸字符串比会报出一片纯噪音的错位。
+    刻意不用 ``os.path.samefile``: 这些路径**可能不存在** (那 14 个会话的 ``ou_*`` 目录抽查
+    7 个一个都没有), 本判定必须纯且能处理假设路径。空串恒为不同 —— 「没有 workspace」不该
+    与任何真实路径相等。
+
+    ``_identity._same_path`` 转发到这里, 于是全项目只有一份 workspace 相等性判据: 归属判定
+    (判错=陌生人互看对话) 与错位告警若各有一份实现, 迟早在某一支上分歧。
+    """
+    if not a or not b:
+        return False
+    return os.path.normcase(os.path.normpath(os.path.abspath(a))) == os.path.normcase(
+        os.path.normpath(os.path.abspath(b))
+    )
 
 
 def _sanitize_open_id(open_id: str) -> str:
@@ -105,8 +129,8 @@ class FeishuManager:
         那条转义。派生只能有一份, 故对外只暴露本方法, 不暴露拼接细节。
         """
         if key.startswith("chat:"):
-            return f"feishu-chat-{_sanitize_open_id(key.removeprefix('chat:'))}"
-        return f"feishu-{_sanitize_open_id(key).replace('-', '_')}"
+            return f"{FEISHU_SESSION_PREFIX}chat-{_sanitize_open_id(key.removeprefix('chat:'))}"
+        return f"{FEISHU_SESSION_PREFIX}{_sanitize_open_id(key).replace('-', '_')}"
 
     def _session_id(self, key: str) -> str:
         """内部别名 —— 既有 5 处调用点不动, 实现见 ``session_id_for``。"""
@@ -163,6 +187,44 @@ class FeishuManager:
         key = route_key(open_id, chat_id, chat_type)
         return bool(key) and key in external_sessions()
 
+    def _warn_if_workspace_drifted(self, key: str, sid: str) -> None:
+        """adopt 一个已存在 Session 前, 比对它的 workspace 与本该派生出的那个。
+
+        **相同就什么都不打**: 生产 63 个飞书会话里 48 个是健康的, 每次 route 都留一行等于
+        把真告警淹掉。不同则一条 WARNING, 带齐四个字段(路由键 / session_id / 实际 / 应有)
+        —— 少任何一个, 读日志的人都补不出剩下的: 没有键不知道是谁, 没有 session_id 没法去
+        ``/sessions`` 核对, 只印一个路径则看不出哪个才是错的。
+
+        **仍然照旧 adopt, 不抛错也不改 workspace。** 纠正存量数据是另一个独立决定 (那 14
+        个会话的历史与产出都在旧目录里, 悄悄换目录等于让人以为文件丢了)。这里只负责让
+        「错状态正在自我延续」这件事在线上 INFO 级别可见。
+
+        为什么错状态会自我延续: ``route`` 的 adopt 分支在 ``ws = workspace or
+        self._workspace_for(key)`` **之前**就 return 了, 于是 adopt 直接继承旧 workspace,
+        ``workspace_for`` 压根不被调用 —— 已用对照实验坐实(干净状态下走 spawn 则正确派生)。
+
+        比较走 ``_same_workspace`` 而不是裸 ``==``: 尾斜杠 / ``.`` 段 / Windows 大小写差异
+        指的是同一个目录, 按字符串比会报出一片纯噪音的错位。
+
+        ``get_workspace`` 抛 ``LookupError`` 时静默放过: 上一行刚判过 ``has(sid)``, 真抛
+        只能是并发删除, 而**观测不该把 route 带崩**。
+        """
+        try:
+            actual = self._sm.get_workspace(sid)
+        except LookupError:
+            return
+        expected = self.workspace_for(key)
+        if _same_workspace(actual, expected):
+            return
+        # 两个路径用引号夹而不是 ``!r``: repr 会把 Windows 的 ``\`` 转义成 ``\\``, 日志里
+        # 印出的路径就没法直接复制粘贴去 ls —— 而这条告警的**唯一用途**就是让人拿着这两个
+        # 路径去核对。同一条教训已写在 ``_workspace_paths.resolve_agent_package`` 里。
+        logger.warning(
+            f"FeishuManager: workspace drift on adopt: key={key!r} session={sid!r} "
+            f"actual_workspace='{actual}' expected_workspace='{expected}' "
+            "(adopted as-is; agent output goes to the actual path)"
+        )
+
     async def route(
         self,
         open_id: str,
@@ -201,6 +263,7 @@ class FeishuManager:
             # 路由表未命中但 Session 已存在 (重启后被 state 恢复, 或 SPA 侧同名建过) → adopt。
             if self._sm.has(sid):
                 self._routes[key] = sid
+                self._warn_if_workspace_drifted(key, sid)
                 logger.debug(f"FeishuManager: adopted existing session {sid!r} for {key!r}")
                 return self._sm.get_socket(sid), sid
 

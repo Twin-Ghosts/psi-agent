@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sys
 from collections.abc import Awaitable, Callable
@@ -25,6 +26,43 @@ WaitFn = Callable[..., Awaitable[dict[str, Any]]]
 ChatFn = Callable[..., Awaitable[dict[str, Any]]]
 _TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
 _FAST_ADVICE_TTL = timedelta(minutes=10)
+
+# The child-supervisor spawn is OFF by default: it never once succeeded in
+# production, and every call paid the full 30s before-turn hook timeout.
+#
+# Evidence from the 2026-09-01 production log survey (two mutually exclusive
+# branches both at zero is what proves it never reached a verdict at all):
+#
+#     before-turn hook timed out       251
+#     child process started            240
+#     "Supervisor handle ready"          0
+#     "readiness check failed"           0   <- never even failed, just hung
+#
+# The cause is ``ensure_supervisor`` planning against a child workspace that is
+# not shipped: ``<agents-parent>/haitun-supervisor-workspace`` does not exist on
+# the deployed image (nor does ``/workspace/haitun-supervisor-workspace``), so
+# ``wait_fn`` polls a socket nobody will ever bind and only exits via timeout.
+# That 30s sits *before* the session lock, so early profiles booked it as
+# "unattributed"; it was 33.7% of a short turn's p50.
+#
+# Turning it off costs no behaviour: with 0 successes, no turn has ever received
+# live child advice. ``supervise`` degrades to ``empty_advice()``, exactly as it
+# already did on all 251 of those turns, and ``render_advice_prompt`` renders
+# nothing for ``source="unavailable"``.
+#
+# Re-open it (``PSI_HAITUN_SUPERVISOR_CHILD=1``) once BOTH hold:
+#   1. ``examples/haitun-supervisor-workspace`` is actually deployed at the path
+#      ``ensure_supervisor`` computes, and
+#   2. ``wait_fn`` has a real readiness predicate, so a miss logs a failure
+#      instead of burning the caller's whole timeout budget.
+# The check to run afterwards is the same one that condemned it: "handle ready"
+# must be non-zero.
+_CHILD_SUPERVISOR_ENV = "PSI_HAITUN_SUPERVISOR_CHILD"
+
+
+def is_child_supervisor_enabled() -> bool:
+    """Whether spawning the child supervisor is allowed (default: no)."""
+    return os.environ.get(_CHILD_SUPERVISOR_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def is_cache_eligible(
@@ -197,6 +235,13 @@ class SupervisorManager:
             return self._handle_locks.setdefault(user_hash, anyio.Lock())
 
     async def ensure_supervisor(self, user_hash: str, *, restart: bool = False) -> SupervisorHandle | None:
+        # Disabled by default — see ``_CHILD_SUPERVISOR_ENV`` above for the
+        # 251-calls/0-successes evidence. Returning before ``_dependencies`` is
+        # deliberate: every 30s wait on this path (``wait_fn`` on ai_socket and
+        # on channel_socket) lives below this line, as does the child spawn.
+        if not is_child_supervisor_enabled():
+            logger.debug(f"Supervisor child spawn disabled; set {_CHILD_SUPERVISOR_ENV}=1 to re-enable")
+            return None
         plan_fn, start_fn, _, wait_fn, _ = await self._dependencies()
         lock = await self._handle_lock(user_hash)
         async with lock:

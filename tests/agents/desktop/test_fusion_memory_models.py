@@ -1,20 +1,33 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 import anyio
 import pytest
-from _fusion_memory.embedding import (
-    ModelCallError,
-    cosine_similarity,
-    embed_texts,
-    extract_memory_items,
-    load_model_config,
-    rerank,
-)
-from _fusion_memory.journal import EvidenceSpan
 from aiohttp import web
 from aiohttp.test_utils import TestServer
+
+if TYPE_CHECKING:
+    from agents.desktop.tools._fusion_memory.embedding import (
+        ModelCallError,
+        cosine_similarity,
+        embed_texts,
+        extract_memory_items,
+        load_model_config,
+        rerank,
+    )
+    from agents.desktop.tools._fusion_memory.journal import EvidenceSpan
+else:
+    from _fusion_memory.embedding import (
+        ModelCallError,
+        cosine_similarity,
+        embed_texts,
+        extract_memory_items,
+        load_model_config,
+        rerank,
+    )
+    from _fusion_memory.journal import EvidenceSpan
 
 
 def test_vector_clients_only_use_dashscope_key() -> None:
@@ -66,6 +79,38 @@ def test_llm_dedicated_key_can_reuse_agent_metadata_but_fallback_is_whole_group(
     )
     assert no_mixing.llm is not None
     assert (no_mixing.llm.provider, no_mixing.llm.model) == ("openai", "agent-model")
+
+
+def test_llm_dedicated_key_requires_complete_agent_group_before_reusing_metadata() -> None:
+    incomplete_agent = load_model_config(
+        {
+            "FUSION_MEMORY_MODEL_API_KEY": "llm-secret",
+            "PSI_AI_PROVIDER": "openai",
+            "PSI_AI_MODEL": "qwen-plus",
+            "PSI_AI_BASE_URL": "https://llm.example/v1",
+        }
+    )
+    assert incomplete_agent.llm is None
+
+
+def test_llm_dedicated_key_does_not_mix_partial_fusion_metadata_with_agent_group() -> None:
+    config = load_model_config(
+        {
+            "FUSION_MEMORY_MODEL_API_KEY": "llm-secret",
+            "FUSION_MEMORY_MODEL_PROVIDER": "deepseek",
+            "PSI_AI_PROVIDER": "openai",
+            "PSI_AI_MODEL": "qwen-plus",
+            "PSI_AI_API_KEY": "agent-secret",
+            "PSI_AI_BASE_URL": "https://llm.example/v1",
+        }
+    )
+    assert config.llm is not None
+    assert (config.llm.api_key, config.llm.provider, config.llm.model, config.llm.endpoint) == (
+        "llm-secret",
+        "openai",
+        "qwen-plus",
+        "https://llm.example/v1/chat/completions",
+    )
 
 
 def test_cosine_similarity_is_safe_for_empty_or_mismatched_vectors() -> None:

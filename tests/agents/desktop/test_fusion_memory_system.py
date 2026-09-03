@@ -30,7 +30,7 @@ def load_system():
 
 
 @pytest.mark.anyio
-async def test_prompt_injects_recall_only_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_turn_context_injects_recall_only_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     module = load_system()
 
     class FakeRuntime:
@@ -46,19 +46,18 @@ async def test_prompt_injects_recall_only_once(monkeypatch: pytest.MonkeyPatch, 
     fake = FakeRuntime()
     monkeypatch.setattr(module, "get_runtime", lambda _workspace: _async_value(fake))
     monkeypatch.setattr(module, "_runtime_session_id", lambda: "session-2")
-    monkeypatch.setattr(module.System, "build_system_prompt", lambda _self: _async_value("base"))
     profile = SimpleNamespace(get_topic=lambda _text: (None, None))
     monkeypatch.setattr(
         module.importlib,
         "import_module",
         lambda _name: SimpleNamespace(get_profile=lambda *_a, **_k: _async_value(profile)),
     )
-    first = await module.system_prompt_builder(
+    first = await module.turn_context_builder(
         {"role": "user", "content": "我们之前决定用什么数据库？"},
         workspace_raw=str(tmp_path),
         agent_raw=str(DESKTOP),
     )
-    second = await module.system_prompt_builder(
+    second = await module.turn_context_builder(
         {"role": "user", "content": "继续"}, workspace_raw=str(tmp_path), agent_raw=str(DESKTOP)
     )
     assert first.count("## Recalled workspace evidence") == 1
@@ -68,7 +67,9 @@ async def test_prompt_injects_recall_only_once(monkeypatch: pytest.MonkeyPatch, 
 
 
 @pytest.mark.anyio
-async def test_schedule_prompt_does_not_consume_first_recall(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_schedule_turn_context_does_not_consume_first_recall(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     module = load_system()
 
     class FakeRuntime:
@@ -81,29 +82,28 @@ async def test_schedule_prompt_does_not_consume_first_recall(monkeypatch: pytest
 
     fake = FakeRuntime()
     monkeypatch.setattr(module, "get_runtime", lambda _workspace: _async_value(fake))
-    monkeypatch.setattr(module.System, "build_system_prompt", lambda _self: _async_value("base"))
     profile = SimpleNamespace(get_topic=lambda _text: (None, None))
     monkeypatch.setattr(
         module.importlib,
         "import_module",
         lambda _name: SimpleNamespace(get_profile=lambda *_a, **_k: _async_value(profile)),
     )
-    await module.system_prompt_builder(
+    await module.turn_context_builder(
         {"role": "user", "content": "heartbeat", "kind": "schedule.silent"},
         workspace_raw=str(tmp_path),
         agent_raw=str(DESKTOP),
     )
-    await module.system_prompt_builder(
+    await module.turn_context_builder(
         {"role": "user_schedule", "content": "legacy heartbeat", "chat_type": "schedule"},
         workspace_raw=str(tmp_path),
         agent_raw=str(DESKTOP),
     )
-    await module.system_prompt_builder(
+    await module.turn_context_builder(
         {"role": "user", "content": "unknown metadata", "kind": "heartbeat"},
         workspace_raw=str(tmp_path),
         agent_raw=str(DESKTOP),
     )
-    await module.system_prompt_builder(
+    await module.turn_context_builder(
         {"role": "user", "content": "first chat", "kind": "chat"},
         workspace_raw=str(tmp_path),
         agent_raw=str(DESKTOP),

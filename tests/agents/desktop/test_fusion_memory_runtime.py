@@ -2,16 +2,23 @@ from __future__ import annotations
 
 import json
 import threading
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import _fusion_memory.runtime as runtime_module
 import anyio
 import pytest
-from _fusion_memory.runtime import get_runtime, reset_runtime_cache_for_tests
+
+if TYPE_CHECKING:
+    import agents.desktop.tools._fusion_memory.runtime as runtime_module
+    from agents.desktop.tools._fusion_memory.runtime import get_runtime, reset_runtime_cache_for_tests
+else:
+    import _fusion_memory.runtime as runtime_module
+    from _fusion_memory.runtime import get_runtime, reset_runtime_cache_for_tests
 
 
 @pytest.fixture(autouse=True)
-async def clear_runtime_cache() -> None:
+async def clear_runtime_cache() -> AsyncIterator[None]:
     await reset_runtime_cache_for_tests()
     yield
     await reset_runtime_cache_for_tests()

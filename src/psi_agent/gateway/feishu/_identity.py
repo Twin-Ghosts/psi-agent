@@ -16,13 +16,16 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Sequence
 from typing import Protocol
 
-from psi_agent.gateway.feishu._feishu_manager import FeishuManager
+from psi_agent.gateway.feishu._feishu_manager import (
+    FEISHU_SESSION_PREFIX,
+    FeishuManager,
+    _same_workspace,
+)
 
-GROUP_SESSION_PREFIX = "feishu-chat-"
+GROUP_SESSION_PREFIX = f"{FEISHU_SESSION_PREFIX}chat-"
 
 
 class SessionLike(Protocol):
@@ -44,14 +47,11 @@ def is_group_session(session_id: str) -> bool:
 def _same_path(a: str, b: str) -> bool:
     """路径相等性判定, 忽略尾斜杠/大小写(Windows)/相对段。
 
-    Path comparison must NOT use ``os.path.samefile`` 因为这些路径可能不存在,
-    本判定必须纯且能处理假设路径。用 normcase/normpath/abspath 三层。
+    实现转发到 ``_feishu_manager._same_workspace`` —— 归属判定 (判错=陌生人互看对话) 与
+    adopt 时的 workspace 错位告警问的是同一个问题「这两个字符串是不是同一个目录」, 各留一份
+    实现迟早在某一支上分歧。本名字保留: 既有调用点与用例都按它写。
     """
-    if not a or not b:
-        return False
-    return os.path.normcase(os.path.normpath(os.path.abspath(a))) == os.path.normcase(
-        os.path.normpath(os.path.abspath(b))
-    )
+    return _same_workspace(a, b)
 
 
 def owns_session(open_id: str, session_id: str, workspace: str, fm: FeishuManager) -> bool:

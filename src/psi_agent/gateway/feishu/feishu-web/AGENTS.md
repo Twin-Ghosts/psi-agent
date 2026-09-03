@@ -90,7 +90,7 @@ AI 落进 `$DEV_APPDATA/state/latest.json` 后就**持久**了 —— 之后每�
 
 ## 身份与免登
 
-- 免登走官方 JSSDK: `index.html` 同步引 `h5-js-sdk-1.5.35.js` → `h5sdk.ready` →
+- 免登走官方 JSSDK: `index.html` 同步引 `h5-js-sdk-1.5.48.js` → `h5sdk.ready` →
   `tt.requestAccess({appID, scopeList: [], ...})` 拿 code → `POST /feishu/auth/login`。
   两级退路见 `src/services/feishuAuth.ts` 模块头 (JSSDK 旧 / 客户端旧 `errno===103`)。
 - **appID 从后端 `GET /feishu/app-id` 取, 不写死在前端。**
@@ -98,12 +98,22 @@ AI 落进 `$DEV_APPDATA/state/latest.json` 后就**持久**了 —— 之后每�
   `psi_feishu_sid`。
 - 会话一族走 `/feishu/sessions`(服务端按身份过滤), **不走裸 `/sessions`** —— 后者不过滤,
   在浏览器里 filter 只是显示过滤, 谁都能直接打裸路由拿全量。
+- **聊天流走 `POST /feishu/sessions/{id}/chat`, 不走裸 `POST /sessions/{id}/chat`。** 裸的那条
+  一行身份校验都没有, 而它是**能驱动 agent 执行工具**的那条(跑 bash、读公司表格、往飞书发
+  消息) —— 上公网后打它等于任何知道一个 session id 的人都能让公司 agent 干活。带鉴权那条的
+  判定与 `/feishu/sessions/{id}/history` **同一套** `owns_session`: 未登录 401、会话不存在
+  404、别人的/群聊的 403。实现不复制: handler 只做三段判定, 正文转给骨架的 `_serve_chat_sse`
+  (见 `feishu/_routes.py` 的 `_web_chat`)。判据在
+  `tests/integration/test_feishu_web_chat_auth.py`, 含一条把归属校验打成恒真的变异复核。
 
 ## 已知敞口
 
-骨架的 `GET /sessions` / `GET /sessions/{id}/history` 在本进程里**仍然无鉴权可达**。本轮
-只做到「前端不再用它 + 过滤路由默认拒绝」, 真正封堵要靠 Gateway 前面的反代或骨架中间件,
-是另一件事。
+骨架的 `GET /sessions` / `GET /sessions/{id}/history` / `POST /sessions/{id}/chat` 在本进程里
+**仍然无鉴权可达**(那条 chat 在容器内回环服务本机, 是它的合理用途)。做到的是「前端不再用它
++ `/feishu/*` 那一族默认拒绝」, 真正封堵要靠 Gateway 前面的反代白名单或骨架中间件, 是另一件事。
+
+**跨身份隔离在真实飞书环境下的表现本地测不到** —— 那要真 open_id、真 `tt.requestAccess` 换回
+来的 code、真容器拓扑。本地能验的只有用例层面那三条。
 
 ## 常用命令
 
@@ -235,7 +245,7 @@ psi-agent gateway --gateway desktop feishu --listen http://127.0.0.1:8765
 
 ## 路径清单: 挡「本地全通、云上全 404」
 
-前端会打的后端路径有一份**从源码提取**的清单: `api-paths.json`(19 条), 生成与消费都走
+前端会打的后端路径有一份**从源码提取**的清单: `api-paths.json`(20 条), 生成与消费都走
 `scripts/feishu_web_paths.py`。
 
 **不人手维护**是关键: 前端加一个端点没人会想起来更新清单, 而漂移的表现恰好就是云上 404。
@@ -275,8 +285,9 @@ bash check-feishu-web-paths.sh http://127.0.0.1:8090
 FAIL 的行就是要和 `oauth-proxy.py` 的 `ALLOWED_PATHS` 逐条比对的路径。部署卡(`c6e60`)里
 「放行路径 200/4xx、未放行必须 404」那个 for 循环**复用这一份清单**, 不要另写第二份。
 
-**这份东西只读不改。** 白名单该放行哪些、`/sessions/{id}/chat` 这条能驱动 agent 执行工具
-要不要暴露, 都是负责人拍的方案, 不在这里决定。
+**这份东西只读不改。** 白名单该放行哪些是负责人拍的方案, 不在这里决定。裸
+`POST /sessions/{id}/chat` 那条已经拍了: **不暴露**, 网页应用改打带鉴权的
+`POST /feishu/sessions/{id}/chat`(清单里因此只有后者), 裸的那条行为一字不改、继续在容器内回环。
 
 ## 三个静默坑(都实测踩过)
 

@@ -5,7 +5,7 @@ import json
 import os
 import re
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -61,14 +61,14 @@ def workspace_scope(path: str | Path) -> WorkspaceScope:
     return WorkspaceScope(normalized, hashlib.sha256(normalized.encode("utf-8")).hexdigest())
 
 
-def _visible_content(row: dict[str, object]) -> str:
+def _visible_content(row: Mapping[str, object]) -> str:
     value = row.get("content", "")
     if not isinstance(value, str):
         return ""
     return _TRANSFER_MARKER.sub("", value)
 
 
-def _kind(row: dict[str, object]) -> str:
+def _kind(row: Mapping[str, object]) -> str:
     if "kind" in row:
         return "chat" if row.get("kind") == "chat" else ""
     if "chat_type" in row:
@@ -395,7 +395,7 @@ def _prefix_hash(path: Path, line_count: int) -> str:
     return digest.hexdigest()
 
 
-def committed_history_provenance(message: dict[str, object]) -> CommittedHistoryProvenance | None:
+def committed_history_provenance(message: Mapping[str, object]) -> CommittedHistoryProvenance | None:
     provenance = message.get("_psi_history_provenance")
     if not isinstance(provenance, dict):
         return None
@@ -423,8 +423,8 @@ def ingest_confirmed_turn(
     store: MemoryStore,
     scope: WorkspaceScope,
     source: HistorySource,
-    user_message: dict[str, object],
-    assistant_message: dict[str, object],
+    user_message: Mapping[str, object],
+    assistant_message: Mapping[str, object],
 ) -> tuple[IngestReport, list[EvidenceSpan]]:
     path = Path(source.path)
     if not path.is_file():

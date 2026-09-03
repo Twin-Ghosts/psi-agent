@@ -7,6 +7,7 @@ import re
 import shlex
 import sys
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -92,11 +93,11 @@ def _infer_background_session_id(row: dict[str, Any]) -> str:
     return process_id
 
 
-async def _count_jsonl_messages(path: anyio.Path) -> int:
+def _count_jsonl_messages_sync(path: str) -> int:
     count = 0
     try:
-        async with await path.open(encoding="utf-8") as handle:
-            async for line in handle:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
                 text = line.strip()
                 if not text:
                     continue
@@ -111,6 +112,62 @@ async def _count_jsonl_messages(path: anyio.Path) -> int:
     return count
 
 
+async def _count_jsonl_messages(path: anyio.Path) -> int:
+    """Count role-bearing lines, reading the file on a worker thread.
+
+    ``anyio``'s per-line ``await`` costs ~13x a plain sync read on a 23MB
+    history (1.3s vs 0.1s), and the read would otherwise block an event loop
+    shared by every session in the process.
+    """
+    return await anyio.to_thread.run_sync(_count_jsonl_messages_sync, str(path))  # ty: ignore
+
+
+def _history_row(session_id: str, path: str, mtime: str) -> dict[str, Any]:
+    """History-backed session row **without** ``message_count``.
+
+    ``message_count`` is filled in by :func:`_ensure_message_count` only for the
+    rows a caller actually returns: computing it here meant reading all 399
+    history files (234MB) on every listing, and the search path re-read the very
+    same files right after.
+    """
+    return {
+        "session_id": session_id,
+        "sources": ["history"],
+        "running": False,
+        "history_path": path,
+        "history_mtime": mtime,
+        "background_processes": [],
+        "gateway": None,
+        "title": "",
+        "is_current": session_id == current_session_id(),
+    }
+
+
+async def _entry_mtime_iso(entry: anyio.Path) -> str:
+    try:
+        stat = await entry.stat()
+    except OSError:
+        return ""
+    return datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat()
+
+
+async def _ensure_message_count(row: dict[str, Any]) -> int:
+    """Return ``row['message_count']``, computing it from the history file once.
+
+    Rows built by :func:`_history_row` omit the key; rows built by
+    :func:`_ensure_session_row` (background / Gateway only, no history file)
+    carry a real ``0``. Either way the value and meaning a caller sees are the
+    same as when it was computed eagerly — only the timing changed.
+    """
+    cached = row.get("message_count")
+    if isinstance(cached, int):
+        return cached
+    path = str(row.get("history_path", "")).strip()
+    count = await _count_jsonl_messages(anyio.Path(path)) if path else 0
+    row["message_count"] = count
+    return count
+
+
 async def _scan_one_histories_dir(histories_dir: anyio.Path) -> dict[str, dict[str, Any]]:
     rows: dict[str, dict[str, Any]] = {}
     if not await histories_dir.exists():
@@ -119,28 +176,27 @@ async def _scan_one_histories_dir(histories_dir: anyio.Path) -> dict[str, dict[s
         session_id = entry.name.removesuffix(".jsonl").strip()
         if not session_id:
             continue
-        try:
-            stat = await entry.stat()
-            mtime = datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat()
-        except OSError:
-            mtime = ""
-        rows[session_id] = {
-            "session_id": session_id,
-            "sources": ["history"],
-            "running": False,
-            "history_path": str(entry),
-            "history_mtime": mtime,
-            "message_count": await _count_jsonl_messages(entry),
-            "background_processes": [],
-            "gateway": None,
-            "title": "",
-            "is_current": session_id == current_session_id(),
-        }
+        rows[session_id] = _history_row(session_id, str(entry), await _entry_mtime_iso(entry))
     return rows
 
 
-async def _scan_history_sessions(workspace: anyio.Path) -> dict[str, dict[str, Any]]:
-    """Scan AppData + legacy workspace histories; AppData wins for the same id."""
+async def _scan_history_sessions(
+    workspace: anyio.Path,
+    *,
+    session_scope: str = "",
+) -> dict[str, dict[str, Any]]:
+    """Scan AppData + legacy workspace histories; AppData wins for the same id.
+
+    With *session_scope* set, resolve that one id instead of globbing both
+    directories — ``resolve_history_read_path`` applies the same AppData-wins
+    precedence, so the row is what the full scan would have produced for it.
+    """
+    if session_scope:
+        path = await _resolve_history_path(workspace, session_scope)
+        if not await path.is_file():
+            return {}
+        return {session_scope: _history_row(session_scope, str(path), await _entry_mtime_iso(path))}
+
     appdata_root = await resolve_appdata_root()
     rows = await _scan_one_histories_dir(workspace / "histories")
     appdata_rows = await _scan_one_histories_dir(anyio.Path(appdata_root) / "histories")
@@ -261,11 +317,18 @@ async def _collect_session_rows(
     *,
     workspace_raw: str = "",
     include_gateway: bool = True,
+    session_scope: str = "",
 ) -> tuple[anyio.Path, str, dict[str, dict[str, Any]]]:
+    """Collect session rows from histories + background registry + Gateway.
+
+    *session_scope* narrows the history scan to a single id. Background and
+    Gateway merges still run: they are cheap (one registry read, two HTTP calls)
+    and they are what fills in ``running`` / ``title`` for that row.
+    """
     workspace = _bg.resolve_workspace(workspace_raw)
     workspace_path = Path(str(workspace))
 
-    rows = await _scan_history_sessions(workspace)
+    rows = await _scan_history_sessions(workspace, session_scope=session_scope)
     await _merge_background_sessions(rows, workspace_raw=workspace_raw)
 
     gateway_url = ""
@@ -328,16 +391,16 @@ def _normalize_history_message(msg: dict[str, Any], *, include_tool_messages: bo
     return None
 
 
-async def _read_history_messages(
-    path: anyio.Path,
+def _read_history_messages_sync(
+    path: str,
     *,
     limit: int,
     include_tool_messages: bool,
 ) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
     try:
-        async with await path.open(encoding="utf-8") as handle:
-            async for line in handle:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
                 text = line.strip()
                 if not text:
                     continue
@@ -357,6 +420,22 @@ async def _read_history_messages(
     return messages
 
 
+async def _read_history_messages(
+    path: anyio.Path,
+    *,
+    limit: int,
+    include_tool_messages: bool,
+) -> list[dict[str, Any]]:
+    return await anyio.to_thread.run_sync(  # ty: ignore
+        partial(
+            _read_history_messages_sync,
+            str(path),
+            limit=limit,
+            include_tool_messages=include_tool_messages,
+        )
+    )
+
+
 async def get_session_status(
     *,
     session_id: str = "",
@@ -374,6 +453,7 @@ async def get_session_status(
     workspace, gateway_url, rows = await _collect_session_rows(
         workspace_raw=workspace_raw,
         include_gateway=include_gateway,
+        session_scope=sid,
     )
     row = rows.get(sid)
     if row is None:
@@ -403,6 +483,7 @@ async def get_session_status(
                 if channel_socket:
                     break
 
+    await _ensure_message_count(row)
     session = dict(row)
     if channel_socket:
         session["channel_socket"] = channel_socket
@@ -438,6 +519,7 @@ async def get_session_history(
     workspace, gateway_url, rows = await _collect_session_rows(
         workspace_raw=workspace_raw,
         include_gateway=include_gateway,
+        session_scope=sid,
     )
     path = await _resolve_history_path(workspace, sid)
     messages: list[dict[str, Any]] = []
@@ -537,11 +619,17 @@ def _searchable_message_text(msg: dict[str, Any]) -> str:
     return content
 
 
-async def _recent_user_texts(path: anyio.Path, *, limit: int = 5) -> list[str]:
+def _recent_user_texts_and_count_sync(path: str, *, limit: int) -> tuple[list[str], int]:
+    """Last *limit* user texts plus the role-bearing message count, in one pass.
+
+    Task search needs both for the same file; counting here keeps it to a single
+    read now that the listing scan no longer computes ``message_count``.
+    """
     texts: list[str] = []
+    count = 0
     try:
-        async with await path.open(encoding="utf-8") as handle:
-            async for line in handle:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
                 text = line.strip()
                 if not text:
                     continue
@@ -549,15 +637,30 @@ async def _recent_user_texts(path: anyio.Path, *, limit: int = 5) -> list[str]:
                     raw = json.loads(text)
                 except json.JSONDecodeError:
                     continue
-                if not isinstance(raw, dict) or raw.get("role") != "user":
+                if not isinstance(raw, dict):
+                    continue
+                if raw.get("role"):
+                    count += 1
+                if raw.get("role") != "user":
                     continue
                 content = raw.get("content", "")
                 if isinstance(content, str) and content.strip():
                     texts.append(content.strip())
     except OSError:
-        return texts
+        return texts, count
     if len(texts) > limit:
-        return texts[-limit:]
+        return texts[-limit:], count
+    return texts, count
+
+
+async def _recent_user_texts_and_count(path: anyio.Path, *, limit: int = 5) -> tuple[list[str], int]:
+    return await anyio.to_thread.run_sync(  # ty: ignore
+        partial(_recent_user_texts_and_count_sync, str(path), limit=limit)
+    )
+
+
+async def _recent_user_texts(path: anyio.Path, *, limit: int = 5) -> list[str]:
+    texts, _ = await _recent_user_texts_and_count(path, limit=limit)
     return texts
 
 
@@ -606,23 +709,21 @@ def _infer_task_categories(row: dict[str, Any], *, user_texts: list[str]) -> lis
     return categories
 
 
-async def _keyword_search_file(
-    path: anyio.Path,
-    *,
-    query: str,
-    session_row: dict[str, Any],
-) -> dict[str, Any] | None:
-    needle = query.casefold()
-    if not needle:
-        return None
+def _keyword_scan_sync(path: str, *, query: str) -> tuple[int, int, list[dict[str, Any]]] | None:
+    """Scan one history file for *query*; ``None`` on unreadable file.
 
+    Returns ``(message_count, hit_count, snippets)`` where ``message_count``
+    counts only searchable (user/assistant) messages — that is the denominator
+    the score has always used.
+    """
+    needle = query.casefold()
     snippets: list[dict[str, Any]] = []
     message_count = 0
     hit_count = 0
 
     try:
-        async with await path.open(encoding="utf-8") as handle:
-            async for line in handle:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
                 text = line.strip()
                 if not text:
                     continue
@@ -652,6 +753,23 @@ async def _keyword_search_file(
     except OSError:
         return None
 
+    return message_count, hit_count, snippets
+
+
+async def _keyword_search_file(
+    path: anyio.Path,
+    *,
+    query: str,
+    session_row: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not query.casefold():
+        return None
+
+    scanned = await anyio.to_thread.run_sync(partial(_keyword_scan_sync, str(path), query=query))  # ty: ignore
+    if scanned is None:
+        return None
+    message_count, hit_count, snippets = scanned
+
     if hit_count == 0:
         return None
 
@@ -660,7 +778,10 @@ async def _keyword_search_file(
         "session_id": session_row.get("session_id", path.name.removesuffix(".jsonl")),
         "title": session_row.get("title", ""),
         "running": bool(session_row.get("running")),
-        "message_count": message_count or session_row.get("message_count", 0),
+        # Falls back to the row's own count only when this file had no
+        # searchable message at all; unreachable while hit_count > 0, kept so
+        # the returned field keeps its original meaning.
+        "message_count": message_count or await _ensure_message_count(session_row),
         "history_mtime": session_row.get("history_mtime", ""),
         "score": round(score, 4),
         "hit_count": hit_count,
@@ -685,12 +806,13 @@ async def keyword_search_sessions(
         }
 
     limit = max(1, min(50, int(limit)))
+    scope = session_id.strip()
     workspace, gateway_url, rows = await _collect_session_rows(
         workspace_raw=workspace_raw,
         include_gateway=True,
+        session_scope=scope,
     )
 
-    scope = session_id.strip()
     if scope:
         row = rows.get(scope)
         path = await _resolve_history_path(workspace, scope)
@@ -755,7 +877,10 @@ async def task_search_sessions(
         path = await _resolve_history_path(workspace, sid)
         user_texts: list[str] = []
         if await path.exists():
-            user_texts = await _recent_user_texts(path)
+            # One read serves both consumers: the ``untitled`` rule below needs
+            # message_count, and it is also an output field.
+            user_texts, count = await _recent_user_texts_and_count(path)
+            row.setdefault("message_count", count)
         categories = _infer_task_categories(row, user_texts=user_texts)
         if category != "all" and category not in categories:
             continue
@@ -800,6 +925,11 @@ async def list_sessions(
     if running_only:
         sessions = [row for row in sessions if row.get("running")]
 
+    # Backfill after the running_only filter so a running-only listing does not
+    # pay for the sessions it just dropped.
+    for row in sessions:
+        await _ensure_message_count(row)
+
     sessions.sort(
         key=lambda row: (
             str(row.get("history_mtime", "")),
@@ -821,11 +951,11 @@ async def list_sessions(
 EXPORT_FORMATS: tuple[str, ...] = ("markdown", "json", "jsonl", "text")
 
 
-async def _read_all_raw_messages(path: anyio.Path) -> list[dict[str, Any]]:
+def _read_all_raw_messages_sync(path: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     try:
-        async with await path.open(encoding="utf-8") as handle:
-            async for line in handle:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
                 text = line.strip()
                 if not text:
                     continue
@@ -838,6 +968,10 @@ async def _read_all_raw_messages(path: anyio.Path) -> list[dict[str, Any]]:
     except OSError:
         return []
     return rows
+
+
+async def _read_all_raw_messages(path: anyio.Path) -> list[dict[str, Any]]:
+    return await anyio.to_thread.run_sync(_read_all_raw_messages_sync, str(path))  # ty: ignore
 
 
 def _resolve_output_path(workspace: anyio.Path, output_path: str) -> anyio.Path:
@@ -932,6 +1066,7 @@ async def export_session(
     workspace, gateway_url, rows = await _collect_session_rows(
         workspace_raw=workspace_raw,
         include_gateway=include_gateway,
+        session_scope=sid,
     )
     row = rows.get(sid, {})
     title = str(row.get("title", "")) if isinstance(row, dict) else ""
@@ -1083,6 +1218,7 @@ async def resolve_channel_socket(
     workspace, gateway_url, rows = await _collect_session_rows(
         workspace_raw=workspace_raw,
         include_gateway=include_gateway,
+        session_scope=sid,
     )
     row = rows.get(sid)
     if row is None:
@@ -1260,6 +1396,7 @@ async def build_handoff_context(
     workspace, gateway_url, rows = await _collect_session_rows(
         workspace_raw=workspace_raw,
         include_gateway=include_gateway,
+        session_scope=sid,
     )
     row = rows.get(sid, {})
     title = str(row.get("title", "")) if isinstance(row, dict) else ""

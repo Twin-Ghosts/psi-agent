@@ -3,15 +3,26 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-from _fusion_memory.journal import (
-    EvidenceSpan,
-    JournalConflictError,
-    JsonlJournal,
-    canonical_json,
-    span_to_record,
-)
+
+if TYPE_CHECKING:
+    from agents.desktop.tools._fusion_memory.journal import (
+        EvidenceSpan,
+        JournalConflictError,
+        JsonlJournal,
+        canonical_json,
+        span_to_record,
+    )
+else:
+    from _fusion_memory.journal import (
+        EvidenceSpan,
+        JournalConflictError,
+        JsonlJournal,
+        canonical_json,
+        span_to_record,
+    )
 
 
 def span(span_id: str = "span-1", content: str = "原始文本") -> EvidenceSpan:

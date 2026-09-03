@@ -103,22 +103,25 @@ def load_model_config(env: Mapping[str, str] | None = None) -> ModelConfig:
         top_n=_bounded_int(values.get("FUSION_MEMORY_RERANKER_TOP_N"), 20, 1, 50),
     )
 
-    dedicated_key = values.get("FUSION_MEMORY_MODEL_API_KEY", "").strip()
-    provider = values.get("FUSION_MEMORY_MODEL_PROVIDER", "").strip().lower()
-    model = values.get("FUSION_MEMORY_MODEL_NAME", "").strip()
-    base_url = values.get("FUSION_MEMORY_MODEL_BASE_URL", "").strip()
-    if dedicated_key:
-        provider = provider or values.get("PSI_AI_PROVIDER", "").strip().lower()
-        model = model or values.get("PSI_AI_MODEL", "").strip()
-        base_url = base_url or values.get("PSI_AI_BASE_URL", "").strip()
-        llm_key = dedicated_key
+    dedicated = (
+        values.get("FUSION_MEMORY_MODEL_PROVIDER", "").strip().lower(),
+        values.get("FUSION_MEMORY_MODEL_NAME", "").strip(),
+        values.get("FUSION_MEMORY_MODEL_API_KEY", "").strip(),
+        values.get("FUSION_MEMORY_MODEL_BASE_URL", "").strip(),
+    )
+    agent = (
+        values.get("PSI_AI_PROVIDER", "").strip().lower(),
+        values.get("PSI_AI_MODEL", "").strip(),
+        values.get("PSI_AI_API_KEY", "").strip(),
+        values.get("PSI_AI_BASE_URL", "").strip(),
+    )
+    if all(dedicated):
+        provider, model, llm_key, base_url = dedicated
+    elif all(agent):
+        provider, model, agent_key, base_url = agent
+        llm_key = dedicated[2] or agent_key
     else:
-        provider = values.get("PSI_AI_PROVIDER", "").strip().lower()
-        model = values.get("PSI_AI_MODEL", "").strip()
-        base_url = values.get("PSI_AI_BASE_URL", "").strip()
-        llm_key = values.get("PSI_AI_API_KEY", "").strip()
-        if not all((provider, model, llm_key, base_url)):
-            llm_key = ""
+        provider = model = llm_key = base_url = ""
     llm = None
     if llm_key and provider in {"openai", "openai-compatible", "deepseek", "dashscope"} and model and base_url:
         llm = LlmConfig(

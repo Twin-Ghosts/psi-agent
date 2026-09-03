@@ -29,6 +29,7 @@ SOP_SKILLS = (
     "company-todo-sync",
     "todo-completion-standard",
     "company-todo-review",
+    "todo-alignment-check",
 )
 
 
@@ -72,6 +73,18 @@ def test_ledger_schema_fields_are_typed() -> None:
 
 def test_completion_verdicts_have_four() -> None:
     assert len(_config()["completion_verdicts"]) == 4
+
+
+def test_schema_requires_external_outcomes_on_big_goal() -> None:
+    required = _config()["schema"]["levels"][0]["required"]
+    assert "外部成果" in required
+    assert "友商对比" in required
+
+
+def test_alignment_section_is_present() -> None:
+    cfg = _config()["alignment"]
+    assert len(cfg["verdicts"]) == 4
+    assert list(cfg["dimensions"]) == ["A1", "A2", "A3", "A4", "A5", "A6"]
 
 
 def test_judgment_skills_point_at_the_config() -> None:

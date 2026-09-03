@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import json
+import re
 import socket
 from pathlib import Path
 from typing import Any
@@ -50,6 +52,8 @@ async def _serve_handler(
     monkeypatch: pytest.MonkeyPatch,
     stream: _TrackingStream,
     received_provider_kwargs: dict[str, Any] | None = None,
+    *,
+    provider: str = "openai",
 ) -> tuple[web.AppRunner, str]:
     async def fake_acompletion(**kwargs: Any) -> _TrackingStream:
         if received_provider_kwargs is not None:
@@ -59,7 +63,7 @@ async def _serve_handler(
     monkeypatch.setattr("psi_agent.ai.server.acompletion", fake_acompletion)
 
     app = web.Application()
-    app["provider"] = "openai"
+    app["provider"] = provider
     app["model"] = "test"
     app["api_key"] = "k"
     app["base_url"] = "http://upstream"
@@ -177,7 +181,7 @@ async def test_handler_omits_client_args_without_http_client(tmp_path: Path, mon
 
 
 async def test_handler_requests_thinking_mode_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """不传 ``reasoning_effort`` 时必须兜一个默认值, 否则思维模式被上游关掉。
+    """``deepseek`` provider 不传 ``reasoning_effort`` 时必须兜一个默认值, 否则思维模式被上游关掉。
 
     any-llm 的 DeepSeek provider 把缺省的 ``"auto"`` 读成「没要思维」, 转而下发
     ``extra_body.thinking={"type": "disabled"}``。模型被关掉思维通道后仍要推理,
@@ -185,13 +189,35 @@ async def test_handler_requests_thinking_mode_by_default(tmp_path: Path, monkeyp
     """
     received: dict[str, Any] = {}
     stream = _TrackingStream([_FakeChunk()])
-    runner, socket_path = await _serve_handler(tmp_path, monkeypatch, stream, received)
+    # 兜底只对会误关思维的 provider (deepseek) 生效
+    runner, socket_path = await _serve_handler(tmp_path, monkeypatch, stream, received, provider="deepseek")
     try:
         await _drain(socket_path)
     finally:
         await runner.cleanup()
 
     assert received["reasoning_effort"] == "medium"
+
+
+async def test_handler_openai_provider_keeps_upstream_reasoning_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``openai`` provider 直连 DeepSeek 兼容端点时, 不传 ``reasoning_effort`` 不能兜默认值。
+
+    openai provider 没有 any-llm deepseek provider 的 auto→disabled 逻辑: 不传时
+    thinking 本来就开着, 思考照常进 ``reasoning_content``。若强制 ``"medium"``,
+    模型反而把过程叙述写进 ``content`` —— 用户在飞书看到整段自我对话 (线上泄漏)。
+    """
+    received: dict[str, Any] = {}
+    stream = _TrackingStream([_FakeChunk()])
+    # _serve_handler 默认 provider="openai"
+    runner, socket_path = await _serve_handler(tmp_path, monkeypatch, stream, received)
+    try:
+        await _drain(socket_path)
+    finally:
+        await runner.cleanup()
+
+    assert "reasoning_effort" not in received
 
 
 async def test_handler_keeps_caller_supplied_reasoning_effort(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -363,6 +389,194 @@ def test_message_census_tolerates_non_dict_and_odd_content() -> None:
     census = _describe_messages(["bare string", {"role": "user", "content": [{"type": "text"}]}])
     assert "0non-object(str)" in census
     assert "content=list" in census
+
+
+# -- turn markers ------------------------------------------------------------
+#
+# These two ends are the *authoritative* pair for model wall time (see the
+# comment on ``_TURN_MARKER_OPEN`` in ai/server.py). Their counts must balance:
+# a 10% shortfall in the agent-side markers previously under-reported model time
+# by 24 percentage points (39.2% where 63.4% was correct), because the turns
+# that fall off are exactly the slow ones on unusual branches.
+
+
+def _capture_records() -> tuple[list[Any], int]:
+    """Capture whole records at INFO — production's level, not DEBUG."""
+    records: list[Any] = []
+    sink_id = logger.add(lambda m: records.append(m.record), level="INFO")
+    return records, sink_id
+
+
+def _markers(records: list[Any]) -> tuple[list[str], list[str]]:
+    messages = [r["message"] for r in records]
+    return (
+        [m for m in messages if m.startswith("ai-turn open")],
+        [m for m in messages if m.startswith("ai-turn close")],
+    )
+
+
+@pytest.mark.anyio
+async def test_turn_markers_balance_on_the_happy_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """V1: one open, one close, both at INFO, close carrying elapsed + outcome."""
+    records, sink_id = _capture_records()
+    stream = _TrackingStream([_FakeChunk()])
+    runner, socket_path = await _serve_handler(tmp_path, monkeypatch, stream)
+    try:
+        await _drain(socket_path)
+    finally:
+        await runner.cleanup()
+        logger.remove(sink_id)
+
+    opens, closes = _markers(records)
+    assert len(opens) == 1
+    assert len(closes) == 1, "an unclosed turn is invisible to the probe scripts"
+    assert "outcome=ok" in closes[0]
+    assert re.search(r"elapsed_ms=\d+", closes[0]), closes[0]
+
+
+@pytest.mark.anyio
+async def test_turn_markers_balance_when_upstream_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """V2: the error branch closes too, and says so in ``outcome``."""
+    records, sink_id = _capture_records()
+    stream = _TrackingStream([_FakeChunk()], raise_after=1)
+    runner, socket_path = await _serve_handler(tmp_path, monkeypatch, stream)
+    try:
+        await _drain(socket_path)
+    finally:
+        await runner.cleanup()
+        logger.remove(sink_id)
+
+    opens, closes = _markers(records)
+    assert len(opens) == len(closes) == 1
+    assert "outcome=upstream_error" in closes[0]
+
+
+@pytest.mark.anyio
+async def test_turn_markers_balance_when_the_provider_call_itself_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """V3: failing before a single chunk arrives still has to close the turn.
+
+    This branch returns early, and used to return with no terminal log at all —
+    one of the two sources of the count imbalance.
+    """
+
+    async def exploding_acompletion(**kwargs: Any) -> Any:
+        raise RuntimeError("provider refused")
+
+    records, sink_id = _capture_records()
+    stream = _TrackingStream([_FakeChunk()])
+    runner, socket_path = await _serve_handler(tmp_path, monkeypatch, stream)
+    monkeypatch.setattr("psi_agent.ai.server.acompletion", exploding_acompletion)
+    try:
+        await _drain(socket_path)
+    finally:
+        await runner.cleanup()
+        logger.remove(sink_id)
+
+    opens, closes = _markers(records)
+    assert len(opens) == len(closes) == 1, f"opens={opens} closes={closes}"
+
+
+@pytest.mark.anyio
+async def test_turn_markers_balance_when_the_client_vanishes_before_prepare(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """V3b: the ``response.prepare`` failure branch must close its turn too.
+
+    This early return used to log only a warning and return with no terminal
+    line at all — the second source of the open/close imbalance (the first being
+    agent.py's markers never covering every path). Reached by making ``prepare``
+    itself raise, which is what a client disconnecting mid-handshake does.
+    """
+
+    async def refuse_to_prepare(self: Any, request: Any) -> None:
+        raise ConnectionResetError("client vanished")
+
+    monkeypatch.setattr(web.StreamResponse, "prepare", refuse_to_prepare)
+
+    records, sink_id = _capture_records()
+    stream = _TrackingStream([_FakeChunk()])
+    runner, socket_path = await _serve_handler(tmp_path, monkeypatch, stream)
+    try:
+        with contextlib.suppress(Exception):
+            await _drain(socket_path)
+    finally:
+        await runner.cleanup()
+        logger.remove(sink_id)
+
+    opens, closes = _markers(records)
+    assert len(opens) == 1, f"opens={opens}"
+    assert len(closes) == 1, f"the turn was opened and never closed: closes={closes}"
+    assert "outcome=prepare_failed" in closes[0]
+
+
+@pytest.mark.anyio
+async def test_unparseable_body_is_not_counted_as_a_turn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """V4: a request that never became a turn must not open one.
+
+    It gets the third marker word instead, so it stays countable without
+    unbalancing the open/close pair.
+    """
+    records, sink_id = _capture_records()
+    stream = _TrackingStream([_FakeChunk()])
+    runner, socket_path = await _serve_handler(tmp_path, monkeypatch, stream)
+    try:
+        async with (
+            ClientSession(timeout=ClientTimeout(total=5)) as session,
+            session.post(
+                f"{socket_path}/chat/completions",
+                data=b"{not json",
+                headers={"Content-Type": "application/json"},
+            ) as response,
+        ):
+            assert response.status == 400
+    finally:
+        await runner.cleanup()
+        logger.remove(sink_id)
+
+    opens, closes = _markers(records)
+    assert opens == [] and closes == []
+    rejected = [r["message"] for r in records if r["message"].startswith("ai-turn rejected")]
+    assert len(rejected) == 1, "still has to leave a trace, just not a turn-shaped one"
+
+
+@pytest.mark.anyio
+async def test_session_id_from_routing_reaches_the_turn_markers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """V5: ``routing.session_id`` is the only way this process learns whose turn it is.
+
+    AI is a separate aiohttp app behind a socket, so the Session's ContextVar
+    does not reach it. Without this the markers cannot be attributed to a person
+    — which is the whole point of item 1.
+    """
+    records, sink_id = _capture_records()
+    stream = _TrackingStream([_FakeChunk()])
+    runner, socket_path = await _serve_handler(tmp_path, monkeypatch, stream)
+    try:
+        async with (
+            ClientSession(timeout=ClientTimeout(total=5)) as session,
+            session.post(
+                f"{socket_path}/chat/completions",
+                json={
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": True,
+                    "routing": {"session_id": "feishu-ou_marker"},
+                },
+            ) as response,
+        ):
+            assert response.status == 200
+            async for _ in response.content:
+                pass
+    finally:
+        await runner.cleanup()
+        logger.remove(sink_id)
+
+    marked = [r for r in records if r["message"].startswith(("ai-turn open", "ai-turn close"))]
+    assert marked, "no turn markers captured"
+    for record in marked:
+        assert record["extra"].get("psi_session") == "feishu-ou_marker", record["message"]
 
 
 @pytest.mark.anyio

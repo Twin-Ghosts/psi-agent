@@ -57,7 +57,7 @@ Session ── POST /chat/completions ──► AI
 
 Session 发送的 body 中，除 `model` 被启动配置覆盖、`messages` 被显式提取、`stream` 被剥离（AI 层始终强制 `stream=True`）、`provider`/`api_key`/`api_base`/`routing` 防御性剥离（避免与启动配置冲突）外，其余字段（`tools`, `temperature`, `max_tokens` 等）全部通过 `**body` 透传给 any-llm-sdk。
 
-`reasoning_effort` 是唯一被**补默认值**的字段（`setdefault("reasoning_effort", "medium")`，调用方给了就用它的，含 `"none"`）。
+`reasoning_effort` 是唯一被**补默认值**的字段（`setdefault("reasoning_effort", "medium")`，调用方给了就用它的，含 `"none"`）。**兜底只对 `deepseek` provider 生效**（白名单在 `_REASONING_EFFORT_DEFAULT_PROVIDERS`）——只有它会缺省值误读；其余 provider 保持不传，交给上游默认行为。
 
 ### 为什么必须显式传 `reasoning_effort`
 
@@ -67,7 +67,7 @@ any-llm 的 DeepSeek provider 把缺省值 `"auto"` 读成「调用方没要思�
 
 该默认值在 1.21.0 之后引入（1.21.0 的同一文件里没有 `thinking` 分支），而依赖声明是 `any-llm-sdk>=1.21.0` —— 一次静默的上游行为变更改掉了线上语义。
 
-**ToC 装机版不受影响，但那是巧合**：它与 ToB 共用同一份代码与同一个 any-llm，只因 `spa-v2/src/services/bootstrapAi.ts` 的 `DEFAULT_REMOTE_AI` 配 `provider: 'openai'`（打的是云端 OpenAI 兼容网关）而绕开了这个默认值。改成 `deepseek` 泄漏立刻出现。
+**兜底必须 provider 感知，不能无条件对全部 provider 生效（2026-09 修正）**：最初这段默认对**所有** provider 全局生效。ToC 装机版不经过 psi-agent 的 `ai/server.py`（SPA 的 `DEFAULT_REMOTE_AI` 直接打云端 OpenAI 兼容网关），所以恰好没吃到这个默认；但 ToB 自部署若用 `provider: 'openai'` 直连 DeepSeek 兼容端点（如 `api.deepseek.com/v1`）就会吃到 —— 而 `openai` provider 并没有 auto→disabled 逻辑：不传 `reasoning_effort` 时 thinking 本来就开着，思考照常进 `reasoning_content`。强制传 `"medium"` 反而把思考档位压到中档，模型于是把**过程叙述**写进 `content`（每轮 tool call 前一段自述），用户在飞书看到整段自我对话 —— 与本页描述的泄漏形态一致。故兜底范围收敛到 `_REASONING_EFFORT_DEFAULT_PROVIDERS`（`{"deepseek"}`）。实测同一 tool-call prompt：不传 `reasoning_effort` → content=0 / reasoning=306；传 `"medium"` → content=34 / reasoning=345。
 
 ## Provider 支持
 
@@ -94,6 +94,22 @@ Anthropic→OpenAI 格式转换由 any-llm-sdk 自动完成，包括 `thinking_d
 - **HTTP 层**（`response.prepare()` 之前）：返回 OpenAI 格式 `{"error": {...}}` JSON + HTTP 4xx/5xx
 - **SSE 层**（`response.prepare()` 之后）：`make_error_chunk()` 构造 error chunk → `finish_reason="error"`（psi-agent 内部扩展，非 OpenAI 标准；构造函数在 `psi_agent/protocol.py`，前缀 `[Upstream Error]: ` 由本层拼好后传入）
 - **取消/断开安全**：上游 stream 在 `finally` 中用 `anyio.CancelScope(shield=True)` 调 `stream.aclose()` 关闭（`getattr` 守卫兼容无 `aclose` 的流），确保客户端断开 / 进程关闭被 cancel 时不泄露上游连接
+
+## 回合标记（模型耗时的权威判据）
+
+`handle_chat_completions` 的两端是**模型墙上时间的唯一权威来源**，都是 INFO（生产钉死 INFO，放 DEBUG 等于没做）：
+
+| 标记 | 时机 |
+|---|---|
+| `ai-turn open` | 请求体解析成功、即将转发上游 |
+| `ai-turn close elapsed_ms=<N> outcome=<结局>` | 唯一出口。`outcome` ∈ `ok` / `upstream_error` / `client_disconnect` / `prepare_failed` |
+| `ai-turn rejected` | 请求体没解析出来。**没有配对的 open**，不进配平计数 |
+
+- **两端计数必须相等**，用例钉住了包括 `response.prepare` 失败在内的每条 return 路径。三条终态日志收成一条出口，于是「配平」只需数两个词，将来多一种结局也不会让脚本漏计一个 close。
+- **不要去补 `agent.py` 的标记。** 实测 2,331 个回合里 241 个（10%）只有 AI 侧、没有 agent 侧标记，据此算出模型耗时占比 39.2%，正确值 63.4%——差 24 个百分点且系统性偏低（掉的那批恰好是走特殊分支的慢回合）。选这一侧作权威是因为**配平在这里是结构性的**：所有上游调用必经这个 handler，open/close 各一次可由一个函数的控制流锁死；放在 `agent.py` 要靠人自觉，下次新加分支又会静默失衡。另外这两端量的正是想要的东西（上游墙上时间），`agent.py` 那一对还含 Session 自己的历史读写。
+- `"Sending request to AI via AiClient"` 保留用于观测**发起**，不得用来配对算耗时。
+- 每行还带**会话 id**（第三列，见根 `AGENTS.md`「日志约定」）。值取自请求体 `routing.session_id`——AI 是 socket 后面另一个进程，Session 侧 ContextVar 过不来。
+- 改这几个标记文本要同步 `scripts/latency-probe/parse.py`（它按 logger 名 + 消息文本匹配，刻意不含行号）。
 
 ## Context Compaction
 

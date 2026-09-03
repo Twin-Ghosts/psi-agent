@@ -67,8 +67,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import anyio
 
-from _fusion_memory.runtime import get_runtime
 from psi_agent.session.history_display import message_kind as _message_kind
+
+get_runtime: Any = importlib.import_module("_fusion_memory.runtime").get_runtime
 
 try:
     from psi_agent.session.runtime_context import get_agent as _runtime_agent
@@ -109,6 +110,12 @@ def _resolve_agent(agent_raw: str = "") -> anyio.Path:
             return anyio.Path(text)
     return anyio.Path(_package_fallback())
 
+
+# Hard import, unlike the guarded ``runtime_context`` one above: this module is
+# loaded *by* the kernel, so psi_agent is always importable in real use. A
+# fallback here could only be a shim that silently drops the itemisation — the
+# one number this section exists to produce.
+from psi_agent.session.prompt_budget import PromptBudget
 
 from prompt_sections import (
     BOOTSTRAP_PENDING_SECTION,
@@ -1000,6 +1007,10 @@ class System:
         # User open-folder: relative file IO + deliverables (may differ from agent).
         self._user_workspace = user_workspace if user_workspace is not None else agent_dir
         self._previous_summary: str | None = None
+        # Set by build_system_prompt; read by system_prompt_builder so the
+        # breakdown can be logged against the *final* prompt, after the
+        # per-turn profile/advice splice.
+        self._last_budget: PromptBudget | None = None
 
     async def _build_workflow_section(self) -> str:
         """Workflow authoring guidance with an explicit legacy fallback.
@@ -1199,48 +1210,39 @@ this workspace, generated workflows, instruction files, or committed `.env` file
         bootstrap = await _build_bootstrap_files(ws)
         global_agents_md = await _build_global_agents_md()
 
-        stable_parts: list[str] = [identity, "", LANGUAGE_LOCALIZATION_SECTION]
+        # Every fragment goes in under a label so the assembled length can be
+        # itemised (see prompt_budget). ``budget.render()`` replaces what used
+        # to be ``"\n".join(stable_parts)`` — same string, plus the accounting.
+        budget = PromptBudget()
+        budget.add("identity (SOUL.md)", identity)
+        budget.add("static: language localization", "", LANGUAGE_LOCALIZATION_SECTION)
 
         help_skill_md = ws / "skills" / HELP_SKILL_NAME / "SKILL.md"
         if await help_skill_md.exists():
-            stable_parts += ["", PSI_AGENT_HELP_GUIDANCE.format(path=str(help_skill_md))]
+            budget.add("psi-agent help guidance", "", PSI_AGENT_HELP_GUIDANCE.format(path=str(help_skill_md)))
 
-        stable_parts += [
-            "",
-            build_tooling_section(tools),
-            "",
-            TOOL_CALL_STYLE_SECTION,
-            "",
-            SYSTEM_CLI_TOOLS_SECTION,
-            "",
-            SEND_FILES_SECTION,
-            "",
-            DELIVERABLES_AS_FILES_SECTION,
-            "",
-            EXECUTION_BIAS_SECTION,
-            "",
-            PLANNING_PROGRESS_SECTION,
-            "",
-            ERROR_HANDLING_RETRY_SECTION,
-            "",
-            CODE_CONVENTIONS_SECTION,
-            "",
-            WEB_SEARCH_RECENCY_SECTION,
-            "",
-            CLARIFY_ASSUMPTIONS_SECTION,
-            "",
-            CLOSING_QUESTIONS_SECTION,
-            "",
-            STRUCTURED_TABLES_SECTION,
-            "",
-            TASK_SELF_CHECK_SECTION,
-            "",
-            CITATIONS_TRUSTWORTHINESS_SECTION,
-            "",
-            SUBAGENT_DELEGATION_SECTION,
-            "",
-            SAFETY_SECTION,
-        ]
+        # The tool *name list*, not the JSON schemas: those are a separate
+        # request field and are measured by log_tool_schema_size.
+        budget.add(f"tooling section ({len(tools)} tool names)", "", build_tooling_section(tools))
+        for label, section in (
+            ("static: tool call style", TOOL_CALL_STYLE_SECTION),
+            ("static: system CLI tools", SYSTEM_CLI_TOOLS_SECTION),
+            ("static: send files", SEND_FILES_SECTION),
+            ("static: deliverables as files", DELIVERABLES_AS_FILES_SECTION),
+            ("static: execution bias", EXECUTION_BIAS_SECTION),
+            ("static: planning progress", PLANNING_PROGRESS_SECTION),
+            ("static: error handling retry", ERROR_HANDLING_RETRY_SECTION),
+            ("static: code conventions", CODE_CONVENTIONS_SECTION),
+            ("static: web search recency", WEB_SEARCH_RECENCY_SECTION),
+            ("static: clarify assumptions", CLARIFY_ASSUMPTIONS_SECTION),
+            ("static: closing questions", CLOSING_QUESTIONS_SECTION),
+            ("static: structured tables", STRUCTURED_TABLES_SECTION),
+            ("static: task self check", TASK_SELF_CHECK_SECTION),
+            ("static: citations trustworthiness", CITATIONS_TRUSTWORTHINESS_SECTION),
+            ("static: subagent delegation", SUBAGENT_DELEGATION_SECTION),
+            ("static: safety", SAFETY_SECTION),
+        ):
+            budget.add(label, "", section)
 
         memory_tools = {"memory_add", "memory_search", "memory_answer_context"}
         memory_enabled = os.environ.get("FUSION_MEMORY_ENABLE_JOURNAL", "1").strip().casefold() not in {
@@ -1249,8 +1251,12 @@ this workspace, generated workflows, instruction files, or committed `.env` file
             "no",
             "off",
         }
-        if memory_enabled and memory_tools <= set(tools):
-            stable_parts += ["", FUSION_MEMORY_SECTION]
+        budget.add_if(
+            memory_enabled and memory_tools <= set(tools),
+            "memory: Fusion Memory guidance",
+            "",
+            FUSION_MEMORY_SECTION,
+        )
 
         _session_tools = {
             "sessions_list",
@@ -1262,57 +1268,40 @@ this workspace, generated workflows, instruction files, or committed `.env` file
             "sessions_create",
             "sessions_handoff",
         }
-        if _session_tools & set(tools):
-            stable_parts += ["", SESSION_MANAGEMENT_SECTION]
+        budget.add_if(_session_tools & set(tools), "static: session management", "", SESSION_MANAGEMENT_SECTION)
+        budget.add_if("todo" in tools, "static: task planning", "", TASK_PLANNING_SECTION)
+        budget.add_if("skill_manage" in tools, "static: skill authoring", "", SKILL_AUTHORING_SECTION)
 
-        if "todo" in tools:
-            stable_parts += ["", TASK_PLANNING_SECTION]
-
-        if "skill_manage" in tools:
-            stable_parts += ["", SKILL_AUTHORING_SECTION]
-
-        skills_section = build_skills_section(skills_xml)
-        if skills_section:
-            stable_parts += ["", skills_section]
-
-        if workflow_section:
-            stable_parts += ["", workflow_section]
+        budget.add_if(skills_section := build_skills_section(skills_xml), "skills index", "", skills_section)
+        budget.add_if(workflow_section, "workflow section (+ flows index)", "", workflow_section)
 
         workspace_abs = str(await user_ws.resolve())
-        stable_parts += ["", build_workspace_section(workspace_abs)]
+        budget.add("workspace section", "", build_workspace_section(workspace_abs))
 
-        if global_agents_md:
-            stable_parts += ["", global_agents_md]
+        # Each bootstrap-ish hook is charged separately: these are the file-fed
+        # sections whose size depends on what operators dropped in the folder,
+        # so a combined figure would hide which file to go look at.
+        budget.add_if(global_agents_md, "hook: global ~/.agent/AGENTS.md", "", global_agents_md)
+        budget.add_if(bootstrap, "hook: bootstrap files (AGENTS/TOOLS/IDENTITY/...)", "", bootstrap)
+        budget.add_if(context_file, "hook: project context (CLAUDE.md/.cursorrules)", "", context_file)
+        budget.add_if(await (ws / "BOOTSTRAP.md").exists(), "static: bootstrap pending", "", BOOTSTRAP_PENDING_SECTION)
 
-        if bootstrap:
-            stable_parts += ["", bootstrap]
-
-        if context_file:
-            stable_parts += ["", context_file]
-
-        if await (ws / "BOOTSTRAP.md").exists():
-            stable_parts += ["", BOOTSTRAP_PENDING_SECTION]
-
-        stable_parts += ["", SILENT_REPLIES_SECTION]
-        stable_parts += ["", _SAVING_GATE_SECTION]
-
-        model_identity = build_model_identity_line(model)
-        if model_identity:
-            stable_parts += ["", model_identity]
+        budget.add("static: silent replies", "", SILENT_REPLIES_SECTION)
+        budget.add("static: saving gate", "", _SAVING_GATE_SECTION)
+        budget.add_if(model_identity := build_model_identity_line(model), "model identity line", "", model_identity)
 
         # NOTE: the heartbeat instruction is intentionally NOT injected here.
         # The heartbeat schedule (schedules/heartbeat/TASK.md) already tells the
         # agent to reply HEARTBEAT_OK on its poll; injecting it into every turn's
         # system prompt caused HEARTBEAT_OK to leak into normal chat replies.
         volatile = await _build_volatile(ws)
-        if volatile:
-            stable_parts += ["", volatile]
+        budget.add_if(volatile, "hook: user profile (USER.md)", "", volatile)
 
         dynamic_ctx = await _build_dynamic_context_files(ws)
-        if dynamic_ctx:
-            stable_parts += ["", dynamic_ctx]
+        budget.add_if(dynamic_ctx, "hook: dynamic context (heartbeat.md)", "", dynamic_ctx)
 
-        return "\n".join(stable_parts)
+        self._last_budget = budget
+        return budget.render()
 
     async def build_turn_context(self, model: str | None = None) -> str:
         """Assemble the volatile block for the turn about to run.
@@ -1486,6 +1475,73 @@ def _build_profile_policy(topic_profile: dict[str, Any]) -> str:
     )
 
 
+async def _build_volatile_turn_blocks(
+    user_message: dict[str, Any] | None,
+    user_workspace: anyio.Path,
+) -> str:
+    """Render this turn's profile / advice / policy blocks, or ``""``.
+
+    These three are re-derived every turn: the profile is re-read from disk (its
+    turn counter and dimensions move), the advice comes off *this* message, and
+    the policy is a function of the turn number. They belong at the request tail
+    for the same reason the clock does — see ``build_turn_context``.
+
+    They used to be spliced into the system prompt instead. Because the prompt
+    is ``messages[0]``, that put per-turn text ahead of the whole history no
+    matter how late in the prompt it landed, invalidating every cached turn
+    behind it (production: 181218 stable chars, 880 changing). AGENTS.md 坑 19
+    records the same conclusion and the boundary-marker scheme that was deleted
+    for it.
+
+    Failure is degradation, not an error: a missing profile costs teaching
+    nuance, while raising here would cost the turn.
+    """
+    profile_text = ""
+    policy_text = ""
+    try:
+        profile_module = importlib.import_module("_user_profile")
+        identity = {
+            name: value
+            for name in ("profile_id", "user_id", "session_id")
+            if isinstance(user_message, dict) and isinstance((value := user_message.get(name)), str) and value
+        }
+        profile = await profile_module.get_profile(str(user_workspace), **identity)
+        content = user_message.get("content") if isinstance(user_message, dict) else ""
+        user_text = content if isinstance(content, str) else ""
+        topic_profile = None
+        if user_text.strip():
+            _topic_key, topic_profile = profile.get_topic(user_text)
+        if topic_profile:
+            dimensions = profile.effective_dimensions(topic_profile)
+            profile_text = (
+                "## 当前知识点学习画像 (每轮从持久化画像重新读取)\n"
+                f"- 当前知识点: {topic_profile['label']}\n"
+                f"- 累计轮次: {topic_profile['turns']}\n"
+                f"- 深度: {dimensions['depth']:.2f} (0=框架概览, 1=系统推导)\n"
+                f"- 目标: {dimensions['goal']:.2f} (0=兴趣, 1=决策)\n"
+                f"- 熟悉度: {dimensions['familiarity']:.2f} (0=新手, 1=专家)\n"
+                f"- 教学指令: {profile.teaching_hint(topic_profile)}\n"
+            )
+            policy_text = _build_profile_policy(topic_profile)
+    except Exception as exc:
+        logger.warning("Adaptive profile unavailable: %r", exc, exc_info=True)
+
+    raw_advice = user_message.get("supervisor_advice") if isinstance(user_message, dict) else None
+    advice_text = ""
+    if isinstance(raw_advice, dict):
+        try:
+            protocol = importlib.import_module("supervisor_protocol")
+            advice_text = protocol.render_advice_prompt(protocol.validate_advice(raw_advice))
+            if advice_text:
+                advice_text += (
+                    "\n- 用户当前消息中的直接范围和深度要求优先; 若用户要求不展开, 则抑制破圈, 不得强制扩展。"
+                )
+        except Exception as exc:
+            logger.warning("Supervisor advice unavailable: %r", exc, exc_info=True)
+
+    return "\n".join(part for part in (profile_text, advice_text, policy_text) if part)
+
+
 async def system_before_turn(
     user_message: dict[str, Any] | None,
     *,
@@ -1555,64 +1611,27 @@ async def system_prompt_builder(
     raw = (workspace_raw or _runtime_workspace() or "").strip()
     if raw:
         user_workspace = anyio.Path(raw)
-    content = user_message.get("content") if isinstance(user_message, dict) else ""
-    user_text = content if isinstance(content, str) else ""
-    prompt = await System(agent_dir, user_workspace=user_workspace).build_system_prompt()
-    profile_text = ""
-    policy_text = ""
-    recall_text = ""
-    kind = _message_kind(user_message) if isinstance(user_message, dict) else "chat"
-    if kind == "chat" and _memory_recall_allowed(user_message):
-        try:
-            runtime = await get_runtime(str(user_workspace))
-            recall_text = await runtime.first_turn_recall(_runtime_session_id(), user_text)
-        except Exception as exc:
-            logger.warning("Fusion Memory prompt recall degraded after %s", type(exc).__name__)
-    try:
-        profile_module = importlib.import_module("_user_profile")
-        identity = {
-            name: value
-            for name in ("profile_id", "user_id", "session_id")
-            if isinstance(user_message, dict) and isinstance((value := user_message.get(name)), str) and value
-        }
-        profile = await profile_module.get_profile(str(user_workspace), **identity)
-        topic_profile = None
-        if user_text.strip():
-            _topic_key, topic_profile = profile.get_topic(user_text)
-        if topic_profile:
-            dimensions = profile.effective_dimensions(topic_profile)
-            profile_text = (
-                "## 当前知识点学习画像 (每轮从持久化画像重新读取)\n"
-                f"- 当前知识点: {topic_profile['label']}\n"
-                f"- 累计轮次: {topic_profile['turns']}\n"
-                f"- 深度: {dimensions['depth']:.2f} (0=框架概览, 1=系统推导)\n"
-                f"- 目标: {dimensions['goal']:.2f} (0=兴趣, 1=决策)\n"
-                f"- 熟悉度: {dimensions['familiarity']:.2f} (0=新手, 1=专家)\n"
-                f"- 教学指令: {profile.teaching_hint(topic_profile)}\n"
-            )
-            policy_text = _build_profile_policy(topic_profile)
-    except Exception as exc:
-        logger.warning("Adaptive profile unavailable: %r", exc, exc_info=True)
+    system = System(agent_dir, user_workspace=user_workspace)
+    prompt = await system.build_system_prompt()
 
-    raw_advice = user_message.get("supervisor_advice") if isinstance(user_message, dict) else None
-    if isinstance(raw_advice, dict):
-        protocol = importlib.import_module("supervisor_protocol")
-        advice_text = protocol.render_advice_prompt(protocol.validate_advice(raw_advice))
-        if advice_text:
-            advice_text += "\n- 用户当前消息中的直接范围和深度要求优先; 若用户要求不展开, 则抑制破圈, 不得强制扩展。"
-    else:
-        advice_text = ""
-    injected = "\n".join(part for part in (recall_text, profile_text, advice_text, policy_text) if part)
-    if not injected:
-        return prompt
-    boundary = "<!-- HAITUN_CACHE_BOUNDARY -->"
-    if boundary in prompt:
-        index = prompt.find(boundary) + len(boundary)
-        return prompt[:index] + "\n" + injected + "\n" + prompt[index:]
-    return prompt + "\n" + injected
+    # No per-turn splice happens here any more: profile / advice / policy ride
+    # the request tail via ``turn_context_builder``. The prompt this returns is
+    # exactly what the budget assembled, so the reconciliation is a straight
+    # one — but it is still charged against the returned string, because that is
+    # what makes a nonzero residual mean anything.
+    budget = system._last_budget
+    if budget is not None:
+        budget.log(context=f"agent={agent_dir.name}", actual=prompt)
+
+    return prompt
 
 
-async def turn_context_builder(*, agent_raw: str = "") -> str:
+async def turn_context_builder(
+    user_message: dict[str, Any] | None = None,
+    *,
+    workspace_raw: str = "",
+    agent_raw: str = "",
+) -> str:
     """Render the volatile block for the turn about to run.
 
     ``system_prompt_builder`` runs once per Session, so every "now" it renders
@@ -1628,14 +1647,44 @@ async def turn_context_builder(*, agent_raw: str = "") -> str:
     conversation behind it. This block is delivered at the **tail** instead,
     on the turn's own user message, so the prompt and every earlier turn stay
     byte-identical.
+
+    *user_message* is what lets the per-turn learning blocks live here rather
+    than in the prompt: the profile keys off this turn's text and identity, and
+    the supervisor advice arrives on the message itself. Turns that have no
+    message (schedules) still get the clock.
     """
     agent_dir = _resolve_agent(agent_raw)
     user_workspace = agent_dir
-    raw = (_runtime_workspace() or "").strip()
+    raw = (workspace_raw or _runtime_workspace() or "").strip()
     if raw:
         user_workspace = anyio.Path(raw)
     system = System(agent_dir, user_workspace=user_workspace)
-    return await system.build_turn_context()
+    recall_text = ""
+    content = user_message.get("content") if isinstance(user_message, dict) else ""
+    user_text = content if isinstance(content, str) else ""
+    kind = _message_kind(user_message) if isinstance(user_message, dict) else "chat"
+    if kind == "chat" and _memory_recall_allowed(user_message):
+        try:
+            runtime = await get_runtime(str(user_workspace))
+            recall_text = await runtime.first_turn_recall(_runtime_session_id(), user_text)
+        except Exception as exc:
+            logger.warning("Fusion Memory turn recall degraded after %s", type(exc).__name__)
+
+    # Charged like the prompt is, for the same reason: this block is per-turn
+    # cost that reaches the model, so it needs its own itemisation rather than
+    # being invisible next to a reconciled prompt. ``actual=block`` keeps the
+    # residual honest about the join.
+    budget = PromptBudget()
+    budget.add("turn context: clock", await system.build_turn_context())
+    budget.add_if(recall_text, "turn context: Fusion Memory recall", recall_text)
+    budget.add_if(
+        volatile := await _build_volatile_turn_blocks(user_message, user_workspace),
+        "turn context: profile/advice/policy",
+        volatile,
+    )
+    block = budget.render()
+    budget.log(context=f"agent={agent_dir.name} turn-context", actual=block)
+    return block
 
 
 async def system_prompt_rebuild_checker(

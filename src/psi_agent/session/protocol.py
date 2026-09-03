@@ -29,10 +29,12 @@ from psi_agent.protocol import (
 )
 
 __all__ = [
+    "DEFAULT_MAX_TOOL_ROUNDS",
     "FINISH_REASON_COMPACTION_NEEDED",
     "FINISH_REASON_ERROR",
     "FINISH_REASON_STOP",
     "FINISH_REASON_TOOL_CALLS",
+    "MAX_ROUNDS_NOTICE",
     "REASONING_KIND_THINKING",
     "REASONING_KIND_TOOL_CALL",
     "REASONING_KIND_TOOL_RESULT",
@@ -48,6 +50,47 @@ __all__ = [
     "is_auxiliary_finish",
     "is_terminal_finish",
 ]
+
+
+DEFAULT_MAX_TOOL_ROUNDS = 20
+"""Default ceiling on agent-loop rounds per turn.
+
+Measured against real traffic rather than guessed: rounds per turn came out at
+p50=3, p90=13, max=49.  The previous default of 128 sat so far above the
+distribution that it could never be reached — a runaway loop burned 128 model
+calls before stopping, so in practice there was no ceiling at all.  20 sits above
+p90 and leaves normal turns untouched while capping a runaway at roughly a sixth
+of the old cost.
+
+It does *not* sit above the observed max, and that is deliberate: a 49-round turn
+is the shape this limit exists to stop.  Hitting the limit therefore moves from
+"never" to "occasionally", which is why the stop is reported explicitly to the
+user (``MAX_ROUNDS_NOTICE``) instead of just to the log.  Callers that legitimately
+need more rounds should pass ``max_tool_rounds`` explicitly.
+
+Single source of truth for all three entry points (``Session``,
+``SessionAgent.__init__``, ``SessionAgent.create``) — they drifted as separate
+literals before, so changing "the default" meant finding every copy.
+"""
+
+MAX_ROUNDS_NOTICE = (
+    "\n\n[已达到单轮工具调用上限, 停在这里]"
+    "我连续调用了 {rounds} 轮工具还没得出结论, 先停下来避免空转。"
+    "可以让我接着查, 或者把问题拆小一点、说得更具体一些。"
+)
+"""User-facing text appended when the round limit stops a turn.
+
+Written for the person in the chat, not for a log reader: the bare
+``[Max tool rounds reached]`` this replaces was an untranslated developer token
+that arrived glued to whatever interstitial narration the model had produced
+("让我再查一下。[Max tool rounds reached]"), so a Feishu user saw a half-finished
+reply with a bracketed English string and no way to tell a round-limit stop from
+a crash.  It states what happened, why, and what to do next, and carries the
+round count so the log line and the chat agree on the same number.
+
+Leading blank line separates it from the model's own last words; the bracketed
+prefix stays so operators grepping histories keep a stable marker.
+"""
 
 
 class AgentError(Exception):
@@ -164,3 +207,13 @@ class AiDelta:
     """Upstream-reported prompt tokens carried by the compaction signal (0 = unknown)."""
     compaction_threshold: int = 0
     """The threshold the signal was raised against (0 = unknown)."""
+    usage_prompt_tokens: int = 0
+    """Prompt tokens from the stream's own ``usage`` chunk (0 = not reported yet).
+
+    Distinct from ``prompt_tokens`` on purpose: that one rides the compaction
+    signal and therefore only appears once the threshold is already exceeded,
+    which is far too late to calibrate anything.  This one arrives on every
+    successful turn (the AI layer forces ``stream_options.include_usage``), and
+    is what ``RequestAssembler.calibrate`` divides into the character count we
+    measured for that same request.
+    """

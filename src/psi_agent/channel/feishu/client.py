@@ -106,6 +106,40 @@ class _CoreRegistry:
 _GATEWAY_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 
+def _log_shared_fallback(
+    open_id: str | None,
+    *,
+    chat_id: str,
+    chat_type: str,
+    session_socket: str,
+    has_gateway: bool,
+    seen: set[str],
+) -> bool:
+    """记一条「这次落到了共享兜底会话」, 每个路由键只记一次; 返回是否真记了。
+
+    ** 这是本次补的观测缺口 **: ``resolve_core`` 里那条 warning 只覆盖「路由失败」, 而
+    「没配 gateway」和「既无 open_id 又不是群聊」这两种同样静默落到同一个共享会话 ——
+    于是「谁跟谁共享了上下文」在日志里根本查不出来, 而那恰恰是排查串上下文时第一个要问
+    的问题。INFO 级, 因为生产钉死 INFO (见根 AGENTS.md「日志约定」)。
+
+    做成模块级函数而非 ``resolve_core`` 里的内联分支, 是为了有个能测的接缝:
+    ``run_feishu`` 是个长跑协程, 没有用例驱动得动它, 内联写法等于这条判据没人验。
+
+    ``seen`` 由调用方持有 (每个 channel 进程一份): 兜底路径是**每条消息**都走的, 它没有
+    provider 那样的缓存, 无脑记 INFO 会把没有轮转的 docker logs 刷满。
+    """
+    key = route_key(open_id or "", chat_id, chat_type)
+    if key in seen:
+        return False
+    seen.add(key)
+    reason = "no routing key (no open_id, not a group)" if has_gateway else "no gateway configured"
+    logger.info(
+        f"shared-session fallback: open_id={open_id!r} chat_id={chat_id!r} "
+        f"chat_type={chat_type!r} -> socket={session_socket!r} ({reason})"
+    )
+    return True
+
+
 class _GatewayRouteProvider:
     """给一次会话 → 幂等返回其 Gateway session 的 ``channel_socket``; 面向动态任意用户/群。
 
@@ -150,7 +184,14 @@ class _GatewayRouteProvider:
             # external 先写: ensure 返回后调用方立刻会问 is_external, 两者必须同时可见。
             self._external[key] = external
             self._sockets[key] = socket
-            logger.debug(f"routed {key!r} -> socket={socket!r} external={external}")
+            # ** INFO 而非 DEBUG, 刻意 **: 这是「谁落到了哪个 Session」的唯一记录, 也是
+            # 排查「两个人共享同一份上下文」时的第一手证据。生产钉死在 INFO
+            # (见根 AGENTS.md「日志约定」: 批量模式没有任何路径能开出全局 DEBUG), 放在
+            # DEBUG 等于真出事时恰好没记 —— 原始 SSE 那三处已经这么栽过一次。
+            #
+            # 量可控: 每个路由键**一辈子一条** (缓存命中走上面的快路径, 不到这里),
+            # 不是每条消息一条。67 个会话就是 67 行。
+            logger.info(f"routed {key!r} -> socket={socket!r} external={external}")
             return socket
 
     async def _route(self, open_id: str, chat_id: str, chat_type: str) -> tuple[str, bool]:
@@ -990,6 +1031,9 @@ async def run_feishu(
                 appdata = await _resolve_shared_appdata(gateway_url, http)
         logger.info(f"AppData root: {await resolve_appdata_root(appdata)}")
 
+        # 已记过「落到共享兜底」的路由键 —— 去重逻辑见 ``_log_shared_fallback``。
+        _shared_fallback_seen: set[str] = set()
+
         async def resolve_core(open_id: str | None, *, chat_id: str = "", chat_type: str = "") -> ChannelCore:
             socket = session_socket  # 默认兜底 (无路由键、无 gateway、或路由失败都走这)
             is_group = is_group_chat(chat_id, chat_type)
@@ -1002,6 +1046,15 @@ async def run_feishu(
                         f"falling back to shared socket {session_socket!r} — {e!r}"
                     )
                     socket = session_socket
+            else:
+                _log_shared_fallback(
+                    open_id,
+                    chat_id=chat_id,
+                    chat_type=chat_type,
+                    session_socket=session_socket,
+                    has_gateway=provider is not None,
+                    seen=_shared_fallback_seen,
+                )
             return await registry.get(socket)
 
         def is_external(open_id: str | None, *, chat_id: str = "", chat_type: str = "") -> bool:

@@ -27,8 +27,13 @@ def _load_system_module():
     return module
 
 
-def _teaching_hint(prompt: str) -> str:
-    for line in prompt.splitlines():
+def _teaching_hint(turn_context: str) -> str:
+    """Read the hint out of the turn context, which is where the profile lives.
+
+    It used to be spliced into the system prompt; it now rides the request tail
+    so the prompt can stay byte-identical across turns.
+    """
+    for line in turn_context.splitlines():
         if line.startswith("- 教学指令:"):
             return line.removeprefix("- 教学指令:").strip()
     return "<missing teaching hint>"
@@ -44,7 +49,7 @@ async def main() -> None:
     }
     for user_id, question in learners.items():
         message = {"role": "user", "content": question, "user_id": user_id}
-        before = await system.system_prompt_builder(message, workspace_raw=str(demo_root))
+        before = await system.turn_context_builder(message, workspace_raw=str(demo_root))
         print("USER", user_id, "BEFORE", _teaching_hint(before))
 
         await system.system_after_turn(
@@ -55,8 +60,8 @@ async def main() -> None:
         print("USER", user_id, "AFTER UPDATE")
 
         next_message = {"role": "user", "content": "讲短一点", "user_id": user_id}
-        next_prompt = await system.system_prompt_builder(next_message, workspace_raw=str(demo_root))
-        print("USER", user_id, "NEXT PROMPT", _teaching_hint(next_prompt))
+        next_context = await system.turn_context_builder(next_message, workspace_raw=str(demo_root))
+        print("USER", user_id, "NEXT PROMPT", _teaching_hint(next_context))
         digest = hashlib.sha256(user_id.encode()).hexdigest()
         print("PROFILE FILE", demo_root / "wiki" / "profiles" / f"user-{digest}.md")
 

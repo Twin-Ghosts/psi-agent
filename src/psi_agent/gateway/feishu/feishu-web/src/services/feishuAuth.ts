@@ -26,8 +26,8 @@ export class FeishuAuthUnavailable extends Error {}
 
 const READY_TIMEOUT_MS = 10_000;
 
-/** 等 ``h5sdk.ready``; 超时也算不可用 —— 否则页面会永远停在 loading。 */
-function sdkReady(): Promise<void> {
+/** 等 ``h5sdk.ready``; 超时或 SDK error 也算不可用 —— 否则页面会永远停在 loading。 */
+export function sdkReady(): Promise<void> {
   const sdk = window.h5sdk;
   if (!sdk) {
     return Promise.reject(new FeishuAuthUnavailable("window.h5sdk 不存在, 请在飞书客户端内打开"));
@@ -37,6 +37,14 @@ function sdkReady(): Promise<void> {
       () => reject(new FeishuAuthUnavailable("飞书 JSSDK 初始化超时")),
       READY_TIMEOUT_MS,
     );
+    sdk.error?.((err: unknown) => {
+      window.clearTimeout(timer);
+      reject(
+        new FeishuAuthUnavailable(
+          `飞书 JSSDK 初始化失败: ${err instanceof Error ? err.message : String(err ?? "unknown error")}`,
+        ),
+      );
+    });
     sdk.ready(() => {
       window.clearTimeout(timer);
       resolve();

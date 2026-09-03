@@ -246,9 +246,29 @@ SSE 流中的特殊字段：
 - 所有模块使用 `from loguru import logger`
 - 默认 INFO 级别，`--verbose` 开启 DEBUG
 - DEBUG 必须覆盖：每个 SSE chunk、tool 执行、锁获取/释放
-- 格式：`时间 | 级别 | 模块:函数:行号 - 消息`
+- 格式：`时间 | 级别 | 会话 id | 模块:函数:行号 - 消息`
 - Channel 客户端使用 `rich.console.Console` 做终端输出，**禁止使用 `print()`**
 - **`setup_logging` 一次性生效（刻意设计）**：用全局 `_handler_id` 守卫，首次调用安装 handler，后续调用直接返回旧 handler，**不会**重新应用 `verbose`。因此“谁先调用谁定级别”。在 `psi-agent run`（批量模式）下，`Run.run()` 先于所有子组件调用 `setup_logging(verbose=False)`（`_run.py`），故**批量模式把级别钉在 INFO**，各组件配置里的 `verbose` 字段一律被忽略——生产走的正是批量模式，所以生产**没有任何路径能开出全局 DEBUG**，要定向观测请用下面的 `PSI_DEBUG_MODULES`。单独启动某个组件（`psi-agent ai/session/channel ...`）时，则由该组件自己的 `verbose` 决定级别。（历史：这里曾是 `verbose=True`，PR #625 改成 `False`，而本文档与 `_logging.py` docstring 都直到 2026-08-25 才跟上——期间一直错写“批量模式始终为 DEBUG”。）
+
+### 会话 id 列（每行都带，INFO 也带）
+
+第三列是**会话 id**，未绑定会话时为 `-`（刻意不是空串：探针脚本按 `|` 切列，空列会让「没绑会话」与「这行没有会话列」长得一样）。
+
+Gateway 一个进程复用约 67 个 Session，它们的日志在同一个 `docker logs` 流里交错。没有这列就无法把一个慢回合归到某个人身上——2026-08-31 那次延迟排查有 123 个回合，其中 34 个因此只能丢弃。所以这列在**共用的 `_FORMAT`** 里，stderr 与 DEBUG 文件都有；只进文件 sink 等于生产看不见。
+
+- ContextVar 住在 `psi_agent/_session_context.py`（零项目内依赖的叶子模块）。`_logging.py` 要读它，而 `session/runtime_context.py` 会带出 `session/__init__.py` → 它又 import `_logging`，循环。`runtime_context` 里那几个同名函数是 re-export，全项目仍只有一个 ContextVar。
+- 写入方：`SessionAgent.run` / `SessionAgent.handle_event`（经 `runtime_scope`），以及 `ai/server.py` 的 `handle_chat_completions`——它从请求体 `routing.session_id` 取值，因为 AI 是 socket 后面另一个 aiohttp 进程，ContextVar 过不去。
+- 格式串用 `{extra[psi_session]}` 而非直接读 ContextVar：`enqueue=True` 的 sink 在**另一个进程**里格式化，那边 ContextVar 是空的。`_logging` 模块 import 时就装好 patcher，因为格式串无条件引用这个 key，缺了会让 loguru 在 sink 内抛错并**静默丢掉整行**。
+
+### 回合标记（模型耗时的权威判据）
+
+`ai/server.py` 的 `ai-turn open` / `ai-turn close` 两端是模型墙上时间的**唯一权威来源**，`close` 行自带 `elapsed_ms=` 与 `outcome=`。两者**计数必须相等**，用例钉住了包括 `response.prepare` 失败在内的每条 return 路径。请求体都没解析出来的那类用第三个词 `ai-turn rejected`，它没有配对的 open，不进配平计数。
+
+**不要去补 `agent.py` 的标记。** 实测 2,331 个回合里 241 个（10%）只有 AI 侧标记而没有 agent 侧，据此算出的模型耗时占比是 39.2%，而正确值是 63.4%——差 24 个百分点，且系统性偏低，因为掉的那批恰好是走特殊分支的慢回合。改用 agent.py 补齐要靠人自觉，下次新加一个分支又会静默失衡；而这两端是结构性的：所有上游调用都必经这个 handler，open/close 各一次可以由一个函数的控制流锁死并被用例断言。`"Sending request to AI via AiClient"` 保留用于观测**发起**，但不得用来配对算耗时。
+
+工具耗时同理记在结果行上：`Tool result (...) elapsed_ms=N`，失败走 `Tool execution error (...) elapsed_ms=N`。工具在一个 task group 里**并发**执行，靠配对时间戳反推会把别人的等待算进来，并发度一高就彻底错。
+
+改动上述任何标记文本，要同步 `scripts/latency-probe/parse.py`。
 
 ### 定向 DEBUG（按模块调级，不全局开）
 
@@ -256,7 +276,7 @@ SSE 流中的特殊字段：
 
 | 环境变量 | 作用 |
 |---|---|
-| `PSI_DEBUG_MODULES` | 模块名白名单，逗号或分号分隔。**留空即不安装文件 sink**，行为与没有此功能时逐字节一致 |
+| `PSI_DEBUG_MODULES` | 模块名白名单，逗号或分号分隔，控的是**哪些模块的 DEBUG/INFO** 进文件。**留空即不安装文件 sink**，行为与没有此功能时逐字节一致。装上之后，**未列出**的模块仍有 WARNING 起的下限（见约束 7） |
 | `PSI_DEBUG_LOG_PATH` | 显式落盘文件路径（可选），优先于下面的推导。可含 `{pid}` 占位符，由本项目替换 |
 
 落盘路径优先级：`PSI_DEBUG_LOG_PATH` → `PSI_APPDATA/logs/psi-debug-<pid>.log` → `platformdirs` 用户数据目录。轮转参数写死在 `_logging.py`：**每份 20 MB、保留 10 份、gz 压缩**，即单进程磁盘上限约 200 MB。
@@ -267,13 +287,17 @@ SSE 流中的特殊字段：
 PSI_DEBUG_MODULES=psi_agent.ai.server,psi_agent.channel._core
 ```
 
-五条约束，改动前请先读：
+七条约束，改动前请先读：
 
 1. **stderr 级别绝不受这个变量影响。** 部署环境的 docker log driver 是 `json-file` 且 **opts 为空——即 `docker logs` 那份没有任何轮转**。所以定向 DEBUG 只进文件 sink，让 `docker logs` 的量保持不变。别把定向 DEBUG 接回 stderr。
 2. **`setup_logging` 里 `logger.remove()` 必须先于文件 sink 安装。** 裸 `remove()` 会清掉**所有** handler；顺序颠倒会在装完文件 sink 后立刻把它删掉，而守卫 `_file_handler_id` 已置位，于是整个进程再也装不上——且不报错。已有回归测试钉住。
 3. **两个 sink 各用独立守卫**（`_handler_id` / `_file_handler_id`）。它们的输入不同：stderr 看调用方的 `verbose`，文件看进程环境。共用守卫会让“谁先调用”意外决定文件 sink 装不装。
 4. **`_logging.py` 刻意不 import `_appdata.py`**：后者是 async 模块，而 `_logging` 处在依赖图最底层且零项目内依赖。代价是 appname 字面量 `"Haitun"` 在两处重复，靠交叉注释锁住。另外 `setup_logging` 是同步的、且在 `resolve_appdata_root()` **之前**执行（见 `gateway/__init__.py`），所以它**看不到 `--appdata` 命令行参数**，只认环境变量。
 5. **一个进程一个文件，文件名带 PID。** 一个容器里常有多个 psi-agent 进程：生产的 `launch-gateway.sh` 是 `psi-agent gateway` 与 `psi-agent channel feishu` 并排跑，而要观测的两个模块恰好分居其中。共用一个路径会**丢行**——`enqueue=True` 只在单进程内串行化，轮转后落败的一方还会继续往被改名的 inode 里写。实测两进程写 600 行、轮转都没触发，磁盘上只剩 586 行。PID 由本项目自己拼进文件名：loguru 的 file sink **只替换 `{time}`**（见 `loguru._file_sink.FileSink._create_path`），路径里留个 `{process}` 会在首次写入时 `KeyError`。
+
+6. **文件 sink 用 `delay=True`，不写就不建文件。** `PSI_DEBUG_MODULES` 是白名单，而**每个** psi-agent 进程都会装这个 sink，绝大多数进程一辈子发不出一条命中的 DEBUG——于是每个 PID 留一个 0 字节文件。实测 `.psi/appdata/logs/` 下攒了 **824 个空文件**，`ls` 都不可用，真正有内容的那几份反而找不着。`delay=True` 把 `open()` 推到第一条记录，治的是源头。清**存量**用 `psi-agent logs`（`--dry-run` 只数不删）：只删 `st_size == 0` 的 `psi-debug-*.log`，有内容的绝不碰，`.log.gz` 不在匹配范围内。刻意做成显式命令而非 `setup_logging` 里的自动动作——多进程容器里另一个进程可能刚 `open()` 完还没写第一行，那时它合法地就是 0 字节。
+
+7. **filter 的根规则 `""` 是 `_UNLISTED_FLOOR = "WARNING"`，不是 `False`。** loguru 的 `False` 把未列模块**整段**关掉（不是只关 DEBUG），于是这个文件里除白名单外一个字都没有。实测代价：生产 14.5 万行定向 DEBUG 里 `FeishuManager` **零命中**——那个模块的 WARNING 无处可落，排查飞书 workspace 错位时只能靠猜。WARNING 起的记录是**告警**，量小且恰恰是出事时要看的。`PSI_DEBUG_MODULES` 控 DEBUG/INFO 量的语义一字未改，只是未列模块从「全禁」变成「WARNING 起」。用例 `tests/psi_agent/test_logging_warning_floor.py` 两条：未列模块的 WARNING/ERROR 必须落盘 + 未列模块的 DEBUG/INFO 仍被挡且已列模块的 DEBUG 仍收（第二条是反向控制，防着有人图省事把下限调成 `DEBUG`）。
 
 **隐私风险（开启前必读）**：`psi-debug-<pid>.log` 里会有**真实对话内容与用户 open_id**，且刻意**不做脱敏**——打码与“看模型原始输出”直接矛盾，自我对话本身就是要看的东西。纪律：默认关闭；**查完即关**；文件不得复制出生产机、不得贴入工单或聊天；只在需要的那一个容器开。磁盘上限按**进程**算，不是按容器：gateway 容器有两个进程，开一个容器就是约 400 MB；生产一机 7 容器全开会到 2.8 G 量级。靠 `retention=10` 自动删除旧文件兜底。
 
@@ -333,7 +357,7 @@ PSI_DEBUG_MODULES=psi_agent.ai.server,psi_agent.channel._core
 
 21. **重定向家目录必须 patch `Path.home()` 本身，不能只 `setenv("HOME")`**：`Path.home()` 在 Windows 上读 `USERPROFILE`、在 POSIX 上才读 `HOME`，所以 `monkeypatch.setenv("HOME", str(tmp_path))` 在 Windows 上**完全不生效**。后果是双重的：断言落点的用例直接失败，而**没有**断言落点的用例会「安静地通过」并往开发者真实目录里写文件（`~/Downloads/.psi/` 曾被测试污染）。CI 三个 job 全是 `ubuntu-latest`，这类差异永远照不出来。正确写法 `monkeypatch.setattr(Path, "home", lambda: tmp_path)`，见 `tests/psi_agent/gateway/test_chat_manager.py` 的 `fake_home` fixture。凡测试碰到会往家目录写盘的代码（目前是 `_chat_manager._downloads_path`），都要先重定向，且**顺手补一条落点断言**——没有断言就等于没有防线。
 
-19. **易变内容挂在请求尾部、不进 system prompt（刻意为之，勿"优化"成写进提示词、也勿删掉那几个 no-op 分支）**：`SystemPrompt.ensure()` 每回合都跑，但只有两条路径——history 空则整段构建；`system_prompt_rebuild_checker()` 返回 True 则整段重建；否则提示词**一字不改**。所有描述「现在」的内容改由 `SystemPrompt.turn_context()` 每回合渲染，挂到**本回合 user 消息**的 `turn_context` 键上（`history_display.TURN_CONTEXT_KEY`），只在 `messages_for_ai()` 投影时折进 `content`。缺了这套机制，提示词就是「首个回合建一次、整段沿用到会话结束」，里面**所有描述「现在」的内容全部冻结**：7月24日建的会话连着几天说今天是 7月24日；构建那刻算错的时区标签（容器 `TZ` 未生效 → `Asia/Shanghai` 记成 `UTC`）活到会话结束；agent 照读陈旧时间作答、被追问时还会编一套时区换算圆场（真实事故）。**为什么不重渲染提示词（哪怕只渲染它的尾部）**：一是整段构建要重扫 skills/tools/bootstrap，实测 haitun 约 110ms、150KB 提示词，这笔是**当下就在付**的；二是它会永久堵死提示缓存这条路——上游按**前缀**缓存，而 system prompt 是**整个请求的最前面**（`any_llm` 的 Anthropic 转换器把所有 `role=system` 抽成顶层 `system` 参数、排在 `messages` 之前），每回合改它就意味着无论怎么配缓存都不可能命中。**注意时态：本仓当前并未开启缓存**——Anthropic 的 prompt caching 是 opt-in 的，文档里那个叫 "automatic caching" 的选项指的是断点自动前移、**仍然要在请求顶层放一个 `cache_control`**，而 `src/` 里没有任何 `cache_control`/`ephemeral`（可 grep 复核）。所以现在不存在「击穿」，改动的收益是**让前缀真正稳定下来、把开启缓存变成一个可行选项**；开启本身是独立的事（会动计费行为，还要先确认提示词长度过得了 512/1024 token 门槛、会话节奏跟得上 5 分钟 TTL）。切 `stable_prefix + 边界 + dynamic_suffix` 并不解决这件事：省下的只是重扫开销，前缀照样每回合变，所以那套边界常量已随此设计一并删除。挂到请求尾部则变动只落在这一个回合。**折在正文之后而非之前**：前置会移动这一回合的每个 byte，正好抵掉带外存储想省的东西。**几个 no-op 分支都是刻意的容错，别当冗余删掉**——未定义 `turn_context_builder`（老 workspace 行为不变）、builder 抛异常、返回非 `str`/空串/纯空白（一律当没有这个块）、`content` 是多模态 block 列表（原样返回并丢块，没有唯一可追加位置，丢一行时钟远好过写坏 block 结构）。**不单独发一条尾部消息**：不是发不出去（Anthropic 明确会把连续同角色轮次合并成一条，不报错），而是那条消息得先落进 history 才能发出去，于是每回合往历史里多塞一条一次性的时钟消息——历史被噪音撑大、压缩时还要判断哪些该丢；挂在本回合 user 消息上则一行不多，且随该回合一起过期。`turn_context` 属于非上线键（与 `kind`/`chat_type` 同在 `_DISPLAY_ONLY_KEYS`），**不写回 history 行**，这样之前每个回合投影出来逐字节相同、前缀才真能复用（实测两回合请求只在末尾分叉，第一回合那行至今仍带着它当时的时钟）。`turn_context_fn` 保持 `None` 默认而不套用坑 8 的「Default over None」：默认函数只能返回空串，与 `None` 语义重合却多一次无谓 await，且 `None` 本身承载「这个 workspace 没有易变块」的语义。**`USER.md`/`HEARTBEAT.md` 留在提示词里**（它们是当作长期上下文读的散文，不是本回合的新闻），文档承诺的「re-read every turn」由 rebuild checker 按**内容哈希**兑现——字节真变了才重建，改一次付一次。详见 `session/AGENTS.md`「每回合易变上下文」。
+19. **易变内容挂在请求尾部、不进 system prompt（刻意为之，勿"优化"成写进提示词、也勿删掉那几个 no-op 分支）**：`SystemPrompt.ensure()` 每回合都跑，但只有两条路径——history 空则整段构建；`system_prompt_rebuild_checker()` 返回 True 则整段重建；否则提示词**一字不改**。所有描述「现在」的内容改由 `SystemPrompt.turn_context()` 每回合渲染，挂到**本回合 user 消息**的 `turn_context` 键上（`history_display.TURN_CONTEXT_KEY`），只在 `project_history_for_wire()` 投影时折进 `content`。缺了这套机制，提示词就是「首个回合建一次、整段沿用到会话结束」，里面**所有描述「现在」的内容全部冻结**：7月24日建的会话连着几天说今天是 7月24日；构建那刻算错的时区标签（容器 `TZ` 未生效 → `Asia/Shanghai` 记成 `UTC`）活到会话结束；agent 照读陈旧时间作答、被追问时还会编一套时区换算圆场（真实事故）。**为什么不重渲染提示词（哪怕只渲染它的尾部）**：一是整段构建要重扫 skills/tools/bootstrap，实测 haitun 约 110ms、150KB 提示词，这笔是**当下就在付**的；二是它会永久堵死提示缓存这条路——上游按**前缀**缓存，而 system prompt 是**整个请求的最前面**（`any_llm` 的 Anthropic 转换器把所有 `role=system` 抽成顶层 `system` 参数、排在 `messages` 之前），每回合改它就意味着无论怎么配缓存都不可能命中。**注意时态：本仓当前并未开启缓存**——Anthropic 的 prompt caching 是 opt-in 的，文档里那个叫 "automatic caching" 的选项指的是断点自动前移、**仍然要在请求顶层放一个 `cache_control`**，而 `src/` 里没有任何 `cache_control`/`ephemeral`（可 grep 复核）。所以现在不存在「击穿」，改动的收益是**让前缀真正稳定下来、把开启缓存变成一个可行选项**；开启本身是独立的事（会动计费行为，还要先确认提示词长度过得了 512/1024 token 门槛、会话节奏跟得上 5 分钟 TTL）。切 `stable_prefix + 边界 + dynamic_suffix` 并不解决这件事：省下的只是重扫开销，前缀照样每回合变，所以那套边界常量已随此设计一并删除。挂到请求尾部则变动只落在这一个回合。**折在正文之后而非之前**：前置会移动这一回合的每个 byte，正好抵掉带外存储想省的东西。**几个 no-op 分支都是刻意的容错，别当冗余删掉**——未定义 `turn_context_builder`（老 workspace 行为不变）、builder 抛异常、返回非 `str`/空串/纯空白（一律当没有这个块）、`content` 是多模态 block 列表（原样返回并丢块，没有唯一可追加位置，丢一行时钟远好过写坏 block 结构）。**不单独发一条尾部消息**：不是发不出去（Anthropic 明确会把连续同角色轮次合并成一条，不报错），而是那条消息得先落进 history 才能发出去，于是每回合往历史里多塞一条一次性的时钟消息——历史被噪音撑大、压缩时还要判断哪些该丢；挂在本回合 user 消息上则一行不多，且随该回合一起过期。`turn_context` 属于非上线键（与 `kind`/`chat_type` 同在 `_DISPLAY_ONLY_KEYS`），**不写回 history 行**，这样之前每个回合投影出来逐字节相同、前缀才真能复用（实测两回合请求只在末尾分叉，第一回合那行至今仍带着它当时的时钟）。`turn_context_fn` 保持 `None` 默认而不套用坑 8 的「Default over None」：默认函数只能返回空串，与 `None` 语义重合却多一次无谓 await，且 `None` 本身承载「这个 workspace 没有易变块」的语义。**`USER.md`/`HEARTBEAT.md` 留在提示词里**（它们是当作长期上下文读的散文，不是本回合的新闻），文档承诺的「re-read every turn」由 rebuild checker 按**内容哈希**兑现——字节真变了才重建，改一次付一次。详见 `session/AGENTS.md`「每回合易变上下文」。
 
 22. **cancel scope 不能跨 `yield`；给流加超时只能包裸读，不能包 generator 的 `__anext__`**：两条一体，都在给「上游静默时把缓冲尾巴发出去」加超时时踩过（`channel/_stream.py` 的 `idle_timeout`）。**其一**，`with anyio.move_on_after(...)`/`fail_after(...)` 里出现 `yield`，正常路径全绿，但消费者**提前 break** 时 `aclose()` 会在**另一个任务**里退出那个 scope，anyio 直接 `RuntimeError: Attempted to exit cancel scope in a different task than it was entered in`，且上游 generator 不被终结（资源照漏）。所以 scope 必须在 `yield` 之前完全关闭——先在 scope 内读、出了 scope 再判 `scope.cancelled_caught` 并 `yield`。这条也否掉了「起 pump 任务 + memory stream + 超时等队列」那种写法：它把 `yield` 留在 task group 内部，同样只在提前 break 时炸。**其二**，超时**包在 async generator 的 `__anext__` 上会静默截断流**——取消会终结 generator，后续数据全丢（与 `gateway.server._write_chat_sse_with_keepalive` 里那条「keepalive 不得 `fail_after` 包 `agen.__anext__()`」是同一个坑的两种表现）。而 aiohttp 的 `StreamReader` 是**类实现**的异步迭代器，取消其 `__anext__` 后 reader 完好、下次读接着走（已用真停顿服务器实测）。**推论**：给流式读加超时，要么作用在类实现的 reader 上，要么把超时下推到最底层的裸读；凡对「可能是 generator」的源加超时，必须留有 opt-out（本仓即 `idle_timeout=0` 默认）。测试要专门覆盖**提前 break** 这条路径，正常消费路径照不出这两个缺陷。
 
@@ -444,6 +468,15 @@ C 端注册登录的云端服务**不在本仓库**，在服务器 `/srv/psi-clo
 - 两侧只通过 HTTP 契约耦合。契约的权威定义是云端的 `/openapi.json`（自动生成，不会与实现脱同步）。
 - 云端的目录结构、模块契约与硬规则记在 `/srv/psi-cloud/AGENTS.md`，**本文不重复**。一句话概括：`core/` 是框架且不认识任何业务，`modules/` 下每个目录一块业务自报清单，认证是 `modules/auth`。
 - 本机侧只有 `gateway/desktop/_auth_manager.py` 与 `_auth_store.py` 两个文件与它对接，**不持任何供应商密钥**。改动云端接口要同步上面那份设计文档。
+
+## 服务器部署（haitun / ToB 栈）
+
+把本仓部署到云服务器的完整流程见 `docs/deploy/psi-agent-cloud-deployment.md`（前置条件、镜像获取、编排、配置项清单、反代、启动验证判据、数据迁移与故障排查）。与上一节的 psi-cloud 是两套东西：那是 C 端服务，这是 haitun 的 ToB 栈（`gateway` / `luolin` / `oauth-proxy` 三容器 + fusion-memory），同机但完全隔离。
+
+- **`Dockerfile` 与 `docker-compose.yml` 不在本仓**，只在目标机 `/srv/haitun/psi-agent/`。本仓贡献的是镜像里 `pip install -e .` 装的那部分。改了配置项 / 启动参数 / 端口暴露，要同步那份部署文档。
+- 反直觉但正确的三条判据，别当 bug 修：公网 `/sessions` 返回 **404** 才表示 gateway 未暴露（它无跨用户鉴权却能驱动 agent 执行工具，绝不能发布）；从 gateway 容器内访问 `psi-agent-luolin:8081` 返回 **404 是正常**（DNS+TCP+HTTP 都通），`000` 才是故障；`Exited (137)` 在 `OOMKilled=false` 时是 `docker stop` 超时强杀，属正常停机。
+- `oauth-proxy` 用 `network_mode: "service:gateway"` 借用 gateway 的网络命名空间，**重启 gateway 会静默打断它的网络栈**（容器仍显示 Up 但 8090 不通）。用目标机的 `./restart-stack.sh`，不要裸 `docker compose restart gateway`。
+- 飞书 channel 是外发 WebSocket 长连接，同一 app 只能有一条，**两端同时在线会导致消息重复投递** —— 迁移顺序必须是「停旧 → 拷数据 → 起新」。
 
 ## 未来扩展方向
 

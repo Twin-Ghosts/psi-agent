@@ -116,7 +116,9 @@ def test_extract_is_not_fooled_by_nested_generics() -> None:
             "它会被嵌套泛型 `Record<string, string>` 骗过去。清单于是静默少条, 全绿。"
         )
     # 模板字面量里的 `${...}` 要归一成参数, 且查询串不进路径。
-    assert "/sessions/{param}/chat" in paths, "模板字面量里的路径没被归一"
+    # 聊天那条已从裸 `/sessions/{id}/chat` 换成带鉴权的 `/feishu/` 对等物(裸的那条无身份
+    # 校验却能驱动 agent 执行工具), 归一判据跟着换 —— 它要的只是「模板插值变成 {param}」。
+    assert "/feishu/sessions/{param}/chat" in paths, "模板字面量里的路径没被归一"
     assert "/workspace/file" in paths, "带查询串的路径没被截掉 `?` 之后的部分"
 
 

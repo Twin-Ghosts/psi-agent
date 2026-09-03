@@ -3,10 +3,16 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-from _fusion_memory.journal import EvidenceSpan, JsonlJournal, canonical_json, span_to_record
-from _fusion_memory.store import IngestCheckpoint, MemoryStore
+
+if TYPE_CHECKING:
+    from agents.desktop.tools._fusion_memory.journal import EvidenceSpan, JsonlJournal, canonical_json, span_to_record
+    from agents.desktop.tools._fusion_memory.store import IngestCheckpoint, MemoryItem, MemoryStore
+else:
+    from _fusion_memory.journal import EvidenceSpan, JsonlJournal, canonical_json, span_to_record
+    from _fusion_memory.store import IngestCheckpoint, MemoryItem, MemoryStore
 
 
 def make_span(
@@ -36,14 +42,14 @@ def test_schema_is_minimal_fts5_wal_and_rebuildable(tmp_path: Path) -> None:
     journal, store = opened(tmp_path)
     journal.append_spans([make_span("span-1")])
     store.replay_journal()
-    names = {row[0] for row in store.connection.execute("select name from sqlite_master")}
+    names = {row[0] for row in store.conn.execute("select name from sqlite_master")}
     assert {"evidence_spans", "memory_items", "summary_cards", "ingest_checkpoints"} <= names
     assert "fts_memory" in names
     assert not {"fact_relations", "event_edges", "entities", "current_views", "entity_profiles"} & names
-    assert store.connection.execute("pragma journal_mode").fetchone()[0] == "wal"
-    store.connection.execute("delete from evidence_spans")
-    store.connection.execute("delete from fts_memory")
-    store.connection.commit()
+    assert store.conn.execute("pragma journal_mode").fetchone()[0] == "wal"
+    store.conn.execute("delete from evidence_spans")
+    store.conn.execute("delete from fts_memory")
+    store.conn.commit()
     assert store.rebuild_index().inserted == 1
     assert [row.doc_id for row in store.search_fts("原始", "workspace-a", 5)] == ["span-1"]
     store.close()
@@ -142,7 +148,7 @@ def test_promote_card_embeddings_and_checkpoint_round_trip(tmp_path: Path) -> No
     assert item.text == "用户偏好\n助手记住"
     assert same_item.item_id == item.item_id
     assert store.upsert_turn_card("workspace-a", "turn-1", "用户偏好", "助手记住", ["u", "a"])
-    assert {row[0] for row in store.connection.execute("select doc_type from fts_memory")} == {
+    assert {row[0] for row in store.conn.execute("select doc_type from fts_memory")} == {
         "evidence",
         "memory_item",
         "summary_card",
@@ -235,7 +241,10 @@ def test_rebuild_clears_derived_rows_and_resets_derivation_progress(tmp_path: Pa
     _, store = opened(tmp_path)
     span = make_span("local")
     store.index_spans([span])
-    store.promote("workspace-a", [span.span_id], "fact", 1.0)
+    store.upsert_memory_items(
+        "workspace-a",
+        [MemoryItem("derived", "workspace-a", "fact", span.content, 1.0, 1.0, (span.span_id,), "model")],
+    )
     store.upsert_turn_card("workspace-a", "turn-1", "user", "assistant", [span.span_id])
     checkpoint = IngestCheckpoint("workspace-a", "/history.jsonl", "session-1", 2, "abc", 42, 9, 2, 2, 2)
     store.write_checkpoint(checkpoint)
@@ -250,6 +259,40 @@ def test_rebuild_clears_derived_rows_and_resets_derivation_progress(tmp_path: Pa
     assert restored.embedding_line == 0
     assert restored.card_line == 0
     store.close()
+
+
+def test_manual_promotion_survives_index_rebuild(tmp_path: Path) -> None:
+    _, store = opened(tmp_path)
+    source = make_span("source", content="durable preference")
+    store.index_spans([source])
+    promoted = store.promote("workspace-a", [source.span_id], "preference", 0.8)
+
+    store.rebuild_index()
+
+    row = store.conn.execute(
+        "select kind, text, salience, source_span_ids, model from memory_items where item_id = ?",
+        (promoted.item_id,),
+    ).fetchone()
+    assert tuple(row) == ("preference", "durable preference", 0.8, '["source"]', None)
+    assert {candidate.doc_id for candidate in store.search_fts("durable", "workspace-a")} == {
+        promoted.item_id,
+        source.span_id,
+    }
+    store.close()
+
+
+def test_manual_promotion_journal_reopens(tmp_path: Path) -> None:
+    _, store = opened(tmp_path)
+    source = make_span("source", content="persistent preference")
+    store.index_spans([source])
+    promoted = store.promote("workspace-a", [source.span_id], "preference", 0.9)
+    store.close()
+
+    _, reopened = opened(tmp_path)
+
+    row = reopened.conn.execute("select text from memory_items where item_id = ?", (promoted.item_id,)).fetchone()
+    assert tuple(row) == ("persistent preference",)
+    reopened.close()
 
 
 def test_corrupt_sqlite_is_quarantined_and_backup_is_paired(tmp_path: Path) -> None:
@@ -275,7 +318,7 @@ def test_legacy_database_and_journal_are_backed_up_without_row_conversion(tmp_pa
         conn.execute("pragma user_version = 37")
     journal_path.write_bytes(canonical_json(span_to_record(make_span("journal"))) + b"\n")
     store = MemoryStore(db, JsonlJournal(journal_path, fsync=False), "workspace-a").open()
-    names = {row[0] for row in store.connection.execute("select name from sqlite_master")}
+    names = {row[0] for row in store.conn.execute("select name from sqlite_master")}
     assert "legacy_marker" not in names
     assert store.get_source_spans("workspace-a", ["journal"])
     assert list(tmp_path.glob("memory.sqlite3.legacy-*"))

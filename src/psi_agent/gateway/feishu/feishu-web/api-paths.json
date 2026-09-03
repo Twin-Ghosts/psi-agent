@@ -29,6 +29,11 @@
     },
     {
       "method": "GET",
+      "path": "/feishu/jsapi/config",
+      "source": "src/api.ts"
+    },
+    {
+      "method": "GET",
       "path": "/feishu/sessions",
       "source": "src/api.ts"
     },
@@ -36,6 +41,11 @@
       "method": "POST",
       "path": "/feishu/sessions",
       "source": "src/api.ts"
+    },
+    {
+      "method": "POST",
+      "path": "/feishu/sessions/{param}/chat",
+      "source": "src/services/chatStream.ts"
     },
     {
       "method": "GET",
@@ -56,11 +66,6 @@
       "method": "DELETE",
       "path": "/sessions/{param}",
       "source": "src/api.ts"
-    },
-    {
-      "method": "POST",
-      "path": "/sessions/{param}/chat",
-      "source": "src/services/chatStream.ts"
     },
     {
       "method": "GET",

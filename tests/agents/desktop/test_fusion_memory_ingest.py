@@ -4,18 +4,32 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import _fusion_memory.ingest as ingest_module
 import pytest
-from _fusion_memory.ingest import (
-    HistorySource,
-    discover_current_history,
-    ingest_confirmed_turn,
-    parse_completed_turns,
-    workspace_scope,
-)
-from _fusion_memory.journal import JsonlJournal
-from _fusion_memory.store import MemoryStore
+
+if TYPE_CHECKING:
+    import agents.desktop.tools._fusion_memory.ingest as ingest_module
+    from agents.desktop.tools._fusion_memory.ingest import (
+        HistorySource,
+        discover_current_history,
+        ingest_confirmed_turn,
+        parse_completed_turns,
+        workspace_scope,
+    )
+    from agents.desktop.tools._fusion_memory.journal import JsonlJournal
+    from agents.desktop.tools._fusion_memory.store import MemoryStore
+else:
+    import _fusion_memory.ingest as ingest_module
+    from _fusion_memory.ingest import (
+        HistorySource,
+        discover_current_history,
+        ingest_confirmed_turn,
+        parse_completed_turns,
+        workspace_scope,
+    )
+    from _fusion_memory.journal import JsonlJournal
+    from _fusion_memory.store import MemoryStore
 
 
 def test_parse_filters_non_raw_rows_and_preserves_history(tmp_path: Path) -> None:
@@ -261,8 +275,8 @@ def test_full_rescan_cannot_resurrect_tombstoned_history(tmp_path: Path) -> None
     ingest_confirmed_turn(store, scope, source, user_message, assistant_message)
     journal.append_scope_clear(scope.workspace_id)
     store.rebuild_index()
-    store.connection.execute("delete from ingest_checkpoints")
-    store.connection.commit()
+    store.conn.execute("delete from ingest_checkpoints")
+    store.conn.commit()
     ingest_confirmed_turn(store, scope, source, user_message, assistant_message)
     assert (
         store.get_source_spans(scope.workspace_id, [span.span_id for span in parse_completed_turns(scope, source)])

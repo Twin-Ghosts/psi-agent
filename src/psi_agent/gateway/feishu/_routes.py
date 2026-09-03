@@ -18,6 +18,7 @@ A7: 与 ``desktop/_routes.py`` 同一个原因搬过来 —— 装配函数留�
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -34,8 +35,9 @@ from psi_agent.gateway.feishu._auth import (
 )
 from psi_agent.gateway.feishu._feishu_manager import FeishuManager
 from psi_agent.gateway.feishu._identity import owns_session, visible_sessions
+from psi_agent.gateway.feishu._jsapi import FeishuJsapiSigner, JsapiError
 from psi_agent.gateway.feishu._oauth_manager import OAuthRelay
-from psi_agent.gateway.server import _error, _json, _read_json, _session_data
+from psi_agent.gateway.server import _error, _json, _read_json, _serve_chat_sse, _session_data
 from psi_agent.runtime._history_manager import HistoryManager
 from psi_agent.runtime._scheduler_manager import SchedulerManager
 from psi_agent.runtime._session_manager import SessionInfo, SessionManager
@@ -174,11 +176,19 @@ def _issue_login(identity: Identity, auth: FeishuAuth) -> web.Response:
     是登录看着成功、下一秒 ``/feishu/auth/me`` 401 —— 可选参数只会让这种漏法静默通过。
     """
     resp = _json(_identity_payload(identity))
+    # 生产 HTTPS 必须让 cookie 只随 TLS 传输; 本地 HTTP 默认关闭, 部署时显式开。
+    secure = (os.environ.get("PSI_FEISHU_COOKIE_SECURE", "") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     resp.set_cookie(
         SID_COOKIE,
         auth.issue(identity),
         httponly=True,
         samesite="Lax",
+        secure=secure,
         path="/",
     )
     return resp
@@ -221,6 +231,27 @@ async def _feishu_app_id(request: web.Request) -> web.Response:
     """
     auth: FeishuAuth = request.app["feishu_auth"]
     return _json({"app_id": auth.app_id})
+
+
+async def _feishu_jsapi_config(request: web.Request) -> web.Response:
+    """``GET /feishu/jsapi/config?url=...`` -> ``tt.config`` 的签名参数。
+
+    ``url`` 由前端传 ``location.href.split('#')[0]``, 后端只拿它拼签名, 不下发
+    ticket 或 App Secret。未配置凭证、URL 非法或上游失败都回 4xx, 不让前端误以为
+    签名可用。
+    """
+    signer: FeishuJsapiSigner = request.app["feishu_jsapi"]
+    url = request.query.get("url", "")
+    if not url.strip():
+        return _error("url query parameter is required", status=400)
+    try:
+        config = await signer.config_for_url(url)
+    except JsapiError as e:
+        return _error(str(e), status=400)
+    except Exception as e:
+        logger.error(f"Unexpected error while signing Feishu JSAPI config: {e!r}")
+        return _error("jsapi config failed", status=500)
+    return _json(config)
 
 
 async def _feishu_defaults(request: web.Request) -> web.Response:
@@ -345,6 +376,42 @@ async def _web_get_history(request: web.Request) -> web.Response:
         return _error("forbidden", status=403)
     messages = await hm.get(workspace, session_id, appdata=str(request.app.get("appdata") or ""))
     return _json(messages)
+
+
+async def _web_chat(request: web.Request) -> web.StreamResponse:
+    """``POST /feishu/sessions/{id}/chat`` —— 带鉴权的聊天流, 只许操作自己的会话。
+
+    **为什么要有这一条**: 骨架的 ``POST /sessions/{id}/chat`` 一行身份校验都没有 (它在容器内
+    回环服务本机, 那是它的合理用途)。而它是**能驱动 agent 执行工具**的那条 —— 跑 bash、读
+    公司表格、往飞书发消息。把裸的那条放上公网等于任何知道一个 session id 的人都能让公司
+    agent 干活, 且不问他是谁。所以网页应用改打这条对等物, 裸的那条**行为一字不改**。
+
+    三段判定与 ``_web_get_history`` **逐条相同**(同一套 ``owns_session``, 同样先存在性再归属):
+    未登录 401、不存在 404、别人的/群聊的 403。两条路由拿同一个 session id 该给同一个答案 ——
+    「history 拒了但 chat 放行」这种缝隙只会来自两处各写一套判定。
+
+    **403 而不是 404**: 与 history 那条对齐是主因(前端拿到 404 会当「会话被删了」去刷列表,
+    越权时那个动作没有意义)。用 404 隐藏存在性在这里也换不到什么: session id 是本人 workspace
+    下派生的 uuid, 猜不出来; 而真·不存在已经占了 404, 再让越权也回 404 就把「会话被删」与
+    「不是你的」两种状态糊成一个, 前端分不出来。
+
+    正文交给骨架的 ``_serve_chat_sse``, **不复制 handler 体**: multipart 解析、SSE keepalive、
+    ``[DONE]`` 收尾都在那一份里。
+    """
+    try:
+        identity = _require_identity(request)
+    except PermissionError as e:
+        return _error(str(e), status=401)
+    fm: FeishuManager = request.app["fm"]
+    sm: SessionManager = request.app["sm"]
+    session_id = request.match_info["session_id"]
+    try:
+        workspace = sm.get_workspace(session_id)
+    except LookupError:
+        return _error(f"Session '{session_id}' not found", status=404)
+    if not owns_session(identity.open_id, session_id, workspace, fm):
+        return _error("forbidden", status=403)
+    return await _serve_chat_sse(request, session_id)
 
 
 async def _web_owned_ids(request: web.Request) -> set[str]:
@@ -540,6 +607,7 @@ def register_feishu_routes(
     # 必须是服务端 (放前端等于公开 secret)。OAuthRelay 那条路径**照旧不碰 token**,
     # 两者互不影响。
     app["feishu_auth"] = FeishuAuth(app_id=feishu_app_id, app_secret=feishu_app_secret)
+    app["feishu_jsapi"] = FeishuJsapiSigner(app_id=feishu_app_id, app_secret=feishu_app_secret)
     # 开发旁路开着就在**启动期**喊一声。挂在这里的理由: 本函数是「装配飞书这条线」唯一的
     # 入口, 于是这条告警的可达性与旁路的可达性是同一个条件 —— 不挂飞书的进程压根没有
     # ``/feishu/auth/login``, 也就不该报旁路。
@@ -549,6 +617,7 @@ def register_feishu_routes(
     # WARNING, 所以「只删前端」会让旁路在没人登录前完全不可见。
     warn_if_dev_bypass_enabled()
     register_auth_routes(app)
+    app.router.add_get("/feishu/jsapi/config", _feishu_jsapi_config)
     app.router.add_post("/feishu/route", _feishu_route)
     app.router.add_get("/feishu/routes", _list_feishu_routes)
     # 网页应用的缺省 AI。**贴在这里而不是 register_auth_routes 里**: 它读 ``app["fm"]``,
@@ -560,6 +629,10 @@ def register_feishu_routes(
     app.router.add_get("/feishu/sessions", _web_list_sessions)
     app.router.add_post("/feishu/sessions", _web_create_session)
     app.router.add_get("/feishu/sessions/{session_id}/history", _web_get_history)
+    # 带鉴权的聊天流。**与骨架 ``POST /sessions/{session_id}/chat`` 不同 path**, 不是重复注册
+    # —— 后者仍在, 行为一字不改。撞同 path 的后果见 ``register_auth_routes`` 里那段: aiohttp
+    # 不报错, 各建一个 resource 由先注册者胜出, 表现是有效 cookie 反而拿 401。
+    app.router.add_post("/feishu/sessions/{session_id}/chat", _web_chat)
     app.router.add_get("/feishu/titles", _web_list_titles)
     app.router.add_get("/feishu/summaries", _web_list_summaries)
     # ``/oauth/*`` 归本包(取件方全在 ToB 一侧), 但注册与 ``--gateway`` 解耦 —— 见

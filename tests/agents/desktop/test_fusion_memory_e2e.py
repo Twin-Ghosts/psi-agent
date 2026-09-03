@@ -2,19 +2,28 @@ from __future__ import annotations
 
 # ruff: noqa: RUF001
 import json
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-from _fusion_memory.runtime import get_runtime, reset_runtime_cache_for_tests
-from memory_add import memory_add
-from memory_answer_context import memory_answer_context
-from memory_search import memory_search
 
 from psi_agent.session.runtime_context import runtime_scope
 
+if TYPE_CHECKING:
+    from agents.desktop.tools._fusion_memory.runtime import get_runtime, reset_runtime_cache_for_tests
+    from agents.desktop.tools.memory_add import memory_add
+    from agents.desktop.tools.memory_answer_context import memory_answer_context
+    from agents.desktop.tools.memory_search import memory_search
+else:
+    from _fusion_memory.runtime import get_runtime, reset_runtime_cache_for_tests
+    from memory_add import memory_add
+    from memory_answer_context import memory_answer_context
+    from memory_search import memory_search
+
 
 @pytest.fixture(autouse=True)
-async def clear_runtime() -> None:
+async def clear_runtime() -> AsyncIterator[None]:
     await reset_runtime_cache_for_tests()
     yield
     await reset_runtime_cache_for_tests()
@@ -74,8 +83,13 @@ async def test_cross_session_workspace_isolation_and_jsonl_recovery(
 
     journal_path = workspace_a / ".fusion-memory" / "evidence.jsonl"
     records = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
-    assert {record["record_type"] for record in records} == {"evidence_span"}
-    assert {record["content"] for record in records} == {valid_user + "\n", valid_assistant}
+    assert {record["record_type"] for record in records} == {"evidence_span", "memory_promotion"}
+    evidence_records = [record for record in records if record["record_type"] == "evidence_span"]
+    promotion_records = [record for record in records if record["record_type"] == "memory_promotion"]
+    assert {record["content"] for record in evidence_records} == {valid_user + "\n", valid_assistant}
+    assert len(promotion_records) == 1
+    assert promotion_records[0]["source_span_ids"] == [source_id]
+    assert "content" not in promotion_records[0]
     authority = journal_path.read_text(encoding="utf-8")
     assert not any(term in authority for term in ["tool output", "thinking", "HEARTBEAT_OK", "summary"])
 

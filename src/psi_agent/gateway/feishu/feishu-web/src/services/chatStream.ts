@@ -1,5 +1,5 @@
 /**
- * ``POST /sessions/{id}/chat`` 的流式收发。
+ * ``POST /feishu/sessions/{id}/chat`` 的流式收发(带鉴权的那条, 理由见下方 fetch 处注释)。
  *
  * 后端返回 SSE (``data:`` 行 + 空行分隔), 事件 type 有 text / reasoning / blob / error,
  * 结束标记是 ``[DONE]``。单独放一个文件而不塞进 api.ts: 那边是 JSON 请求-响应, 这里是
@@ -51,7 +51,11 @@ export async function streamChat(
 
   try {
     const { headers, body } = buildBody(text, files);
-    const resp = await fetch(`/sessions/${encodeURIComponent(sessionId)}/chat`, {
+    // **必须是 ``/feishu/`` 那条, 不是裸 ``/sessions/{id}/chat``**: 裸的那条一行身份校验都
+    // 没有, 而它能驱动 agent 执行工具(跑 bash、读公司表格、往飞书发消息)。上公网后打裸路由
+    // 等于任何知道一个 session id 的人都能让公司 agent 干活。这条走 cookie 鉴权 + 会话归属
+    // 校验(见 ``feishu/_routes.py`` 的 ``_web_chat``), 越权是 403、未登录是 401。
+    const resp = await fetch(`/feishu/sessions/${encodeURIComponent(sessionId)}/chat`, {
       method: "POST",
       headers,
       body,

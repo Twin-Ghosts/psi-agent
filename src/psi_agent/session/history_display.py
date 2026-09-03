@@ -16,7 +16,7 @@ Legacy aliases still accepted when reading JSONL:
 - ``chat_type: "schedule"`` → ``schedule.silent``
 - roles ``user_schedule`` / ``assistant_schedule`` → schedule.silent
 
-AI requests strip display-only keys and rewrite legacy roles via ``messages_for_ai``.
+AI requests strip display-only keys and rewrite legacy roles via ``project_history_for_wire``.
 
 ``turn_context`` (2026-07-29) is the same idea applied to volatile text: stored
 beside the user message it belongs to, folded into ``content`` only on the way
@@ -47,7 +47,7 @@ CHAT_TYPE_SCHEDULE = "schedule"
 # Volatile per-turn context (wall-clock time, runtime info) carried alongside
 # the user message it belongs to.  Folded into ``content`` only when the turn
 # is sent to the AI, so history rows stay byte-identical once written — see
-# ``messages_for_ai``.
+# ``project_history_for_wire``.
 TURN_CONTEXT_KEY = "turn_context"
 
 _DISPLAY_ONLY_KEYS = frozenset({KIND_KEY, CHAT_TYPE_KEY, TURN_CONTEXT_KEY})
@@ -183,8 +183,16 @@ def with_chat_type(msg: dict[str, Any], chat_type: str) -> dict[str, Any]:
     return with_kind(msg, chat_type)
 
 
-def messages_for_ai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def project_history_for_wire(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Project history for the AI backend.
+
+    Named for what it does rather than who calls it: the old name
+    (``messages_for_ai``) claimed to be a projection while also enforcing
+    ``truncate_tool_result`` and discarding every row between ``system`` and the
+    last ``compacted``.  Those are still here — they are wire-shape obligations,
+    not cost policy — but the *budget* now lives one layer out, in
+    ``session/request_assembly.py``, which is the only caller that can see the
+    tool schemas as well as the messages.
 
     - Strips display-only keys (``kind``, ``chat_type``, ``turn_context``) and
       fixes legacy roles.
@@ -197,6 +205,28 @@ def messages_for_ai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
       the first ``system`` (index 0) and the last ``compacted`` (exclusive),
       merges the compaction summary into the system message, and drops the
       ``compacted`` message itself.
+    """
+    return [projected for projected, _ in project_history_with_sources(messages)]
+
+
+def project_history_with_sources(
+    messages: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], dict[str, Any] | None]]:
+    """``project_history_for_wire``, but each row paired with the row it came from.
+
+    Exists because the budget layer has to decide *which stored row* to elide
+    and have that decision stick across turns.  It cannot pair projected rows
+    with stored ones by position: the projection drops rows (invalid legacy
+    assistants) and deletes whole spans (everything before the last
+    ``compacted``), so the two lists routinely differ in length.  Inferring the
+    pairing from a parallel walk would be a guess that silently mis-attributes
+    the moment any row is dropped — the kind of near-miss that shows up as
+    "elision hit the wrong message" long after the fact.
+
+    So the pairing is emitted by the function that performs the projection,
+    where it is known exactly, rather than reconstructed by the caller.  The
+    source is ``None`` for the merged ``system`` row, which is synthesized from
+    two stored rows (the prompt and the summary) and is never elidible anyway.
     """
     if not messages:
         return []
@@ -219,14 +249,16 @@ def messages_for_ai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
         if system_idx is not None and system_idx < compacted_idx:
             after = messages[compacted_idx + 1 :]
-            result: list[dict[str, Any]] = []
+            result: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
 
             system_msg = messages[system_idx]
             if isinstance(system_msg, dict):
                 projected = {k: v for k, v in system_msg.items() if k not in _DISPLAY_ONLY_KEYS}
                 projected["role"] = "system"
                 projected["content"] = projected.get("content", "") + "\n\n[Compacted History]\n" + compacted_content
-                result.append(projected)
+                # Source is ``None``: this row is the stored prompt *plus* the
+                # summary, so no single stored row owns it.
+                result.append((projected, None))
 
             for msg in after:
                 if not isinstance(msg, dict):
@@ -237,7 +269,7 @@ def messages_for_ai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 _append_for_ai(result, msg, role)
             return result
 
-    out: list[dict[str, Any]] = []
+    out: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
     for msg in messages:
         if not isinstance(msg, dict):
             continue
@@ -248,12 +280,16 @@ def messages_for_ai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _append_for_ai(out: list[dict[str, Any]], msg: dict[str, Any], role: str) -> None:
+def _append_for_ai(
+    out: list[tuple[dict[str, Any], dict[str, Any] | None]],
+    msg: dict[str, Any],
+    role: str,
+) -> None:
     """Append one valid wire message, skipping unusable legacy assistant rows."""
     projected = _project_for_ai(msg, role)
     if role == "assistant" and not projected.get("content") and not projected.get("tool_calls"):
         return
-    out.append(projected)
+    out.append((projected, msg))
 
 
 def _project_for_ai(msg: dict[str, Any], role: str) -> dict[str, Any]:

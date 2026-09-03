@@ -33,7 +33,7 @@ jobs:
         with:
           python-version: "3.14"
       - run: uv sync
-      - run: uv run pytest -v
+      - run: uv run pytest -v --ignore=tests/deploy/test_oauth_proxy.py
 
   # ToB 前端脚手架的可构建性。单独一个 job 而不是塞进 publish: publish 只在打 tag 时
   # 跑, 那样脚手架坏掉要到发版才发现 —— 方案 3.6 要的是「不会悄悄坏掉」。

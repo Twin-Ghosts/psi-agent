@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import anyio
 import pytest
 from lark_channel import PolicyConfig
+from loguru import logger
 
 from psi_agent.channel._core import ChannelCore
 from psi_agent.channel._file_bytes import OutboundFileError
@@ -927,6 +928,141 @@ async def test_gateway_route_provider_raises_on_failure_and_does_not_cache() -> 
     socket = await provider.ensure("ou_1")
     assert socket == "/tmp/ok.sock"
     assert len(http.post_calls) == 2
+
+
+# ── 路由日志必须在线上看得见 ──────────────────────────────────────────────────
+#
+# 「谁落到了哪个 Session」只有这一处记录。生产钉死 INFO, 所以这些断言全部按 INFO 收
+# 集 —— 若哪天有人把它挪回 DEBUG, 用例会红, 而不是等到出事时发现没记。
+
+
+def _capture_info() -> tuple[list[str], int]:
+    messages: list[str] = []
+    sink_id = logger.add(lambda m: messages.append(m.record["message"]), level="INFO")
+    return messages, sink_id
+
+
+@pytest.mark.anyio
+async def test_route_decision_is_logged_at_info_once_per_key() -> None:
+    """V1: 路由结果在 INFO 可见, 且每个路由键只记一条 (缓存命中不再刷)。"""
+    http = _FakeHttp([_FakeResp(201, {"channel_socket": "/tmp/feishu-ou_1.sock"})])
+    provider = client._GatewayRouteProvider("http://127.0.0.1:9000", cast("Any", http))
+
+    messages, sink_id = _capture_info()
+    try:
+        await provider.ensure("ou_1")
+        await provider.ensure("ou_1")  # 缓存命中
+    finally:
+        logger.remove(sink_id)
+
+    routed = [m for m in messages if m.startswith("routed ")]
+    assert len(routed) == 1, messages
+    assert "ou_1" in routed[0]
+    assert "/tmp/feishu-ou_1.sock" in routed[0]
+
+
+@pytest.mark.anyio
+async def test_group_and_direct_routes_are_logged_separately() -> None:
+    """V2: 两个不同的路由键各记一条 —— 否则分不出群聊与私聊各落到哪。"""
+    http = _FakeHttp(
+        [
+            _FakeResp(201, {"channel_socket": "/tmp/direct.sock"}),
+            _FakeResp(201, {"channel_socket": "/tmp/group.sock"}),
+        ]
+    )
+    provider = client._GatewayRouteProvider("http://127.0.0.1:9000", cast("Any", http))
+
+    messages, sink_id = _capture_info()
+    try:
+        await provider.ensure("ou_1")
+        await provider.ensure("ou_2", chat_id="oc_9", chat_type="group")
+    finally:
+        logger.remove(sink_id)
+
+    routed = [m for m in messages if m.startswith("routed ")]
+    assert len(routed) == 2, messages
+    assert "/tmp/direct.sock" in routed[0]
+    assert "/tmp/group.sock" in routed[1]
+    # 群聊按 chat_id 归并, 所以键里应当出现 chat_id 而不是发送者。
+    assert "oc_9" in routed[1]
+
+
+def test_shared_fallback_is_logged_at_info_with_its_reason() -> None:
+    """V3: 落到共享兜底会话必须留痕, 并说明是哪种原因。
+
+    改前只有「路由失败」那一种记了 warning; 没配 gateway 和没有路由键这两种完全静默,
+    而它们同样让多个人共用一份上下文。
+    """
+    seen: set[str] = set()
+    messages, sink_id = _capture_info()
+    try:
+        logged = client._log_shared_fallback(
+            "ou_x",
+            chat_id="",
+            chat_type="p2p",
+            session_socket="/tmp/shared.sock",
+            has_gateway=False,
+            seen=seen,
+        )
+    finally:
+        logger.remove(sink_id)
+
+    assert logged is True
+    lines = [m for m in messages if m.startswith("shared-session fallback:")]
+    assert len(lines) == 1, messages
+    assert "ou_x" in lines[0]
+    assert "/tmp/shared.sock" in lines[0]
+    assert "no gateway configured" in lines[0]
+
+
+def test_shared_fallback_reason_distinguishes_a_missing_routing_key() -> None:
+    """V4: 配了 gateway 却还是兜底, 是另一回事 —— 两者不能长得一样。"""
+    seen: set[str] = set()
+    messages, sink_id = _capture_info()
+    try:
+        client._log_shared_fallback(
+            None,
+            chat_id="",
+            chat_type="",
+            session_socket="/tmp/shared.sock",
+            has_gateway=True,
+            seen=seen,
+        )
+    finally:
+        logger.remove(sink_id)
+
+    lines = [m for m in messages if m.startswith("shared-session fallback:")]
+    assert len(lines) == 1, messages
+    assert "no routing key" in lines[0]
+    assert "no gateway configured" not in lines[0]
+
+
+def test_shared_fallback_logs_once_per_key() -> None:
+    """V5: 兜底是每条消息都走的路径, 无脑记 INFO 会刷满没有轮转的 docker logs。
+
+    同时验去重是**按键**的: 另一个人落到同一个共享 socket 仍要记 —— 否则第二个受害者
+    就查不出来了, 而「谁跟谁共享」正好需要至少两条。
+    """
+    seen: set[str] = set()
+    messages, sink_id = _capture_info()
+    try:
+        first = client._log_shared_fallback(
+            "ou_a", chat_id="", chat_type="p2p", session_socket="/s.sock", has_gateway=False, seen=seen
+        )
+        again = client._log_shared_fallback(
+            "ou_a", chat_id="", chat_type="p2p", session_socket="/s.sock", has_gateway=False, seen=seen
+        )
+        other = client._log_shared_fallback(
+            "ou_b", chat_id="", chat_type="p2p", session_socket="/s.sock", has_gateway=False, seen=seen
+        )
+    finally:
+        logger.remove(sink_id)
+
+    assert (first, again, other) == (True, False, True)
+    lines = [m for m in messages if m.startswith("shared-session fallback:")]
+    assert len(lines) == 2, messages
+    assert "ou_a" in lines[0]
+    assert "ou_b" in lines[1]
 
 
 # ── approval status-change push ───────────────────────────────────────────────
