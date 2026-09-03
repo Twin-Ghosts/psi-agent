@@ -254,9 +254,7 @@ def test_policy_uses_current_turn_and_single_injection(monkeypatch: pytest.Monke
 
 
 @pytest.mark.anyio
-async def test_turn_context_has_one_profile_and_policy_section(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_turn_context_has_one_profile_and_policy_section(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Injected once, and into the turn context rather than the prompt.
 
     This used to assert the same single-injection property against
