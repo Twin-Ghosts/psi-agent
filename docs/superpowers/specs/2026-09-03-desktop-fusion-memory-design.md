@@ -210,7 +210,13 @@ JSONL 只包含 `evidence_span` 和 `scope_clear` 两类记录。SQLite 从 JSON
 
 ### 新 session 首轮自动召回
 
-`system_prompt_builder()` 每个 Session 只运行一次，正好作为首轮自动召回入口：
+`system_prompt_builder()` 是首轮自动召回入口，但不能假设它在一个 Session 内只调用一次：
+desktop 的自适应画像会通过 `system_prompt_rebuild_checker()` 在后续回合触发 prompt 重建。
+Fusion Memory runtime 因此按规范化后的 `(workspace_id, session_id)` 保存进程内的首轮召回消费状态；
+只有第一次带非空普通 user 原文的 builder 调用会执行自动检索并返回注入块，后续重建只更新原有动态画像，
+不得再次检索或注入记忆。该消费状态不写入 JSONL 或 SQLite，Session 进程重启后允许重新执行一次首轮召回。
+
+首次符合条件的 builder 调用执行：
 
 1. 用 `workspace_raw`/runtime context 确定 workspace scope。
 2. 初始化或恢复该 workspace runtime。
@@ -293,7 +299,7 @@ DASHSCOPE_API_KEY
 |---|---|
 | DashScope key 缺失/embedding 失败 | 保留 raw + FTS，记录待补向量水位 |
 | rerank 失败 | 使用融合前分数和确定性排序 |
-| LLM key 缺失/抽取失败 | 不生成 memory item/card，raw + FTS 可用 |
+| LLM key 缺失/抽取失败 | 跳过 LLM memory item 抽取；确定性 summary card 仍可更新，raw + FTS 可用 |
 | SQLite 写失败 | JSONL 已保留；下次启动重放 |
 | SQLite 损坏 | 将原文件和 WAL/SHM 隔离为带后缀的损坏副本，从 JSONL 重建 |
 | JSONL 尾部半行 | 保存半行副本，截到最后完整换行，再继续追加 |
