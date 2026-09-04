@@ -25,6 +25,17 @@ priority:
   terms: [重要且紧急, 重要不紧急, 紧急不重要, 不重要不紧急]
   order: 重要且紧急 > 重要不紧急 > 紧急不重要 > 不重要不紧急
   scope: 仅 TODO 层;大目标 / 小目标不强求
+  importance:            # 行事优先级执行SOP v1.4 重要度三档判定
+    high: 可折合成外部成果大的任务
+    high_examples: [训模型, 新功能上线, 留存提升, Bug 修复, 重要演示]
+    medium: 间接支撑外部成果, 或直接影响组织效率
+    medium_examples: [内部工具优化, 流程规范化, 文档建设]
+    low: 既不支撑外部成果也不影响他人效率
+    low_examples: [纯个人偏好, 无明确产出的探索]
+    judgment: 优先按能否折合成对用户/外部成果的贡献判定
+  business_priority: 用户 > 组织 > 员工 > 股东 > 领导 > 个人
+  seventy_three_rule: 7成取决于客观外部成果
+  urgency_trap: [无实质损失, 可延后, 可批量处理, 可委托他人]
 
 rules:
   todo_quota: 5
@@ -96,3 +107,10 @@ alignment:
     A4: 用户价值
     A5: 外部成果/友商对比
     A6: 验收
+
+external_outcome:      # 个人与TPMF小组汇报与评级SOP v4.0「名词解释」
+  types: [用户订单, 留存, 认可, 爆款, Star, 刷榜]
+  evidence: [数据, 截图, 链接, 付费, 口碑]
+  contribution: 对外部成果的贡献(未直接产生外部成果但直接对标其产生的贡献)
+  annual_trajectory: 全年价值推进轨迹(关键拐点/偏差/成果)
+  team_types: [融资, 专利, 资质申报, 媒体报道, 银行贷款资格, 雇员满意度, 节税]

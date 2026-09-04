@@ -235,6 +235,16 @@ def test_priority_rule_pins_the_four_quadrant_order() -> None:
     assert "金字塔" in block, "must note the 70/25/5 pyramid is not yet in scope"
 
 
+def test_priority_importance_and_consistency_check_are_wired_in() -> None:
+    """SOP v1.4: importance by external-outcome tier; a TODO's priority must match its goal's."""
+    body = _body()
+    assert "priority.importance" in body, "importance judgment must read config priority.importance"
+    assert "urgency_trap" in body, "urgency must be judged against config urgency_trap"
+    block = _subsection("按优先级", within=_section("规则集段"))
+    assert "一致性" in block, "the rule must check todo-goal importance consistency"
+    assert "待人工确认" in block, "an uncertain consistency verdict must go to human confirmation"
+
+
 def test_params_section_pins_the_confirmed_values() -> None:
     params = _section("参数段")
     for value in PARAMS:
