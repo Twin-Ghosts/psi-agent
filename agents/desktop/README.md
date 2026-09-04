@@ -11,7 +11,8 @@
   `FusionFlow.g4`, hosted by the `workflow` skill, with an explicit
   TypeScript fallback under `fusion-flow-legacy`, plus `flow_manage` + `flows/`),
 - the hermes domain skill set + curated skills, and
-- clean async file/shell tools, Serper web search, and environment-configured
+- clean async file/shell tools, Bocha (博查) web search with an optional
+  Serper Google/English supplement, and environment-configured
   iFLYTEK STT/TTS tools.
 
 See `AGENTS.md` for the full layout and conventions.
@@ -60,7 +61,8 @@ uv run psi-agent channel repl --session-socket /tmp/ch.sock
   `flow_manage` and legacy assets.
   For stateful sub-agent sessions, copy `bin/env.stateful.template` to
   `skills/fusion-flow-legacy/.env` and fill in the paths.
-- **Serper search** needs psi-agent installed with the `mcp` extra and `uvx` on PATH.
+- **Web search (Bocha, 默认)**: set `BOCHA_API_KEY`（申请: https://open.bocha.cn）; aiohttp 已是核心依赖, 无需额外包与代理。
+- **Serper search** (optional Google/English/vertical supplement) needs psi-agent installed with the `mcp` extra, `uvx` on PATH, and `SERPER_API_KEY` set.
 - **Haibao ChatBI** needs the required operator-provisioned private MCP server and the three
   deployment-managed variables documented in `docs/haibao-integration.md`. The bundled Adapter,
   tools, and Skill do not provide the private service or database onboarding.

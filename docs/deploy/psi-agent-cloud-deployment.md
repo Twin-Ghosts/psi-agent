@@ -83,7 +83,8 @@ v2.11.4 h1:XKxkMTgNSizEvKG6QHue6cAsFOteU2qA61w2tKkCWi0=
 | `PSI_FEISHU_APP_ID` / `PSI_FEISHU_APP_SECRET` | 飞书开放平台 → 应用凭证 |
 | `PSI_AI_PROVIDER` / `PSI_AI_MODEL` / `PSI_AI_API_KEY` / `PSI_AI_BASE_URL` | AI provider 控制台 |
 | `DASHSCOPE_API_KEY` | 阿里云百炼（embed proxy 用） |
-| `SERPER_API_KEY` | serper.dev |
+| `SERPER_API_KEY` | serper.dev（可选: Google/英文搜索补充） |
+| `BOCHA_API_KEY` | 博查开放平台 open.bocha.cn（Web Search API; 国内搜索默认后端） |
 | `XFYUN_STT_*` / `XFYUN_TTS_*`（各 3 个键） | 讯飞开放平台 |
 | `FUSION_MEMORY_TOKEN_PEPPER` / `FUSION_MEMORY_PG_DSN` | 自行生成 / 按 postgres 配置拼 |
 
