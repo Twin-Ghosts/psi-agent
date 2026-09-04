@@ -36,12 +36,13 @@
 | 账户区 | 头像菜单合一 | 头像菜单仅资料/登录；**模型池**与**设置**为侧栏独立快捷入口 |
 | 默认工作区 | 无 / 必须先选 | 启动读 ``GET /defaults``.workspace（Gateway 软默认 `{Desktop}/haitun交付`，**只宣布不建目录**；首个 Session/对话时服务端再 mkdir）；遗留 `*-workspace` / 字面量 `workspace` / `haitun-workspace` 会忽略 |
 | 工作区切换 | 侧栏打开 PathPicker | 设置「切换工作区」→ 全屏选择页；**浏览**走 `/workspace/places` + `/browse`（对齐 v1）；偏好 `gw-v2-workspace` |
-| 顶栏新建 | — | 右上角「新建任务/聊天」+ 侧栏同入口（`⌘/Ctrl N`）；**分屏聚焦**时对话栏「收起」旁也有同款入口（左栏收起后**仅**保留展开上下文钮，不再并排再建入口） |
+| 顶栏新建 | — | 右上角「新建任务/聊天」+ 侧栏同入口（**刻意为之**：不绑 `⌘/Ctrl N`，与 Edge「打开新窗口」冲突；侧栏按钮亦不展示该快捷键）；**分屏聚焦**时对话栏「收起」旁也有同款入口（左栏收起后**仅**保留展开上下文钮，不再并排再建入口） |
 | Agent 包 | 与 workspace 合一 | ``GET /defaults``.agent → 新建任务/聊天 ``POST /sessions`` 带 `agent`（可与用户工作区不同）。设置「切换 Agent 包」与工作区同区；全屏 `WorkspaceGate kind=agent`；偏好 `gw-v2-agent`（覆盖 defaults）。**刻意为之**：只影响**新建** Session；已有任务仍用创建时绑定的 `agent` |
 | 任务模板库 | — | 卡片正文/分类/交付物/页脚等字号 ≥12–14px（勿回退 8–10px 设计稿字号）。「新建模板」抽屉经 `createPortal` 挂 `document.body`：全屏遮罩 + 右侧贴边抽屉（勿嵌在 `.main-stage` 内导致四边露白） |
 
 设置弹窗保留**切换工作区**与**切换 Agent 包**（真实功能）；设置 / 高级设置是**同一弹窗的两个页面**（点「高级设置」换页、可返回设置；`Esc` 先回主页再关闭），不要叠第二个 `HubDialog`。通知/交付位置等占位项已去掉，避免空壳菜单。
 | 任务删除 | 侧栏 trash → DELETE session + 清本地 hist | 侧栏/卡片删除 → ``DELETE /sessions/{id}``（顺带清 JSONL + 标题）+ 清本地状态 |
+| 任务置顶 | 侧栏 pin → `gw-pinned-session-ids` | 侧栏历史任务行 pin 钮（`TaskRow`）→ `gw-v2-pinned-task-ids`；**只排侧栏列表**（置顶先、再原序），**不改**卡片栈顺序；bootReady 后再 prune 失效 id（冷启动 `tasks=[]` 时不写盘） |
 | 消息操作栏 | 助手：赞/踩/复制/重新生成；用户：复制 + 失败重试 | 同左（`FocusChatThread`）；feedback 仅内存态，刷新历史后不保留 |
 | 停止生成 | 输入栏 Send ↔ Stop 切换 | 同左：流式时发送键变为停止（`abortRef.abort()`）；停止后草稿回填输入框 |
 | 任务翻页 | — | 总览：卡片栈两侧 `card-arrow`。**分屏/聚焦**：左右箭头贴在**对话面板**（`context-chat`）左右缘——随对话区走（上下文栏开则在右栏内；侧栏+上下文都收起则贴主区左右）。顶栏另有 `NN / MM` 翻页器。键盘 `←`/`→`（输入框内 `Alt+←/→`）。窄屏隐藏侧箭头，保留顶栏翻页器 |

@@ -78,6 +78,13 @@ import {
   writeStoredAiId,
 } from "../services/bootstrapAi";
 import { chatFileToFile, filesToChatFiles } from "../services/chatFiles";
+import {
+  loadPinnedTaskIds,
+  prunePinnedTaskIds,
+  savePinnedTaskIds,
+  sortTasksByPin,
+  togglePinnedTaskId,
+} from "../services/pinnedTasks";
 import { filesFromClipboard } from "../services/clipboardFiles";
 import { useComposerFileDrop } from "../services/composerFileDrop";
 import { onComposerEnterKey } from "../services/composerKeys";
@@ -159,6 +166,8 @@ export default function HaiTunAgentWorkspace({
   const { t, language } = useI18n();
   const quickActions = [t("quickAction.blockers"), t("quickAction.nudge"), t("quickAction.conclusion")];
   const [tasks, setTasks] = useState<Task[]>([]);
+  /** Client-only pin order for sidebar history (localStorage `gw-v2-pinned-task-ids`). */
+  const [pinnedTaskIds, setPinnedTaskIds] = useState<string[]>(() => loadPinnedTaskIds());
   const [templates, setTemplates] = useState<TaskTemplate[]>(INITIAL_TEMPLATES);
   const [aiId, setAiId] = useState<string | null>(null);
   const [bootReady, setBootReady] = useState(false);
@@ -258,9 +267,13 @@ export default function HaiTunAgentWorkspace({
   const pendingTasks = filterTasksBySignal(tasks, "pending");
   const deliveryTasks = filterTasksBySignal(tasks, "deliveries");
   const workingTasks = filterTasksBySignal(tasks, "working");
+  const pinnedIdSet = useMemo(() => new Set(pinnedTaskIds), [pinnedTaskIds]);
   const normalizedSearch = globalSearch.trim().toLocaleLowerCase("zh-CN");
   const taskSearchResults = normalizedSearch
-    ? tasks.filter((task) => `${task.title}${task.shortTitle}${task.category}${task.summary}${task.statusLabel}${task.deliverables.join(" ")}`.toLocaleLowerCase("zh-CN").includes(normalizedSearch)).slice(0, 4)
+    ? sortTasksByPin(
+      tasks.filter((task) => `${task.title}${task.shortTitle}${task.category}${task.summary}${task.statusLabel}${task.deliverables.join(" ")}`.toLocaleLowerCase("zh-CN").includes(normalizedSearch)),
+      pinnedTaskIds,
+    ).slice(0, 4)
     : [];
   const templateSearchResults = SHOW_OVERVIEW_AND_TEMPLATES && normalizedSearch
     ? templates.filter((template) => `${template.title}${template.category}${template.description}${template.starterPrompt}${template.deliverables.join(" ")}`.toLocaleLowerCase("zh-CN").includes(normalizedSearch)).slice(0, 4)
@@ -753,6 +766,26 @@ export default function HaiTunAgentWorkspace({
     if (cards.length === 0) return;
     if (currentIndex >= cards.length) setCurrentIndex(cards.length - 1);
   }, [cards.length, currentIndex]);
+
+  // Drop stale pins after boot when the session list shrinks (delete / workspace switch).
+  // 刻意为之: 等 bootReady 再 prune——冷启动 tasks=[] 时若立刻 prune 会把 localStorage 置顶清空。
+  useEffect(() => {
+    if (!bootReady) return;
+    setPinnedTaskIds((current) => {
+      const next = prunePinnedTaskIds(current, tasks.map((task) => task.id));
+      if (next.length === current.length && next.every((id, i) => id === current[i])) return current;
+      savePinnedTaskIds(window.localStorage, next);
+      return next;
+    });
+  }, [bootReady, tasks]);
+
+  const toggleTaskPin = useCallback((task: Task) => {
+    setPinnedTaskIds((current) => {
+      const next = togglePinnedTaskId(current, task.id);
+      savePinnedTaskIds(window.localStorage, next);
+      return next;
+    });
+  }, []);
 
   const deleteTask = useCallback(async (task: Task) => {
     const ok = window.confirm(t("app.confirmDeleteTask", { title: task.title }));
@@ -1638,11 +1671,7 @@ export default function HaiTunAgentWorkspace({
         window.setTimeout(() => globalSearchRef.current?.focus(), 50);
         return;
       }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "n") {
-        event.preventDefault();
-        openNewTask();
-        return;
-      }
+      // 刻意为之: 不绑 ⌘/Ctrl N 新建——与 Edge「打开新窗口」冲突；侧栏按钮也不再展示该快捷键。
       if (artifactTask) {
         if (event.key === "Escape") {
           closeArtifact();
@@ -1691,11 +1720,13 @@ export default function HaiTunAgentWorkspace({
     expandFocusGenRef.current += 1;
   }, []);
 
-  const visibleSidebarTasks =
+  const visibleSidebarTasks = sortTasksByPin(
     sidebarPanel === "pending" ? pendingTasks
     : sidebarPanel === "deliveries" ? deliveryTasks
     : sidebarPanel === "working" ? workingTasks
-    : tasks;
+    : tasks,
+    pinnedTaskIds,
+  );
   const renderCardAt = (index: number, openChat?: () => void) => {
     const task = taskAtCardIndex(tasks, index);
     return task
@@ -2146,7 +2177,7 @@ export default function HaiTunAgentWorkspace({
         </button>
 
         <button type="button" className="new-task-button" onClick={() => openNewTask()}>
-          <Plus size={18} /> {t("app.newTask")} <span>⌘ / Ctrl N</span>
+          <Plus size={18} /> {t("app.newTask")}
         </button>
 
         <div className={`global-search ${searchOpen ? "open" : ""}`}>
@@ -2234,10 +2265,12 @@ export default function HaiTunAgentWorkspace({
                   key={task.id}
                   task={task}
                   active={currentTask?.id === task.id}
+                  pinned={pinnedIdSet.has(task.id)}
                   onSelect={() => selectTask(task)}
                   onPrefetch={() => void ensureHistory(task.id)}
                   onOpenArtifact={openArtifact}
                   onDelete={deleteTask}
+                  onTogglePin={toggleTaskPin}
                 />
               ))}
             </div>
