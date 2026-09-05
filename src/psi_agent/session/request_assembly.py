@@ -56,7 +56,12 @@ from loguru import logger
 from psi_agent.protocol import (
     DEFAULT_MAX_CONTEXT_TOKENS as _DEFAULT_MAX_CONTEXT_TOKENS,
 )
-from psi_agent.session.history_display import project_history_with_sources
+from psi_agent.session.history_display import (
+    ELISION_HANDLE_PREFIX,
+    ELISION_HANDLE_TEMPLATE,
+    project_history_with_sources,
+    render_sent_files_note,
+)
 
 DEFAULT_MAX_CONTEXT_TOKENS = _DEFAULT_MAX_CONTEXT_TOKENS
 """Re-exported from ``psi_agent.protocol``, which owns the number.
@@ -124,8 +129,14 @@ fact) rather than at the assembly point.  This constant is where that instinct
 belongs, because this is the layer that can act before sending.
 """
 
-_HANDLE_PREFIX = "[已省略"
-"""Sentinel that makes elision idempotent.
+_HANDLE_PREFIX = ELISION_HANDLE_PREFIX
+"""Sentinel that makes elision idempotent (re-exported for local readability).
+
+Defined in ``history_display`` because that module also strips handles back out
+for the user-visible projection, and two literals facing each other across a
+layer boundary is how ``[SEND:]`` drifted into two disagreeing regexes.  Here a
+drift would fail open: the strip would stop matching and the handle would reach
+the user again.
 
 Elision is re-applied on every turn (that is what makes it stick), so a row's
 content is fed back through the same code path that produced it.  Without this
@@ -134,26 +145,31 @@ check the second pass would elide the handle itself, reporting an ever-shrinking
 ``_TRUNCATION_MARKER`` guards against in ``history_display``.
 """
 
-ELISION_HANDLE_TEMPLATE = _HANDLE_PREFIX + " {chars} 字符{label}, 句柄 {handle}]"
-"""Placeholder left where a row's content was.
-
-The row is never *removed*: an OpenAI ``tool`` row must stay paired with the
-``tool_calls`` entry that requested it, and dropping either half makes the
-request malformed.  Equally important, the model must be told that something
-was dropped — a silent cut leaves it answering from data it believes complete,
-the same trap ``truncate_tool_result`` documents.  The handle names where the
-original still lives, so elision is recoverable rather than destructive.
-
-Deliberately terse, and that terseness is load-bearing rather than a style
-choice.  The handle is paid **once per elided row**, so a sentence explaining
-what a handle is and how to retrieve it — which the first draft of this module
-carried, at ~220 chars — turns into tens of kilobytes on exactly the histories
-that were already too big, and becomes an un-elidible floor of its own: a first
-run against a deliberately tight budget could not get under it no matter how
-many rows it elided.  That explanation belongs in the system prompt, where it is
-paid once.  Here only the two facts that vary per row are worth the bytes: how
-much was dropped, and the key to find it again.
-"""
+# ``ELISION_HANDLE_TEMPLATE`` is defined alongside the prefix and the display
+# strip in ``history_display``; imported above and re-exported here, because this
+# is the module that applies it and the reasoning below is about applying it.
+#
+# Placeholder left where a row's content was.
+#
+# The row is never *removed*: an OpenAI ``tool`` row must stay paired with the
+# ``tool_calls`` entry that requested it, and dropping either half makes the
+# request malformed.  Equally important, the model must be told that something
+# was dropped — a silent cut leaves it answering from data it believes complete,
+# the same trap ``truncate_tool_result`` documents.  The handle names where the
+# original still lives, so elision is recoverable rather than destructive.
+#
+# Deliberately terse, and that terseness is load-bearing rather than a style
+# choice.  The handle is paid **once per elided row**, so a sentence explaining
+# what a handle is and how to retrieve it — which the first draft of this module
+# carried, at ~220 chars — turns into tens of kilobytes on exactly the histories
+# that were already too big, and becomes an un-elidible floor of its own: a first
+# run against a deliberately tight budget could not get under it no matter how
+# many rows it elided.  That explanation belongs in the system prompt, where it is
+# paid once.  Here only the two facts that vary per row are worth the bytes: how
+# much was dropped, and the key to find it again.
+#
+# The handle is stripped from the *display* projection only
+# (``history_display.strip_transfer_markers``); on the wire it must survive.
 
 _ELIDIBLE_ROLES = frozenset({"tool", "user", "assistant"})
 """Roles elision may touch.  ``system`` is excluded on purpose.
@@ -249,6 +265,23 @@ class RequestAssembler:
     calibrated: bool = False
     """Whether ``chars_per_token`` came from a real ``usage`` report yet."""
 
+    _turn_watermark: int | None = None
+    """Index into the stored history at which the current turn's output begins.
+
+    Set by ``agent.py`` right after this turn's user row lands, cleared in that
+    turn's ``finally``.  ``None`` means no turn is in flight and nothing is
+    exempt — the pre-existing behaviour, which is what non-turn callers get.
+
+    Why a turn boundary rather than a time window: history rows carry no
+    timestamp, and elapsed time is not the question anyway.  A 3-second turn is
+    covered by any window but never had the problem; a runaway 49-round turn
+    (which this deployment has produced) outruns any window worth setting.  The
+    watermark asks the question that actually matters — "did this generator call
+    produce this row?" — and gets an exact answer.
+
+    See :meth:`begin_turn`.
+    """
+
     _elided_row_ids: set[int] = field(default_factory=set)
     """Identity of rows already elided, by position-independent row identity.
 
@@ -268,6 +301,35 @@ class RequestAssembler:
         if self.max_context_tokens <= 0:
             return 0
         return int(self.max_context_tokens * self.chars_per_token)
+
+    def begin_turn(self, watermark: int) -> None:
+        """Mark where this turn's own output starts in the stored history.
+
+        ``watermark`` is ``len(conversation.messages)`` taken immediately after
+        this turn's user row was added, so every row from that index onward was
+        produced by the generator call now running.  Those rows are exempt from
+        elision for the duration of the turn: they include the reply the user has
+        not received yet, and eliding a reply before it is delivered makes the
+        upstream believe nothing was said.
+
+        Idempotent per turn, and deliberately last-write-wins: a re-entrant call
+        can only move the boundary forward onto a newer turn, which is the
+        correct answer if it ever happens.
+        """
+        self._turn_watermark = watermark
+
+    def end_turn(self) -> None:
+        """Drop the exemption.  Must run in the turn's ``finally``.
+
+        The assembler is per *session* and outlives any single turn, while the
+        watermark is per *turn*.  A turn that dies without clearing it — raised,
+        cancelled, or out of tool rounds — would pin the exemption at its own
+        index forever, and every later turn's elision range would be capped
+        there.  The symptom is not a crash but a budget that slowly stops being
+        enforceable, with nothing in the logs pointing at the cause, which is why
+        this matters more than the happy path.
+        """
+        self._turn_watermark = None
 
     def calibrate(self, sent_chars: int, prompt_tokens: int) -> None:
         """Update the ratio from one completed turn's own numbers.
@@ -345,6 +407,7 @@ class RequestAssembler:
         """
         paired = project_history_with_sources(history)
         messages = [projected for projected, _ in paired]
+        exempt = self._exempt_row_ids(history)
         elided = self._reapply_sticky_elisions(paired)
 
         body = self._compose(messages, tools, extra)
@@ -367,7 +430,7 @@ class RequestAssembler:
             f"Eliding oldest/largest rows down to {target} chars ({SHRINK_TARGET_FRACTION:.0%} of budget) "
             f"so the shrunk prefix can serve many later turns instead of one."
         )
-        elided += self._elide_until(paired, tools, extra, target)
+        elided += self._elide_until(paired, tools, extra, target, exempt)
 
         body = self._compose(messages, tools, extra)
         chars = payload_chars(body)
@@ -426,9 +489,26 @@ class RequestAssembler:
             content = projected.get("content")
             if not isinstance(content, str) or content.startswith(_HANDLE_PREFIX):
                 continue
-            projected["content"] = self._handle_for(projected, source, len(content))
+            projected["content"] = self._handle_for(projected, source, content)
             count += 1
         return count
+
+    def _exempt_row_ids(self, history: list[dict[str, Any]]) -> frozenset[int]:
+        """Identities of the stored rows this turn produced.
+
+        Resolved from stored rows rather than from positions in the projected
+        list, because the two lists do not share an index space: the projection
+        drops invalid legacy assistant rows and deletes the whole span before the
+        last ``compacted``.  Comparing a stored-history watermark against a
+        projected position would therefore exempt the wrong rows — and it would
+        do so silently, exempting some arbitrary older row while leaving the
+        undelivered reply elidible, i.e. reintroducing the bug while looking
+        fixed.  ``id()`` is the same key hysteresis already uses.
+        """
+        watermark = self._turn_watermark
+        if watermark is None:
+            return frozenset()
+        return frozenset(id(row) for row in history[watermark:] if isinstance(row, dict))
 
     def _elide_until(
         self,
@@ -436,6 +516,7 @@ class RequestAssembler:
         tools: list[dict[str, Any]],
         extra: dict[str, Any] | None,
         target_chars: int,
+        exempt: frozenset[int] = frozenset(),
     ) -> int:
         """Elide oldest-largest-first until the payload fits ``target_chars``.
 
@@ -450,7 +531,7 @@ class RequestAssembler:
         the delta content-dependent, and the number this returns has to be the
         real one — it is what the budget guarantee rests on.
         """
-        candidates = self._elidible_candidates(paired)
+        candidates = self._elidible_candidates(paired, exempt)
         count = 0
         for projected, source in candidates:
             if payload_chars(self._compose([p for p, _ in paired], tools, extra)) <= target_chars:
@@ -458,7 +539,7 @@ class RequestAssembler:
             content = projected.get("content")
             if not isinstance(content, str):
                 continue
-            projected["content"] = self._handle_for(projected, source, len(content))
+            projected["content"] = self._handle_for(projected, source, content)
             self._elided_row_ids.add(id(source))
             count += 1
         return count
@@ -466,6 +547,7 @@ class RequestAssembler:
     @staticmethod
     def _elidible_candidates(
         paired: list[tuple[dict[str, Any], dict[str, Any] | None]],
+        exempt: frozenset[int] = frozenset(),
     ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
         """Elidible rows, oldest-half-largest-first.
 
@@ -476,6 +558,12 @@ class RequestAssembler:
         * the last two rows — the current user turn and the assistant/tool
           exchange in flight.  Eliding what the model is answering *right now*
           would break the turn rather than trim it.
+        * anything in ``exempt`` — rows this turn produced (see
+          :meth:`begin_turn`).  The last-two guard was the only protection these
+          had, and it stops covering them as soon as a third row lands: in a
+          multi-round turn the assistant row from round 1 sits well inside
+          ``paired[:-2]`` by round 3, behind several tool results.  Its content
+          is output the user has not received yet, ``[SEND:]`` markers included.
         * rows already handled, and rows below ``_MIN_ELIDIBLE_CHARS``.
         * rows with non-string content (multimodal block lists): there is no
           single place to put a handle, and mangling the blocks is worse than
@@ -486,6 +574,8 @@ class RequestAssembler:
         eligible: list[tuple[int, int, dict[str, Any], dict[str, Any]]] = []
         for position, (projected, source) in enumerate(paired[:-2]):
             if source is None:
+                continue
+            if id(source) in exempt:
                 continue
             if projected.get("role") not in _ELIDIBLE_ROLES:
                 continue
@@ -512,7 +602,7 @@ class RequestAssembler:
         return [(projected, source) for _, _, projected, source in older + newer]
 
     @staticmethod
-    def _handle_for(projected: dict[str, Any], source: dict[str, Any], chars: int) -> str:
+    def _handle_for(projected: dict[str, Any], source: dict[str, Any], content: str) -> str:
         """The placeholder text left in a row's place.
 
         Carries the original length and a handle so the model can tell the
@@ -521,10 +611,30 @@ class RequestAssembler:
         identifier the model itself used to request the result) and otherwise
         the row's role plus its stored ordinal — enough to find the row in the
         session's history JSONL, which is where the original still is.
+
+        Plus, *only* for a row that delivered files, the names it delivered.
+        Without that, eliding last turn's assistant row leaves the model reading a
+        transcript in which it never sent the document, so it re-sends it or
+        denies having sent it — the cross-turn half of the bug whose same-turn
+        half ``begin_turn``'s exemption closes.  The exemption cannot be widened
+        to cover it: the span would have to reach back over a whole task, which
+        has no bound, whereas elision is the one hard budget guarantee.
+        Conditional and capped because the handle is paid once per elided row —
+        see ``ELISION_SENT_FILES_NOTE`` and ``render_sent_files_note``, which is
+        also where the reason it never renders a scannable ``[SEND:]`` lives.
+
+        Takes the content rather than its length because the note is decoded from
+        the text being replaced; this is the last point at which it is still here.
         """
         role = str(projected.get("role", "?"))
         call_id = source.get("tool_call_id")
         handle = str(call_id) if isinstance(call_id, str) and call_id else f"{role}#{id(source) % 1_000_000:06d}"
         name = source.get("name")
         label = f" ({name})" if isinstance(name, str) and name else ""
-        return ELISION_HANDLE_TEMPLATE.format(kind=role, chars=chars, label=label, handle=handle)
+        return ELISION_HANDLE_TEMPLATE.format(
+            kind=role,
+            chars=len(content),
+            label=label,
+            sent=render_sent_files_note(content),
+            handle=handle,
+        )

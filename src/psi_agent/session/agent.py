@@ -750,6 +750,13 @@ class SessionAgent:
                 turn_start = len(self._conversation.messages)
                 self._conversation.add(stored_user_message)
                 await self._conversation.commit()
+                # Everything appended from here on is *this* turn's output, and
+                # the reply inside it has not reached the user yet.  Eliding it
+                # tells the upstream "my last message said nothing" — including
+                # when that message carried a ``[SEND:]`` marker, which is how a
+                # finished document became a user asking "where is the file?".
+                # Cleared in the ``finally`` below; see ``end_turn``.
+                self._request_assembler.begin_turn(len(self._conversation.messages))
                 history_path = self._conversation.history_path
                 after_turn_message[_HISTORY_PROVENANCE_KEY] = {
                     "path": str(history_path or ""),
@@ -1113,6 +1120,14 @@ class SessionAgent:
                     # keeps the user — that is the crash-retry baseline.
                     await self._abandon_incomplete_turn(turn_start)
                     raise
+                finally:
+                    # Per-turn state on a per-session object: whichever way this
+                    # turn ended — returned, raised, cancelled, or out of tool
+                    # rounds — the exemption must not outlive it.  A turn that
+                    # died holding the watermark would cap every later turn's
+                    # elision range at its own index, and the symptom is a budget
+                    # that quietly stops being enforceable rather than an error.
+                    self._request_assembler.end_turn()
 
     async def _abandon_incomplete_turn(self, turn_start: int) -> None:
         """Drop an early-committed turn that never reached a terminal result.

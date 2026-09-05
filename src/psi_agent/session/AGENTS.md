@@ -531,7 +531,15 @@ provider 只认 `reasoning_content`（any-llm 的 `REASONING_FIELD_NAMES` 首项
 | `schedule.silent` / `trigger.silent` / `compacted` | 否 |
 | 遗留 `chat_type=schedule` / `*_schedule` role | 视为 silent |
 
-Gateway ``HistoryManager`` 同时投影剥掉 ``[SEND:]``/``[RECV:]`` 标记。本节这几个符号（``KIND_CHAT`` / ``message_kind`` / ``wire_role`` / ``is_displayable_chat_message`` / ``strip_transfer_markers`` / ``extract_send_paths``）经 ``session/__init__.py`` 的 ``__all__`` 正式导出给 Gateway（同表还有 ``Session`` / ``SessionAgent`` / ``ACTIVATE_ALL``，共 9 个）——**依赖是刻意的**：Gateway 的展示投影必须与 Session 的落盘语义逐字一致，否则同一条历史两处渲染会分叉。此前 Gateway 按内部模块路径导入（依赖刻意、通道非正式），现已补上公开门面；旧 import 路径仍然有效，这是新增通道而非强制迁移。
+Gateway ``HistoryManager`` 同时投影剥掉 ``[SEND:]``/``[RECV:]`` 标记**与省略句柄
+``[已省略 N 字符, 句柄 X]``**（`strip_transfer_markers`；带自述的形态是
+``[已省略 N 字符, 含已送达文件: 方案.pdf, 句柄 X]``，自述在同一对 ``[…]`` 内所以同一条正则照旧剥得掉）。
+句柄只对模型有意义（它靠句柄知道有内容被省略、
+可以去捞），对用户是看着像 bug 的噪音 —— 生产实测一个会话里 4 条 assistant 行把句柄带进了可见文本。
+**只剥展示这一侧**：送往模型的请求必须保留句柄，剥了就把「可恢复的省略」变成「静默删除」。句柄字面量与
+剥离正则同源于 `history_display`（`ELISION_HANDLE_PREFIX` / `ELISION_HANDLE_TEMPLATE`，`request_assembly`
+从这里 import），不在两处各写一份 —— 同 `[SEND:]` 曾经两处正则写法不同的教训，而这里一旦漂移是 fail-open：
+剥不中，句柄又回到用户眼前。本节这几个符号（``KIND_CHAT`` / ``message_kind`` / ``wire_role`` / ``is_displayable_chat_message`` / ``strip_transfer_markers`` / ``extract_send_paths``）经 ``session/__init__.py`` 的 ``__all__`` 正式导出给 Gateway（同表还有 ``Session`` / ``SessionAgent`` / ``ACTIVATE_ALL``，共 9 个）——**依赖是刻意的**：Gateway 的展示投影必须与 Session 的落盘语义逐字一致，否则同一条历史两处渲染会分叉。此前 Gateway 按内部模块路径导入（依赖刻意、通道非正式），现已补上公开门面；旧 import 路径仍然有效，这是新增通道而非强制迁移。
 
 ``[SEND:]`` 的解码（正则 + 空路径过滤）归属顶层 ``psi_agent/_send_markers.py`` 的 ``iter_send_paths()``，本层不再自持正则——两处正则曾经写法不同，而 Channel 侧没有空路径过滤。放在顶层而非 ``channel/`` 内，是为了不让本层 import Channel 的私有模块（同 ``_feishu_routing``）。
 
@@ -709,6 +717,44 @@ async def compact_history(
   「完整原文仍在会话历史文件中，可用文件工具检索」的说明、约 220 字符，34 行就是 7.5KB，自己变成新的
   不可省略下限 —— 实测撞到过「省略完全部行仍超预算」。那句说明属于 system prompt，付一次就够。
 - **不删行、只换 `content`**：`tool_calls` 与其 `tool` 返回必须成对，删任一半请求就非法。
+- **句柄在请求里正当、在用户可见投影里要剥掉**：句柄的设计用途是让模型知道有内容被省略、可以去捞，所以
+  请求侧必须保留（剥掉等于把可恢复的省略变成静默删除）；Gateway 的 `/history` 投影则剥掉它，见上文
+  「History 展示白名单」。字面量与正则同源于 `history_display`，本模块 import 而不另写一份。
+- **「去捞」那把工具在 workspace 侧**：`agents/feishu/tools/history_recall.py` 按句柄从本会话历史 JSONL
+  读回原文（只读、返回值按 `MAX_TOOL_RESULT_CHARS` 截断，否则捞回一行就把省下的预算全退回去）。
+  **只有 `tool_call_id` 形态的句柄捞得回来**：`_handle_for` 的回落形态 `role#ordinal` 取自
+  `id(source) % 1_000_000`，是**进程内内存地址**，从不落盘、重启后也不再指同一行，故工具直接报
+  `handle_not_on_disk` 而不按 role 猜行。触发权在模型自己（它得看懂句柄才会想到去捞），所以这把工具
+  **不是**「丢文档」缺陷的修法 —— 那个由回合水位线与句柄自述关掉。
+- **回合水位线：本回合自己的产出整轮豁免省略**（`begin_turn` / `end_turn`）。`agent.py` 在本回合
+  user 行落库后取 `len(conversation.messages)` 作为水位线，索引 >= 水位线的行是本回合产出，不可省略。
+  没有水位线（非回合调用方）= 什么都不豁免，即改动前的行为。
+  **真因**：多轮工具循环里第 1 轮的 assistant 行写完就落库，到第 3 轮组装时它后面已经压了多条 tool
+  结果行，于是不再落在 `paired[:-2]` 的保护区内、成了合格候选。它被换成句柄后，上游看到的是「我上一条
+  什么都没说」—— 包括那一行里的 `[SEND:]` 标记，于是模型道歉并补发，补发的内容下一轮又被削，用户永远
+  拿不到那个文档（生产实测）。注意**落盘历史并没有被改写**：`_project_for_ai` 每行建新 dict，省略只写
+  投影后的 `content`，被削的是**送进上游的那一份**。
+  **为什么按回合而不按时间**：历史行上没有时间戳，且时长与「送达了没有」不是一回事 —— 3 秒的回合任何
+  窗口都覆盖得住但本来也不出事，49 轮的失控回合任何合理窗口都会漏。
+  **必须清在 `finally` 里**：assembler 按 session 持有、活得比回合长，而水位线是回合级的。抛异常 /
+  被 anyio 取消 / 撞满 `_max_tool_rounds` 三种退出都要清。漏了这一笔，一个死掉的回合会把水位线永久钉
+  在那儿，后续每回合的省略范围都被锁死 —— 症状是预算慢慢失控而日志里没有任何线索。
+  豁免区**刻意只覆盖一次生成器调用的产出**：跨回合的交付物记忆不靠扩大豁免解决（豁免区随「一件事」
+  的长度无上限增长，最后等于关掉省略，而省略是预算的唯一硬保证）。跨回合那一半改由下一条解决。
+- **被省略的行自己说清发过什么文件**（`render_sent_files_note`，句柄里的 `含已送达文件: 方案.pdf`）：
+  上个回合那条带 `[SEND:]` 的 assistant 行到了这个回合已是句柄，模型读到的是「我从没发过东西」，于是
+  重发、或者否认发过 —— 生产症状是用户反复问「文档呢」。这条路**被动生效**（不依赖模型起意）、**总量有界**，
+  所以能解上一条解不了的跨回合部分。
+  **绝不能写成字面 `[SEND:…]`**：渠道侧是扫模型输出流触发发送的（`channel/_markers.SendMarkerScanner`），
+  而这个模型演示过会照抄句柄格式（生产 line 5874）。抄出一个真标记就会把文件**再发一遍**给用户 —— 比原
+  bug 更糟。故只取 basename（顺带丢掉目录这几十个没人读的字节，也拆掉 `/w/[SEND:x].md` 这种把标记藏在
+  文件名里的路径），残留的 `[` `]` 一律删掉。判据 `test_delivery_note_is_not_scannable_as_a_send_marker`
+  直接拿渠道侧的 scanner 去扫自述文本 —— 变异复核里去掉删括号那一步，scanner 确实吐出了 `FileChunk`。
+  **只有真含标记的行才加，且长度有上限**（`_SENT_FILES_NOTE_MAX_NAMES = 3` / `_SENT_FILES_NAME_MAX_CHARS = 24`）：
+  句柄每条被省略的行付一次，无条件加就是上一条「220 字符说明变成不可省略下限」的重演；不封顶则下限随内容
+  增长，预算又不成保证。不含标记的行句柄**逐字节不变**，有判据钉着。
+  **必须是确定性的**：`_reapply_sticky_elisions` 每回合用同一行重算句柄，自述一变就等于每回合重写早期行、
+  前缀缓存全量 miss —— 即滞回要避免的那个结果。解码统一走 `iter_send_paths()`，不另写正则。
 - **预算以字符计，比值每回合用上游自己的 `prompt_tokens` 校准**（`calibrate`）。不引 tokenizer、不加
   依赖。实测同一仓库内字符/token 跨度 **2.6 倍**（中文散文 1.56，ASCII 工具 JSON 3.5-4），所以单一
   硬编码系数必然对某一类内容是错的。首回合用保守默认 1.5（保守 = **偏低**，因为预算 = token x 比值，

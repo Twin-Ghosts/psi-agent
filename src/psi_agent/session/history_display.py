@@ -139,6 +139,91 @@ _KNOWN_KINDS = frozenset(
 _TRANSFER_MARKER_RE = re.compile(r"\[\s*(?:SEND|RECV)\s*:\s*[^\]]*?\]", re.IGNORECASE)
 
 
+ELISION_HANDLE_PREFIX = "[已省略"
+"""Opening literal of an elision handle.  Also the idempotence sentinel.
+
+Lives here rather than in ``request_assembly`` (which produces the handles)
+because this module both defines the format and, below, strips it back out for
+display — and ``request_assembly`` already imports from here, so this direction
+keeps one authority instead of two literals facing each other across a layer
+boundary.  Same arrangement as ``_TRUNCATION_MARKER``.
+
+Elision is re-applied on every turn (that is what makes it stick), so a row's
+content is fed back through the code path that produced it.  Without a sentinel
+check the second pass would elide the handle itself, reporting an
+ever-shrinking "original length" and losing the real one.
+"""
+
+ELISION_HANDLE_TEMPLATE = ELISION_HANDLE_PREFIX + " {chars} 字符{label}{sent}, 句柄 {handle}]"
+"""Placeholder left where a row's content was — see ``request_assembly``.
+
+Rationale for the format (why it is this terse, why the row is not simply
+dropped) stays with the code that applies it; this is only where the literal
+is defined so both sides agree on it.
+
+``{sent}`` is empty for almost every row and carries
+``ELISION_SENT_FILES_NOTE`` for the few that delivered files; it sits inside the
+same ``[…]`` so the display strip and the idempotence sentinel keep working
+unchanged.
+"""
+
+ELISION_SENT_FILES_NOTE = ", 含已送达文件: {names}"
+"""Appended to a handle only when the elided row actually delivered files.
+
+Why it exists: a row that carried ``[SEND:/…/方案.pdf]`` really did deliver the
+file, but once elided the model reads a turn in which it sent nothing — so it
+re-sends, or tells the user it never sent anything.  Production symptom was the
+user asking "where is the document?" repeatedly.  Widening the elision exemption
+instead cannot work: the exempt span would have to cover a whole task, which has
+no bound, and elision is the only *hard* budget guarantee (level 1).
+
+Why it is conditional: the handle is paid once per elided row, so anything
+unconditional here multiplies by row count on exactly the histories that were
+already too big — see the ~220-character first draft described in
+``request_assembly``.  Rows that sent nothing must stay byte-identical, which
+``test_handles_for_rows_without_send_markers_stay_byte_identical`` pins.
+
+**File names only, never the marker.**  ``render_sent_files_note`` reduces each
+path to its base name, which drops the directory (bytes nobody needs) and, more
+importantly, cannot be re-scanned as a transfer request — see that function.
+"""
+
+_SENT_FILES_NOTE_MAX_NAMES = 3
+_SENT_FILES_NAME_MAX_CHARS = 24
+"""Caps on the note, because the un-elidible floor must not grow with content.
+
+A row delivering twenty files, or one file with a pathological name, would
+otherwise set the per-row handle cost and turn the floor back into something that
+scales with the history — the exact failure mode that made the first draft's long
+explanation unshippable.  Three names is enough to answer "did my files arrive"
+for every real turn measured here; beyond that the count stands in for the rest.
+"""
+
+# Display-only strip of elision handles (Gateway history projection).
+#
+# Derived from ``ELISION_HANDLE_TEMPLATE`` rather than retyped: a hand-written
+# second copy is how ``[SEND:]`` ended up with two regexes that disagreed (see
+# ``psi_agent/_send_markers``) — there the Channel copy used ``(.+?)`` and the
+# Gateway copy ``([^\]]*?)``, and only one of them filtered empty paths.  Here a
+# drifted copy would fail *open*, i.e. leak the handle to the user again, which
+# is exactly the bug this strip exists to fix.
+#
+# The body is ``[^\]\n]*`` for the same reason ``SEND_RE`` excludes both: a
+# handle never spans lines, and allowing newlines would let one unclosed
+# ``[已省略`` swallow through to a ``]`` several lines down, deleting real text
+# the user was supposed to read.
+#
+# The leading ``[ \t]*`` is what keeps spacing right without a global whitespace
+# collapse: a handle removed from mid-sentence would otherwise leave two spaces
+# where one belongs.  Collapsing all runs of horizontal whitespace afterwards
+# would fix that spacing and silently flatten the indentation of every fenced
+# code block in the message — damage to text the user *is* supposed to read, in
+# the name of tidying text they are not.
+_ELISION_HANDLE_RE = re.compile(
+    r"[ \t]*" + re.escape(ELISION_HANDLE_PREFIX) + r"[^\]\n]*\]",
+)
+
+
 def normalize_kind(raw: object) -> str:
     """Return a known ``kind``; unknown / empty → ``chat``."""
     if not isinstance(raw, str):
@@ -394,8 +479,24 @@ def _fold_turn_context(content: Any, turn_context: str) -> Any:
 
 
 def strip_transfer_markers(text: str) -> str:
-    """Remove ``[SEND:…]`` / ``[RECV:…]`` from display text (Gateway projection)."""
+    """Remove internal-only markers from display text (Gateway projection).
+
+    Two kinds, both of which are addressed to a machine and meaningless to a
+    reader:
+
+    - ``[SEND:…]`` / ``[RECV:…]`` — transport instructions for the Channel.
+    - ``[已省略 N 字符, 句柄 X]`` — elision handles. The model needs these (they
+      say content was dropped and name where to fetch it); a user has no such
+      affordance, so to them it reads as a bug. Measured in production: four
+      assistant rows in one session carried a handle into the visible
+      transcript. **Display side only** — the request keeps its handles, or
+      elision would become silent deletion.
+
+    Spacing around a removed handle is handled by the pattern itself rather than
+    by collapsing whitespace afterwards — see ``_ELISION_HANDLE_RE``.
+    """
     cleaned = _TRANSFER_MARKER_RE.sub("", text)
+    cleaned = _ELISION_HANDLE_RE.sub("", cleaned)
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
@@ -408,6 +509,51 @@ def extract_send_paths(text: str) -> list[str]:
     if not isinstance(text, str) or not text:
         return []
     return [path for path, _ in iter_send_paths(text)]
+
+
+def render_sent_files_note(text: str) -> str:
+    """The ``含已送达文件: …`` fragment for an elided row, or ``""``.
+
+    Lives here beside ``extract_send_paths`` because both answer "what did this
+    text deliver", and both must answer it through ``iter_send_paths`` — the one
+    decoder for ``[SEND:]``, whose two hand-written copies once disagreed (see
+    ``psi_agent._send_markers``).
+
+    **Never emits a scannable marker, and that is the load-bearing property.**
+    The Channel starts a transfer by scanning the model's output for ``[SEND:]``
+    (``channel/_markers.SendMarkerScanner``), and this model is known to copy
+    handle formatting back out verbatim — production line 5874 is it transcribing
+    a handle.  A note that quoted the marker would therefore be re-emitted by the
+    model, re-scanned by the Channel, and the file delivered to the user a second
+    time: a worse bug than the one the note fixes.  Two things prevent it:
+    ``os.path.basename`` drops everything up to the last separator (so a path
+    crafted as ``/w/[SEND:x].md`` loses its ``[SEND:`` prefix), and any residual
+    ``[`` / ``]`` in a name is dropped outright, because those are the only
+    characters the scanner's brackets can be built from.
+
+    Bounded on purpose — see ``_SENT_FILES_NOTE_MAX_NAMES``.  Deterministic on
+    purpose too: it is recomputed from the same row on every later turn by
+    ``_reapply_sticky_elisions``, and a note that varied would rewrite an early
+    row's bytes each turn and void the upstream prefix cache (99.7% hit rate
+    measured here), which is what makes eliding worse than not eliding.
+    """
+    paths = extract_send_paths(text)
+    if not paths:
+        return ""
+    names: list[str] = []
+    for path in paths:
+        # ``basename`` on both separators: these paths cross OS boundaries
+        # (Windows desktop client, Linux container) and ``os.path`` only splits
+        # on the host's own.
+        name = re.split(r"[\\/]", path)[-1].translate({ord("["): None, ord("]"): None}).strip()
+        if name and name not in names:
+            names.append(name)
+    if not names:
+        return ""
+    shown = [n[:_SENT_FILES_NAME_MAX_CHARS] for n in names[:_SENT_FILES_NOTE_MAX_NAMES]]
+    remainder = len(names) - len(shown)
+    listing = ", ".join(shown) + (f" 等 {len(names)} 个" if remainder else "")
+    return ELISION_SENT_FILES_NOTE.format(names=listing)
 
 
 def is_displayable_chat_message(msg: dict[str, Any]) -> bool:
