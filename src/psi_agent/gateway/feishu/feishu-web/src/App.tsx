@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { generateTitle, revealWorkspacePath } from "./api";
+import { PanelLeftClose } from "lucide-react";
+import { generateTitle, getSessionHistory, revealWorkspacePath } from "./api";
 import { ArtifactDrawer } from "./components/artifact-drawer";
+import { ChatTopbar } from "./components/chat-topbar";
 import { ChatView } from "./components/chat-view";
+import { DesktopShell, type ShellNav } from "./components/desktop-shell";
 import { DeliveryPreviewModal } from "./components/delivery-preview-modal";
 import { NewDeliveriesPanel } from "./components/new-deliveries-panel";
+import { NewTaskPage } from "./components/new-task-page";
 import { TaskFocusDetails } from "./components/task-focus-details";
 import { TasksView } from "./components/tasks-view";
 import { useAuth } from "./hooks/useAuth";
@@ -11,9 +15,10 @@ import { useChatTurn } from "./hooks/useChatTurn";
 import { useSessionHistory, useSessions } from "./hooks/useSessions";
 import { useTasks } from "./hooks/useTasks";
 import { mapHistory } from "./services/historyMap";
+import { clearPendingDeliveries } from "./services/pendingDeliveries";
 import "./styles.css";
 
-type View = "tasks" | "chat";
+type View = "tasks" | "chat" | "new-task";
 
 /**
  * 应用装配层。
@@ -76,23 +81,64 @@ export function App() {
 function AuthedApp({ userName }: { userName: string }) {
   const [view, setView] = useState<View>("tasks");
   const [input, setInput] = useState("");
+  const [newDraft, setNewDraft] = useState("");
+  const [creatingTask, setCreatingTask] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [selectedSegment, setSelectedSegment] = useState("live");
   const [artifactTaskId, setArtifactTaskId] = useState("");
+  const [artifactFile, setArtifactFile] = useState("");
   const [previewFile, setPreviewFile] = useState("");
   const [showNewDeliveries, setShowNewDeliveries] = useState(false);
+  const [contextCollapsed, setContextCollapsed] = useState(false);
+  const [historyDeliverables, setHistoryDeliverables] = useState<
+    Record<string, { files: string[]; paths: Record<string, string> }>
+  >({});
+  const [deliveriesRevision, setDeliveriesRevision] = useState(0);
 
   const sessions = useSessions();
-  const tasks = useTasks(sessions.sessions, sessions.titles);
+  const tasks = useTasks(sessions.sessions, sessions.titles, historyDeliverables);
   const history = useSessionHistory(sessions.currentId);
-  const turn = useChatTurn();
+  const turn = useChatTurn(sessions.currentId);
+
+  // 任务总览/交付物抽屉需要的文件来自历史记录, 不能只依赖流式 blob 事件。
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const next: Record<string, { files: string[]; paths: Record<string, string> }> = {};
+      await Promise.all(
+        sessions.sessions.map(async (session) => {
+          try {
+            const rows = await getSessionHistory(session.id);
+            const { messages, filePaths } = mapHistory(rows);
+            const files = Array.from(new Set(messages.flatMap((m) => m.files || [])));
+            next[session.id] = { files, paths: filePaths };
+          } catch {
+            // 没有历史/接口失败时这一项保持缺省, 不影响任务列表本身。
+          }
+        }),
+      );
+      if (alive) setHistoryDeliverables(next);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [sessions.sessions, deliveriesRevision]);
 
   // 历史到了就铺进消息列表 (附件路径一起接管)。流式增量之后只改 turn.messages。
   useEffect(() => {
+    // 发送中的会话不能拿「当时历史还没写入」的空结果覆盖本地乐观消息；
+    // 已有本地消息时历史只是兜底, 也不需要重铺, 避免把刚上屏的输入又清掉。
+    if (turn.sending || turn.messages.length > 0) return;
     const { messages, filePaths } = mapHistory(history.raw);
-    turn.setMessages(messages);
-    turn.setFilePaths((prev) => ({ ...prev, ...filePaths }));
-  }, [history.raw, turn.setMessages, turn.setFilePaths]);
+    turn.setMessages(sessions.currentId, messages);
+    turn.setFilePaths(sessions.currentId, (prev) => ({ ...prev, ...filePaths }));
+  }, [
+    history.raw,
+    turn.sending,
+    turn.messages.length,
+    turn.setMessages,
+    turn.setFilePaths,
+  ]);
 
   const currentTask = useMemo(
     () => tasks.tasks.find((t) => t.id === sessions.currentId),
@@ -117,9 +163,59 @@ function AuthedApp({ userName }: { userName: string }) {
   );
 
   const handleNewTask = useCallback(async () => {
-    const id = await sessions.create();
-    if (id) openChat(id);
-  }, [sessions, openChat]);
+    setView("new-task");
+  }, []);
+
+  const backToTasks = useCallback(() => {
+    setView("tasks");
+    setNewDraft("");
+  }, []);
+
+  const navigate = useCallback(
+    (nav: ShellNav) => {
+      if (nav === "tasks") {
+        setView("tasks");
+        return;
+      }
+      if (sessions.currentId) {
+        setView("chat");
+      } else {
+        setView("new-task");
+      }
+    },
+    [sessions.currentId],
+  );
+
+  const createFromDraft = useCallback(async () => {
+    const draft = newDraft.trim();
+    const files = pendingFiles;
+    if (!draft && !files.length) return;
+    setCreatingTask(true);
+    try {
+      const id = await sessions.create();
+      if (!id) return;
+      setNewDraft("");
+      setPendingFiles([]);
+      setSelectedSegment("live");
+      setView("chat");
+      // C 端语义: 「新建中」只锁新建页自己的那一次提交; 一旦会话建好并切回对话,
+      // 释放创建锁, 首轮回复继续在后台跑。否则首轮没结束时再次点“新建任务”会打不了字。
+      setCreatingTask(false);
+      const assistantText = await turn.send(id, draft, files);
+      if (!sessions.titles[id]) {
+        try {
+          const { title } = await generateTitle(id, draft, assistantText);
+          sessions.setTitles((prev) => ({ ...prev, [id]: title }));
+        } catch {
+          // 标题失败不阻塞首轮对话。
+        }
+      }
+      setDeliveriesRevision((n) => n + 1);
+      void tasks.refresh();
+    } finally {
+      setCreatingTask(false);
+    }
+  }, [newDraft, pendingFiles, sessions, tasks, turn]);
 
   const handleSend = useCallback(async () => {
     const sessionId = sessions.currentId;
@@ -128,18 +224,18 @@ function AuthedApp({ userName }: { userName: string }) {
     const files = pendingFiles;
     setInput("");
     setPendingFiles([]);
-    await turn.send(sessionId, text, files);
+    const assistantText = await turn.send(sessionId, text, files);
 
     // 首轮结束后补标题, 否则列表里一直是「未命名任务」。
     if (!sessions.titles[sessionId]) {
-      const assistant = turn.messages.at(-1)?.text || "";
       try {
-        const { title } = await generateTitle(sessionId, text, assistant);
+        const { title } = await generateTitle(sessionId, text, assistantText);
         sessions.setTitles((prev) => ({ ...prev, [sessionId]: title }));
       } catch {
         // 标题生成失败不影响对话本身。
       }
     }
+    setDeliveriesRevision((n) => n + 1);
     void tasks.refresh();
   }, [sessions, input, pendingFiles, turn, tasks]);
 
@@ -147,13 +243,49 @@ function AuthedApp({ userName }: { userName: string }) {
   const handleReveal = useCallback((path: string) => {
     void revealWorkspacePath(path).catch(() => undefined);
   }, []);
+  const saveArtifact = useCallback(() => {
+    if (!artifactTaskId) return;
+    clearPendingDeliveries(artifactTaskId);
+    setArtifactTaskId("");
+    setArtifactFile("");
+  }, [artifactTaskId]);
 
   const listError = sessions.error || history.error;
+  const taskIndex = useMemo(
+    () => tasks.tasks.findIndex((t) => t.id === sessions.currentId),
+    [tasks.tasks, sessions.currentId],
+  );
+  const switchTask = useCallback(
+    (dir: 1 | -1) => {
+      const idx = taskIndex;
+      if (idx < 0) return;
+      const next = tasks.tasks[idx + dir];
+      if (next) openChat(next.id);
+    },
+    [taskIndex, tasks.tasks, openChat],
+  );
+
+  // 抽屉类浮层统一支持 Esc 关闭（与 PR 版行为一致）。
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (previewFile) {
+        setPreviewFile("");
+      } else if (showNewDeliveries) {
+        setShowNewDeliveries(false);
+      } else if (artifactTaskId) {
+        setArtifactTaskId("");
+        setArtifactFile("");
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [previewFile, showNewDeliveries, artifactTaskId]);
 
   return (
-    <div className="ht-app">
+    <DesktopShell nav={view === "tasks" ? "tasks" : "chat"} userName={userName} onNavigate={navigate}>
       {view === "tasks" ? (
-        <main className="ht-desktop">
+        <>
           {listError ? <div className="ht-error" role="alert">{listError}</div> : null}
           <TasksView
             tasks={tasks.tasks}
@@ -171,19 +303,66 @@ function AuthedApp({ userName }: { userName: string }) {
             newDeliveryCount={newDeliveryTasks.length}
             onNewTask={() => void handleNewTask()}
           />
-        </main>
+        </>
+      ) : view === "new-task" ? (
+        <NewTaskPage
+          draft={newDraft}
+          sending={creatingTask}
+          pendingFiles={pendingFiles}
+          onDraft={setNewDraft}
+          onBack={backToTasks}
+          onSubmit={() => void createFromDraft()}
+          onAddFiles={(files) => setPendingFiles((prev) => [...prev, ...files])}
+          onRemoveFile={(index) => setPendingFiles((prev) => prev.filter((_, idx) => idx !== index))}
+        />
       ) : (
-        <main className="ht-focus">
-          <header className="ht-focus-top">
-            <button type="button" className="ht-btn" onClick={() => setView("tasks")}>
-              返回任务
-            </button>
-            <h2>{sessions.titles[sessions.currentId] || "未命名任务"}</h2>
-          </header>
-          <div className="ht-focus-split">
+        <div className={`focus-view${contextCollapsed ? " is-context-collapsed" : ""}`}>
+          {!contextCollapsed && (
+            <div className="focus-context-col">
+              <div className="cend2-context-bar">
+                <button
+                  type="button"
+                  className="context-panel-toggle"
+                  aria-label="收起任务上下文栏"
+                  title="收起任务上下文栏"
+                  onClick={() => setContextCollapsed(true)}
+                >
+                  <PanelLeftClose size={15} />
+                </button>
+                <span>任务上下文</span>
+              </div>
+              <TaskFocusDetails
+                task={currentTask || null}
+                tasks={tasks.tasks}
+                todoSegments={tasks.segments[sessions.currentId] || []}
+                selectedSegmentId={selectedSegment}
+                onSelectTodoSegment={setSelectedSegment}
+                onOpenArtifact={(task, fileName) => {
+                  setArtifactTaskId(task.id);
+                  setArtifactFile(fileName || "");
+                  if (fileName) setPreviewFile("");
+                }}
+              />
+            </div>
+          )}
+          <div className="focus-chat-col">
+            <ChatTopbar
+              title={currentTask?.title || sessions.titles[sessions.currentId] || "未命名任务"}
+              sending={turn.sending}
+              hasNewDeliveries={(currentTask?.newDeliverables.length ?? 0) > 0}
+              taskIndex={taskIndex < 0 ? 0 : taskIndex}
+              taskCount={tasks.tasks.length}
+              contextCollapsed={contextCollapsed}
+              onToggleContext={() => setContextCollapsed((v) => !v)}
+              onPrevTask={() => switchTask(-1)}
+              onNextTask={() => switchTask(1)}
+              onNewTask={() => void handleNewTask()}
+              onOpenDeliverables={() => setShowNewDeliveries(true)}
+            />
             <ChatView
               messages={turn.messages}
               userName={userName}
+              taskTitle={currentTask?.title || sessions.titles[sessions.currentId] || "当前任务"}
               input={input}
               sending={turn.sending}
               error={turn.error || history.error}
@@ -193,9 +372,9 @@ function AuthedApp({ userName }: { userName: string }) {
               onSend={() => void handleSend()}
               onStop={turn.stop}
               onAddFiles={(files) => setPendingFiles((prev) => [...prev, ...files])}
-              onRemoveFile={(i) => setPendingFiles((prev) => prev.filter((_, idx) => idx !== i))}
+              onRemoveFile={(index) => setPendingFiles((prev) => prev.filter((_, idx) => idx !== index))}
               onFeedback={(index, kind) =>
-                turn.setMessages((prev) =>
+                turn.setMessages(sessions.currentId, (prev) =>
                   prev.map((m, i) =>
                     i === index ? { ...m, feedback: m.feedback === kind ? undefined : kind } : m,
                   ),
@@ -208,19 +387,18 @@ function AuthedApp({ userName }: { userName: string }) {
               onOpenFile={handleOpenFile}
               onRevealFile={handleReveal}
               filePathOf={turn.filePathOf}
-            />
-            <TaskFocusDetails
-              task={currentTask || null}
-              todoSegments={tasks.segments[sessions.currentId] || []}
-              selectedSegmentId={selectedSegment}
-              onSelectTodoSegment={setSelectedSegment}
-              onOpenArtifact={(task, fileName) => {
-                setArtifactTaskId(task.id);
-                if (fileName) setPreviewFile("");
-              }}
+              executionSteps={
+                currentTask?.hasTodoTrack
+                  ? currentTask.steps.map((step) => ({
+                      label: step.t,
+                      state: step.s as "done" | "working" | "waiting",
+                      ...(step.detail ? { detail: step.detail } : {}),
+                    }))
+                  : undefined
+              }
             />
           </div>
-        </main>
+        </div>
       )}
 
       {showNewDeliveries && (
@@ -229,6 +407,7 @@ function AuthedApp({ userName }: { userName: string }) {
           onOpen={(taskId) => {
             setShowNewDeliveries(false);
             setArtifactTaskId(taskId);
+            setArtifactFile("");
           }}
           onClose={() => setShowNewDeliveries(false)}
         />
@@ -237,9 +416,18 @@ function AuthedApp({ userName }: { userName: string }) {
       {artifactTask && (
         <ArtifactDrawer
           taskTitle={artifactTask.title}
-          files={artifactTask.files}
-          filePathOf={turn.filePathOf}
-          onClose={() => setArtifactTaskId("")}
+          files={[...new Set([...artifactTask.files, ...artifactTask.newDeliverables])]}
+          filePathOf={(name) =>
+            historyDeliverables[artifactTask.id]?.paths[name] ??
+            (artifactTask.id === sessions.currentId ? turn.filePathOf(name) : undefined)
+          }
+          initialFile={artifactFile || undefined}
+          pending={artifactTask.newDeliverables.length > 0}
+          onSave={saveArtifact}
+          onClose={() => {
+            setArtifactTaskId("");
+            setArtifactFile("");
+          }}
         />
       )}
 
@@ -250,6 +438,6 @@ function AuthedApp({ userName }: { userName: string }) {
           onClose={() => setPreviewFile("")}
         />
       )}
-    </div>
+    </DesktopShell>
   );
 }

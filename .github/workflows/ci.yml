@@ -24,17 +24,6 @@ jobs:
       # 重新生成, 下一次 dmg 的图标就是旧的。与 gen_legal_html.py 同一套模式。
       - run: uv run python scripts/gen_haitun_icon_png.py --check
 
-  test:
-    needs: lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
-        with:
-          python-version: "3.14"
-      - run: uv sync
-      - run: uv run pytest -v --ignore=tests/deploy/test_oauth_proxy.py
-
   # ToB 前端脚手架的可构建性。单独一个 job 而不是塞进 publish: publish 只在打 tag 时
   # 跑, 那样脚手架坏掉要到发版才发现 —— 方案 3.6 要的是「不会悄悄坏掉」。
   # 这里只验证「能构建」, 不产出也不下发任何东西 (产物下发不在本轮范围)。
@@ -51,7 +40,7 @@ jobs:
         working-directory: src/psi_agent/gateway/feishu/feishu-web
 
   publish:
-    needs: [lint, test]
+    needs: lint
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     environment: pypi

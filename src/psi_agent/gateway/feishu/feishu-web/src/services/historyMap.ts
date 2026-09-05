@@ -23,6 +23,8 @@ export function mapHistory(raw: HistoryMessage[]): {
   const mapped: ChatMessage[] = [];
 
   for (const item of raw) {
+    // 调度静默记录不进会话气泡, 也不该出现在历史交付物里。
+    if (item.kind === "schedule.silent") continue;
     const role = item.role === "user" ? "user" : "assistant";
     // history 里可能有 system / tool 之类的角色, UI 只展示这两种。
     if (item.role !== "user" && item.role !== "assistant") continue;
@@ -33,13 +35,23 @@ export function mapHistory(raw: HistoryMessage[]): {
       files.push(f.name);
       if (f.path) filePaths[f.name] = f.path;
     }
+    // 后端 history 的实际形状是 ``sends: [绝对路径]``(``[SEND:]`` 解析产物);
+    // 刷新后不从这里恢复, 交付物列表和消息里的文件芯片都会丢。
+    for (const rawPath of item.sends || []) {
+      const path = typeof rawPath === "string" ? rawPath.trim() : "";
+      if (!path) continue;
+      const name = path.replace(/\\/g, "/").split("/").pop() || path;
+      files.push(name);
+      filePaths[name] = path;
+    }
+    const uniqueFiles = [...new Set(files)];
 
     mapped.push({
       role,
       text: typeof item.text === "string" ? item.text : "",
       ...(item.reasoning ? { reasoning: item.reasoning } : {}),
       ...(item.tools?.length ? { tools: item.tools.map(toolLine) } : {}),
-      ...(files.length ? { files } : {}),
+      ...(uniqueFiles.length ? { files: uniqueFiles } : {}),
     });
   }
 

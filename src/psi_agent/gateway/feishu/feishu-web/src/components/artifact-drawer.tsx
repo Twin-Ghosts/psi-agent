@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { FileText, FolderOpen, X } from "lucide-react";
 import { revealWorkspacePath } from "../api";
 import { isBlobPreviewable } from "../services/filePreview";
@@ -14,15 +14,25 @@ export function ArtifactDrawer({
   taskTitle,
   files,
   filePathOf,
+  initialFile,
+  pending,
+  onSave,
   onClose,
 }: {
   taskTitle: string;
   files: string[];
   filePathOf: (name: string) => string | undefined;
+  initialFile?: string;
+  pending?: boolean;
+  onSave?: () => void;
   onClose: () => void;
 }) {
-  const [active, setActive] = useState(files[0] || "");
+  const [active, setActive] = useState(initialFile || files[0] || "");
   const activePath = active ? filePathOf(active) : undefined;
+
+  useEffect(() => {
+    if (initialFile) setActive(initialFile);
+  }, [initialFile]);
 
   return (
     <div className="preview-drawer-shell">
@@ -34,6 +44,15 @@ export function ArtifactDrawer({
             <em className="preview-task-name">{taskTitle}</em>
           </div>
           <div className="preview-actions">
+            {pending && onSave && (
+              <button
+                type="button"
+                className="preview-text-btn"
+                onClick={onSave}
+              >
+                保存到成果库
+              </button>
+            )}
             {activePath && (
               <button
                 type="button"

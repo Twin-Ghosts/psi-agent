@@ -27,6 +27,7 @@ export interface SessionInfo {
 export interface HistoryMessage {
   role: string;
   text: string;
+  kind?: string;
   reasoning?: string;
   tools?: Array<{ name: string; arguments?: string }>;
   sends?: string[];

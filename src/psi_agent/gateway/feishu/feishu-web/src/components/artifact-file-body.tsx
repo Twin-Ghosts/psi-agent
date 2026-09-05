@@ -1,14 +1,55 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { readWorkspaceFile } from "../api";
 import { decodeBase64Text, mimeOf, previewKindOf } from "../services/filePreview";
+import { renderBlobPreview } from "../services/blobPreview";
 import { renderMarkdownHtml } from "./markdown";
+
+function BlobPreviewHost({ name, data }: { name: string; data: string }) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const [notice, setNotice] = useState("");
+  const [renderError, setRenderError] = useState("");
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host || !data) return;
+    let alive = true;
+    let cleanup = () => {};
+    setRenderError("");
+    setNotice("");
+    void renderBlobPreview(host, { name, data })
+      .then((handle) => {
+        if (!alive) {
+          handle.cleanup();
+          return;
+        }
+        cleanup = handle.cleanup;
+        if (handle.error) setRenderError(handle.error);
+        if (handle.notice) setNotice(handle.notice);
+      })
+      .catch((err: unknown) => {
+        if (alive) setRenderError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      alive = false;
+      cleanup();
+    };
+  }, [name, data]);
+
+  return (
+    <>
+      {notice ? <div className="preview-partial-notice">{notice}</div> : null}
+      {renderError ? <div className="artifact-file-empty" role="alert">{renderError}</div> : null}
+      <div ref={hostRef} className="blob-preview-host" />
+    </>
+  );
+}
 
 /**
  * 单个交付物的内容区。数据走 ``GET /workspace/file`` (后端已存在)。
  *
  * 注意后端**总是**返回 ``{name, data, path}`` 且 ``data`` 是 base64 (见
  * ``_workspace_manager.read_file``) —— 没有「原始字节」这种响应形式, 所以图片走 data URL,
- * 文本要先解 base64 再显示。二进制格式本轮不预览, 见 services/filePreview.ts。
+ * 文本要先解 base64 再显示; 二进制格式由 blobPreview.ts 动态渲染。
  */
 export function ArtifactFileBody({ path, name }: { path: string; name: string }) {
   const [data, setData] = useState("");
@@ -51,6 +92,9 @@ export function ArtifactFileBody({ path, name }: { path: string; name: string })
 
   if (kind === "image") {
     return <img className="artifact-file-image" src={`data:${mimeOf(name)};base64,${data}`} alt={name} />;
+  }
+  if (kind === "blob") {
+    return <BlobPreviewHost name={name} data={data} />;
   }
 
   const text = decodeBase64Text(data);

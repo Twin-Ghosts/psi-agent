@@ -1,20 +1,20 @@
 /**
  * 交付物「能不能在前端直接预览」的判断。
  *
- * 只覆盖**纯文本类**格式 —— 这类文件 ``GET /workspace/file`` 直接返回可渲染的内容,
- * 前端零解析依赖。二进制预览 (pdf / docx / xlsx / pptx) 本轮不做, 所以
- * ``pdfjs-dist`` ``xlsx`` ``docx-preview`` ``pptx-preview`` 都不在 package.json 里。
- * 要加回来的话: 补对应扩展名 + 装依赖 + 在 artifact-file-body 里加分支, 三处一起改。
+ * 文本/图片直接渲染; pdf / office / sheet / csv / 音视频交给 services/blobPreview.ts
+ * 动态加载对应渲染库。
  */
 
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "avif"]);
+const AUDIO_EXTS = new Set(["mp3", "wav", "ogg", "m4a", "flac"]);
+const VIDEO_EXTS = new Set(["mp4", "webm", "mov", "m4v"]);
 const MARKDOWN_EXTS = new Set(["md", "markdown"]);
+const BINARY_EXTS = new Set(["pdf", "docx", "xls", "xlsx", "pptx"]);
 const TEXT_EXTS = new Set([
   "txt",
   "log",
   "json",
   "jsonl",
-  "csv",
   "tsv",
   "yaml",
   "yml",
@@ -38,7 +38,7 @@ export function extensionOf(name: string): string {
   return base.slice(dot + 1).toLowerCase();
 }
 
-export type PreviewKind = "image" | "markdown" | "html" | "text" | "none";
+export type PreviewKind = "image" | "markdown" | "html" | "text" | "blob" | "none";
 
 export function previewKindOf(name: string): PreviewKind {
   const ext = extensionOf(name);
@@ -46,6 +46,12 @@ export function previewKindOf(name: string): PreviewKind {
   if (IMAGE_EXTS.has(ext) || ext === "svg") return "image";
   if (MARKDOWN_EXTS.has(ext)) return "markdown";
   if (ext === "html" || ext === "htm") return "html";
+  if (
+    AUDIO_EXTS.has(ext)
+    || VIDEO_EXTS.has(ext)
+    || BINARY_EXTS.has(ext)
+    || ext === "csv"
+  ) return "blob";
   if (TEXT_EXTS.has(ext)) return "text";
   return "none";
 }
@@ -64,6 +70,15 @@ const IMAGE_MIME: Record<string, string> = {
   ico: "image/x-icon",
   avif: "image/avif",
   svg: "image/svg+xml",
+  mp3: "audio/mpeg",
+  wav: "audio/wav",
+  ogg: "audio/ogg",
+  m4a: "audio/mp4",
+  flac: "audio/flac",
+  mp4: "video/mp4",
+  webm: "video/webm",
+  mov: "video/quicktime",
+  m4v: "video/mp4",
 };
 
 export function mimeOf(name: string): string {

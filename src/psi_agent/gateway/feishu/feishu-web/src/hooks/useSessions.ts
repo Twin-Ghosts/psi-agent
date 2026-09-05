@@ -52,7 +52,8 @@ export function useSessions() {
   // 报 NO_AI_CONFIGURED, 会话列表本身照常显示。
   useEffect(() => {
     void (async () => {
-      await refresh();
+      const list = await refresh();
+      setCurrentId((current) => current || list[0]?.id || "");
       try {
         setDefaultAiId(await getFeishuDefaultAiId());
       } catch {

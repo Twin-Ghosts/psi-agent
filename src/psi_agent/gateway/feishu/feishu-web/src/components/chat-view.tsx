@@ -3,6 +3,7 @@ import { Paperclip, Send, Square, X } from "lucide-react";
 import type { ChatMessage } from "../types";
 import { brandMark } from "./brand";
 import { ChatThread } from "./chat-thread";
+import { ExecutionStepsPanel, type ExecutionStep } from "./execution-steps-panel";
 
 /**
  * 会话视图 = 消息列表 + 输入区。视觉照 PR 复刻, 但**只收 props**:
@@ -12,6 +13,7 @@ import { ChatThread } from "./chat-thread";
 export function ChatView({
   messages,
   userName,
+  taskTitle,
   input,
   sending,
   error,
@@ -27,9 +29,11 @@ export function ChatView({
   onOpenFile,
   onRevealFile,
   filePathOf,
+  executionSteps,
 }: {
   messages: ChatMessage[];
   userName: string;
+  taskTitle?: string;
   input: string;
   sending: boolean;
   error: string;
@@ -45,6 +49,7 @@ export function ChatView({
   onOpenFile: (name: string) => void;
   onRevealFile: (path: string) => void;
   filePathOf: (name: string) => string | undefined;
+  executionSteps?: ExecutionStep[];
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const canSend = !sending && (!!input.trim() || pendingFiles.length > 0);
@@ -54,8 +59,13 @@ export function ChatView({
       <div className="focus-chat-scroll">
         {messages.length === 0 ? (
           <div className="focus-chat-empty">
-            {brandMark("hero")}
-            <p>{emptyHint || "有什么可以帮您？"}</p>
+            <span className="focus-chat-avatar agent" aria-hidden="true">{brandMark("mini")}</span>
+            <p>
+              {emptyHint
+                || (taskTitle
+                  ? `向 Agent 发送消息，开始围绕「${taskTitle}」继续推进。`
+                  : "有什么可以帮您？")}
+            </p>
           </div>
         ) : (
           <ChatThread
@@ -76,6 +86,8 @@ export function ChatView({
           {error}
         </div>
       )}
+
+      {executionSteps && executionSteps.length > 0 ? <ExecutionStepsPanel steps={executionSteps} /> : null}
 
       <form
         className="focus-chat-composer"

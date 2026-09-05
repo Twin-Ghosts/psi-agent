@@ -173,6 +173,7 @@ button {
 
 .ht-dt-app {
   min-width: 0;
+  min-height: 0;
   flex: 1;
   display: grid;
   grid-template-columns: 236px minmax(0, 1fr);
@@ -183,7 +184,7 @@ button {
   flex-direction: column;
   gap: 4px;
   padding: 14px 12px;
-  border-right: 1px solid var(--fs-line);
+  border-right: 0;
   background: var(--fs-card-soft);
 }
 
@@ -259,6 +260,41 @@ button {
   min-height: 0;
   overflow-y: auto;
   padding: 22px;
+}
+
+.ht-dt-main > .focus-view {
+  min-height: calc(100vh - 92px);
+  height: 100%;
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  gap: 16px;
+}
+
+.ht-dt-main > .focus-view.is-context-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.focus-view > .focus-context-col {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--fs-line);
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--fs-card);
+}
+
+.focus-view > .focus-context-col > .focus-details {
+  flex: 1;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+.ht-dt-main > .cend2-shell {
+  min-height: calc(100vh - 92px);
+  height: 100%;
 }
 
 .ht-loading {
@@ -3247,6 +3283,23 @@ button {
   cursor: not-allowed;
 }
 
+.preview-text-btn {
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  border: 1px solid var(--fs-line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--fs-ink);
+  font-size: 12px;
+}
+
+.preview-text-btn:hover {
+  color: #3370ff;
+  background: #eef4fa;
+}
+
 .preview-reveal-error {
   padding: 8px 16px;
   color: #b42318;
@@ -3798,3 +3851,389 @@ button {
 
 /* 开发旁路的告警条(`.ht-dev-bypass`)已撤 —— 提示改在 gateway 启动日志里, 见 App.tsx 里
    那段注释。别再加回页面: 旁路只在本机开发时开着, 而开发者就是启动进程的那个人。 */
+
+/* ---------- 对话分屏补充样式 ---------- */
+.focus-chat-col {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--fs-line);
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--fs-card);
+}
+
+.focus-chat-col .cend2-chat-top {
+  flex: none;
+  padding: 10px 14px;
+  background: #fff;
+}
+
+.focus-chat-pane {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: #fbfcff;
+}
+
+.focus-chat-scroll {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+}
+
+.focus-chat-empty {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  color: var(--fs-muted);
+  text-align: center;
+  gap: 8px;
+}
+
+.focus-chat-empty p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.focus-chat-error {
+  margin: 0 14px 8px;
+  padding: 8px 10px;
+  border: 1px solid #ffd5d0;
+  border-radius: 8px;
+  background: #fff1ef;
+  color: #c0392b;
+  font-size: 12px;
+}
+
+.focus-chat-composer {
+  flex: none;
+  padding: 8px 12px 12px;
+  border-top: 1px solid var(--fs-line);
+  background: #fff;
+}
+
+.focus-chat-composer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.focus-chat-pending-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 2px 8px;
+}
+
+.focus-chat-pending-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  border: 1px solid var(--fs-line);
+  border-radius: 8px;
+  background: var(--fs-card-soft);
+  color: var(--fs-muted);
+  font-size: 12px;
+}
+
+.focus-chat-pending-chip button {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--fs-muted);
+}
+
+.chat-attach-button {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fs-brand);
+}
+
+.chat-attach-button:disabled,
+.focus-chat-send:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.focus-chat-input {
+  min-width: 0;
+  flex: 1;
+  min-height: 36px;
+  max-height: 140px;
+  padding: 8px 10px;
+  border: 1px solid var(--fs-line);
+  border-radius: 10px;
+  outline: 0;
+  resize: none;
+  color: var(--fs-ink);
+  background: #fff;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.focus-chat-input:focus {
+  border-color: var(--fs-brand);
+  box-shadow: 0 0 0 3px rgba(51, 112, 255, 0.1);
+}
+
+.focus-chat-send {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 10px;
+  background: var(--fs-brand);
+  color: #fff;
+}
+
+.focus-chat-send.stop {
+  background: var(--fs-coral);
+}
+
+/* ---------- 任务详情侧栏 ---------- */
+.focus-details {
+  min-width: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--fs-line);
+  border-radius: 14px;
+  background: var(--fs-card);
+}
+
+.focus-details-empty {
+  color: var(--fs-muted);
+  font-size: 12px;
+  text-align: center;
+  padding: 16px 0;
+}
+
+.focus-details-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.focus-details-headtext {
+  min-width: 0;
+}
+
+.focus-details-headtext h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+
+.focus-details-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.focus-details-meta em {
+  color: var(--fs-muted);
+  font-style: normal;
+}
+
+.focus-details-summary {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--fs-card-soft);
+  color: var(--fs-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.focus-history-viewing-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--fs-brand-soft);
+  border-radius: 8px;
+  background: var(--fs-brand-soft);
+  color: var(--fs-brand-deep);
+  font-size: 12px;
+}
+
+.focus-history-viewing-hint button {
+  margin-left: auto;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: #fff;
+  color: var(--fs-brand-deep);
+  font-size: 11px;
+}
+
+.focus-details-block {
+  display: grid;
+  gap: 8px;
+}
+
+.focus-details-block h4 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--fs-ink);
+  font-size: 13px;
+}
+
+.focus-segment-list,
+.focus-delivery-list {
+  display: grid;
+  gap: 6px;
+}
+
+.focus-segment-row,
+.focus-delivery-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--fs-line);
+  border-radius: 9px;
+  background: #fff;
+  color: var(--fs-ink);
+  text-align: left;
+}
+
+.focus-segment-row.is-active {
+  border-color: var(--fs-brand);
+  background: var(--fs-brand-soft);
+}
+
+.focus-segment-row div {
+  min-width: 0;
+  flex: 1;
+}
+
+.focus-segment-row strong,
+.focus-delivery-row span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.focus-segment-row em {
+  display: block;
+  margin-top: 2px;
+  color: var(--fs-muted);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.focus-segment-time {
+  flex: none;
+  color: var(--fs-muted);
+  font-size: 10px;
+}
+
+/* ---------- 当前交付物抽屉布局 ---------- */
+.preview-drawer.wide {
+  position: relative;
+  width: min(1000px, 96vw);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  box-shadow: -12px 0 34px rgba(13, 27, 46, 0.22);
+}
+
+.artifact-drawer-split {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 230px minmax(0, 1fr);
+}
+
+.artifact-file-list {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-right: 1px solid var(--fs-line);
+  background: #f7f9fc;
+}
+
+.artifact-file-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #35506c;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.artifact-file-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-file-item.is-active {
+  border-color: rgba(51, 112, 255, 0.35);
+  background: #e8f1fb;
+  color: #17436e;
+}
+
+.artifact-file-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.artifact-file-pane {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+  background: #fff;
+}
+
+.blob-preview-host {
+  width: 100%;
+  min-width: 0;
+}
+
+.blob-preview-host .docx-preview-scroll,
+.blob-preview-host .pptx-preview-scroll {
+  max-height: calc(100vh - 190px);
+}
+
+.blob-preview-host .docx-preview-host,
+.blob-preview-host .pptx-preview-host {
+  min-height: 360px;
+}
